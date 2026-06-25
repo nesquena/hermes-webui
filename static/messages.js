@@ -1825,8 +1825,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const normalized=String(text||'').replace(/\s+/g,' ').trim();
     if(!normalized) return false;
     const systemRecovery=/^\[System:/i.test(normalized)
-      && /previous response was cut off by a network error/i.test(normalized)
-      && /continue exactly where you left off/i.test(normalized);
+      && (/continue exactly where you left off/i.test(normalized)
+        || /do not retry the same tool call/i.test(normalized));
     const backendRecovery=/^the live worker stopped before this run finished\.?$/i.test(normalized);
     return !!(systemRecovery || backendRecovery);
   }
@@ -2545,6 +2545,56 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!message||typeof message!=='object') return '';
     return String(message.reasoning||message._reasoning||message.reasoning_content||message.thinking||'');
   }
+  // #4622: a settled tool row built from messages[].tool_calls (state.db/sidecar)
+  // can lack the result body — terminal stdout, or the diff/output that a
+  // patch/edit card renders — because the persisted row carries only a short
+  // preview (or, on a cold/paginated load, nothing). The full body lives on the
+  // live S.toolCalls entry at settle time. When a settled row and a live call
+  // match by tool id, restore the missing body fields from the live call onto
+  // the settled row's tool+payload (only when the settled value is empty — never
+  // clobber a genuine persisted body), so the rebuilt card shows full output +
+  // the Show-more expander + the rendered diff. Returns true if it enriched.
+  function _enrichSettledToolRowBodyFromLive(row, live){
+    if(!row||typeof row!=='object'||!live||typeof live!=='object') return false;
+    const tool=(row.tool&&typeof row.tool==='object')?row.tool:(row.tool={});
+    const payload=(row.payload&&typeof row.payload==='object')?row.payload:(row.payload={});
+    let enriched=false;
+    const _empty=v=>v===undefined||v===null||v==='';
+    // Result body: _anchorSceneToolCallFromRow renders tool.snippet||payload.snippet
+    // (||payload.result||payload.output) as the card output + diff source, so
+    // restore the snippet onto both tool+payload when the settled row has none.
+    const liveSnippet=_anchorSceneStringPayload(live.snippet||live.result||live.output);
+    // Restore the live body when the settled snippet is missing OR is a bounded
+    // preview of the live one. The backend persists a capped preview
+    // (_TOOL_RESULT_SNIPPET_MAX = 4000 chars in api/streaming.py), so a long
+    // terminal/tool output settles to that 4000-char prefix, not to empty —
+    // #4622's actual symptom. Treat a settled snippet as restorable when the
+    // live snippet is strictly longer AND the settled value is a prefix of it
+    // AND the settled value is at/over the persistence cap (i.e. it's a
+    // truncated preview, not a genuinely short real value we must not clobber).
+    const _SETTLED_SNIPPET_CAP=4000;
+    const _isBoundedPreview=(settled,full)=>(
+      typeof settled==='string'&&typeof full==='string'&&
+      full.length>settled.length&&settled.length>=_SETTLED_SNIPPET_CAP&&
+      full.startsWith(settled)
+    );
+    const _settledSnippet=(!_empty(tool.snippet)?tool.snippet:(!_empty(payload.snippet)?payload.snippet:''));
+    const _snippetRestorable=(_empty(tool.snippet)&&_empty(payload.snippet))||_isBoundedPreview(_settledSnippet,liveSnippet);
+    if(liveSnippet&&_snippetRestorable){
+      tool.snippet=liveSnippet; payload.snippet=liveSnippet; enriched=true;
+    }
+    // Command (shell detail-lead) + args (diff/input reconstruction, the "Full" tab).
+    const liveCommand=_anchorSceneStringPayload(live.command||live.raw_command);
+    if(liveCommand&&_empty(tool.command)&&_empty(payload.command)){
+      tool.command=liveCommand; payload.command=liveCommand; enriched=true;
+    }
+    const liveArgs=(live.args&&typeof live.args==='object')?live.args:null;
+    const argsEmpty=o=>!o||typeof o!=='object'||Object.keys(o).length===0;
+    if(liveArgs&&argsEmpty(tool.args)&&argsEmpty(payload.args)){
+      tool.args={...liveArgs}; payload.args={...liveArgs}; enriched=true;
+    }
+    return enriched;
+  }
   function _anchorSceneRowsByMessageIndex(messages, turnStart, lastAsstIndex){
     const byIdx=new Map();
     const add=(idx,row)=>{
@@ -2577,21 +2627,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(Array.isArray(message.tool_calls)) messageTools.push(...message.tool_calls);
       if(Array.isArray(message._partial_tool_calls)) messageTools.push(...message._partial_tool_calls);
       const seenToolIds=new Set();
+      const rowByToolId=new Map();
       for(const tool of messageTools){
         const row=_anchorSceneToolRowFromCall(tool,0,idx);
         pool.push({...row,_phase:1,_encounter:encounter++});
         const tid=row.tool_call_id||(row.tool&&row.tool.id);
-        if(tid) seenToolIds.add(tid);
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
       }
-      // Merge S.toolCalls for this index, dedup by tool id
+      // Merge S.toolCalls for this index, dedup by tool id. When a live call
+      // matches a settled row already in the pool, don't just skip it —
+      // restore any result body the settled row is missing (#4622): the live
+      // S.toolCalls entry carries the full terminal output / patch diff that the
+      // persisted state.db row may have dropped to a short preview or nothing.
       for(const tool of (toolsByIdx.get(idx)||[])){
         if(!tool||typeof tool!=='object') continue;
         const toolIdx=Number(tool.assistant_msg_idx);
         if(!Number.isFinite(toolIdx)||toolIdx!==idx) continue;
         const row=_anchorSceneToolRowFromCall(tool,0,idx);
         const tid=row.tool_call_id||(row.tool&&row.tool.id);
-        if(tid&&seenToolIds.has(tid)) continue;
-        if(tid) seenToolIds.add(tid);
+        if(tid&&seenToolIds.has(tid)){
+          const existing=rowByToolId.get(tid);
+          if(existing) _enrichSettledToolRowBodyFromLive(existing, tool);
+          continue;
+        }
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
         pool.push({...row,_phase:1,_encounter:encounter++});
       }
       // Stable sort by (phase, started_at, encounter)
@@ -5302,6 +5361,46 @@ function hideApprovalCard(force=false) {
 let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
+let _approvalResponding = null;
+
+const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
+
+// Dismissed approvals are namespaced by session so that two sessions carrying
+// the SAME approval_id (e.g. a gateway/run source that reuses externally
+// supplied IDs across sessions) can't have a dismissal in one session hide the
+// other's still-pending approval. Stored value is "<sid>\u0000<approval_id>".
+function _approvalDismissKey(sid, approvalId) {
+  if (!approvalId) return '';
+  return String(sid || '') + '\u0000' + String(approvalId);
+}
+
+function _getDismissedApprovals() {
+  try { return JSON.parse(localStorage.getItem(_DISMISSED_APPROVALS_KEY) || '[]'); }
+  catch (_) { return []; }
+}
+
+function _isApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return false;
+  return _getDismissedApprovals().includes(key);
+}
+
+function _markApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return;
+  const set = _getDismissedApprovals().filter(k => k !== key);
+  set.push(key);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set.slice(-100))); }
+  catch (_) {}
+}
+
+function _unmarkApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return;
+  const set = _getDismissedApprovals().filter(k => k !== key);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set)); }
+  catch (_) {}
+}
 
 function _promptActiveSessionId() {
   return (S.session && S.session.session_id) || null;
@@ -5351,6 +5450,27 @@ function _renderPendingApprovalForActiveSession() {
   if (entry) showApprovalCard(entry.pending, entry.pendingCount);
 }
 
+function _approvalResponseMatches(sid, approvalId) {
+  return !!(
+    _approvalResponding &&
+    _approvalResponding.sid === sid &&
+    (_approvalResponding.approvalId || null) === (approvalId || null)
+  );
+}
+
+function _setApprovalControlsDisabled(choice, disabled) {
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+    const b = $(id);
+    if (!b) return;
+    b.disabled = !!disabled;
+    if (disabled && choice && b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) {
+      b.classList.add("loading");
+    } else {
+      b.classList.remove("loading");
+    }
+  });
+}
+
 function showApprovalForSession(sid, pending, pendingCount) {
   if (!pending) return;
   pending._session_id = sid;
@@ -5360,6 +5480,7 @@ function showApprovalForSession(sid, pending, pendingCount) {
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
+  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
@@ -5388,10 +5509,11 @@ function showApprovalCard(pending, pendingCount) {
     // approval's collapsed state, which would hide its command + action buttons. (#3515)
     card.classList.remove("collapsed");
   }
-  // Re-enable buttons in case a previous approval disabled them
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
-    const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
-  });
+  const responding = _approvalResponseMatches(sid, _approvalCurrentId);
+  _setApprovalControlsDisabled(
+    responding ? _approvalResponding.choice : null,
+    responding,
+  );
   card.classList.add("visible");
   _syncApprovalCollapseButton(card);
   _syncApprovalTranscriptSpace(card, {immediate: true});
@@ -5401,6 +5523,13 @@ function showApprovalCard(pending, pendingCount) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
   if (typeof syncTopbar === 'function') syncTopbar();
+}
+
+function dismissApprovalCard() {
+  const sid = _approvalSessionId;
+  if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
+  hideApprovalCard(true);
+  if (sid) _clearApprovalPendingForSession(sid);
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -5453,6 +5582,14 @@ function _syncApprovalTranscriptSpace(card, opts) {
   setTimeout(measure, 420);
 }
 
+function _restoreFailedApprovalResponse(sid, errMsg) {
+  _approvalResponding = null;
+  _setApprovalControlsDisabled(null, false);
+  if (_approvalPromptBelongsToActiveSession(sid)) _renderPendingApprovalForActiveSession();
+  if (typeof showToast === "function") showToast(errMsg, 5000);
+  if (typeof setStatus === "function") setStatus(errMsg);
+}
+
 function toggleApprovalCardCollapsed(forceCollapsed) {
   const card = $("approvalCard");
   if (!card) return;
@@ -5466,21 +5603,33 @@ async function respondApproval(choice) {
   const sid = _approvalSessionId || (S.session && S.session.session_id);
   if (!sid) return;
   const approvalId = _approvalCurrentId;
-  // Disable all buttons immediately to prevent double-submit
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
-    const b = $(id);
-    if (b) { b.disabled = true; if (b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) b.classList.add("loading"); }
-  });
-  _approvalSessionId = null;
-  _approvalCurrentId = null;
-  _clearApprovalPendingForSession(sid);
-  hideApprovalCard(true);
+  if (_approvalResponseMatches(sid, approvalId)) return;
+  _unmarkApprovalDismissed(sid, approvalId);
+  _approvalResponding = {sid, approvalId: approvalId || null, choice};
+  _setApprovalControlsDisabled(choice, true);
   try {
-    await api("/api/approval/respond", {
+    const result = await api("/api/approval/respond", {
       method: "POST",
       body: JSON.stringify({ session_id: sid, choice, approval_id: approvalId })
     });
-  } catch(e) { setStatus(t("approval_responding") + " " + e.message); }
+    if (result && result.ok) {
+      _approvalResponding = null;
+      const pendingEntry = _approvalPendingBySession.get(sid);
+      const samePending = !!(pendingEntry && pendingEntry.pending && (pendingEntry.pending.approval_id || null) === (approvalId || null));
+      if (_approvalSessionId === sid && _approvalCurrentId === approvalId) {
+        _approvalSessionId = null;
+        _approvalCurrentId = null;
+        hideApprovalCard(true);
+      }
+      if (samePending) _clearApprovalPendingForSession(sid);
+      return;
+    }
+    const errMsg = (result && result.error) || "Approval response not accepted.";
+    _restoreFailedApprovalResponse(sid, errMsg);
+  } catch(e) {
+    const errMsg = (e && e.message) || (t("approval_responding") + " failed");
+    _restoreFailedApprovalResponse(sid, errMsg);
+  }
 }
 
 function startApprovalPolling(sid) {
@@ -5519,7 +5668,10 @@ function _startApprovalFallbackPoll(sid) {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
+        const _resolvedEntry = _approvalPendingBySession.get(sid);
         _clearApprovalPendingForSession(sid);
+        const _resolvedId = _resolvedEntry && _resolvedEntry.pending && _resolvedEntry.pending.approval_id;
+        if (_resolvedId) _unmarkApprovalDismissed(sid, _resolvedId);
         _hideApprovalCardIfOwner(sid);
         if (!S.busy) {
           stopApprovalPollingForSession(sid);

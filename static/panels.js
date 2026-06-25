@@ -805,9 +805,11 @@ function _setCronHeaderButtons(mode, job) {
   const delBtn = $('btnDeleteTaskDetail');
   const cancelBtn = $('btnCancelTaskDetail');
   const saveBtn = $('btnSaveTaskDetail');
+  const header = $('mainTasks') && $('mainTasks').querySelector('.main-view-header');
   const hide = b => b && (b.style.display = 'none');
   const show = b => b && (b.style.display = '');
   if (mode === 'read') {
+    if (header) header.style.display = 'flex';
     show(runBtn);
     const status = job ? _cronStatusMeta(job) : null;
     const resumable = job && (
@@ -818,10 +820,12 @@ function _setCronHeaderButtons(mode, job) {
     else { show(pauseBtn); hide(resumeBtn); }
     show(editBtn); show(dupBtn); show(delBtn); hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create' || mode === 'edit') {
+    if (header) header.style.display = 'flex';
     hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(dupBtn); hide(delBtn);
     show(cancelBtn); show(saveBtn);
   } else {
     [runBtn,pauseBtn,resumeBtn,editBtn,dupBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
+    if (header) header.style.display = 'none';
   }
 }
 
@@ -1541,7 +1545,7 @@ function _kanbanTaskTitle(task){ return task.title || task.summary || task.id ||
 function _kanbanTaskBody(task){ return task.body || task.description || task.prompt || ''; }
 function _kanbanTaskMeta(task){
   const bits = [];
-  if (task.assignee) bits.push(task.assignee);
+  bits.push(task.assignee ? task.assignee : t('kanban_unassigned'));
   if (task.tenant) bits.push(task.tenant);
   if (task.priority !== undefined && task.priority !== null) bits.push('P' + task.priority);
   if (task.comment_count) bits.push('💬 ' + task.comment_count);
@@ -1920,10 +1924,20 @@ async function dropKanbanTask(event, status){
   _kanbanSuppressNextCardClick();
 }
 
+const KANBAN_UNASSIGNED_LANE = '__unassigned__';
+function _kanbanLaneKey(task){ return task && task.assignee ? String(task.assignee) : KANBAN_UNASSIGNED_LANE; }
+function _kanbanLaneLabel(lane){ return lane === KANBAN_UNASSIGNED_LANE ? t('kanban_unassigned') : lane; }
+
 function _kanbanLaneNames(columns){
   const names = new Set();
-  columns.forEach(col => (col.tasks || []).forEach(task => names.add(task.assignee || t('kanban_unassigned'))));
-  return Array.from(names).sort((a, b) => String(a).localeCompare(String(b)));
+  columns.forEach(col => (col.tasks || []).forEach(task => names.add(_kanbanLaneKey(task))));
+  const assigned = Array.from(names).filter(n => n !== KANBAN_UNASSIGNED_LANE).sort((a, b) => {
+    if (a === 'default') return -1;
+    if (b === 'default') return 1;
+    return String(a).localeCompare(String(b));
+  });
+  if (names.has(KANBAN_UNASSIGNED_LANE)) assigned.push(KANBAN_UNASSIGNED_LANE);
+  return assigned;
 }
 
 function _kanbanRenderColumn(col){
@@ -1943,14 +1957,28 @@ function _kanbanRenderProfileLanes(columns){
   const lanes = _kanbanLaneNames(columns);
   if (!lanes.length) return columns.map(_kanbanRenderColumn).join('');
   return `<div class="kanban-profile-lanes">${lanes.map(lane => {
-    const laneCols = columns.map(col => ({...col, tasks: (col.tasks || []).filter(task => (task.assignee || t('kanban_unassigned')) === lane)}));
+    const laneCols = columns.map(col => ({...col, tasks: (col.tasks || []).filter(task => _kanbanLaneKey(task) === lane)}));
     const count = laneCols.reduce((sum, col) => sum + (col.tasks || []).length, 0);
-    return `<section class="kanban-profile-lane" data-kanban-lane="${esc(lane)}"><header class="kanban-profile-lane-head"><span>${esc(lane)}</span><span class="kanban-count">${count}</span></header><div class="kanban-board kanban-board-in-lane">${laneCols.map(_kanbanRenderColumn).join('')}</div></section>`;
+    const laneClass = lane === KANBAN_UNASSIGNED_LANE ? ' kanban-profile-lane-unassigned' : '';
+    return `<section class="kanban-profile-lane${laneClass}" data-kanban-lane="${esc(lane)}"><header class="kanban-profile-lane-head"><span>${esc(_kanbanLaneLabel(lane))}</span><span class="kanban-count">${count}</span></header><div class="kanban-board kanban-board-in-lane">${laneCols.map(_kanbanRenderColumn).join('')}</div></section>`;
   }).join('')}</div>`;
 }
 
 function _kanbanEmptyBoardHtml(){
   return `<div class="main-view-empty"><div class="main-view-empty-title">${esc(t('kanban_no_data'))}</div><div class="main-view-empty-sub">${esc(t('kanban_work_queue_hint'))}</div></div>`;
+}
+
+function _kanbanHiddenByFiltersHtml(){
+  return `<div class="main-view-empty"><div class="main-view-empty-title">${esc(t('kanban_tasks_hidden_by_filters'))}</div><div class="main-view-empty-sub"><button class="btn-link" onclick="clearKanbanFilters()">${esc(t('kanban_clear_filters'))}</button></div></div>`;
+}
+
+function clearKanbanFilters(){
+  const s = $('kanbanSearch'); if (s) s.value = '';
+  const a = $('kanbanAssigneeFilter'); if (a) { a.value = ''; a.dataset.defaultValue = ''; }
+  const te = $('kanbanTenantFilter'); if (te) { te.value = ''; te.dataset.defaultValue = ''; }
+  const ai = $('kanbanIncludeArchived'); if (ai) ai.checked = false;
+  const om = $('kanbanOnlyMine'); if (om) om.checked = false;
+  loadKanban(true);
 }
 
 function _kanbanRenderBoard(){
@@ -1965,7 +1993,8 @@ function _kanbanRenderBoard(){
   if ($('kanbanSummary')) $('kanbanSummary').textContent = String(t('kanban_visible_tasks')).replace('{0}', total);
   _kanbanRenderSidebar(columns);
   if (total === 0) {
-    board.innerHTML = _kanbanEmptyBoardHtml();
+    const unfilteredTotal = (_kanbanBoard.columns || []).reduce((n, col) => n + (col.tasks || []).length, 0);
+    board.innerHTML = unfilteredTotal > 0 ? _kanbanHiddenByFiltersHtml() : _kanbanEmptyBoardHtml();
     return;
   }
   board.innerHTML = _kanbanLanesByProfile ? _kanbanRenderProfileLanes(columns) : columns.map(_kanbanRenderColumn).join('');
@@ -4307,15 +4336,16 @@ function _renderSkillError(name, message) {
 }
 
 function _setSkillHeaderButtons(mode) {
-  const editBtn = $('btnEditSkillDetail');
+
+  const header = $('mainSkills') && $('mainSkills').querySelector('.main-view-header');  const editBtn = $('btnEditSkillDetail');
   const delBtn = $('btnDeleteSkillDetail');
   const cancelBtn = $('btnCancelSkillDetail');
   const saveBtn = $('btnSaveSkillDetail');
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
-  if (mode === 'read') { show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn); }
-  else if (mode === 'create' || mode === 'edit') { hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn); }
-  else { hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
+  if (mode === 'read') { if (header) header.style.display = 'flex';  show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn); }
+  else if (mode === 'create' || mode === 'edit') { if (header) header.style.display = 'flex'; hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn); }
+  else { if (header) header.style.display = 'none';  hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
 }
 
 async function openSkill(name, el) {
@@ -4577,15 +4607,23 @@ function _memorySectionMtime(key) {
 }
 
 function _setMemoryHeaderButtons(mode) {
+  const header = $('mainMemory') && $('mainMemory').querySelector('.main-view-header');
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
   const editBtn = $('btnEditMemoryDetail');
   const cancelBtn = $('btnCancelMemoryDetail');
   const saveBtn = $('btnSaveMemoryDetail');
   const meta = _memorySectionMeta(_currentMemorySection);
-  if (mode === 'read' && _currentMemorySection !== 'external_notes' && !meta.readOnly) { show(editBtn); hide(cancelBtn); hide(saveBtn); }
-  else if (mode === 'edit') { hide(editBtn); show(cancelBtn); show(saveBtn); }
-  else { hide(editBtn); hide(cancelBtn); hide(saveBtn); }
+  if (mode === 'read') {
+    // Any read view has a populated title → header must be visible. Only the
+    // Edit affordance is gated on the section being editable (read-only
+    // sections like Project Context / External Notes still show the header).
+    if (header) header.style.display = 'flex';
+    if (_currentMemorySection !== 'external_notes' && !meta.readOnly) show(editBtn); else hide(editBtn);
+    hide(cancelBtn); hide(saveBtn);
+  }
+  else if (mode === 'edit') { if (header) header.style.display = 'flex'; hide(editBtn); show(cancelBtn); show(saveBtn); }
+  else { if (header) header.style.display = 'none'; hide(editBtn); hide(cancelBtn); hide(saveBtn); }
 }
 
 function _renderExternalNotesSources() {
@@ -5300,6 +5338,7 @@ function _renderWorkspaceDetail(ws){
 }
 
 function _setWorkspaceHeaderButtons(mode, ws){
+  const header = $('mainWorkspaces') && $('mainWorkspaces').querySelector('.main-view-header');
   const actBtn = $('btnActivateWorkspaceDetail');
   const editBtn = $('btnEditWorkspaceDetail');
   const delBtn = $('btnDeleteWorkspaceDetail');
@@ -5307,7 +5346,7 @@ function _setWorkspaceHeaderButtons(mode, ws){
   const saveBtn = $('btnSaveWorkspaceDetail');
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
-  if (mode === 'read') {
+  if (mode === 'read') { if (header) header.style.display = 'flex';
     const activePath = S.session ? S.session.workspace : '';
     const isActive = ws && ws.path === activePath;
     const isDefault = !!(ws && ws.is_default);
@@ -5316,8 +5355,10 @@ function _setWorkspaceHeaderButtons(mode, ws){
     if (isDefault) hide(delBtn); else show(delBtn);
     hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create' || mode === 'edit') {
+    if (header) header.style.display = 'flex';
     hide(actBtn); hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn);
   } else {
+    if (header) header.style.display = 'none';
     [actBtn, editBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
   }
 }
@@ -5754,7 +5795,7 @@ function _renderProfileConceptHelp(activeName){
   if (empty) empty.style.display = 'none';
   _profileMode = 'read';
   _currentProfileDetail = null;
-  _setProfileHeaderButtons('empty');
+  _setProfileHeaderButtons('help');
 }
 
 function _renderProfileDetail(p, activeName){
@@ -5796,6 +5837,7 @@ function _renderProfileDetail(p, activeName){
 }
 
 function _setProfileHeaderButtons(mode, p, activeName){
+  const header = $('mainProfiles') && $('mainProfiles').querySelector('.main-view-header');
   const actBtn = $('btnActivateProfileDetail');
   const delBtn = $('btnDeleteProfileDetail');
   const cancelBtn = $('btnCancelProfileDetail');
@@ -5803,6 +5845,7 @@ function _setProfileHeaderButtons(mode, p, activeName){
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
   if (mode === 'read') {
+    if (header) header.style.display = 'flex';
     const isActive = p && p.name === activeName;
     const isDefault = !!(p && p.is_default);
     const singleProfileMode = !!(_profilesCache && _profilesCache.single_profile_mode);
@@ -5810,8 +5853,15 @@ function _setProfileHeaderButtons(mode, p, activeName){
     if (isDefault || singleProfileMode) hide(delBtn); else show(delBtn);
     hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create') {
+    if (header) header.style.display = 'flex';
     hide(actBtn); hide(delBtn); show(cancelBtn); show(saveBtn);
+  } else if (mode === 'help') {
+    // Read-only help/concept view: title is populated, so show the header but
+    // hide every action button (no profile to act on).
+    if (header) header.style.display = 'flex';
+    [actBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
   } else {
+    if (header) header.style.display = 'none';
     [actBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
   }
 }
@@ -6469,6 +6519,9 @@ let _settingsIndexPromise = null;
 let _settingsSearchSeq = 0;
 let _extensionsStatusData = null;
 let _extensionsSidecarMonitorSeq = 0;
+let _extensionsGalleryData = null;
+let _extensionsGalleryLoaded = false;
+let _extensionsActiveTab = 'gallery';
 let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
@@ -8221,6 +8274,143 @@ async function loadExtensionsPanel(){
     if(copyBtn) copyBtn.disabled=true;
     target.innerHTML='<div class="extensions-error">Failed to load extension diagnostics: '+esc(e.message||String(e))+'</div>';
   }
+  if(_extensionsActiveTab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();
+}
+
+function switchExtensionsTab(tab){
+  _extensionsActiveTab=tab;
+  document.querySelectorAll('[data-extensions-tab]').forEach(btn=>{
+    btn.classList.toggle('extensions-tab-active',btn.dataset.extensionsTab===tab);
+  });
+  document.querySelectorAll('[data-extensions-pane]').forEach(pane=>{
+    pane.hidden=pane.dataset.extensionsPane!==tab;
+  });
+  if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();
+}
+
+async function loadExtensionsGallery(){
+  _extensionsGalleryLoaded=true;
+  const galleryEl=$('extensionsGallery');
+  const installedEl=$('extensionsInstalled');
+  if(galleryEl) galleryEl.innerHTML='<div class="extensions-loading">Loading gallery…</div>';
+  if(installedEl) installedEl.innerHTML='<div class="extensions-loading">Loading installed extensions…</div>';
+  try{
+    const [regData,statusData]=await Promise.all([
+      api('/api/extensions/registry'),
+      api('/api/extensions/status'),
+    ]);
+    _extensionsGalleryData={regData,statusData};
+    _renderExtensionsGallery(regData.entries||[],statusData);
+  }catch(e){
+    _extensionsGalleryLoaded=false;
+    const msg=esc(e&&e.message?e.message:String(e));
+    if(galleryEl) galleryEl.innerHTML='<div class="extensions-error">Failed to load gallery: '+msg+'</div>';
+    if(installedEl) installedEl.innerHTML='<div class="extensions-error">Failed to load extension status.</div>';
+  }
+}
+
+function _renderExtensionsGallery(entries,statusData){
+  const galleryEl=$('extensionsGallery');
+  const installedEl=$('extensionsInstalled');
+  const installedIds=new Set();
+  if(statusData&&statusData.gallery_installed){
+    Object.keys(statusData.gallery_installed).forEach(id=>installedIds.add(id));
+  }
+  if(statusData&&Array.isArray(statusData.extensions)){
+    statusData.extensions.forEach(e=>{ if(e&&e.id) installedIds.add(e.id); });
+  }
+  if(!Array.isArray(entries)||entries.length===0){
+    if(galleryEl) galleryEl.innerHTML='<div class="extensions-empty">No extensions found in the registry.</div>';
+    if(installedEl) installedEl.innerHTML='<div class="extensions-empty">No extensions installed from the gallery.</div>';
+    return;
+  }
+  const galleryCards=[];
+  const installedCards=[];
+  for(const entry of entries){
+    const id=esc(String(entry.id||''));
+    const name=esc(String(entry.name||entry.id||''));
+    const author=esc(String(entry.author||''));
+    const version=esc(String(entry.version||''));
+    const desc=esc(String(entry.description||''));
+    const caps=Array.isArray(entry.capabilities)?entry.capabilities:[];
+    const perms=entry.permissions||null;
+    const isInstalled=installedIds.has(String(entry.id||''));
+    const restartRequired=!!(entry.lifecycle&&entry.lifecycle.restart_required);
+    const badgesHtml=caps.map(c=>`<span class="extension-gallery-badge">${esc(String(c))}</span>`).join('');
+    const permsHtml=perms?`<details class="extension-gallery-perms"><summary data-i18n="ext_gallery_permissions_show">Permissions</summary><pre>${esc(JSON.stringify(perms,null,2))}</pre></details>`:'';
+    const actionBtn=isInstalled
+      ?`<button class="extension-gallery-uninstall-btn" data-ext-uninstall-id="${id}" type="button" data-i18n="ext_gallery_uninstall">Uninstall</button>`
+      :`<button class="extension-gallery-install-btn" data-ext-install-id="${id}" type="button" data-i18n="ext_gallery_install">Install</button>`;
+    const installedBadge=isInstalled?'<span class="extension-gallery-installed-badge">Installed</span>':'';
+    const card=`<div class="extension-gallery-card">
+      <div class="extension-gallery-head">
+        <div class="extension-gallery-info">
+          <div class="extension-gallery-name">${name}${installedBadge}</div>
+          <div class="extension-gallery-meta">${author?'by '+author:''}${version?' · v'+version:''}</div>
+        </div>
+      </div>
+      <div class="extension-gallery-desc">${desc}</div>
+      ${badgesHtml?'<div class="extension-gallery-badge-row">'+badgesHtml+'</div>':''}
+      ${permsHtml}
+      <div class="extension-gallery-actions">${actionBtn}</div>
+    </div>`;
+    galleryCards.push(card);
+    if(isInstalled) installedCards.push(card);
+  }
+  if(galleryEl) galleryEl.innerHTML=galleryCards.length?galleryCards.join(''):'<div class="extensions-empty">No extensions found.</div>';
+  if(installedEl) installedEl.innerHTML=installedCards.length?installedCards.join(''):'<div class="extensions-empty">No extensions installed from the gallery.</div>';
+  _bindExtensionGalleryButtons(entries);
+}
+
+function _bindExtensionGalleryButtons(entries){
+  const entryMap=new Map();
+  if(Array.isArray(entries)) entries.forEach(e=>{if(e&&e.id)entryMap.set(String(e.id),e);});
+  document.querySelectorAll('[data-ext-install-id]').forEach(btn=>{
+    const entry=entryMap.get(btn.dataset.extInstallId);
+    if(entry) btn.addEventListener('click',()=>handleExtensionInstall(btn,entry));
+  });
+  document.querySelectorAll('[data-ext-uninstall-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionUninstall(btn,btn.dataset.extUninstallId));
+  });
+}
+
+async function handleExtensionInstall(btn,entry){
+  if(!btn||btn.disabled) return;
+  const previousText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='Installing…';
+  try{
+    const result=await api('/api/extensions/install',{method:'POST',body:JSON.stringify({
+      id:entry.id,
+      download_url:entry.download_url||entry.download,
+      sha256:entry.sha256,
+    })});
+    const restart=!!(entry.lifecycle&&entry.lifecycle.restart_required);
+    showToast(restart?'Extension installed. Restart required to apply.':'Extension installed successfully.');
+    _extensionsGalleryLoaded=false;
+    await loadExtensionsGallery();
+  }catch(e){
+    btn.disabled=false;
+    btn.textContent=previousText;
+    showToast('Install failed: '+(e&&e.message?e.message:String(e)));
+  }
+}
+
+async function handleExtensionUninstall(btn,id){
+  if(!btn||btn.disabled) return;
+  const previousText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='Uninstalling…';
+  try{
+    await api('/api/extensions/uninstall',{method:'POST',body:JSON.stringify({id})});
+    showToast('Extension uninstalled.');
+    _extensionsGalleryLoaded=false;
+    await loadExtensionsGallery();
+  }catch(e){
+    btn.disabled=false;
+    btn.textContent=previousText;
+    showToast('Uninstall failed: '+(e&&e.message?e.message:String(e)));
+  }
 }
 
 async function copyExtensionsDiagnostics(){
@@ -8239,7 +8429,6 @@ async function copyExtensionsDiagnostics(){
   }
 }
 
-
 // ── Plugins panel (read-only plugin/hook visibility) ───────────────────────
 
 async function handlePluginEnableToggle(pluginKey, checked){
@@ -8251,6 +8440,32 @@ async function handlePluginEnableToggle(pluginKey, checked){
   }catch(e){
     showToast(t('settings_save_failed')+e.message);
   }
+}
+
+function _pluginActivationState(plugin){
+  const activation=(plugin&&typeof plugin.activation==='string')
+    ? plugin.activation
+    : (plugin&&plugin.enabled===false ? 'disabled' : 'enabled');
+  // Mirror _buildPluginCard's isProviderActive precedence: an explicit
+  // is_active_provider===true overrides the activation string so the sort
+  // bucket always matches the badge.
+  if(plugin&&plugin.is_active_provider===true) return 'provider';
+  if(activation==='exclusive'||activation==='provider'){
+    if(plugin&&plugin.is_active_provider===false) return 'disabled';
+    return 'provider';
+  }
+  if(activation==='enabled') return 'enabled';
+  return 'disabled';
+}
+
+function _partitionPluginsActiveFirst(plugins){
+  const active=[];
+  const inactive=[];
+  for(const p of plugins){
+    if(_pluginActivationState(p)==='disabled') inactive.push(p);
+    else active.push(p);
+  }
+  return active.concat(inactive);
 }
 
 async function loadPluginsPanel(){
@@ -8271,7 +8486,7 @@ async function loadPluginsPanel(){
     }
     if(empty) empty.style.display='none';
     list.style.display='';
-    for(const plugin of plugins){
+    for(const plugin of _partitionPluginsActiveFirst(plugins)){
       list.appendChild(_buildPluginCard(plugin));
     }
   }catch(e){

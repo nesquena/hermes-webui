@@ -384,6 +384,25 @@ def format_wakeup_prompt(evt: object) -> str | None:
         if sup:
             body += f"\n({sup} earlier matches were suppressed by rate limit)"
         return body + "]"
+    if evt_type == "async_delegation":
+        # A background ``delegate_task`` completion. The agent-side formatter
+        # renders these; delegate to it so the subagent result re-enters the
+        # parent conversation instead of being silently dropped (#4912).
+        try:
+            from tools.process_registry import (
+                format_process_notification as _agent_fmt,
+            )
+            result = _agent_fmt(evt)
+            if result:
+                return result
+        except Exception:
+            logger.debug(
+                "agent-side format_process_notification fallback failed for "
+                "evt_type=%s",
+                evt_type,
+                exc_info=True,
+            )
+        return None
     if evt_type != "completion":
         return None
 

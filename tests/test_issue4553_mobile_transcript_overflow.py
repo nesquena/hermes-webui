@@ -40,8 +40,21 @@ def test_messages_inner_mobile_has_containment():
     assert 'max-width:100%' in messages_inner_rule, (
         ".messages-inner in mobile block missing max-width:100%"
     )
-    assert 'overflow-x:hidden' in messages_inner_rule, (
-        ".messages-inner in mobile block missing overflow-x:hidden"
+    # #4856: the mobile .messages-inner must clip horizontal overflow WITHOUT
+    # becoming a scroll container. `overflow-x:hidden` coerces overflow-y to
+    # auto (CSS spec), which made the inner a scroll container whose
+    # min-height:auto resolved to 0 and collapsed it inside the .messages
+    # column flexbox — leaving the transcript unscrollable on mobile (stuck at
+    # top). `overflow-x:clip` clips horizontally without that side effect and
+    # still satisfies the original #4553 horizontal-pan-prevention goal.
+    assert 'overflow-x:clip' in messages_inner_rule, (
+        ".messages-inner in mobile block must use overflow-x:clip (not hidden, "
+        "which coerces overflow-y:auto and makes it an unscrollable scroll "
+        "container — #4856)"
+    )
+    assert 'overflow-x:hidden' not in messages_inner_rule, (
+        ".messages-inner in mobile block must NOT use overflow-x:hidden; that "
+        "regresses #4856 (transcript collapses and won't scroll on mobile)"
     )
     assert 'word-break:break-word' in messages_inner_rule, (
         ".messages-inner in mobile block missing word-break:break-word"

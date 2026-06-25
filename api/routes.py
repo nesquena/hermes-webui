@@ -6847,6 +6847,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _approval_sse_unsubscribe,
     _approval_sse_notify_locked,
     _approval_sse_notify,
+    _GATEWAY_MIRROR_FLAG,
     reconcile_gateway_pending_mirror_locked,
     submit_gateway_pending_mirror,
     submit_pending,
@@ -9434,6 +9435,11 @@ def handle_get(handler, parsed) -> bool:
 
         return j(handler, get_extension_status())
 
+    if parsed.path == "/api/extensions/registry":
+        from api.extensions import get_extension_registry
+
+        return j(handler, get_extension_registry())
+
     if parsed.path.startswith("/extensions/"):
         from api.extensions import serve_extension_static
 
@@ -10752,6 +10758,34 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.exception("extension toggle failed")
             return bad(handler, "Failed to update extension state", status=500)
+
+    if parsed.path == "/api/extensions/install":
+        from api.extensions import ExtensionInstallError, install_extension
+
+        try:
+            return j(
+                handler,
+                install_extension(body.get("id"), body.get("download_url"), body.get("sha256")),
+            )
+        except ExtensionInstallError as exc:
+            return bad(handler, str(exc), status=exc.status)
+        except Exception:
+            logger.exception("extension install failed")
+            return bad(handler, "Failed to install extension", status=500)
+
+    if parsed.path == "/api/extensions/uninstall":
+        from api.extensions import ExtensionInstallError, uninstall_extension
+
+        try:
+            return j(
+                handler,
+                uninstall_extension(body.get("id")),
+            )
+        except ExtensionInstallError as exc:
+            return bad(handler, str(exc), status=exc.status)
+        except Exception:
+            logger.exception("extension uninstall failed")
+            return bad(handler, "Failed to uninstall extension", status=500)
 
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
@@ -18617,6 +18651,32 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     return resolved
 
 
+_GATEWAY_APPROVAL_RELAY_UNAVAILABLE = (
+    "Gateway approval could not be relayed because the active run is unavailable. "
+    "Reopen the session or retry after it reconnects."
+)
+
+
+def _gateway_pending_approval_without_run_id(sid: str, approval_id: str) -> bool:
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(sid)
+        queue = _pending.get(sid)
+        if isinstance(queue, list):
+            entries = queue
+        elif queue:
+            entries = [queue]
+        else:
+            entries = []
+        if approval_id:
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get("approval_id") == approval_id:
+                    return bool(entry.get(_GATEWAY_MIRROR_FLAG))
+            return False
+        if not entries or not isinstance(entries[0], dict):
+            return False
+        return bool(entries[0].get(_GATEWAY_MIRROR_FLAG))
+
+
 def _handle_approval_respond(handler, body):
     sid = body.get("session_id", "")
     if not sid:
@@ -18648,6 +18708,18 @@ def _handle_approval_respond(handler, body):
             except (RunnerClientError, ValueError) as exc:
                 return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
             return j(handler, {"ok": True, "choice": choice, "relayed": True})
+        if _gateway_pending_approval_without_run_id(sid, approval_id):
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "choice": choice,
+                    "relayed": False,
+                    "code": "gateway_run_unavailable",
+                    "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+                },
+                status=409,
+            )
     except Exception:
         pass  # fall through to local approval path
 

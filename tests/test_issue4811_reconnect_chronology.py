@@ -59,6 +59,7 @@ const funcNames = [
   '_anchorSceneThinkingRow',
   '_anchorSceneToolRowFromCall',
   '_anchorSceneMessageReasoningText',
+  '_enrichSettledToolRowBodyFromLive',
   '_anchorSceneRowsByMessageIndex',
 ];
 

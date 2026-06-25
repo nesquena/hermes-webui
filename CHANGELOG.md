@@ -7,6 +7,107 @@
 
 - **WebUI-created sessions stay in sync after the official Hermes Desktop App continues the same Hermes Agent session.** The conversation sidebar now refreshes WebUI-origin rows from settled `state.db` message counts/timestamps even when external/CLI sessions are hidden, recovers persisted sidecar rows that are readable by `/api/session` but missing from `_index.json`, full session loads avoid duplicating the sidecar prefix when merging `state.db`, and the next WebUI turn saves a single reconciled transcript instead of re-writing duplicated history.
 
+## [v0.51.653] — 2026-06-25 — Release XI (gateway approval failures stay actionable instead of dead-ending)
+
+### Fixed
+
+- **In gateway-backed sessions, an approval card no longer disappears when the backend can't relay your approve/deny click.** Previously the WebUI cleared the approval card as soon as you clicked, before knowing whether the backend actually relayed the response to the gateway run — so if the relay failed, the card vanished and the run was left blocked with no way to respond. Now `/api/approval/respond` returns an explicit relay-failure error and preserves the pending state, and the card stays visible and actionable (with the error surfaced) until the backend confirms acceptance. Re-renders and Enter no longer re-enable or duplicate-submit an in-flight approval. Thanks @rodboev. (#4917, closes #4771)
+
+## [v0.51.652] — 2026-06-25 — Release XH (background subagent results return to chat)
+
+### Fixed
+
+- **Background `delegate_task` subagent results now re-enter the conversation instead of being silently dropped.** When a subagent dispatched via `delegate_task` finished, the WebUI showed it as perpetually "running" and its consolidated result never appeared in chat. The wakeup-prompt builder only recognized `completion` and watch-pattern events, so the `async_delegation` completion event a finished subagent emits hit the catch-all and was discarded before the server-side wakeup turn could start. The builder now renders `async_delegation` events (via the shared agent-side notification formatter), so the subagent's result is delivered back into the parent conversation. Genuinely-unrecognized event types are still skipped. Thanks @mydelren for the report and root-cause. (#4912)
+
+## [v0.51.651] — 2026-06-25 — Release XG (force update no longer aborts on undeletable Windows files)
+
+### Fixed
+
+- **Force update no longer fails when the working tree contains a file git can't delete (Windows reserved device names).** On Windows, a file named after a reserved device (`nul`, `con`, `prn`, `aux`, `com1`–`com9`, `lpt1`–`lpt9`) can end up in the working tree — for example when a shell command redirects to `> nul` under Git Bash, which treats it as a literal filename — and git cannot remove it through the normal Win32 path. That made `git clean -fd` exit non-zero, and the force-update flow treated it as fatal ("Failed to remove untracked files before force reset"), leaving the user permanently unable to force-update. The clean step is now best-effort: a failure is logged for diagnostics but no longer aborts, because the subsequent `git reset --hard` applies the update regardless (overwriting any tracked-file collisions, and the residual undeletable untracked file is harmless). A genuine reset failure still aborts as before. Thanks @rodboev for the report and root-cause. (#4914)
+
+## [v0.51.650] — 2026-06-25 — Release XF (table cells with a pipe inside inline code render correctly)
+
+### Fixed
+
+- **Markdown tables no longer break when a cell contains a `|` inside inline code.** A table cell like `` `updates.model = modelState.model || null` `` rendered the `|` (or `||`) as extra column separators, splitting one cell into several and corrupting the row. The table parser already protected pipes inside bracket pairs; it now also protects pipes inside inline-code (`<code>…</code>`) spans — which is what backtick spans become before the table pass runs — so the code renders intact in a single cell. Thanks @luandnh. (#4896)
+
+## [v0.51.649] — 2026-06-25 — Release XE (gallery-installed extensions actually activate)
+
+### Fixed
+
+- **Gallery-installed extensions are now activated after install instead of only being marked installed.** When an extension was installed from Settings -> Extensions without also preconfiguring `HERMES_WEBUI_EXTENSION_MANIFEST`, the gallery wrote files and showed the Installed state but the app shell did not inject the extension scripts. A second failure hit subdirectory manifests such as `desktop-companion/manifest.json`: relative assets like `assets/companion-adapter.js` were resolved as `/extensions/assets/...` instead of `/extensions/desktop-companion/assets/...`, producing a 404 and MIME-type console error. Gallery installs now build a runtime manifest from each installed extension's `manifest.json`, and explicit subdirectory manifests resolve relative assets from their manifest directory.
+
+## [v0.51.648] — 2026-06-25 — Release XD (settled tool cards keep their full output)
+
+### Fixed
+
+- **Terminal tool cards keep their full output, and patch/edit cards keep their diff, after a turn settles in the Transparent Stream / Worklog view.** While a turn streamed, the tool cards showed their complete output; once the stream settled (or on reload/reconnect), terminal cards collapsed to just the `$ command` line with no stdout and patch/edit cards showed their input fields with no rendered diff. The settled rebuild reconstructs each tool row from the persisted `messages[].tool_calls` (state.db / sidecar), which can carry only a short preview — or, on a cold/paginated load, nothing — for the result body; the live in-memory tool call still held the full output at settle time, but the merge dropped it (it skipped the matching live entry instead of restoring the missing body onto the surviving settled row). The merge now restores the full result body, command, and input args from the matched live tool call when the settled row is missing them (without clobbering a genuinely persisted value), so the rebuilt card shows the complete terminal stdout (with the **Show more** expander and the transparent **Output** / **Full** tabs), and renders the patch/edit diff. (#4622)
+
+## [v0.51.647] — 2026-06-25 — Release XC (task detail action buttons reappear on mobile PWA)
+
+### Fixed
+
+- **On mobile (and PWA WebViews), the task / skill / memory / workspace detail action buttons (Run, Pause, Edit, Delete, Save, …) are no longer invisible.** The detail header used a CSS `:has(.main-view-title:empty)` rule to stay hidden until its title was populated, but on some mobile browsers and PWA WebViews that pseudo-class doesn't re-evaluate after the title is set dynamically, so the header — and every action button in it — stayed permanently hidden. The header visibility is now driven explicitly in JavaScript (shown for read/create/edit views, hidden only for the empty state), with read-only Memory sections and the Profiles concept-help view still showing their header/title. Thanks @luandnh. (#4891)
+
+## [v0.51.646] — 2026-06-25 — Release XB (mobile transcript scrolls again)
+
+### Fixed
+
+- **The transcript is no longer stuck at the top and unscrollable on mobile.** On phones (Android and iOS), opening a conversation — and every send/receive after — left the view pinned to the oldest message with no way to scroll down to the latest. Root cause: the mobile `.messages-inner` rule used `overflow-x:hidden`, which (per the CSS spec) silently coerces `overflow-y` to `auto`, turning the inner element into a scroll container. A scroll container's `min-height:auto` resolves to `0`, so the inner — a flex item inside the `.messages` column flexbox — collapsed to the viewport height instead of growing to its content; the transcript then overflowed the (clipped) inner rather than the real scroller, leaving nothing to scroll and pinning `scrollTop` at 0. Switching to `overflow-x:clip` suppresses horizontal overflow exactly as intended without creating a scroll container, so the inner grows to full height and the transcript scrolls normally. Desktop was unaffected. (#4856)
+
+## [v0.51.645] — 2026-06-25 — Release XA (cron-heavy session lists no longer pin the CPU)
+
+### Fixed
+
+- **`GET /api/sessions` no longer pins CPU to 100% and takes multiple seconds on profiles with many cron sessions.** The sidebar projection that turns agent state.db rows into sidebar entries did three pieces of redundant per-row file I/O — an uncached sidecar JSON read (open + 64KB prefix read + key scan), a `get_last_workspace()` resolve (up to two file reads + a directory probe), and a full `cron/jobs.json` read+parse for each untitled cron row — across both the visible pass and the higher-capped (up to 200 rows) cron-only second pass. On a cron-heavy install that was hundreds of file reads per build, and because the session-list cache is keyed on a state.db fingerprint that advances on every streamed message, the whole scan was re-paid on essentially every 5s poll during a live turn (the recurring "100% CPU / slow `/api/sessions`" from #4672 → #4808 → #4842). The sidecar metadata read is now memoized per file by its `(path, mtime_ns, size, ctime_ns)` stat signature so a warm build re-stats instead of re-reads (a rename/archive/edit still invalidates just that one entry), and the workspace resolve + jobs.json parse now happen once per build instead of once per row. Output is unchanged. Thanks @rodboev for the independent profiling. (#4842)
+
+## [v0.51.644] — 2026-06-25 — Release WZ (browse, install, and uninstall extensions from a gallery)
+
+### Added
+
+- **A new Extensions gallery (Settings → Extensions) to browse, install, and uninstall WebUI extensions from the curated registry.** Previously the extension infrastructure (path-safety, manifest loading, static serving, enable/disable) existed but there was no way to discover or install extensions from the UI. The gallery fetches the curated registry, shows each extension's description, capabilities, and a permissions disclosure, and installs with a verified download: HTTPS + host-allowlist (redirects to other hosts are rejected), SHA-256 verification of the downloaded bytes before extraction, zip-bomb and zip-slip guards, symlinked-target rejection, and a tracked file manifest so uninstall removes exactly what was installed (and cleans up empty directories). An Installed tab and a Diagnostics tab (with an explicit trust-model note) round out the surface. Thanks @rodboev, with review by @franksong2702. (#4879, closes #4746)
+
+## [v0.51.643] — 2026-06-25 — Release WX (unassigned tasks show up on the mobile Kanban board)
+
+### Fixed
+
+- **On the mobile Kanban board, tasks with no assignee are no longer invisible.** Mobile groups tasks into per-profile lanes, but the lane key was derived from a localized "unassigned" label, so tasks without an assignee had no stable lane and silently dropped off the board (the CLI would show, e.g., Ready = 3 while mobile showed Ready = 0). Unassigned tasks now group into a stable internal lane rendered as an explicit "unassigned" lane (sorted after the named profiles), so the mobile counts match the CLI. Thanks @rodboev. (#4853)
+
+## [v0.51.642] — 2026-06-25 — Release WW (a failed steer now shows why, with Retry / Dismiss)
+
+### Fixed
+
+- **When a mid-turn steer can't be delivered, the composer no longer dead-ends on a generic toast.** A `/steer` (or busy-mode auto-fallback) that failed previously surfaced one of two vague toasts and restored your draft, with no explanation and no way forward — in the auto-fallback case this could trap you in a bounce loop. Each of the distinct failure reasons (agent not running, no cached agent, stream ended, session not found, agent lacks steer, network/steer error) now maps to a specific message, shown in a small recovery bar above the composer with **Retry** and **Dismiss** actions. The bar's buttons are theme-aware (readable in both light and dark, including on mobile). Thanks @rodboev. (#4850, closes #4749)
+
+## [v0.51.641] — 2026-06-25 — Release WV (disabled plugins read as disabled in dark mode, active ones sort first)
+
+### Fixed
+
+- **In dark mode, disabled plugins no longer show a green "enabled-looking" badge, and active plugins sort to the top of the Plugins list.** The disabled-badge style lost a CSS specificity contest to the dark provider-badge rule, so a disabled plugin's badge rendered the same green as an enabled one — indistinguishable at a glance. A dark-mode-specific rule now renders the disabled badge in the muted surface color. The Plugins list also sorts active/enabled plugins above inactive ones (a stable partition that never reorders within a bucket), with the sort bucket always matching the badge actually shown. Thanks @rodboev. (#4848, closes #4713)
+
+## [v0.51.640] — 2026-06-25 — Release WU (faster profile switching — Claude Code transcript parses are cached)
+
+### Fixed
+
+- **Profile switching and sidebar loads are no longer dominated by re-parsing Claude Code transcripts.** On an installation with a large `~/.claude/projects` history, every `/api/sessions` build (which a profile switch triggers) re-read and JSON-parsed every Claude Code transcript file from scratch — line by line — just to recover each session's title and message count. On a 200-file / ~130MB tree that single step measured 650–1000ms and dominated the cold sidebar latency; because the directory is global but the higher session cache is keyed per active profile, it repeated in full on every switch, on the 5s CLI-cache expiry, and on every sidebar poll. The transcript parse is now memoized per file by its `(path, mtime, size)` signature, so a warm build re-stats the files (~4ms for 200) instead of re-parsing them, while any genuine edit or append transparently invalidates just that one file's entry. The redundant per-row `get_last_workspace()` call (which stats config + probes the terminal cwd) was also hoisted out of the Claude Code row loop. Measured cold-rebuild `/api/sessions` latency on a 250-session profile dropped from ~670–880ms to ~100–200ms. Output is byte-identical to the previous behavior. Thanks @rodboev for the browser-level profiling that isolated the real bottleneck. (#4718, #4662)
+
+## [v0.51.639] — 2026-06-25 — Release WT (approval cards can be dismissed and stay dismissed)
+
+### Fixed
+
+- **Dismissing an approval card now sticks across tab switches, polls, and restarts.** The 1.5s approval poll re-rendered the card whenever the server still reported a pending approval, so collapsing it was undone on the next tick and duplicate cards re-surfaced in every open tab after a reload. The card now has an explicit dismiss (✕) button, and dismissals are remembered in `localStorage` (capped, pruned when the approval resolves) so a card you dismissed stays gone. Dismissals are scoped per session, so dismissing one session's approval can't hide another session's still-pending approval that happens to share an id. Thanks @rodboev. (#4846, closes #4754)
+
+## [v0.51.638] — 2026-06-25 — Release WS (faster session list — bounded continuation-fallback sidecar reads)
+
+### Fixed
+
+- **Listing sessions no longer reads entire session sidecar files when probing for compression continuations.** While `/api/sessions` builds sidebar metadata, a stale-pending repair path scans sibling sidecars for a continuation marker. That scan was documented as a shallow metadata-prefix check but `read_text()[:4096]` still loaded the whole file into memory before slicing, so it scaled with full transcript size on large sessions. It now reads a bounded head (up to 16 KB — enough to cover the first 4096 characters even with multi-byte content) and slices to the same 4096-character prefix, preserving the exact detection semantics while avoiding full-file I/O. Thanks @starship-s. (#4882)
+
+## [v0.51.637] — 2026-06-25 — Release WR (all continuation prompts stay out of the transcript)
+
+### Fixed
+
+- **Internal "continue where you left off" prompts no longer leak into the visible transcript when a response is truncated by the output-length cap or a too-large tool call.** When the agent's response is cut short it emits a `[System: …]` continuation prompt, which the WebUI hides from the chat. The filter only matched the network-error variant (it required the literal "cut off by a network error" phrase), so the output-length and tool-call-too-large variants rendered as stray system bubbles. The filter now matches any `[System: …]` prompt carrying either "continue exactly where you left off" or "do not retry the same tool call", covering all three variants while still leaving genuine non-`[System:]` messages alone. Thanks @rodboev. (#4880, closes #4875)
 ## [v0.51.636] — 2026-06-25 — Release WQ (Android Chromium no longer jumps the transcript to the top)
 
 ### Fixed

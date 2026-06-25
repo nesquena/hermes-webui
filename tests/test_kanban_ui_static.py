@@ -1195,3 +1195,120 @@ def test_kanban_locale_parity():
     assert not failures, (
         "Kanban i18n key parity violations:\n" + "\n".join(failures)
     )
+
+
+def test_kanban_profile_lanes_explicitly_render_unassigned_lane():
+    """Regression: unassigned Ready tasks must not disappear when the board is
+    grouped by profile/lane. Mobile users should see an explicit Unassigned
+    lane via a stable internal key instead of needing tasks assigned to
+    `default` for visibility.
+    """
+    assert "function _kanbanLaneNames" in PANELS
+    assert "function _kanbanRenderProfileLanes" in PANELS
+    assert "KANBAN_UNASSIGNED_LANE" in PANELS
+    assert "function _kanbanLaneKey" in PANELS
+    assert "function _kanbanLaneLabel" in PANELS
+    assert "kanban_unassigned" in PANELS
+
+    # Lane key helper returns the constant for tasks without an assignee.
+    assert "KANBAN_UNASSIGNED_LANE" in PANELS
+    # Lane label helper converts the constant back to a translated string.
+    assert "t('kanban_unassigned')" in PANELS
+
+    # _kanbanLaneNames uses _kanbanLaneKey to build the set, not raw assignee.
+    lane_names_match = re.search(
+        r"function _kanbanLaneNames\(columns\)\{(.*?)\nfunction ",
+        PANELS,
+        re.DOTALL,
+    )
+    assert lane_names_match, "_kanbanLaneNames() not found"
+    lane_names_body = lane_names_match.group(1)
+    assert "_kanbanLaneKey(task)" in lane_names_body
+    # Unassigned lane is appended last (after assigned lanes).
+    assert "has(KANBAN_UNASSIGNED_LANE)" in lane_names_body
+
+    # _kanbanRenderProfileLanes uses _kanbanLaneKey for filtering and
+    # _kanbanLaneLabel for display, and emits the unassigned CSS class.
+    render_match = re.search(
+        r"function _kanbanRenderProfileLanes\(columns\)\{(.*?)\nfunction ",
+        PANELS,
+        re.DOTALL,
+    )
+    assert render_match, "_kanbanRenderProfileLanes() not found"
+    render_body = render_match.group(1)
+    assert "_kanbanLaneNames(columns)" in render_body
+    assert "_kanbanLaneKey(task)" in render_body
+    assert "_kanbanLaneLabel(lane)" in render_body
+    assert "kanban-profile-lane-unassigned" in render_body
+    assert "kanban-profile-lane" in render_body
+
+
+def test_kanban_hidden_by_filters_ux():
+    """When all tasks are filtered by the text search but unfiltered data
+    exists, the board should show an explanation and a Clear filters button
+    instead of a generic 'No Kanban data' empty state.
+    """
+    # The helper functions exist.
+    assert "function _kanbanHiddenByFiltersHtml" in PANELS
+    assert "function clearKanbanFilters" in PANELS
+
+    # The empty-board branch checks unfiltered total.
+    render_match = re.search(
+        r"function _kanbanRenderBoard\(\)\{(.*?)\nfunction ",
+        PANELS,
+        re.DOTALL,
+    )
+    assert render_match, "_kanbanRenderBoard() not found"
+    render_body = render_match.group(1)
+    assert "_kanbanHiddenByFiltersHtml" in render_body
+    assert "unfilteredTotal" in render_body
+
+    # The hidden-html helper references the i18n keys.
+    hidden_match = re.search(
+        r"function _kanbanHiddenByFiltersHtml\(\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert hidden_match, "_kanbanHiddenByFiltersHtml() not found"
+    hidden_body = hidden_match.group(1)
+    assert "kanban_tasks_hidden_by_filters" in hidden_body
+    assert "kanban_clear_filters" in hidden_body
+    assert "clearKanbanFilters()" in hidden_body
+
+    # clearKanbanFilters() resets all filter inputs and reloads.
+    clear_match = re.search(
+        r"function clearKanbanFilters\(\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert clear_match, "clearKanbanFilters() not found"
+    clear_body = clear_match.group(1)
+    assert "kanbanSearch" in clear_body
+    assert "kanbanAssigneeFilter" in clear_body
+    assert "kanbanTenantFilter" in clear_body
+    assert "loadKanban(true)" in clear_body
+
+    # i18n keys exist in every locale.
+    locale_blocks = _locale_blocks_with_body(I18N)
+    for key in ("kanban_tasks_hidden_by_filters", "kanban_clear_filters"):
+        missing = [
+            locale
+            for locale, body in locale_blocks
+            if re.search(rf"\b{re.escape(key)}\s*:", body) is None
+        ]
+        assert missing == [], f"i18n key '{key}' missing from locales: {missing}"
+
+
+def test_kanban_unassigned_lane_in_sidebar_meta():
+    """Sidebar task list must show 'unassigned' label for tasks without an
+    assignee, not silently omit the field.
+    """
+    meta_match = re.search(
+        r"function _kanbanTaskMeta\(task\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert meta_match, "_kanbanTaskMeta() not found"
+    meta_body = meta_match.group(1)
+    # Must emit unassigned label when task.assignee is falsy.
+    assert "t('kanban_unassigned')" in meta_body
