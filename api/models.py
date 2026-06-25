@@ -38,6 +38,12 @@ CLI_VISIBLE_SESSION_LIMIT = 20
 # sidebar window (#3172).
 CRON_PROJECT_CHIP_LIMIT = 200
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
+# While a turn is actively streaming, hold the CLI/cron projection longer than
+# one poll interval (mirrors the route-level #4808 hold-down). The frontend
+# polls /api/sessions every ~5s during a stream; without a wider window the
+# CLI cache key advances on every streamed message row (see below) and the
+# expensive state.db CLI/cron projection is re-run on every poll. (#4842)
+_CLI_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 30.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
 _CLI_SESSIONS_CACHE = {}
 
@@ -260,8 +266,12 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
     the existing index — O(1) for single-session changes.  When *updates*
     is None, a full rebuild is performed (used on startup / first call).
 
-    LOCK protects in-memory state snapshots and payload construction only;
-    disk I/O (write/flush/fsync/replace) always runs outside LOCK.
+    LOCK protects only in-memory session snapshots.  JSON parsing, payload
+    construction, and disk I/O run outside LOCK so active-stream saves do not
+    block ordinary session reads longer than necessary.  The on-disk index
+    read-modify-write is NOT unsynchronized: it stays fully serialized by
+    ``_INDEX_WRITE_LOCK`` (held across this whole function), so narrowing LOCK
+    cannot introduce a lost-update or index-corruption race between writers.
     """
     session_dir = session_dir or SESSION_DIR
     session_index_file = session_index_file or SESSION_INDEX_FILE
@@ -293,13 +303,16 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     logger.debug("Failed to load session from %s", p)
             entries = list(entry_map.values())
 
+            existing_ids = set(entry_map.keys())
             with LOCK:
-                existing_ids = set(entry_map.keys())
-                for s in SESSIONS.values():
-                    if s.session_id not in existing_ids:
-                        entries.append(s.compact())
-                entries.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
-                _payload = json.dumps(entries, ensure_ascii=False, indent=2)
+                in_memory_entries = [
+                    s.compact()
+                    for s in SESSIONS.values()
+                    if s.session_id not in existing_ids
+                ]
+            entries.extend(in_memory_entries)
+            entries.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+            _payload = json.dumps(entries, ensure_ascii=False, indent=2)
 
             try:
                 with open(_tmp, 'w', encoding='utf-8') as f:
@@ -323,29 +336,30 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
             # Avoid N filesystem exists() checks under LOCK by collecting
             # on-disk IDs once before entering the critical section.
             on_disk_ids = _persisted_session_ids_snapshot()
+            existing = json.loads(session_index_file.read_text(encoding='utf-8'))
+            if not isinstance(existing, list):
+                raise ValueError("session index must be a list")
             with LOCK:
-                existing = json.loads(session_index_file.read_text(encoding='utf-8'))
                 in_memory_ids = set(SESSIONS.keys())
-
-                existing = [
-                    e for e in existing
-                    if (e.get('session_id') in in_memory_ids or e.get('session_id') in on_disk_ids)
-                ]
-
-                # Build lookup of updated entries
                 updated_map = {s.session_id: s.compact() for s in updates}
-                existing_ids = {e.get('session_id') for e in existing}
-                # Add any updated entries not yet in the index
-                for sid, entry in updated_map.items():
-                    if sid not in existing_ids:
-                        existing.append(entry)
-                # Replace matching entries in-place
-                for i, e in enumerate(existing):
-                    sid = e.get('session_id')
-                    if sid in updated_map:
-                        existing[i] = updated_map[sid]
-                existing.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
-                _payload = json.dumps(existing, ensure_ascii=False, indent=2)
+
+            existing = [
+                e for e in existing
+                if (e.get('session_id') in in_memory_ids or e.get('session_id') in on_disk_ids)
+            ]
+
+            existing_ids = {e.get('session_id') for e in existing}
+            # Add any updated entries not yet in the index.
+            for sid, entry in updated_map.items():
+                if sid not in existing_ids:
+                    existing.append(entry)
+            # Replace matching entries in-place.
+            for i, e in enumerate(existing):
+                sid = e.get('session_id')
+                if sid in updated_map:
+                    existing[i] = updated_map[sid]
+            existing.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+            _payload = json.dumps(existing, ensure_ascii=False, indent=2)
 
             try:
                 with open(_tmp, 'w', encoding='utf-8') as f:
@@ -4099,6 +4113,17 @@ def _copy_cli_sessions(sessions: list) -> list:
 
 
 def _cli_sessions_cache_ttl_seconds() -> float:
+    # #4842: widen the freshness window while a turn is streaming so the fixed
+    # ~5s streaming poll cadence doesn't force a rebuild on every poll. Paired
+    # with the streaming-freeze cache key (so the key is stable across polls
+    # mid-stream), this bounds the heavy CLI/cron projection to one rebuild per
+    # streaming-TTL window instead of one per poll. Mirrors the route-level
+    # #4808 TTL widening.
+    try:
+        if _cli_sessions_streaming_freeze_marker() is not None:
+            return max(0.0, float(_CLI_SESSIONS_CACHE_STREAMING_TTL_SECONDS))
+    except (TypeError, ValueError):
+        pass
     try:
         return max(0.0, float(_CLI_SESSIONS_CACHE_TTL_SECONDS))
     except (TypeError, ValueError):
@@ -4209,6 +4234,46 @@ def _sqlite_file_stat_cache_key(db_path: Path):
     )
 
 
+def _cli_sessions_streaming_freeze_marker():
+    """Return a stable cache-key marker while any turn is actively streaming.
+
+    The CLI/cron sidebar projection (``_load_cli_sessions_uncached``) is gated by
+    ``_CLI_SESSIONS_CACHE``, whose key folds in ``_sqlite_file_stat_cache_key`` →
+    ``_sqlite_content_fingerprint`` (``MAX(rowid) FROM messages``). During an
+    active chat turn the gateway/CLI writes a message row per streamed delta, so
+    that fingerprint advances on essentially every ``/api/sessions`` poll — busting
+    the CLI cache and re-running the expensive candidate-join + projection (and the
+    lineage-metadata pass) on every poll, while contending for the same SQLite/global
+    lock the streaming worker holds. That is the multi-second ``get_cli_sessions``
+    in #4842 (and #4672/#4808).
+
+    The route-level session-list cache already freezes its own key during streaming
+    (#4808 ``_session_list_cache_streaming_freeze_marker``), but that freeze never
+    reached this *inner* CLI-sessions cache, so the heavy CLI/cron query still
+    re-ran whenever the outer cache validated. This marker mirrors the route-level
+    one: keyed only on the *set* of active stream ids, it is constant while the same
+    turn(s) stream (so the projection is reused across polls) and changes the instant
+    a stream starts/stops (so the just-finished turn's rows are picked up promptly).
+    A streaming session's own CLI/cron title/count is not what this projection
+    returns (the streaming session is overlaid live by the route layer), and any
+    in-app structural mutation invalidates the cache directly via
+    ``clear_cli_sessions_cache``. Externally-driven changes that don't fire that
+    listener (a scheduled cron completing, an external CLI writing rows) surface
+    within one streaming-TTL window (≤30s) rather than instantly — a bounded,
+    self-healing lag that is the deliberate latency/CPU trade-off of the freeze. (#4842)
+    """
+    try:
+        active = _active_stream_ids()
+    except Exception:
+        return None
+    if not active:
+        return None
+    try:
+        return ("streaming", tuple(sorted(str(x) for x in active)))
+    except Exception:
+        return ("streaming",)
+
+
 def _resolve_cli_sessions_context(source_filter=None):
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
@@ -4232,12 +4297,20 @@ def _resolve_cli_sessions_context(source_filter=None):
 
     db_path = hermes_home / 'state.db'
     projects_dir = _default_claude_code_projects_dir()
+    # #4842: while a turn streams, freeze the volatile state.db component of the
+    # key so per-message writes don't bust the CLI cache and re-run the heavy
+    # CLI/cron projection on every poll (mirrors the route-level #4808 freeze).
+    # The wider streaming TTL in get_cli_sessions() still forces a periodic
+    # rebuild so a streaming session's own count stays fresh within that window,
+    # and structural mutations invalidate via clear_cli_sessions_cache().
+    _streaming_marker = _cli_sessions_streaming_freeze_marker()
+    db_state_key = _streaming_marker if _streaming_marker is not None else _sqlite_file_stat_cache_key(db_path)
     cache_key = (
         str(hermes_home),
         str(cli_profile or ''),
         str(db_path),
         str(source_filter or ''),
-        _sqlite_file_stat_cache_key(db_path),
+        db_state_key,
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
         _path_stat_cache_key(SESSION_INDEX_FILE),
@@ -4588,6 +4661,12 @@ def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
     source_filter = _normalize_cli_session_source_filter(source_filter)
     if all_profiles:
         contexts, context_cache_key = _all_profiles_cli_contexts()
+        # #4842: freeze the volatile per-profile state.db component while
+        # streaming so a streamed message row in one profile doesn't bust the
+        # all-profiles CLI cache and re-run every profile's heavy projection.
+        _streaming_marker = _cli_sessions_streaming_freeze_marker()
+        if _streaming_marker is not None:
+            context_cache_key = ('streaming-frozen', _streaming_marker)
         cache_key = (
             'all_profiles',
             source_filter or '',

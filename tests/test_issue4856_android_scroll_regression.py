@@ -83,6 +83,27 @@ def test_rebuild_path_calls_fix_before_wipe():
     )
 
 
+def test_rebuild_path_marks_dom_wipe_scroll_as_programmatic():
+    # During innerHTML='' the scroller can transiently collapse to clientHeight
+    # and clamp scrollTop to 0. That browser event must be suppressed as
+    # programmatic; otherwise the scroll listener treats it as user upward
+    # intent and disables live auto-follow.
+    fix_idx = UI_JS.find("window._fixMobileScrollJank()")
+    assert fix_idx != -1, "renderMessages() guard call not found"
+    wipe_idx = UI_JS.find("innerHTML=''", fix_idx)
+    assert wipe_idx != -1, "innerHTML='' not found after _fixMobileScrollJank()"
+    window = UI_JS[fix_idx:wipe_idx]
+    assert "_programmaticScroll=true" in window, (
+        "renderMessages() must mark the DOM wipe/rebuild scroll event as "
+        "programmatic before innerHTML='' can clamp scrollTop."
+    )
+    assert "_programmaticScrollSetAt=performance.now()" in window
+    assert UI_JS.find("_deferClearProgrammaticScroll(160)", wipe_idx) != -1, (
+        "renderMessages() must clear the programmatic-scroll suppression after "
+        "the rebuild/post-render paint window."
+    )
+
+
 def test_streaming_tick_calls_fix_before_dom_writes():
     # The streaming render tick in messages.js must call _fixMobileScrollJank()
     # before _lastRenderMs=performance.now() so anchor suppression covers every

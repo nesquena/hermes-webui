@@ -205,6 +205,24 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
 def _on_session_list_changed(profile: str | None = None) -> None:
     """Invalidate in-process /api/sessions cache when sidebar state mutates."""
     _clear_session_list_cache(profile)
+    # #4842: also drop the inner CLI/cron projection cache. While a turn streams
+    # that cache is frozen on a stable streaming marker (so per-token message
+    # writes don't bust it), which means it no longer self-invalidates via the
+    # state.db content fingerprint mid-stream. In-app structural mutations
+    # (session create/rename/archive/delete/branch/pin/move/import, attention)
+    # fire this listener — and never fire per streamed token — so clearing here
+    # restores prompt freshness for those without reintroducing the per-poll
+    # rebuild the freeze removed. Note: externally-driven changes that do NOT go
+    # through this listener (a scheduled cron job completing, or an external CLI
+    # writing rows directly) are not cleared here mid-stream; for those the 30s
+    # streaming TTL is the backstop — they surface within one streaming-TTL
+    # window (≤30s) rather than instantly. That bound is the deliberate
+    # latency/CPU trade-off of the freeze.
+    try:
+        from api.models import clear_cli_sessions_cache
+        clear_cli_sessions_cache()
+    except Exception:
+        logger.debug("Failed to clear CLI sessions cache on session list change", exc_info=True)
 
 
 try:
@@ -18683,7 +18701,12 @@ def _handle_approval_respond(handler, body):
 
     # Gateway relay: forward choice to the runs API when session has an active run.
     try:
-        from api.gateway_chat import _STREAM_RUN_IDS, _gateway_base_url, _gateway_api_key
+        from api.gateway_chat import (
+            _STREAM_RUN_IDS,
+            _gateway_base_url,
+            _gateway_api_key,
+            webui_gateway_chat_enabled,
+        )
         from api.config import get_config as _get_config
         s = get_session(sid)
         _run_id = None
@@ -18703,7 +18726,23 @@ def _handle_approval_respond(handler, body):
             except (RunnerClientError, ValueError) as exc:
                 return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
             return j(handler, {"ok": True, "choice": choice, "relayed": True})
-        if _gateway_pending_approval_without_run_id(sid, approval_id):
+        # #4771 surfaces an explicit relay-failure 409 when a gateway approval
+        # is pending but its run is gone (so the card stays actionable instead
+        # of silently failing). That signal is ONLY meaningful on a
+        # gateway-backed deployment. On the default local in-process backend,
+        # every guarded command parks an entry in tools.approval._gateway_queues
+        # (via _await_gateway_decision), which the WebUI mirrors into _pending
+        # with _GATEWAY_MIRROR_FLAG set — but there is no gateway run and no
+        # _STREAM_RUN_IDS entry by design. Without the backend-mode gate below,
+        # _gateway_pending_approval_without_run_id() returns True for that purely
+        # local approval and the handler 409s ("active run unavailable"),
+        # refusing to resolve an approval that resolves perfectly well locally.
+        # Gate on gateway mode so local approvals fall through to the local
+        # resolution path; gateway behaviour is unchanged. (#4771 regression;
+        # also reported as #4948)
+        if webui_gateway_chat_enabled(_get_config()) and _gateway_pending_approval_without_run_id(
+            sid, approval_id
+        ):
             return j(
                 handler,
                 {

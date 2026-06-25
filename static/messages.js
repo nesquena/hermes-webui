@@ -2741,6 +2741,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(lastAsst&&lastAsst._turnDuration!==undefined&&lastAsst._turnDuration!==null) return lastAsst._turnDuration;
     if(base&&base.turn_duration!==undefined&&base.turn_duration!==null) return base.turn_duration;
     const session=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
+    // The `pending_started_at` fallback below is the START of an IN-FLIGHT turn.
+    // For a SETTLED turn that recorded no live duration, computing
+    // `now - pending_started_at` is wrong: pending_started_at is either stale
+    // (left over from an earlier turn / a session that sat idle) or belongs to a
+    // different, still-pending turn — which rendered a bogus "Processed 15h 32m"
+    // on fresh conversations (#4930). Only use it while a turn is actually in
+    // flight; otherwise show no duration rather than a fabricated one.
+    const turnInFlight=!!(session&&(session.active_stream_id||session.pending_user_message));
+    if(!turnInFlight) return undefined;
     const candidates=[
       session&&session.pending_started_at,
       session&&session.active_started_at,

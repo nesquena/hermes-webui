@@ -70,12 +70,16 @@ def _status_counts_empty():
     }
 
 
-def test_extension_status_disabled_by_default():
+def test_extension_status_disabled_by_default(tmp_path, monkeypatch):
+    # With no HERMES_WEBUI_EXTENSION_DIR and no managed default dir yet, the
+    # gallery is "configured" (a managed install target is always available)
+    # but not yet valid/enabled until the first install creates the directory.
+    _use_extension_state_dir(monkeypatch, tmp_path)
     from api.extensions import get_extension_status
 
     assert get_extension_status() == {
         "enabled": False,
-        "extension_dir_configured": False,
+        "extension_dir_configured": True,
         "extension_dir_valid": False,
         "script_urls": [],
         "stylesheet_urls": [],
@@ -264,14 +268,17 @@ def test_extension_status_reports_unreadable_manifest_safely(tmp_path, monkeypat
     assert "bad-utf8.json" not in repr(status)
 
 
-def test_extension_status_reports_manifest_disabled_when_dir_unconfigured(monkeypatch):
+def test_extension_status_reports_manifest_disabled_when_dir_unconfigured(tmp_path, monkeypatch):
+    # No managed default dir exists yet, so even though the gallery target is
+    # "configured", a manifest env points at a directory that isn't valid yet.
+    _use_extension_state_dir(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
 
     from api.extensions import get_extension_status
 
     status = get_extension_status()
     assert status["enabled"] is False
-    assert status["extension_dir_configured"] is False
+    assert status["extension_dir_configured"] is True
     assert status["extension_dir_valid"] is False
     assert status["manifest"]["status"] == "extension_disabled"
     assert status["manifest"]["configured"] is True

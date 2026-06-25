@@ -504,6 +504,12 @@ class TestApprovalHTTPEndpoints:
 
         monkeypatch.setattr(r, "j", fake_j)
         monkeypatch.setattr(r, "get_session", lambda _sid: SimpleNamespace(active_stream_id=stream_id))
+        # The relay-unavailable 409 is gateway-deployment behaviour: it only
+        # fires when the WebUI actually runs the gateway chat backend. On the
+        # default local backend a mirrored approval is resolved locally
+        # instead (see test_issue4771_local_approval_regression.py). Pin the
+        # gateway backend so this test exercises the intended 409 path.
+        monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
 
         with _lock:
             r._pending.pop(sid, None)

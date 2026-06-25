@@ -420,7 +420,16 @@ def test_legacy_approval_without_run_id_stays_actionable():
             assert isinstance(pending_queue, list)
             approval_id = pending_queue[0]["approval_id"]
 
-        with patch("api.routes.get_session", return_value=mock_session), \
+        # The relay-unavailable 409 is only meaningful when the WebUI is
+        # actually running the gateway chat backend. On a gateway deployment
+        # the backend env is process-wide (not just during the stream), so
+        # assert the 409 with HERMES_WEBUI_CHAT_BACKEND=gateway active at
+        # respond time. Without this scope the handler now (correctly) treats
+        # a mirrored approval on the default LOCAL backend as locally
+        # resolvable and falls through instead of 409ing — see
+        # test_issue4771_local_approval_regression.py (#4771 follow-up).
+        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}), \
+             patch("api.routes.get_session", return_value=mock_session), \
              patch("api.routes.j", new=fake_j):
             r._handle_approval_respond(
                 object(),
