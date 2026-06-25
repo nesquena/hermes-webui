@@ -25,6 +25,26 @@ def read(rel):
     return (REPO / rel).read_text(encoding='utf-8')
 
 
+def _function_body(src: str, name: str) -> str:
+    marker = f"function {name}"
+    start = src.find(marker)
+    assert start >= 0, f"{name} not found"
+    # Some JS signatures contain default object literals, e.g. options={}; skip
+    # those and start at the function-body brace.
+    signature_end = src.find("){", start)
+    brace = signature_end + 1 if signature_end >= 0 else src.find("{", start)
+    assert brace >= 0, f"{name} body not found"
+    depth = 0
+    for i, ch in enumerate(src[brace:], brace):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError(f"{name} body did not terminate")
+
+
 class TestStreamFinalized:
     """_streamFinalized flag and rAF cancellation."""
 
@@ -227,3 +247,39 @@ class TestReconnectAccumulatorPreservation:
         assert 'S.session&&S.session.session_id' in fn
         assert '!==activeSid' in fn
         assert fn.index('!==activeSid') < fn.index('api(`/api/chat/stream/status?stream_id=')
+
+
+class TestCrossSessionStreamScrollIsolation:
+    """Background stream callbacks must not scroll the currently viewed session."""
+
+    def test_scroll_helper_requires_current_session_and_stream(self):
+        src = read('static/messages.js')
+        assert "function _isLivePaneCurrent(){" in src
+        assert "return _isActiveSession() && S.activeStreamId===streamId;" in src
+        assert "function _scrollIfLivePanePinned(){" in src
+        helper_idx = src.index("function _scrollIfLivePanePinned(){")
+        guard_idx = src.index("if(!_isLivePaneCurrent()) return;", helper_idx)
+        scroll_idx = src.index("scrollIfPinned();", helper_idx)
+        assert guard_idx < scroll_idx, (
+            "live stream callbacks must verify the visible session+stream before scrolling"
+        )
+
+    def test_attach_live_stream_has_no_raw_scroll_if_pinned_call_sites(self):
+        src = read('static/messages.js')
+        attach = _function_body(src, 'attachLiveStream')
+        assert attach.count("scrollIfPinned();") == 1, (
+            "attachLiveStream must route stream-triggered scrolls through the "
+            "current-pane helper so background streams cannot scroll another session"
+        )
+        assert "_scrollIfLivePanePinned();" in attach
+
+    def test_deferred_render_bails_before_dom_writes_after_session_switch(self):
+        src = read('static/messages.js')
+        schedule_idx = src.index("function _scheduleRender")
+        do_render_idx = src.index("const _doRender=()=>{", schedule_idx)
+        current_guard_idx = src.index("if(!_isLivePaneCurrent()) return;", do_render_idx)
+        dom_write_idx = src.index("if(typeof window._fixMobileScrollJank==='function')", do_render_idx)
+        assert current_guard_idx < dom_write_idx, (
+            "a delayed token render that fires after session switch must exit before "
+            "mutating DOM or scroll state in the newly viewed session"
+        )

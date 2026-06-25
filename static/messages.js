@@ -1776,6 +1776,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  function _isLivePaneCurrent(){
+    return _isActiveSession() && S.activeStreamId===streamId;
+  }
+  function _scrollIfLivePanePinned(){
+    if(!_isLivePaneCurrent()) return;
+    scrollIfPinned();
+  }
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
@@ -3593,7 +3600,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!assistantBody){onDone();return;}
       const target=_streamFadeCurrentDisplayText();
       const caughtUp=_renderStreamingFadeMarkdown(target);
-      scrollIfPinned();
+      _scrollIfLivePanePinned();
       if(caughtUp){
         // parser_end can flush pending markdown text; include that final text in
         // the fade wait instead of replacing it immediately in renderMessages().
@@ -3960,6 +3967,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _renderPending=false;
       // Guard: a pending setTimeout+rAF can outlive stream finalization.
       if(_streamFinalized) return;
+      // Guard against stale callbacks after switching tabs/sessions.
+      if(!_isLivePaneCurrent()) return;
       // Mobile scroll-jank guard: temporarily disable overflow-anchor before DOM
       // writes to suppress Chromium scroll re-anchoring during streaming growth.
       if(typeof window._fixMobileScrollJank==='function') window._fixMobileScrollJank();
@@ -4000,7 +4009,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _upsertAnchorProcessProse(displayText);
         if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
       }
-      scrollIfPinned();
+      _scrollIfLivePanePinned();
       snapshotLiveTurn();
     };
     const frameIntervalMs=_shouldUseStreamFade()?33:66;
@@ -4193,7 +4202,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _freshSegment=true;
       _smdEndParser();
       _resetAssistantSegment();
-      scrollIfPinned();
+      _scrollIfLivePanePinned();
     });
 
     source.addEventListener('tool_complete',e=>{
@@ -4231,7 +4240,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       }
       snapshotLiveTurn();
-      scrollIfPinned();
+      _scrollIfLivePanePinned();
     });
 
     // Phase 2: dedicated `todo_state` event carries a full snapshot of
