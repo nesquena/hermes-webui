@@ -120,6 +120,7 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     const result = { calls: [], renderCalls: 0, statusCalls: 0, buttonStates: [] };
     let delayedConfigResolve = null;
     const delayedConfigValue = { enabled: 'never', url: 'http://stale.local:1234' };
+    let delayedConfigUsed = false;
 
     global._dashboardLastNonNeverMode = 'auto';
     global._dashboardStatusCache = null;
@@ -153,12 +154,23 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
     global.api = (url, opts = {}) => {
       result.calls.push({ url: String(url), method: (opts.method || 'GET').toUpperCase(), body: opts.body || '', timeoutToast: !!(opts.timeoutToast) });
       if (String(url) === '/api/dashboard/config') {
-        if ((opts.method || 'GET').toUpperCase() === 'GET' && action === 'stale-load') {
+        if (
+          (opts.method || 'GET').toUpperCase() === 'GET' &&
+          (action === 'stale-load' || action === 'failed-save-stale-load') &&
+          !delayedConfigUsed
+        ) {
+          delayedConfigUsed = true;
           return new Promise((resolve) => {
             delayedConfigResolve = () => resolve(delayedConfigValue);
           });
         }
+        if ((opts.method || 'GET').toUpperCase() === 'GET' && action === 'failed-save-stale-load') {
+          return Promise.resolve(delayedConfigValue);
+        }
         const payload = opts.body ? JSON.parse(opts.body) : {};
+        if ((opts.method || 'GET').toUpperCase() === 'POST' && action === 'failed-save-stale-load') {
+          return Promise.reject(new Error('save failed'));
+        }
         const enabled = payload.enabled || modeEl.value || 'auto';
         const configuredUrl = payload.url || urlEl.value || '';
         return Promise.resolve({ enabled, url: configuredUrl });
@@ -214,6 +226,29 @@ _DASHBOARD_LINK_DRIVER = textwrap.dedent(
           renderCalls: result.renderCalls,
           lastRenderMode: result.lastRenderMode || '',
           calls: result.calls,
+          buttonStates: result.buttonStates,
+        }));
+        return;
+      }
+
+      if (action === 'failed-save-stale-load') {
+        const loadPromise = loadDashboardSettings();
+        modeEl.value = 'always';
+        urlEl.value = 'http://fresh.local:4321';
+        await saveDashboardSettings();
+        if (!delayedConfigResolve) throw new Error('delayed config read was not started');
+        delayedConfigResolve();
+        await loadPromise;
+        await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        recordButtons();
+        console.log(JSON.stringify({
+          mode: modeEl.value,
+          url: urlEl.value,
+          renderCalls: result.renderCalls,
+          lastRenderMode: result.lastRenderMode || '',
+          calls: result.calls,
+          statusCalls: result.statusCalls,
           buttonStates: result.buttonStates,
         }));
         return;
@@ -439,3 +474,21 @@ def test_stale_dashboard_load_does_not_overwrite_newer_save():
         and state["display"] != "none"
         for state in out["buttonStates"]
     )
+
+
+@requires_node
+def test_failed_dashboard_save_reloads_backend_after_stale_load_is_dropped():
+    out = _run_dashboard_link_driver("failed-save-stale-load", mode="never", url="http://stale.local:1234")
+    assert out["mode"] == "never"
+    assert out["url"] == "http://stale.local:1234"
+    assert out["renderCalls"] == 1
+    assert out["lastRenderMode"] == "never"
+    assert [
+        (call["url"], call["method"])
+        for call in out["calls"]
+    ] == [
+        ("/api/dashboard/config", "GET"),
+        ("/api/dashboard/config", "POST"),
+        ("/api/dashboard/config", "GET"),
+    ]
+    assert out["statusCalls"] == 0

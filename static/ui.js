@@ -1282,6 +1282,7 @@ async function saveDashboardSettings(opts){
   }catch(err){
     if(statusEl) statusEl.textContent='Dashboard link settings failed to save.';
     else if(typeof showToast==='function') showToast('Dashboard link settings failed to save.');
+    try{await loadDashboardSettings();}catch(_){}
     if(opts.raiseOnError) throw err;
   }
 }
