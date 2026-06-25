@@ -696,3 +696,19 @@ def test_live_worklog_reason_mirror_is_gated_to_compact_mode():
     render_message_start = UI_JS.index("const messageBelongsInWorklog=")
     render_message_end = UI_JS.index("if(messageBelongsInWorklog)", render_message_start)
     assert "isCompactWorklogMode()" in UI_JS[render_message_start:render_message_end]
+
+
+def test_interleaved_transcript_bubbles_skip_hidden_thinking_and_reuse_tool_results_index():
+    """Interleaved settled rendering should skip hidden-thinking bubbles before
+    creating any DOM row, and it should build the tool-result lookup once per
+    render pass instead of rescanning S.messages for every assistant message."""
+    assert "function _collectToolResultsByTid(messages){" in UI_JS
+    assert "const interleavedToolResultsByTid=isInterleavedTranscriptBubbles()?_collectToolResultsByTid(S.messages):null;" in UI_JS
+
+    branch_start = UI_JS.index("if(isInterleavedTranscriptBubbles()&&!m._live){")
+    branch_end = UI_JS.index("assistantSegments.set(rawIdx, lastBubble);", branch_start)
+    branch = UI_JS[branch_start:branch_end]
+
+    assert "for(const part of walkMessageParts(m, interleavedToolResultsByTid)){" in branch
+    assert "if(part.type==='thinking'&&window._showThinking===false) continue;" in branch
+    assert "S.messages.forEach" not in branch

@@ -8404,6 +8404,30 @@ function* walkMessageParts(m, toolResultsByTid){
     if(result) yield {type:'result', content:result};
   }
 }
+function _collectToolResultsByTid(messages){
+  const toolResultsByTid={};
+  for(const rm of (messages||[])){
+    if(!rm) continue;
+    if(rm.role==='tool'){
+      const tid=rm.tool_call_id||rm.tool_use_id||'';
+      if(tid) toolResultsByTid[tid]=_cliToolResultSnippet(rm.content);
+      continue;
+    }
+    if(!Array.isArray(rm.content)) continue;
+    for(const part of rm.content){
+      if(!part||typeof part!=='object'||part.type!=='tool_result') continue;
+      const tid=part.tool_use_id||'';
+      if(!tid) continue;
+      const raw=typeof part.content==='string'
+        ? part.content
+        : Array.isArray(part.content)
+          ? part.content.map(c=>c&&c.text?c.text:'').join('')
+          : '';
+      toolResultsByTid[tid]=_cliToolResultSnippet(raw);
+    }
+  }
+  return toolResultsByTid;
+}
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
@@ -11460,6 +11484,7 @@ function renderMessages(options){
       }
     }
   }
+  const interleavedToolResultsByTid=isInterleavedTranscriptBubbles()?_collectToolResultsByTid(S.messages):null;
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
@@ -11641,27 +11666,10 @@ function renderMessages(options){
     if(isInterleavedTranscriptBubbles()&&!m._live){
       const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
       const messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
-      const toolResultsByTid={};
-      S.messages.forEach(rm=>{
-        if(!rm) return;
-        if(rm.role==='tool'){
-          const tid=rm.tool_call_id||rm.tool_use_id||'';
-          if(tid) toolResultsByTid[tid]=_cliToolResultSnippet(rm.content);
-          return;
-        }
-        if(Array.isArray(rm.content)){
-          rm.content.forEach(p=>{
-            if(!p||typeof p!=='object'||p.type!=='tool_result') return;
-            const tid=p.tool_use_id||'';
-            if(!tid) return;
-            const raw=typeof p.content==='string'?p.content:Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join(''):'';
-            toolResultsByTid[tid]=_cliToolResultSnippet(raw);
-          });
-        }
-      });
       const blocks=_assistantTurnBlocks(currentAssistantTurn);
       let lastBubble=null;
-      for(const part of walkMessageParts(m, toolResultsByTid)){
+      for(const part of walkMessageParts(m, interleavedToolResultsByTid)){
+        if(part.type==='thinking'&&window._showThinking===false) continue;
         const bubble=document.createElement('div');
         bubble.className='assistant-segment interleaved-bubble interleaved-bubble-'+part.type;
         bubble.dataset.msgIdx=rawIdx;
@@ -11674,7 +11682,7 @@ function renderMessages(options){
           const html=renderMd(part.content);
           bubble.insertAdjacentHTML('beforeend',`<div class="msg-body">${html}</div>`);
         } else if(part.type==='thinking'){
-          if(window._showThinking!==false) bubble.insertAdjacentHTML('beforeend', _thinkingCardHtml(part.content));
+          bubble.insertAdjacentHTML('beforeend', _thinkingCardHtml(part.content));
         } else if(part.type==='cli-action'){
           const name=(part.content&&(part.content.name||(part.content.function&&part.content.function.name)))||'tool';
           bubble.insertAdjacentHTML('beforeend',`<div class="interleaved-action-label">${esc(name)}</div>`);
