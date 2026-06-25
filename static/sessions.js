@@ -1122,7 +1122,7 @@ async function loadSession(sid){
   // Persist the current composer draft before switching away so it can be
   // restored when the user switches back (#1060). Save to server now so the
   // draft survives page refresh and syncs across clients.
-  if (currentSid && freshSessionSwitch) {
+  if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
@@ -1151,7 +1151,7 @@ async function loadSession(sid){
       snapshotLiveTurnHtmlForSession(currentSid);
     }
   }
-  if (freshSessionSwitch || forceReload) {
+  if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we
     // clear them. _ensureMessagesLoaded() runs the ephemeral-field
