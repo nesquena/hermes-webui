@@ -3,10 +3,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- **Final stream writeback now emits slow-stage diagnostics without changing the writeback contract.** Successful agent turns time the result merge, session save, persistent-state scan, optional `state.db` sync, and terminal `done` payload phases, logging a debug line only when the full writeback exceeds `HERMES_WEBUI_STREAM_WRITEBACK_DIAG_MS` (250 ms by default, negative disables). This gives the remaining #4918 lock-contention work a measured next step while preserving the existing active-stream lifecycle.
-
 ## [v0.51.653] — 2026-06-25 — Release XI (gateway approval failures stay actionable instead of dead-ending)
 
 ### Fixed
