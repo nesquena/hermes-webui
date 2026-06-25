@@ -11700,6 +11700,7 @@ function renderMessages(options){
       currentAssistantTurn.dataset.recycleKey=rawIdx;
       inner.appendChild(currentAssistantTurn);
     }
+    const seg=document.createElement('div');
     if(Array.isArray(orderedTransparentParts)&&orderedTransparentParts.length){
       const blocks=_assistantTurnBlocks(currentAssistantTurn);
       const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
@@ -11730,31 +11731,30 @@ function renderMessages(options){
           if(part.toolUseId) transparentOrderedToolIds.add(part.toolUseId);
           return;
         }
-        const seg=document.createElement('div');
-        seg.className='assistant-segment';
-        seg.dataset.msgIdx=rawIdx;
-        seg.dataset.sessionMsgIdx=sessionMsgIdx;
-        seg.dataset.messageAnchorKey=messageAnchorKey;
-        seg.dataset.rawText=String(part.text||'').trim();
-        if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
-        if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
-        if(_ERR_MSG_RE.test(String(part.text||'').trim())) seg.dataset.error='1';
+        const orderedSeg=document.createElement('div');
+        orderedSeg.className='assistant-segment';
+        orderedSeg.dataset.msgIdx=rawIdx;
+        orderedSeg.dataset.sessionMsgIdx=sessionMsgIdx;
+        orderedSeg.dataset.messageAnchorKey=messageAnchorKey;
+        orderedSeg.dataset.rawText=String(part.text||'').trim();
+        if(m._activityBurstId!==undefined&&m._activityBurstId!==null) orderedSeg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
+        if(Number.isFinite(Number(m._liveSegmentSeq))) orderedSeg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
+        if(_ERR_MSG_RE.test(String(part.text||'').trim())) orderedSeg.dataset.error='1';
         if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))){
-          seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+          orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
         }
         const isLastTextPart=partIdx===lastTextPartIdx;
         const partBodyHtml=_getCachedRender(part.text,false);
         if(isLastTextPart&&statusHtml){
-          seg.insertAdjacentHTML('beforeend', statusHtml);
+          orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        seg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
-        blocks.appendChild(seg);
-        if(!firstSeg) firstSeg=seg;
+        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
+        blocks.appendChild(orderedSeg);
+        if(!firstSeg) firstSeg=orderedSeg;
       });
       assistantSegments.set(rawIdx, firstSeg||null);
       continue;
     }
-    const seg=document.createElement('div');
     seg.className='assistant-segment';
     seg.dataset.msgIdx=rawIdx;
     seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
