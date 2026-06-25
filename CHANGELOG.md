@@ -3,6 +3,78 @@
 
 ## [Unreleased]
 
+## [v0.51.637] — 2026-06-25 — Release WR (all continuation prompts stay out of the transcript)
+
+### Fixed
+
+- **Internal "continue where you left off" prompts no longer leak into the visible transcript when a response is truncated by the output-length cap or a too-large tool call.** When the agent's response is cut short it emits a `[System: …]` continuation prompt, which the WebUI hides from the chat. The filter only matched the network-error variant (it required the literal "cut off by a network error" phrase), so the output-length and tool-call-too-large variants rendered as stray system bubbles. The filter now matches any `[System: …]` prompt carrying either "continue exactly where you left off" or "do not retry the same tool call", covering all three variants while still leaving genuine non-`[System:]` messages alone. Thanks @rodboev. (#4880, closes #4875)
+
+## [v0.51.636] — 2026-06-25 — Release WQ (Android Chromium no longer jumps the transcript to the top)
+
+### Fixed
+
+- **On Android Chromium, opening a session / sending / receiving no longer yanks the transcript to the oldest message.** Since v0.51.576 every interaction could scroll-jump to the top on Android (desktop and the iOS-specific fixes #4818/#4702 didn't cover it). The mobile scroll-jank guard was setting `overflow-anchor: auto` before the DOM wipe — but `auto` is already the CSS resting value on mobile, so the write was a no-op and Chromium's aggressive scroll-anchor re-selection stayed active, re-anchoring to the top row during the `innerHTML=''` rebuild. The guard now actively *suppresses* anchoring (`overflow-anchor: none`) for the wipe-and-rebuild window and restores the CSS default afterward, so Chromium can't re-anchor mid-rebuild. Desktop and the iOS behavior are unchanged. Thanks @rodboev. (#4878, closes #4856)
+
+## [v0.51.635] — 2026-06-24 — Release WP (no more "parse failed" note under JSON/YAML fragments)
+
+### Fixed
+
+- **JSON/YAML code blocks that aren't valid top-level documents no longer show a bare "parse failed" note.** The chat renderer's Tree-view affordance stamped an unstyled `parse failed` line below any fenced block it couldn't `JSON.parse` — but assistants routinely emit fragments (a bare `key: value` line, `…` snippets, trailing commas) that legitimately don't parse, so the note was pure noise under an otherwise-clean code box. Those blocks now fall through silently to the normal syntax-highlighted raw view; the per-block Raw/Tree toggle and the configurable default-view behavior are unchanged. Thanks @metaember. (#4858, #484)
+
+## [v0.51.634] — 2026-06-24 — Release WO (faster profile list — skill stats are cached with an mtime probe)
+
+### Fixed
+
+- **Opening the profile switcher / listing profiles is no longer slow when you have several profiles.** The profile list computed each profile's enabled/total skill counts by reading and parsing every `SKILL.md` on every request — with multiple profiles this added up to 100s+ of latency. The counts are now cached per profile and only recomputed when a cheap directory-mtime probe detects an actual change (a skill added, removed, edited, or `config.yaml` changed), with a periodic safety-net refresh. The probe walks the skill tree the same way the real scan does (following symlinked skills, pruning vendored dependency trees like `node_modules`/`.venv`), so the cached counts stay correct while the expensive re-parse is skipped. Thanks @rodboev. (#4847, closes #4783)
+
+## [v0.51.633] — 2026-06-24 — Release WN (collapsed tool cards preview the result, not the call args)
+
+### Fixed
+
+- **A completed tool card's collapsed header now previews the tool's result instead of its call arguments.** For a finished tool, the one-line header showed the call args (e.g. `path=src/`) rather than what actually happened (e.g. `Found 3 matches`). Completed tools now surface a one-line result preview (from the tool's preview/snippet), suppressing JSON object/array blobs and capping length, while running tools and the args-preview fallback are unchanged. The preview is escaped on render (no XSS). Thanks @rodboev. (#4851, closes #4752)
+
+## [v0.51.632] — 2026-06-24 — Release WM (new conversations use your configured default model)
+
+### Fixed
+
+- **Starting a new conversation now uses your configured default model instead of inheriting the last session's model.** New Chat could pick up a loaded session's picker state (or stale picker state left behind after deleting the last session), so it opened on the wrong model. The selection precedence is now explicit empty-composer override → configured default → legacy picker/persisted fallback, applied whether or not a session is currently loaded. The Settings save path also keeps the default-model provider in sync with the saved model and drops the auxiliary-only `"auto"` sentinel before it reaches main-model persistence, and switching the main default to a different custom provider now clears the previous provider's `base_url` so requests don't route to the old endpoint. Thanks @rodboev. (#4867, closes #4728)
+
+## [v0.51.631] — 2026-06-24 — Release WL (reconnecting to a running session keeps prior content in order)
+
+### Fixed
+
+- **Returning to a running session no longer reorders the prior conversation.** When reconnecting to a live session, the settled-scene reconstruction emitted rows grouped by role (all prose, then thinking, then tools) and appended reconnect-supplied tool calls at the tail — so a tool that ran *before* some prose showed up *after* it, and reconnect tools always jumped to the end. Rows are now pooled per message, tagged by phase, merged with the live tool calls (deduped by tool id), and stable-sorted by phase → start time → encounter order, so the transcript reads in true chronological order. Anonymous tool rows (no tool id) at the same message index now get distinct identities so none is silently dropped during settlement dedupe. Thanks @rodboev. (#4849, closes #4811)
+
+## [v0.51.630] — 2026-06-24 — Release WK (update failures show the real git error, not just "check your connection")
+
+### Fixed
+
+- **When an update can't fetch, the WebUI now shows the actual git error instead of always blaming the network.** The apply-update paths previously discarded git's stderr and hard-coded "Could not reach the remote repository," which hid real, fixable failures (e.g. a locked ref, an auth rejection, a repository-not-found). They now surface the sanitized git diagnostic (`fetch failed: …`) for non-network failures while still showing the friendly connection message for genuine network errors (DNS, connect timeout, TLS, unreachable). The diagnostic is run through the existing secret-stripping redactor — broadened in this change to also redact `client_secret`, `private_token`, `oauth_token`, `app_secret`, and `api_key` query params — so credentials embedded in a remote URL never appear in the error. Thanks @rodboev. (#4862, closes #4694)
+
+## [v0.51.629] — 2026-06-24 — Release WJ (macOS workspace drag-drop now lands)
+
+### Fixed
+
+- **Dragging a file or folder in the workspace tree now works on macOS.** macOS WebKit strips custom drag MIME types (`application/ws-path`) during `dragover`/`drop`, leaving only `text/plain`, so the move was silently rejected on macOS (it worked on Linux/Windows Chromium, which preserve the custom type). The drop handler now also recognizes an in-flight workspace drag via a module-scoped active-drag flag, and only treats a stripped-MIME `text/plain` drop as a move when its payload matches the dragged path — a foreign text drag from another app can't trigger a move, and the flag is cleared on `dragend`/`drop`/`pagehide`/`blur` so an abandoned drag can't leave it set. Thanks @rodboev. (#4845, closes #4757)
+
+## [v0.51.628] — 2026-06-24 — Release WI (no ghost messages after edit/retry/undo)
+
+### Fixed
+
+- **Editing a message (or `/retry` / `/undo`) no longer resurrects the replaced messages — and stops feeding them back into the agent's context.** After an edit/retry/undo, switching away and back used to bring the original pre-edit message and its reply back into the transcript (and into the model's context window, polluting the conversation). The append-only state.db merge now ADVANCES the truncation watermark to the new turn instead of clearing it, and persists the original truncate cutoff (`truncation_boundary`) separately so cold-load/crash recovery can tell a legitimate prefix from a deleted suffix — instead of guessing. Covers editing an older message that leaves several later turns, same-second edits, and the recovery window where the new turn is saved but its reply only exists in state.db. The `#2914` truncate-to-empty block and `#3346` repeated-identical-turn handling are preserved. Thanks @AlexeyDsov. (#4772, closes #4767)
+
+## [v0.51.627] — 2026-06-24 — Release WH (Tasks cron APIs survive a shadowing top-level `cron` package)
+
+### Fixed
+
+- **The Tasks panel no longer shows an empty cron list (or "cron unavailable") when another `cron` package shadows the agent's on `sys.path`.** In some deployments (two-container / shared-venv Docker setups) an unrelated top-level `cron` package can appear earlier on `sys.path` than the Hermes agent checkout, so `import cron` resolved to the wrong package and the cron Task APIs caught `ModuleNotFoundError: cron.jobs` and returned `{"jobs": [], "cron_unavailable": true}` even though the agent's cron jobs file was present. The cron API handlers now ensure the agent's cron package takes import precedence (re-ordering `sys.path` ahead of any shadowing entry and clearing a previously-imported unrelated `cron` module before retrying), so cron jobs surface correctly. Thanks @luckfu. (#4855)
+
+## [v0.51.626] — 2026-06-24 — Release WG (restore the mobile streaming scroll-jank guard)
+
+### Fixed
+
+- **On iOS Safari / installed PWAs, the transcript no longer jumps to the first/oldest message while assistant output streams.** The mobile scroll-jank protection had three layers — the `overflow-anchor: auto` mobile CSS, the `_fixMobileScrollJank()` helper, and a streaming-time call that re-enables anchoring right before each live DOM write. The streaming-time call was inadvertently dropped during the streaming parse-cache work, so Safari could paint a transient `scrollTop = 0` frame during streamed DOM rebuilds and yank the reader to the top. That third layer is restored (the helper still self-gates to touch devices, so desktop is unaffected), with a regression test so it can't silently disappear again. Thanks @b-yelverton. (#4857)
+
 ## [v0.51.625] — 2026-06-24 — Release WF (cron job model override no longer keeps the @provider: display prefix)
 
 ### Fixed

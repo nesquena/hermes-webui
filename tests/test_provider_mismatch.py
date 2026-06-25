@@ -380,6 +380,48 @@ def test_default_model_save_persists_codex_provider_for_qualified_model(tmp_path
     assert saved["model"].get("base_url") != "https://openrouter.ai/api/v1"
 
 
+def test_default_model_save_clears_stale_custom_base_url_on_provider_change(tmp_path, monkeypatch):
+    """Switching the main default from one custom provider to another must drop
+    the previous provider's base_url so New Chat doesn't route to the old
+    endpoint (#4728). Previously custom:* was exempted from the base_url clear,
+    so the stale URL lingered."""
+    import yaml
+    import api.config as config
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "model:\n"
+        "  provider: custom:old-local\n"
+        "  default: old-model\n"
+        "  base_url: http://old.local/v1\n",
+        encoding="utf-8",
+    )
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_file)
+    config.cfg["model"] = {
+        "provider": "custom:old-local",
+        "default": "old-model",
+        "base_url": "http://old.local/v1",
+    }
+    config._cfg_mtime = config_file.stat().st_mtime
+    try:
+        result = config.set_hermes_default_model("new-model", provider="custom:new-local")
+        saved = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+        config.invalidate_models_cache()
+
+    assert result["ok"] is True
+    assert saved["model"]["provider"] == "custom:new-local"
+    # The stale base_url from the OLD custom provider must not survive.
+    assert saved["model"].get("base_url") != "http://old.local/v1", (
+        f"stale custom base_url leaked: {saved['model'].get('base_url')!r}"
+    )
+
+
 def test_active_codex_at_provider_session_model_preserved(monkeypatch):
     """@openai-codex:gpt-5.5 session selections must keep their provider hint."""
     import api.routes as routes

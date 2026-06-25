@@ -112,6 +112,7 @@ def test_rendered_apply_patch_tool_card_html_contains_diff_lines():
         "_toolArgPreviewValue",
         "_toolArgPreviewKeyIsHidden",
         "_formatToolArgPreview",
+        "_toolResultOneLiner",
         "_toolCardPreviewText",
         # #3336: buildToolCard now wraps diff snippets via these helpers.
         "_snippetLooksLikeDiff",

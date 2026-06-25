@@ -214,7 +214,7 @@ def _provider_assignment_in_new_session() -> str:
     src = _read("static/sessions.js")
     idx = src.find("async function newSession(flash, options={}){")
     assert idx != -1, "newSession() must be defined in static/sessions.js"
-    body = src[idx : idx + 6000]
+    body = src[idx : idx + 7000]
     guard_start = body.find("const _bareModel")
     assert guard_start != -1, (
         "newSession() must declare a 'const _bareModel' guard for the "

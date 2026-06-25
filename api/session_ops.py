@@ -116,6 +116,9 @@ def retry_last(session_id: str) -> dict[str, Any]:
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
             s.truncation_watermark = _truncation_watermark_for(s.messages)
+            # Persist the original truncate cutoff so empty-sidecar recovery
+            # can distinguish legitimate prefix from deleted suffix.
+            s.truncation_boundary = s.truncation_watermark
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
@@ -156,6 +159,8 @@ def undo_last(session_id: str) -> dict[str, Any]:
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
             s.truncation_watermark = _truncation_watermark_for(s.messages)
+            # Persist the original truncate cutoff.
+            s.truncation_boundary = s.truncation_watermark
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:

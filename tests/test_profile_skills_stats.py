@@ -127,19 +127,27 @@ def test_platform_disabled_webui(tmp_path):
 
 @requires_agent_modules
 def test_skills_stats_cache(tmp_path):
-    """Verify that caching works and has short TTL behavior."""
+    """Caching avoids re-parsing SKILL.md, but the per-call mtime probe catches
+    a real skill add/remove immediately (the #4783 fix — adding a skill bumps
+    the skills-dir mtime, so the next call recomputes rather than serving stale
+    counts for the whole TTL)."""
     profiles._SKILLS_STATS_CACHE.clear()
-    
+
     _write_skill(tmp_path, "alpha")
     enabled, compat = profiles._get_profile_skills_stats(tmp_path)
     assert enabled == 1 and compat == 1
 
-    # Add a skill but since cache is active (TTL 8s), we should still get old values
-    _write_skill(tmp_path, "beta")
+    # A second call with NO change serves the cache (no recompute) — same value.
     enabled, compat = profiles._get_profile_skills_stats(tmp_path)
     assert enabled == 1 and compat == 1
 
-    # Force clear or override the mock TTL, or clear cache manually to see changes
+    # Adding a skill bumps the skills-dir mtime; the cheap probe detects it on
+    # the very next call and the counts update immediately (no stale TTL window).
+    _write_skill(tmp_path, "beta")
+    enabled, compat = profiles._get_profile_skills_stats(tmp_path)
+    assert enabled == 2 and compat == 2
+
+    # .clear() still forces a fresh recompute regardless of mtime/TTL.
     profiles._SKILLS_STATS_CACHE.clear()
     enabled, compat = profiles._get_profile_skills_stats(tmp_path)
     assert enabled == 2 and compat == 2

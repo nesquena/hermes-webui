@@ -1581,29 +1581,66 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
-_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, float]] = {}
-_SKILLS_STATS_CACHE_TTL = 8.0  # seconds
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float]] = {}
+_SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because .clear() handles programmatic changes
 
 
-def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
-    """Calculate (enabled_count, compatible_count) for a profile directory."""
-    import time
-    profile_dir = Path(profile_dir).resolve()
-    now = time.time()
-    # Read via .get() (not membership-check + index) so a concurrent
-    # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
-    # between the `in` test and the lookup.
-    cached = _SKILLS_STATS_CACHE.get(profile_dir)
-    if cached is not None:
-        enabled, compat, expiry = cached
-        if now < expiry:
-            return enabled, compat
+def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
+    """Return the max st_mtime_ns across config.yaml, skill dirs, and SKILL.md files."""
+    max_ns = 0
+    try:
+        if config_path.exists():
+            max_ns = max(max_ns, config_path.stat().st_mtime_ns)
+    except OSError:
+        pass
+    if not skills_dir.is_dir():
+        return max_ns
+    try:
+        from agent.skill_utils import EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS
+    except Exception:
+        EXCLUDED_SKILL_DIRS = frozenset()
+        SKILL_SUPPORT_DIRS = frozenset()
+    try:
+        # Directory mtimes catch nested out-of-band deletes that leave file mtimes unchanged.
+        # followlinks=True mirrors agent.skill_utils.iter_skill_index_files (the compute
+        # path), so a symlinked skill directory is descended into and edits to its target
+        # SKILL.md change the probe value — otherwise such edits would stay stale up to the TTL.
+        for root, dirnames, filenames in os.walk(skills_dir, followlinks=True):
+            root_path = Path(root)
+            # Prune the SAME trees iter_skill_index_files prunes (.git/.venv/
+            # node_modules/site-packages + skill support dirs), so a skill that
+            # vendors a dependency tree doesn't make this every-call probe walk
+            # thousands of irrelevant files and defeat the cache's perf goal.
+            has_skill_md = "SKILL.md" in filenames
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in EXCLUDED_SKILL_DIRS
+                and not (has_skill_md and d in SKILL_SUPPORT_DIRS)
+            ]
+            try:
+                max_ns = max(max_ns, root_path.stat().st_mtime_ns)
+            except OSError:
+                pass
+            for dirname in dirnames:
+                try:
+                    max_ns = max(max_ns, (root_path / dirname).stat().st_mtime_ns)
+                except OSError:
+                    pass
+            if "SKILL.md" in filenames:
+                try:
+                    max_ns = max(max_ns, (root_path / "SKILL.md").stat().st_mtime_ns)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    return max_ns
 
+
+def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Compute (enabled_count, compatible_count) by reading and parsing all SKILL.md files."""
     skills_dir = profile_dir / "skills"
     if not skills_dir.is_dir():
-        res = (0, 0)
-        _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
-        return res
+        return (0, 0)
 
     disabled = set()
     config_path = profile_dir / "config.yaml"
@@ -1620,7 +1657,7 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
                         disabled_val = platform_disabled
                     else:
                         disabled_val = skills_cfg.get("disabled")
-                    
+
                     if disabled_val is not None:
                         if isinstance(disabled_val, str):
                             disabled_val = [disabled_val]
@@ -1629,11 +1666,11 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
             pass
 
     from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
-    
+
     seen_names = set()
     enabled_count = 0
     compatible_count = 0
-    
+
     for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
         try:
             content = skill_md.read_text(encoding="utf-8")[:4000]
@@ -1644,15 +1681,56 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
             if name in seen_names:
                 continue
             seen_names.add(name)
-            
+
             compatible_count += 1
             if name not in disabled:
                 enabled_count += 1
         except Exception:
             pass
-            
-    res = (enabled_count, compatible_count)
-    _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
+
+    return (enabled_count, compatible_count)
+
+
+def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Calculate (enabled_count, compatible_count) with two-tier mtime cache.
+
+    A cheap stat-only mtime probe runs on EVERY call so out-of-band (CLI/git)
+    skill changes are reflected promptly — the expensive part (reading + parsing
+    every SKILL.md) is what the cache avoids, not the change detection. The TTL
+    is only a safety-net upper bound that forces an occasional full recompute
+    even when the mtime probe sees no change.
+    """
+    import time
+    profile_dir = Path(profile_dir).resolve()
+    now = time.time()
+    skills_dir = profile_dir / "skills"
+    config_path = profile_dir / "config.yaml"
+
+    # Always run the cheap stat-only probe first — this is what catches an
+    # out-of-band create/edit/delete within the same request (not after the TTL).
+    current_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+
+    # Read via .get() (not membership-check + index) so a concurrent
+    # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
+    # between the `in` test and the lookup.
+    cached = _SKILLS_STATS_CACHE.get(profile_dir)
+    if cached is not None:
+        enabled, compat, cached_mtime_ns, expiry = cached
+        # Fast path: files unchanged (by the cheap probe above) AND still within
+        # the TTL → serve cached without re-reading any SKILL.md. The mtime probe
+        # already ran, so an out-of-band change is caught immediately regardless
+        # of the TTL. On TTL expiry we deliberately fall through to a full
+        # recompute (the TTL is a safety net for mtime-preserving changes that
+        # the probe can't see — e.g. a git checkout that restores the old mtime).
+        if current_mtime_ns == cached_mtime_ns and now < expiry:
+            return enabled, compat
+
+    # Cache miss, mtime changed, or TTL expired — snapshot mtime BEFORE compute
+    # so any concurrent SKILL.md write during the compute window causes a mismatch
+    # on the next probe instead of silently serving stale data (TOCTOU).
+    new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+    res = _compute_profile_skills_stats(profile_dir)
+    _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], new_mtime_ns, now + _SKILLS_STATS_CACHE_TTL)
     return res
 
 

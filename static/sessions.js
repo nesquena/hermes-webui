@@ -802,6 +802,32 @@ function _markPollingCompletionUnreadTransitions(sessions) {
 
 let _newSessionInFlight=null;
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
+const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalThis;
+
+function _rememberEmptyComposerModelOverride(model, modelProvider){
+  const resolvedModel=String(model||'').trim();
+  if(!resolvedModel) return;
+  _emptyComposerModelOverrideHost._emptyComposerModelOverride={
+    model:resolvedModel,
+    model_provider:modelProvider||null,
+    saved_at:Date.now(),
+  };
+}
+
+function _readEmptyComposerModelOverride(){
+  const state=_emptyComposerModelOverrideHost._emptyComposerModelOverride;
+  if(!state||!state.model) return null;
+  return {
+    model:String(state.model||''),
+    model_provider:state.model_provider||null,
+    saved_at:Number(state.saved_at||0)||0,
+  };
+}
+
+function _clearEmptyComposerModelOverride(){
+  _emptyComposerModelOverrideHost._emptyComposerModelOverride=null;
+}
+
 function _setNewSessionPending(pending){
   const ids=['btnNewChat','btnTitlebarNewChat'];
   for (let i=0;i<ids.length;i++){
@@ -849,12 +875,23 @@ async function newSession(flash, options={}){
     if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
     // Forward a pre-session toolset override only from the empty composer (#4490).
     if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
-    // Carry the visible picker selection into the new session. Without this,
-    // /api/session/new falls back to config.yaml defaults (e.g. gpt-5.5) even
-    // when the user already chose cursor/composer-2.5 in the composer chip.
     const modelSelForNew=$('modelSelect');
+    const explicitModelOverride=(typeof _readEmptyComposerModelOverride==='function')
+      ? _readEmptyComposerModelOverride()
+      : null;
+    const hasLoadedSession=!!(S.session&&S.session.session_id);
     let newModelState=null;
-    if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
+    let consumedExplicitModelOverride=false;
+    let usingConfiguredDefault=false;
+    if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
+      newModelState=explicitModelOverride;
+      consumedExplicitModelOverride=true;
+    }else if(window._defaultModel){
+      // Configured default wins over stale picker/persisted state even with no
+      // loaded session (deleting the last session left S.session null + stale picker) (#4728).
+      newModelState={model:window._defaultModel,model_provider:null};
+      usingConfiguredDefault=true;
+    }else if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
     }else if(typeof _readPersistedModelState==='function'){
       newModelState=_readPersistedModelState();
@@ -889,7 +926,9 @@ async function newSession(flash, options={}){
       // server fast path passes the pair through verbatim (no validation) and
       // silently routes to the wrong backend — so leave model_provider=null and
       // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
-      const _fallbackProvider=_bareModel?(window._activeProvider||(S.session&&S.session.model_provider)||''):'';
+      const _fallbackProvider=_bareModel
+        ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
+        : '';
       const _familyProvider=(m=>{const s=String(m||'').toLowerCase();
         if(s.startsWith('gpt'))return 'openai';if(s.startsWith('claude'))return 'anthropic';
         if(s.startsWith('gemini'))return 'google';return '';})(newModelState.model);
@@ -903,6 +942,9 @@ async function newSession(flash, options={}){
         ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
+      _clearEmptyComposerModelOverride();
+    }
     S.session=data.session;S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
@@ -1244,6 +1286,7 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true});
   }
   S.session=data.session;
+  if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;

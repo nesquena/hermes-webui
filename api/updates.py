@@ -43,7 +43,19 @@ CACHE_TTL = 1800  # 30 minutes
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
-_QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|token|password|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+_QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|oauth_token|private_token|client_secret|app_secret|api[_-]?key|token|password|secret|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+_FETCH_NETWORK_FAILURE_SIGNATURES = (
+    'could not resolve host',
+    'failed to connect',
+    'network is unreachable',
+    'no route to host',
+    'connection timed out',
+    'timed out after',
+    'connection reset by peer',
+    'remote end hung up unexpectedly',
+    'tls connection was non-properly terminated',
+    'ssl certificate problem',
+)
 
 
 def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CHARS) -> str:
@@ -62,6 +74,17 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
     if len(sanitized) > limit:
         sanitized = sanitized[:limit].rstrip() + "…"
     return sanitized
+
+
+def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
+    """Return the apply-path fetch failure message for the given stderr."""
+    detail = _sanitize_git_diagnostic(fetch_out)
+    if not detail:
+        return network_message
+    detail_lower = detail.lower()
+    if any(signature in detail_lower for signature in _FETCH_NETWORK_FAILURE_SIGNATURES):
+        return network_message
+    return f'fetch failed: {detail}'
 
 
 def _restart_blocker_snapshot() -> dict:
@@ -1254,11 +1277,14 @@ def apply_force_update(target: str) -> dict:
         # --force so a remote re-tag (e.g. squash-merge that re-points an
         # existing release tag) doesn't jam the apply path with "would clobber
         # existing tag". See #2756.
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
         if not fetch_ok:
             return {
                 'ok': False,
-                'message': 'Could not reach the remote repository. Check your connection.',
+                'message': _apply_fetch_failure_message(
+                    fetch_out,
+                    'Could not reach the remote repository. Check your connection.',
+                ),
             }
 
         compare_ref = _select_apply_compare_ref(path)
@@ -1319,13 +1345,13 @@ def _apply_update_inner(target):
 
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
-    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
         return {
             'ok': False,
-            'message': (
-                'Could not reach the remote repository. '
-                'Check your internet connection and try again.'
+            'message': _apply_fetch_failure_message(
+                fetch_out,
+                'Could not reach the remote repository. Check your internet connection and try again.',
             ),
         }
 

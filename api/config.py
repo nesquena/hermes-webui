@@ -3555,7 +3555,7 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
-def set_hermes_default_model(model_id: str, advanced: dict | None = None) -> dict:
+def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
     if not selected_model:
@@ -3572,6 +3572,7 @@ def set_hermes_default_model(model_id: str, advanced: dict | None = None) -> dic
             model_cfg = {}
 
         previous_provider = str(model_cfg.get("provider") or "").strip()
+        requested_provider = str(provider or "").strip()
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
         )
@@ -3585,7 +3586,8 @@ def set_hermes_default_model(model_id: str, advanced: dict | None = None) -> dic
         # CLI-shaped bare form via `_applyModelToDropdown()`'s normalising
         # matcher — see `static/panels.js` (#895).
         persisted_model = str(resolved_model or selected_model).strip()
-        persisted_provider = str(resolved_provider or previous_provider or "").strip()
+        persisted_provider = str(requested_provider or resolved_provider or previous_provider or "").strip()
+        provider_override_won = bool(requested_provider and requested_provider != str(resolved_provider or "").strip())
         # Never persist the bogus ``local`` value — see #1384. The auto-detect
         # block in ``_build_available_models_uncached`` was rewriting unknown
         # loopback hosts to ``provider: "local"``, which is not registered and
@@ -3598,12 +3600,17 @@ def set_hermes_default_model(model_id: str, advanced: dict | None = None) -> dic
         if persisted_provider:
             model_cfg["provider"] = persisted_provider
 
-        if resolved_base_url:
+        if resolved_base_url and not provider_override_won:
             model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
-            elif not persisted_provider.startswith("custom:"):
+            else:
+                # Provider changed and we have no resolved URL for the new one.
+                # Drop the previous provider's base_url so New Chat doesn't route
+                # to the old endpoint — this MUST also cover custom:* providers
+                # (a different custom provider has a different URL); leaving the
+                # stale base_url sent requests to the wrong host (#4728).
                 model_cfg.pop("base_url", None)
 
         _apply_advanced_model_options(model_cfg, advanced)
@@ -3617,7 +3624,7 @@ def set_hermes_default_model(model_id: str, advanced: dict | None = None) -> dic
     # it triggers a live provider fetch (up to 8s) that blocks the HTTP response
     # to the browser, causing a visible freeze on every Settings save (#895).
     invalidate_models_cache()
-    return {"ok": True, "model": persisted_model}
+    return {"ok": True, "model": persisted_model, "provider": persisted_provider or None}
 
 
 # ── Auxiliary model configuration ──────────────────────────────────────────
