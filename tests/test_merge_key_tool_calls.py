@@ -126,6 +126,34 @@ class TestMergeToolCallsEndToEnd:
         }
         assert tc_ids == {"call_1", "call_2"}
 
+    def test_older_state_tool_call_assistant_stays_before_final_answer(self):
+        """Older tool-call-only state.db rows must not become the final tail.
+
+        The WebUI sidecar can already contain a settled final answer while
+        state.db still has empty-content assistant rows that carry distinct
+        tool_calls from earlier in the turn. Those rows are real activity and
+        should be preserved, but appending them after the final answer makes the
+        renderer treat the final answer as a non-final assistant segment.
+        """
+        sidecar_tool = _assistant_tc("call_1", "read_file", timestamp=1000.0)
+        final_answer = {
+            "role": "assistant",
+            "content": "Final answer is complete.",
+            "timestamp": 1001.0,
+        }
+        state_tool = _assistant_tc("call_2", "terminal", timestamp=1000.5)
+
+        result = merge_session_messages_append_only(
+            [sidecar_tool, final_answer],
+            [state_tool],
+        )
+
+        assert result[-1] == final_answer
+        assert [m.get("tool_calls", [{}])[0].get("id") for m in result if m.get("tool_calls")] == [
+            "call_1",
+            "call_2",
+        ]
+
     def test_no_tool_calls_still_deduped(self):
         """Messages without tool_calls are deduplicated by legacy key as before."""
         msg = {"role": "assistant", "content": "hello", "timestamp": 1000}

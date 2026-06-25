@@ -5639,7 +5639,17 @@ def merge_session_messages_append_only(
                 if _tc:
                     _ck = _session_message_content_key(msg)
                     if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
-                        pass  # different tool_calls from sidecar — preserve
+                        # Different tool_calls from sidecar — preserve, but keep
+                        # the row in timestamp order. Falling through to the
+                        # generic append path would move older tool-call-only
+                        # assistant rows after the settled final answer.
+                        if _insert_state_message_chronologically(merged_messages, msg):
+                            seen_message_keys.add(key)
+                            seen_dedup_keys.add(dedup_key)
+                            seen_content_keys.add(_session_message_content_key(msg))
+                            seen_visible_keys.add(visible_key)
+                            _remember_merged_message(msg)
+                        continue
                     else:
                         _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                         continue
