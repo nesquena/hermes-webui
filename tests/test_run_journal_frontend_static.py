@@ -45,6 +45,8 @@ def _run_session_identity_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
+            _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
             _function_body(SESSIONS_SRC, "function _inflightHasVisibleLiveState"),
         ]
     )
@@ -65,6 +67,76 @@ process.stdout.write(JSON.stringify({{
   roleMismatchNotDedupe: !_sameTranscriptMessage(plain, {{role:'assistant', content:{json.dumps(prompt)}}}),
   userOnlyInflightVisible: _inflightHasVisibleLiveState({{messages:[plain]}}),
   emptyUserOnlyInflightNotVisible: !_inflightHasVisibleLiveState({{messages:[{{role:'user', content:'   '}}]}}),
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
+def _run_current_turn_scope_probe() -> dict:
+    prompt = "repeat me"
+    historical_workspace_prompt = f"[Workspace::v1: /tmp/old]\n{prompt}"
+    current_workspace_prompt = f"[Workspace::v1: /tmp/current]\n{prompt}"
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _stripWorkspaceDisplayPrefix"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
+            _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
+            _function_body(SESSIONS_SRC, "function _mergePendingSessionMessage"),
+            _function_body(SESSIONS_SRC, "function _mergeInflightTailMessages"),
+        ]
+    )
+    script = f"""
+{helpers}
+function getPendingSessionMessage(session, messages){{
+  const text=String(session&&session.pending_user_message||'').trim();
+  if(!text) return null;
+  return {{
+    role:'user',
+    content:text,
+    _ts:session.pending_started_at||10,
+    _pending:true,
+  }};
+}}
+const historical = {{role:'user', content:{json.dumps(historical_workspace_prompt)}, _ts:1}};
+const historicalAnswer = {{role:'assistant', content:'done', _ts:2}};
+const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:4}};
+const pendingSession = {{pending_user_message:{json.dumps(prompt)}, pending_started_at:3}};
+
+const pendingAfterHistory = [historical, historicalAnswer];
+const insertedAfterHistory = _mergePendingSessionMessage(pendingSession, pendingAfterHistory);
+
+const pendingBeforeLive = [historical, historicalAnswer, liveAssistant];
+const insertedBeforeLive = _mergePendingSessionMessage(pendingSession, pendingBeforeLive);
+
+const optimisticCurrent = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3}};
+const pendingWithCurrent = [historical, historicalAnswer, optimisticCurrent, liveAssistant];
+const insertedWithCurrent = _mergePendingSessionMessage(pendingSession, pendingWithCurrent);
+
+const inflightAfterHistory = _mergeInflightTailMessages(
+  [historical, historicalAnswer],
+  [{{role:'user', content:{json.dumps(prompt)}, _ts:3}}, liveAssistant]
+);
+
+const inflightWithCurrent = _mergeInflightTailMessages(
+  [historical, historicalAnswer, optimisticCurrent],
+  [{{role:'user', content:{json.dumps(prompt)}, _ts:3}}, liveAssistant]
+);
+
+process.stdout.write(JSON.stringify({{
+  insertedAfterHistory,
+  pendingAfterHistoryRoles: pendingAfterHistory.map(m=>m.role),
+  insertedBeforeLive,
+  pendingBeforeLiveRoles: pendingBeforeLive.map(m=>m.role),
+  insertedWithCurrent,
+  pendingWithCurrentRoles: pendingWithCurrent.map(m=>m.role),
+  inflightAfterHistoryRoles: inflightAfterHistory.map(m=>m.role),
+  inflightWithCurrentRoles: inflightWithCurrent.map(m=>m.role),
 }}));
 """
     proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
@@ -220,6 +292,21 @@ def test_pending_user_merge_dedupes_user_turn_variants_by_behavior():
     assert result["forcedSkillDedupe"] is True
     assert result["differentUserNotDedupe"] is True
     assert result["roleMismatchNotDedupe"] is True
+
+
+def test_user_turn_dedupe_is_scoped_to_current_turn_by_behavior():
+    result = _run_current_turn_scope_probe()
+
+    assert result["insertedAfterHistory"] is True
+    assert result["pendingAfterHistoryRoles"] == ["user", "assistant", "user"]
+    assert result["insertedBeforeLive"] is True
+    assert result["pendingBeforeLiveRoles"] == ["user", "assistant", "user", "assistant"]
+
+    assert result["insertedWithCurrent"] is False
+    assert result["pendingWithCurrentRoles"] == ["user", "assistant", "user", "assistant"]
+
+    assert result["inflightAfterHistoryRoles"] == ["user", "assistant", "user", "assistant"]
+    assert result["inflightWithCurrentRoles"] == ["user", "assistant", "user", "assistant"]
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():

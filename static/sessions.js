@@ -1348,8 +1348,9 @@ async function loadSession(sid){
     if(!Array.isArray(messages)) return false;
     const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,messages):null;
     if(!pendingMsg) return false;
-    if(messages.some(existing=>_sameTranscriptMessage(existing,pendingMsg))) return false;
     const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+    const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
+    if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
     if(liveAssistantIdx>=0) messages.splice(liveAssistantIdx,0,pendingMsg);
     else messages.push(pendingMsg);
     return true;
@@ -2359,6 +2360,24 @@ function _sameTranscriptMessage(a,b){
   return false;
 }
 
+function _currentTailUserMessage(messages){
+  const list=Array.isArray(messages)?messages:[];
+  for(let i=list.length-1;i>=0;i--){
+    const msg=list[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user') return msg;
+    if(msg._live||String(msg.role||'')==='tool') continue;
+    return null;
+  }
+  return null;
+}
+
+function _hasCurrentTailUserDuplicate(messages,candidate){
+  if(!candidate||String(candidate.role||'')!=='user') return false;
+  const existing=_currentTailUserMessage(messages);
+  return !!(existing&&_sameTranscriptMessage(existing,candidate));
+}
+
 function _currentTurnAssistantText(messages){
   const list=Array.isArray(messages)?messages:[];
   let start=-1;
@@ -2651,7 +2670,9 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
   for(const msg of tail){
     let candidate=msg;
     if(!candidate) continue;
-    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
+    const duplicate=String(candidate.role||'')==='user'
+      ? _hasCurrentTailUserDuplicate(merged,candidate)
+      : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
     if(!duplicate) merged.push(candidate);
   }
   return merged;
