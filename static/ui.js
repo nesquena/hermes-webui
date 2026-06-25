@@ -11636,10 +11636,11 @@ function renderMessages(options){
       currentAssistantTurn.dataset.recycleKey=rawIdx;
       inner.appendChild(currentAssistantTurn);
     }
-    const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
-    const messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+    const seg=document.createElement('div');
     const rawText=String(content).trim();
     if(isInterleavedTranscriptBubbles()&&!m._live){
+      const sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+      const messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
       const toolResultsByTid={};
       S.messages.forEach(rm=>{
         if(!rm) return;
@@ -11692,11 +11693,10 @@ function renderMessages(options){
       }
       assistantSegments.set(rawIdx, lastBubble);
     } else {
-      const seg=document.createElement('div');
       seg.className='assistant-segment';
       seg.dataset.msgIdx=rawIdx;
-      seg.dataset.sessionMsgIdx=sessionMsgIdx;
-      seg.dataset.messageAnchorKey=messageAnchorKey;
+      seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+      seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
       seg.dataset.rawText=rawText;
       if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
       if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));

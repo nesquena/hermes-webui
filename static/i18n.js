@@ -21971,6 +21971,8 @@ const LOCALES = {
     settings_desc_workspace_panel_open: 'Khi bật, panel workspace / trình duyệt tệp sẽ tự mở với mỗi phiên mới. Bạn vẫn có thể đóng thủ công bất cứ lúc nào.',
     settings_label_workspace_todos_tab: 'Hiển thị tab Todos trong bảng workspace',
     settings_desc_workspace_todos_tab: 'Khi bật, một tab Todos sẽ xuất hiện trong panel workspace. Panel Todos ở sidebar vẫn có sẵn.',
+    settings_label_interleaved_transcript_bubbles: 'Hiển thị bong bóng transcript xen kẽ',
+    settings_desc_interleaved_transcript_bubbles: 'Hiển thị các lượt trả lời của trợ lý thành các bong bóng bình luận và hành động riêng biệt thay vì một khối duy nhất.',
     settings_label_session_jump_buttons: 'Hiển thị nút nhảy trong phiên',
     settings_desc_session_jump_buttons: 'Hiển thị các nút Đầu và Cuối nổi khi đọc lịch sử phiên dài.',
     settings_label_terminal_auto_expand: 'Tự mở rộng terminal khi có output',
