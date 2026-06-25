@@ -289,10 +289,13 @@ def test_origin_filter_toggle_updates_local_state_without_refetch():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     normalize_origin_fn = _extract_function(src, "_normalizeSidebarOriginId")
     persist_fn = _extract_function(src, "_persistOriginFilters")
+    signature_fn = _extract_function(src, "_originFilterSignature")
+    ensure_fn = _extract_function(src, "_ensureOriginFilterDefaults")
     fn_toggle = _extract_function(src, "_toggleOriginFilter")
     script = f"""
     const renderCalls = [];
     global._originFiltersHydrated = false;
+    global._originFiltersLoadedFromStorage = false;
     global._activeOriginFilters = new Set(['webui', 'cli']);
     global._activeProject = 'demo-project';
     global._selectedSessions = new Set(['first', 'second']);
@@ -308,24 +311,35 @@ global.localStorage = {{
     }};
     {normalize_origin_fn}
     {persist_fn}
+    {signature_fn}
+    {ensure_fn}
     {fn_toggle}
     _toggleOriginFilter('cli');
+    const changedAfterToggle = _ensureOriginFilterDefaults([
+      {{ id: 'webui' }},
+      {{ id: 'cli' }},
+      {{ id: 'slack' }},
+    ]);
     console.log(JSON.stringify({{
       activeOrigins: Array.from(global._activeOriginFilters),
+      originFiltersLoadedFromStorage: global._originFiltersLoadedFromStorage,
       activeProject: global._activeProject,
       selectedSize: global._selectedSessions.size,
       sessionSelectMode: global._sessionSelectMode,
-  storageWrites: global.localStorage.writes,
-  renderCalls,
-}}));
+      storageWrites: global.localStorage.writes,
+      changedAfterToggle,
+      renderCalls,
+    }}));
     """
     body = _run_node(script)
 
     assert body["activeOrigins"] == ["webui"]
+    assert body["originFiltersLoadedFromStorage"] is True
     assert body["activeProject"] is None
     assert body["selectedSize"] == 0
     assert body["sessionSelectMode"] is False
     assert body["storageWrites"] == [["hermes-origin-filters", "[\"webui\"]"]]
+    assert body["changedAfterToggle"] is False
     assert body["renderCalls"] == ["cache"]
 
 

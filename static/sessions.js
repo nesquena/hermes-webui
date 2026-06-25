@@ -1799,6 +1799,7 @@ function _toggleOriginFilter(origin) {
     _activeOriginFilters.add(normalizedOrigin);
   }
   _originFiltersHydrated = true;
+  _originFiltersLoadedFromStorage = true;
   _activeProject = null;
   _selectedSessions.clear();
   _sessionSelectMode = false;
