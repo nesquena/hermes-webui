@@ -705,7 +705,7 @@ function _messageVirtualRoleForEntry(entry){
 }
 function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
   _syncMessageVirtualHeightCache(visWithIdx);
-  const container=$('messages');
+  const container=_messageScrollElement();
   // #4325 opt-out: when the user disables transcript virtualization, always
   // render the full transcript (no windowing). Mirrors the <=threshold path so
   // every downstream consumer (render, anchor, prepend-delta) treats it as a
@@ -791,7 +791,7 @@ function _messageVirtualKeepTailCount(){
   return Math.min(_currentMessageRenderWindowSize(), MESSAGE_RENDER_WINDOW_DEFAULT);
 }
 function _captureMessageViewportAnchor(){
-  const container=$('messages');
+  const container=_messageScrollElement();
   if(!container) return null;
   const containerRect=container.getBoundingClientRect();
   const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
@@ -812,7 +812,7 @@ function _captureMessageViewportAnchor(){
   return null;
 }
 function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
-  const container=$('messages');
+  const container=_messageScrollElement();
   if(!container||!anchor) return false;
   const anchorKey=String(anchor.key||'');
   let row=anchorKey?Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(el=>el&&el.dataset&&el.dataset.messageAnchorKey===anchorKey):null;
@@ -836,7 +836,7 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
 }
 let _messageViewportAnchorRemounting=false;
 function _remountMessageViewportAnchor(anchor){
-  const container=$('messages');
+  const container=_messageScrollElement();
   if(!container||!anchor||_messageViewportAnchorRemounting) return false;
   const anchorKey=String(anchor.key||'');
   const visibleKeyNode=anchorKey
@@ -879,7 +879,7 @@ function _remountMessageViewportAnchor(anchor){
   return Number.isFinite(targetIdx)&&!!container.querySelector(`[data-msg-idx="${targetIdx}"]`);
 }
 function _compensateScrollForMeasurementDelta(renderFn){
-  const container=$('messages');
+  const container=_messageScrollElement();
   if(!container) return renderFn();
   const anchorBefore=_captureMessageViewportAnchor();
   const scrollTopBefore=container.scrollTop;
@@ -903,7 +903,7 @@ function _compensateScrollForMeasurementDelta(renderFn){
   _deferClearProgrammaticScroll();
 }
 function _messageViewportIntersectsRenderedRow(){
-  const container=$('messages');
+  const container=_messageScrollElement();
   if(!container) return true;
   const containerRect=container.getBoundingClientRect();
   const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
@@ -959,7 +959,7 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   }
 }
 function _scheduleMessageVirtualizedRender(force){
-  const container=$('messages');
+  const container=_messageScrollElement();
   const inner=$('msgInner');
   if(!container||!inner) return;
   const visWithIdx=_getVisibleMessagesWithIdx();
@@ -1000,15 +1000,28 @@ function _scheduleMessageVirtualizedRender(force){
 const _renderCache = new Map();
 const _renderCacheMax = 300;
 function _clearRenderCache(){ _renderCache.clear(); }
+function _renderCacheTextHash(text){
+  // Long-message cache keys must distinguish messages that share length,
+  // prefix, and suffix (common in templated/numbered transcripts). Keep the
+  // key compact without falling back to storing every full long message string.
+  let h=0x811c9dc5;
+  const s=String(text||'');
+  for(let i=0;i<s.length;i++){
+    h^=s.charCodeAt(i);
+    h=Math.imul(h,0x01000193);
+  }
+  return (h>>>0).toString(36);
+}
 function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
   const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
   // Short content: use the full string as key (cheap Map lookup).
-  // Long content: length + prefix + suffix is good enough — collisions on
-  // 20-char prefix+suffix are vanishingly rare for chat messages.
+  // Long content: include length + a full-content hash + prefix/suffix. The
+  // hash prevents stale HTML when templated long messages differ only in the
+  // middle (e.g. numbered session-tail messages at mobile size).
   if(text.length <= 500) return p + ':' + text;
-  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+  return p + ':' + text.length + ':' + _renderCacheTextHash(text) + ':' + text.slice(0,20) + ':' + text.slice(-20);
 }
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
@@ -1047,13 +1060,13 @@ function _isSessionJumpButtonsEnabled(){
   return window._sessionJumpButtonsEnabled===true;
 }
 function _applySessionNavigationPrefs(){
-  const container=$('messages');
+  const container=_messageScrollElement();
   if(container) container.classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled());
   _updateSessionStartJumpButton();
 }
 function _updateSessionStartJumpButton(){
   const btn=$('jumpToSessionStartBtn');
-  const container=$('messages');
+  const container=_messageScrollElement();
   if(!btn||!container) return;
   if(!_isSessionJumpButtonsEnabled()){
     btn.style.display='none';
@@ -1066,7 +1079,7 @@ function _updateSessionStartJumpButton(){
   btn.style.display=(hasSession&&canRevealStart&&awayFromStart)?'flex':'none';
 }
 async function jumpToSessionStart(){
-  const container=$('messages');
+  const container=_messageScrollElement();
   if(!container||!S.session) return;
   _scrollPinned=false;
   _messageUserUnpinned=true;
@@ -1118,7 +1131,7 @@ function _highlightQuestionRow(row){
 }
 
 async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
-  const container=$('messages');
+  const container=_messageScrollElement();
   if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
   const scrollToTarget=()=>{
     const hasAssistant=typeof assistantRawIdx==='number'&&assistantRawIdx>=0;
@@ -3732,6 +3745,15 @@ let _lastMessageTouchScrollIntentMs=-Infinity;
 let _deferredOlderMessagesTimer=0;
 const MESSAGE_TOUCH_SCROLL_SUPPRESS_MS=1200;
 let _newMessageCueVisible=false;
+function _messageScrollElement(){
+  const messages=$('messages');
+  const msgInner=$('msgInner');
+  const messagesScrollable=!!(messages&&messages.scrollHeight>messages.clientHeight+1);
+  const msgInnerScrollable=!!(msgInner&&msgInner.scrollHeight>msgInner.clientHeight+1);
+  if(messagesScrollable) return messages;
+  if(msgInnerScrollable) return msgInner;
+  return msgInner||messages;
+}
 function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
 function _markMessageTouchScrollIntent(active=true){
   _messageTouchScrollActive=!!active;
@@ -3744,7 +3766,7 @@ function _isMessageReaderUnpinned(){
   return !!_messageUserUnpinned;
 }
 function _olderMessagesPrefetchReady(){
-  const el=document.getElementById('messages');
+  const el=_messageScrollElement();
   if(!el) return false;
   const olderPrefetchPx=Math.max(600,el.clientHeight*1.5);
   return _isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function';
@@ -3761,7 +3783,7 @@ function _scheduleDeferredOlderMessagesLoad(){
   },MESSAGE_TOUCH_SCROLL_SUPPRESS_MS+50);
 }
 function _recordNonMessageScrollIntent(e){
-  const el=document.getElementById('messages');
+  const el=_messageScrollElement();
   const target=e&&e.target;
   if(!el||!target) return;
   if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
@@ -3823,7 +3845,7 @@ function _clearNewMessageScrollCue(){
   _syncScrollToBottomCue(false,{newMessage:false});
 }
 function _maybeShowNewMessageScrollCue(scrollSnapshot){
-  const el=document.getElementById('messages');
+  const el=_messageScrollElement();
   if(!el||!scrollSnapshot) return;
   const previousHeight=Number(scrollSnapshot.scrollHeight)||0;
   const distance=el.scrollHeight-el.scrollTop-el.clientHeight;
@@ -3834,7 +3856,7 @@ if(typeof document!=='undefined'){
   document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
   document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
   document.addEventListener('touchstart',function(e){
-    const el=document.getElementById('messages');
+    const el=_messageScrollElement();
     if(e.touches&&e.touches[0]) _touchStartY=e.touches[0].clientY;
     if(el&&e.target&&el.contains(e.target)) _markMessageTouchScrollIntent(true);
   },{capture:true,passive:true});
@@ -3883,7 +3905,7 @@ if(typeof window!=='undefined'){
   if(typeof document==='undefined') return;
   const isStandalone=window.navigator?.standalone||matchMedia('(display-mode:standalone),(display-mode:fullscreen)').matches;
   if(!isStandalone) return;
-  const el=document.getElementById('messages');
+  const el=_messageScrollElement();
   if(!el) return;
   let _ptrState=0; // 0=idle, 1=pulling, 2=ready
   let _ptrStartY=0;
@@ -3912,12 +3934,12 @@ if(typeof window!=='undefined'){
     _ptrCurrentY=0;
     if(_indicator) _indicator.classList.remove('active');
   }
-  el.addEventListener('touchstart',function(e){
+  const onTouchStart=(e)=>{
     if(el.scrollTop>0||_ptrState!==0) return;
     _ptrStartY=e.touches[0].clientY;
     _ptrState=1;
-  },{passive:true});
-  el.addEventListener('touchmove',function(e){
+  };
+  const onTouchMove=(e)=>{
     if(_ptrState!==1) return;
     _ptrCurrentY=e.touches[0].clientY;
     const pull=_ptrCurrentY-_ptrStartY;
@@ -3933,8 +3955,8 @@ if(typeof window!=='undefined'){
     _ptrUpdate(progress);
     _ptrState=progress>=1?2:1;
     if(progress>0.3) e.preventDefault();
-  },{passive:false});
-  el.addEventListener('touchend',function(){
+  };
+  const onTouchEnd=()=>{
     if(_ptrState===2){
       if(typeof window.refreshSessionList==='function'){
         Promise.resolve(window.refreshSessionList('pull', {force:true, refreshActive:true})).catch(()=>{}).finally(_ptrReset);
@@ -3944,15 +3966,23 @@ if(typeof window!=='undefined'){
       return;
     }
     _ptrReset();
-  },{passive:true});
+  };
+  el.addEventListener('touchstart',onTouchStart,{passive:true});
+  el.addEventListener('touchmove',onTouchMove,{passive:false});
+  el.addEventListener('touchend',onTouchEnd,{passive:true});
   el.addEventListener('touchcancel',_ptrReset,{passive:true});
 })();
 (function(){
-  const el=document.getElementById('messages');
-  if(!el) return;
-  el.addEventListener('pointerdown',(e)=>{
-    if(e.target===el&&e.offsetX>=el.clientWidth) _scrollbarDragActive=true;
-  },{passive:true});
+  const bindableScrollElements=[_messageScrollElement(),$('messages'),$('msgInner')].filter((el,idx,arr)=>{
+    if(!el) return false;
+    return arr.indexOf(el)===idx;
+  });
+  if(!bindableScrollElements.length) return;
+  bindableScrollElements.forEach(el=>{
+    el.addEventListener('pointerdown',(e)=>{
+      if(e.target===el&&e.offsetX>=el.clientWidth) _scrollbarDragActive=true;
+    },{passive:true});
+  });
   window.addEventListener('pointerup',()=>{
     if(!_scrollbarDragActive) return;
     _scrollbarDragActive=false;
@@ -3968,67 +3998,69 @@ if(typeof window!=='undefined'){
     if(document.visibilityState==='hidden') _scrollbarDragActive=false;
   },{passive:true});
   let _scrollRaf=0;
-  el.addEventListener('scroll',()=>{
-    _scheduleMessageVirtualizedRender();
-    if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
-    if(_programmaticScroll) return;
-    _markMessageVirtualScrollActive();
-    cancelAnimationFrame(_scrollRaf);
-    _scrollRaf=requestAnimationFrame(()=>{
-      const top=el.scrollTop;
-      const bottomDistance=el.scrollHeight-top-el.clientHeight;
-      const nearBottom=bottomDistance<250;
-      // #4702: iOS Safari (esp. portrait) resolves its dynamic toolbar height
-      // AFTER first paint. When the toolbar collapses the scroller GROWS
-      // (clientHeight increases), which fires a scroll event with a DECREASED
-      // scrollTop even though the user never scrolled. Without this guard that
-      // reflow is misread as an upward scroll and falsely unpins a freshly-opened
-      // session, stranding portrait readers at the top (sibling: #4701). On
-      // desktop/landscape the scroller height is stable, so `grew` is always
-      // false and behavior is byte-identical.
-      const grew=_lastMessageClientHeight!==null&&el.clientHeight>_lastMessageClientHeight+1;
-      _lastMessageClientHeight=el.clientHeight;
-      const movedUp=!grew&&_lastScrollTop!==null&&top<_lastScrollTop-2;
-      const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
-      _lastScrollTop=top;
-      if(movedUp){
-        _cancelBottomSettle();
-        _nearBottomCount=0;
-        _scrollPinned=false;
-        _messageUserUnpinned=true;
-      }else if(movedDown&&nearBottom){
-        _nearBottomCount=_nearBottomCount+1;
-        if(_nearBottomCount>=2){
-          if(!_messageUserUnpinned||bottomDistance<=80){
-            _messageUserUnpinned=false;
-            _scrollPinned=true;
-          }
+  bindableScrollElements.forEach(el=>{
+    el.addEventListener('scroll',function(){
+      _scheduleMessageVirtualizedRender();
+      if(_programmaticScroll&&(performance.now()-_programmaticScrollSetAt)>150) _programmaticScroll=false;
+      if(_programmaticScroll) return;
+      _markMessageVirtualScrollActive();
+      cancelAnimationFrame(_scrollRaf);
+      _scrollRaf=requestAnimationFrame(()=>{
+        const top=el.scrollTop;
+        const bottomDistance=el.scrollHeight-top-el.clientHeight;
+        const nearBottom=bottomDistance<250;
+        // #4702: iOS Safari (esp. portrait) resolves its dynamic toolbar height
+        // AFTER first paint. When the toolbar collapses the scroller GROWS
+        // (clientHeight increases), which fires a scroll event with a DECREASED
+        // scrollTop even though the user never scrolled. Without this guard that
+        // reflow is misread as an upward scroll and falsely unpins a freshly-opened
+        // session, stranding portrait readers at the top (sibling: #4701). On
+        // desktop/landscape the scroller height is stable, so `grew` is always
+        // false and behavior is byte-identical.
+        const grew=_lastMessageClientHeight!==null&&el.clientHeight>_lastMessageClientHeight+1;
+        _lastMessageClientHeight=el.clientHeight;
+        const movedUp=!grew&&_lastScrollTop!==null&&top<_lastScrollTop-2;
+        const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
+        _lastScrollTop=top;
+        if(movedUp){
+          _cancelBottomSettle();
           _nearBottomCount=0;
-        }
-      }else if(!_messageUserUnpinned){
-        if(nearBottom){
+          _scrollPinned=false;
+          _messageUserUnpinned=true;
+        }else if(movedDown&&nearBottom){
           _nearBottomCount=_nearBottomCount+1;
-          if(_nearBottomCount>=2){_scrollPinned=true;_nearBottomCount=0;}
-        }else{
+          if(_nearBottomCount>=2){
+            if(!_messageUserUnpinned||bottomDistance<=80){
+              _messageUserUnpinned=false;
+              _scrollPinned=true;
+            }
+            _nearBottomCount=0;
+          }
+        }else if(!_messageUserUnpinned){
+          if(nearBottom){
+            _nearBottomCount=_nearBottomCount+1;
+            if(_nearBottomCount>=2){_scrollPinned=true;_nearBottomCount=0;}
+          }else{
+            _nearBottomCount=0;
+            _scrollPinned=false;
+          }
+        }else if(!nearBottom){
           _nearBottomCount=0;
           _scrollPinned=false;
         }
-      }else if(!nearBottom){
-        _nearBottomCount=0;
-        _scrollPinned=false;
-      }
-      if(nearBottom) _clearNewMessageScrollCue();
-      const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
-      _syncScrollToBottomCue(showBottomButton,{newMessage:_newMessageCueVisible});
-      if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
-      // Prefetch older messages before the reader hits the hard top. Prepending
-      // then preserving scrollTop is seamless only if there is runway left for
-      // the user's continued upward wheel/touch movement.
-      const olderPrefetchPx=Math.max(600,el.clientHeight*1.5);
-      if(_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
-        if(_recentMessageTouchScrollIntent()) _scheduleDeferredOlderMessagesLoad();
-        else _loadOlderMessages();
-      }
+        if(nearBottom) _clearNewMessageScrollCue();
+        const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
+        _syncScrollToBottomCue(showBottomButton,{newMessage:_newMessageCueVisible});
+        if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+        // Prefetch older messages before the reader hits the hard top. Prepending
+        // then preserving scrollTop is seamless only if there is runway left for
+        // the user's continued upward wheel/touch movement.
+        const olderPrefetchPx=Math.max(600,el.clientHeight*1.5);
+        if(_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
+          if(_recentMessageTouchScrollIntent()) _scheduleDeferredOlderMessagesLoad();
+          else _loadOlderMessages();
+        }
+      });
     });
   });
 })();
@@ -4477,7 +4509,7 @@ document.addEventListener('DOMContentLoaded',function(){
 });
 
 function _setMessageScrollToBottom(){
-  const el=$('messages');
+  const el=_messageScrollElement();
   if(!el) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=el.scrollHeight;
@@ -4503,12 +4535,12 @@ function _setMessageScrollToBottom(){
   });
 }
 function _isMessagePaneNearBottom(threshold=250){
-  const el=$('messages');
+  const el=_messageScrollElement();
   if(!el) return false;
   return el.scrollHeight-el.scrollTop-el.clientHeight<=threshold;
 }
 function _messageBottomDistance(){
-  const el=$('messages');
+  const el=_messageScrollElement();
   if(!el) return 0;
   return el.scrollHeight-el.scrollTop-el.clientHeight;
 }
@@ -4554,7 +4586,7 @@ function _settleMessageScrollToBottom(force, explicit){
 
   if(force) return;
 
-  const el=document.getElementById('messages');
+  const el=_messageScrollElement();
   if(!el) return;
   // Observe the GROWING content node, not the scroll container. #messages is the
   // scroller but its box is fixed by the flex layout, so it never resizes — the
@@ -4613,7 +4645,7 @@ function _settleMessageScrollToBottom(force, explicit){
 
 function _settleFinalScroll(token){
   if(token!==_bottomSettleToken) return;
-  const el=document.getElementById('messages');
+  const el=_messageScrollElement();
   if(!el){ _programmaticScroll=false; return; }
   if(_messageUserUnpinned||!_scrollPinned||_recentNonMessageScrollIntent()||_recentMessageTouchScrollIntent()){
     _programmaticScroll=false;
@@ -9694,7 +9726,7 @@ function _projectLiveAnchorActivitySceneForStream(streamId, mode){
   }
 }
 function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
-  const messagesEl=$('messages');
+  const messagesEl=_messageScrollElement();
   if(!messagesEl||!scrollSnapshot) return {readerAwayFromBottom:false,release:null};
   const beforeBottomDistance=Math.max(0,messagesEl.scrollHeight-messagesEl.scrollTop-messagesEl.clientHeight);
   // Only treat the reader as away if they were ALREADY in a non-follow state.
@@ -11016,7 +11048,7 @@ function _toolArgsSnapshot(args, limit){
 }
 
 function _captureMessageScrollSnapshot(){
-  const el=$('messages');
+  const el=_messageScrollElement();
   if(!el) return null;
   const bottom=Math.max(0,el.scrollHeight-el.scrollTop-el.clientHeight);
   return {
@@ -11029,7 +11061,7 @@ function _captureMessageScrollSnapshot(){
   };
 }
 function _restoreMessageScrollSnapshot(snapshot){
-  const el=$('messages');
+  const el=_messageScrollElement();
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
@@ -11077,7 +11109,7 @@ function _restoreMessageScrollSnapshot(snapshot){
  * wipe-and-rebuild gap. The rAF callback restores CSS default afterward.
  */
 window._fixMobileScrollJank=function _fixMobileScrollJank(){
-  const el=document.getElementById('messages');
+  const el=_messageScrollElement();
   if(!el) return;
   // Desktop with a mouse: keep overflow-anchor:none (explicitly set by CSS).
   // Mobile touch devices only: temporarily suppress anchor re-selection.
@@ -11089,7 +11121,7 @@ window._fixMobileScrollJank=function _fixMobileScrollJank(){
 };
 
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
-  const el=$('messages');
+  const el=_messageScrollElement();
   if(!el||!snapshot) return;
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)

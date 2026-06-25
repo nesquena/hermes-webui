@@ -58,6 +58,43 @@ def test_fresh_session_render_forces_bottom_without_snapshot_restore():
     assert "const scrollSnapshot=(!forceBottom&&(preserveScroll||_messageUserUnpinned))?_captureMessageScrollSnapshot():null;" in UI_JS
 
 
+def test_message_scroll_owner_prefers_effective_scrollable_transcript_element():
+    """Mobile layouts can make #msgInner the actual scroller while #messages is fixed."""
+    helper_start = UI_JS.index("function _messageScrollElement")
+    helper_end = UI_JS.index("function _cancelBottomSettle", helper_start)
+    helper = UI_JS[helper_start:helper_end]
+
+    assert "const messages=$('messages');" in helper
+    assert "const msgInner=$('msgInner');" in helper
+    assert "messages.scrollHeight>messages.clientHeight+1" in helper
+    assert "msgInner.scrollHeight>msgInner.clientHeight+1" in helper
+    assert "if(messagesScrollable) return messages;" in helper
+    assert "if(msgInnerScrollable) return msgInner;" in helper
+    assert "return msgInner||messages;" in helper
+
+
+def test_bottom_helpers_use_canonical_message_scroll_owner():
+    """Force-bottom and near-bottom logic must target the real mobile/desktop scroller."""
+    for signature in (
+        "function _setMessageScrollToBottom",
+        "function _isMessagePaneNearBottom",
+        "function _messageBottomDistance",
+        "function _captureMessageScrollSnapshot",
+        "function _restoreMessageScrollSnapshot",
+    ):
+        start = UI_JS.index(signature)
+        end = UI_JS.index("function ", start + len(signature))
+        body = UI_JS[start:end]
+        assert "_messageScrollElement()" in body, f"{signature} should use the canonical scroll owner"
+
+
+def test_scroll_listener_binds_both_possible_scroll_owners():
+    """User scroll intent must be heard from the same element that bottom-follow scrolls."""
+    assert "const bindableScrollElements=[_messageScrollElement(),$('messages'),$('msgInner')]" in UI_JS
+    assert "bindableScrollElements.forEach(el=>" in UI_JS
+    assert "el.addEventListener('scroll',function()" in UI_JS
+
+
 def test_session_switch_scroll_helpers_are_scoped_to_real_switches():
     """Scroll reset helper call should remain conditional on currentSid !== sid."""
     block = _extract_load_session_block()

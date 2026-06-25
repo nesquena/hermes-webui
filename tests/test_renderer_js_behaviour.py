@@ -87,8 +87,51 @@ def _render(driver_path, markdown: str) -> str:
     return result.stdout
 
 
+def test_long_render_cache_key_hashes_full_content_to_avoid_template_collisions():
+    """Long templated messages can share length, prefix, and suffix while differing in the middle."""
+    driver = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+global.window = { _renderUserMarkdown: false };
+function extractFunc(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') depth--;
+    i++;
+  }
+  return src.slice(start, i);
+}
+eval(extractFunc('_renderCacheTextHash'));
+eval(extractFunc('_renderCacheKey'));
+const prefix = 'same twenty char pre';
+const suffix = 'same twenty char end';
+const a = prefix + ' A'.repeat(320) + suffix;
+const b = prefix + ' B'.repeat(320) + suffix;
+if (a.length !== b.length) throw new Error('fixture length mismatch');
+if (a.slice(0,20) !== b.slice(0,20)) throw new Error('fixture prefix mismatch');
+if (a.slice(-20) !== b.slice(-20)) throw new Error('fixture suffix mismatch');
+process.stdout.write(JSON.stringify({ a: _renderCacheKey(a, false), b: _renderCacheKey(b, false) }));
+"""
+    node = NODE
+    assert node is not None
+    result = subprocess.run(
+        [node, "-e", driver, str(UI_JS_PATH)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '"a"' in result.stdout and '"b"' in result.stdout
+    assert result.stdout.split('"a":"', 1)[1].split('"', 1)[0] != result.stdout.split('"b":"', 1)[1].split('"', 1)[0]
+
 
 class TestSessionInternalLinks:
+
     """Drive renderMd() so session:// hardening covers the real sanitizer path."""
 
     def test_session_scheme_renders_same_origin_internal_anchor(self, driver_path):

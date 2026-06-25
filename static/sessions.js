@@ -2748,8 +2748,10 @@ async function _loadOlderMessages() {
     // messages were prepended. When the suffix check fails, nextMessages
     // already encodes the legacy prepend fallback so the visible behavior
     // matches the old msg_before page path exactly.
-    // Use $('messages') — the scrollable container (#msgInner is not scrollable).
-    const container = $('messages');
+    // Use the active transcript scroll owner so prepend restore works on mobile/desktop.
+    const container = (typeof _messageScrollElement==='function')
+      ? _messageScrollElement()
+      : $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
     const oldTop = container ? container.scrollTop : 0;
     const viewportAnchor = (container && typeof _captureMessageViewportAnchor === 'function')
