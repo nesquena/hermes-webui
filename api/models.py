@@ -45,7 +45,12 @@ _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # expensive state.db CLI/cron projection is re-run on every poll. (#4842)
 _CLI_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 30.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
+_CLI_SESSIONS_CACHE_INFLIGHT: "dict[tuple, threading.Event]" = {}
+_CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 _CLI_SESSIONS_CACHE = {}
+# Event waits that keep stale rows visible while a rebuild is in flight.
+_CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
+_CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
 
 # Per-file parse cache for Claude Code JSONL transcripts (#4718/#4662 phase 4).
 # ``~/.claude/projects`` is a GLOBAL, profile-independent directory, but the
@@ -4101,7 +4106,10 @@ def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None
 
 def clear_cli_sessions_cache() -> None:
     with _CLI_SESSIONS_CACHE_LOCK:
+        global _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+        _CLI_SESSIONS_CACHE_INVALIDATION_VERSION += 1
         _CLI_SESSIONS_CACHE.clear()
+        _CLI_SESSIONS_CACHE_INFLIGHT.clear()
     # The sidecar-metadata projection cache is stat-keyed (self-invalidating on
     # any file change), but clear it alongside the CLI cache so an explicit
     # reset — a mutating sidebar action or test isolation — starts fully cold.
@@ -4110,6 +4118,31 @@ def clear_cli_sessions_cache() -> None:
 
 def _copy_cli_sessions(sessions: list) -> list:
     return copy.deepcopy(sessions)
+
+
+def _cli_sessions_cache_invalidation_stamp() -> int:
+    with _CLI_SESSIONS_CACHE_LOCK:
+        return int(_CLI_SESSIONS_CACHE_INVALIDATION_VERSION)
+
+
+def _cli_sessions_cache_claim_rebuild(cache_key: tuple) -> tuple[threading.Event, bool]:
+    with _CLI_SESSIONS_CACHE_LOCK:
+        current = _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key)
+        if current is not None:
+            return current, False
+        event = threading.Event()
+        _CLI_SESSIONS_CACHE_INFLIGHT[cache_key] = event
+        return event, True
+
+
+def _cli_sessions_cache_done(cache_key: tuple, event: threading.Event | None) -> None:
+    with _CLI_SESSIONS_CACHE_LOCK:
+        if event is None:
+            return
+        if _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key) is event:
+            _CLI_SESSIONS_CACHE_INFLIGHT.pop(cache_key, None)
+    if event is not None:
+        event.set()
 
 
 def _cli_sessions_cache_ttl_seconds() -> float:
@@ -4699,26 +4732,88 @@ def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
         return _load_cli_sessions_uncached(hermes_home, db_path, cli_profile, source_filter=source_filter)
 
     if ttl > 0:
+        stale_sessions = None
+        stale_stamp = None
         with _CLI_SESSIONS_CACHE_LOCK:
-            cached = _CLI_SESSIONS_CACHE.get(cache_key)
-            if cached:
-                expires_at, cached_sessions = cached
-                if expires_at > now:
+            cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
+            if cached_entry is not None:
+                if len(cached_entry) == 3:
+                    cached_expires_at, cached_stamp, cached_sessions = cached_entry
+                else:
+                    cached_expires_at, cached_sessions = cached_entry
+                    cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+                if cached_stamp != _CLI_SESSIONS_CACHE_INVALIDATION_VERSION:
+                    _CLI_SESSIONS_CACHE.pop(cache_key, None)
+                elif cached_expires_at > now:
                     return _copy_cli_sessions(cached_sessions)
-                _CLI_SESSIONS_CACHE.pop(cache_key, None)
+                else:
+                    stale_sessions = _copy_cli_sessions(cached_sessions)
+                    stale_stamp = cached_stamp
+        event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
+        if is_owner:
             try:
-                sessions = _load_sessions()
-            except Exception as _cli_err:
-                logger.warning(
-                    "get_cli_sessions() failed — check state.db schema or path (%s): %s",
-                    "all profiles" if all_profiles else db_path, _cli_err,
-                )
-                return []
-            _CLI_SESSIONS_CACHE[cache_key] = (
-                time.monotonic() + ttl,
-                _copy_cli_sessions(sessions),
+                invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
+                try:
+                    sessions = _load_sessions()
+                except Exception as _cli_err:
+                    logger.warning(
+                        "get_cli_sessions() failed — check state.db schema or path (%s): %s",
+                        "all profiles" if all_profiles else db_path, _cli_err,
+                    )
+                    return []
+                if _cli_sessions_cache_invalidation_stamp() == invalidation_stamp:
+                    with _CLI_SESSIONS_CACHE_LOCK:
+                        _CLI_SESSIONS_CACHE[cache_key] = (
+                            time.monotonic() + ttl,
+                            _CLI_SESSIONS_CACHE_INVALIDATION_VERSION,
+                            _copy_cli_sessions(sessions),
+                        )
+                return _copy_cli_sessions(sessions)
+            finally:
+                _cli_sessions_cache_done(cache_key, event)
+        try:
+            timeout = (
+            _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS
+            if stale_sessions is not None
+            else _CLI_SESSIONS_CACHE_WAIT_SECONDS
             )
-            return _copy_cli_sessions(sessions)
+            event.wait(timeout)
+        except Exception:
+            pass
+        with _CLI_SESSIONS_CACHE_LOCK:
+            cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
+            if cached_entry is not None:
+                if len(cached_entry) == 3:
+                    cached_expires_at, cached_stamp, cached_sessions = cached_entry
+                else:
+                    cached_expires_at, cached_sessions = cached_entry
+                    cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+                if (
+                    cached_stamp == _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+                    and cached_expires_at > time.monotonic()
+                ):
+                    return _copy_cli_sessions(cached_sessions)
+        if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
+            return stale_sessions
+        fallback_invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
+        try:
+            sessions = _load_sessions()
+        except Exception as _cli_err:
+            logger.warning(
+                "get_cli_sessions() failed — check state.db schema or path (%s): %s",
+                "all profiles" if all_profiles else db_path, _cli_err,
+            )
+            if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
+                return stale_sessions
+            return []
+        if _cli_sessions_cache_invalidation_stamp() == fallback_invalidation_stamp:
+            with _CLI_SESSIONS_CACHE_LOCK:
+                _CLI_SESSIONS_CACHE[cache_key] = (
+                    time.monotonic() + ttl,
+                    _CLI_SESSIONS_CACHE_INVALIDATION_VERSION,
+                    _copy_cli_sessions(sessions),
+                )
+        return _copy_cli_sessions(sessions)
 
     try:
         return _load_sessions()
