@@ -79,8 +79,11 @@ def test_apply_force_update_removes_untracked_files_before_reset(tmp_path):
     assert len(restart_calls) == 1
 
 
-def test_apply_force_update_stops_when_clean_fails(tmp_path):
-    """A failed git clean must not be hidden behind a reset success."""
+def test_apply_force_update_proceeds_when_clean_fails(tmp_path):
+    """A failed `git clean -fd` is NON-FATAL: the reset --hard still applies the
+    update (#4914). On Windows a reserved-device-name file (nul/con/prn/…) can
+    land in the tree and git can't delete it, so `clean` exits non-zero — but
+    that residue is harmless and must not block the force update."""
     (tmp_path / '.git').mkdir()
     call_log = []
 
@@ -91,7 +94,9 @@ def test_apply_force_update_stops_when_clean_fails(tmp_path):
         if args == ['checkout', '.']:
             return '', True
         if args == ['clean', '-fd']:
-            return 'permission denied', False
+            return 'warning: failed to remove nul: Invalid argument', False
+        if args == ['reset', '--hard', 'origin/master']:
+            return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
     restart_calls = []
@@ -104,11 +109,13 @@ def test_apply_force_update_stops_when_clean_fails(tmp_path):
     ):
         result = updates.apply_force_update('webui')
 
-    assert result['ok'] is False
-    assert 'untracked files' in result['message']
+    # Clean failed, but reset --hard succeeded → force update must SUCCEED.
+    assert result['ok'] is True, result
     assert ['clean', '-fd'] in call_log
-    assert ['reset', '--hard', 'origin/master'] not in call_log
-    assert len(restart_calls) == 0
+    assert ['reset', '--hard', 'origin/master'] in call_log, (
+        'reset --hard must still run even though clean -fd failed (#4914)'
+    )
+    assert len(restart_calls) == 1
 
 
 def test_stash_apply_conflict_preserves_stash(tmp_path):

@@ -331,3 +331,113 @@ def test_legacy_approval_records_run_id_for_response_relay():
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
         _STREAM_RUN_IDS.pop(stream_id, None)
+
+def test_legacy_approval_without_run_id_stays_actionable():
+    """Legacy approvals without a run_id must fail explicitly and keep the mirror live."""
+    from types import SimpleNamespace
+    from api import routes as r
+    from api import route_approvals as ra
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_chat_streaming
+
+    stream_id = "sid-legacy-no-run"
+    session_id = "sess-legacy-no-run"
+    events = []
+    q = MagicMock()
+    q.put_nowait = lambda item: events.append(item)
+
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+    _STREAM_RUN_IDS.pop(stream_id, None)
+
+    approval_payload = json.dumps({
+        "command": "rm -rf /tmp/test",
+        "description": "Delete temporary files",
+        "pattern_key": "dangerous_command",
+        "pattern_keys": ["dangerous_command"],
+        "approval_id": "appr-legacy-no-run",
+        "choices": ["once", "session", "always", "deny"],
+    })
+    sse_body = (
+        f"event: approval.request\ndata: {approval_payload}\n\n"
+        'data: {"choices":[{"delta":{"content":"Done"}}]}\n\n'
+        "data: [DONE]\n\n"
+    ).encode()
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = stream_id
+    mock_session.workspace = "/tmp"
+    mock_session.model = "test"
+    mock_session.model_provider = None
+    mock_session.profile = None
+    mock_session.context_messages = []
+    mock_session.messages = []
+    mock_session.pending_user_message = None
+    mock_session.pending_attachments = None
+    mock_session.pending_started_at = None
+
+    def fake_urlopen(req, *, timeout=None):
+        resp = MagicMock()
+        resp.__iter__ = lambda s: iter(sse_body.split(b"\n"))
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+
+    captured = {}
+
+    def fake_j(handler, data, status=200, extra_headers=None):
+        captured["payload"] = data
+        captured["status"] = status
+        return data
+
+    try:
+        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
+            with patch("api.gateway_chat.gateway_supports_approval", return_value=False), \
+                 patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                 patch("api.gateway_chat.get_session", return_value=mock_session), \
+                 patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
+                 patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
+                _run_gateway_chat_streaming(
+                    session_id=session_id,
+                    msg_text="do something risky",
+                    model="test",
+                    workspace="/tmp",
+                    stream_id=stream_id,
+                )
+
+        assert _STREAM_RUN_IDS.get(stream_id) is None
+        approval_events = [
+            item for item in events
+            if isinstance(item, tuple) and item[0] == "approval"
+        ]
+        assert approval_events
+        approval_data = approval_events[0][1]
+        with ra._lock:
+            r._gateway_queues[session_id] = [SimpleNamespace(data=dict(approval_data))]
+        ra.submit_gateway_pending_mirror(session_id, approval_data)
+        with ra._lock:
+            pending_queue = r._pending.get(session_id)
+            assert isinstance(pending_queue, list)
+            approval_id = pending_queue[0]["approval_id"]
+
+        with patch("api.routes.get_session", return_value=mock_session), \
+             patch("api.routes.j", new=fake_j):
+            r._handle_approval_respond(
+                object(),
+                {"session_id": session_id, "choice": "once", "approval_id": approval_id},
+            )
+
+        assert captured["status"] == 409
+        assert captured["payload"]["code"] == "gateway_run_unavailable"
+        assert captured["payload"]["error"] == r._GATEWAY_APPROVAL_RELAY_UNAVAILABLE
+        with ra._lock:
+            pending_queue = r._pending.get(session_id)
+            assert isinstance(pending_queue, list)
+            assert pending_queue[0]["approval_id"] == approval_id
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+        with ra._lock:
+            r._pending.pop(session_id, None)
+            r._gateway_queues.pop(session_id, None)
+        _STREAM_RUN_IDS.pop(stream_id, None)

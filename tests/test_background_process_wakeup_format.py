@@ -15,6 +15,67 @@ def test_format_wakeup_prompt_skips_unknown_event_type():
     assert format_wakeup_prompt(evt) is None
 
 
+def test_format_wakeup_prompt_handles_async_delegation(monkeypatch):
+    """#4912 — async_delegation completion events (from a background
+    delegate_task) must be rendered, not silently dropped, so the subagent
+    result re-enters the parent conversation. format_wakeup_prompt delegates
+    to the agent-side tools.process_registry.format_process_notification.
+
+    We inject a stub agent module so this validates the delegation WIRING
+    independent of whether the full hermes-agent package is importable in the
+    test environment (it isn't in WebUI-only CI shards).
+    """
+    import sys
+    import types
+
+    seen = {}
+
+    def _fake_fmt(evt):
+        seen["evt"] = evt
+        return "[ASYNC DELEGATION COMPLETE — t_1]\nSubagent finished: the answer is 42."
+
+    fake_mod = types.ModuleType("tools.process_registry")
+    fake_mod.format_process_notification = _fake_fmt
+    fake_pkg = sys.modules.get("tools") or types.ModuleType("tools")
+    monkeypatch.setitem(sys.modules, "tools", fake_pkg)
+    monkeypatch.setitem(sys.modules, "tools.process_registry", fake_mod)
+
+    evt = {
+        "type": "async_delegation",
+        "session_id": "proc_deleg1",
+        "session_key": "webui-session",
+        "task_id": "t_1",
+        "summary": "Subagent finished: the answer is 42.",
+        "status": "completed",
+    }
+    result = format_wakeup_prompt(evt)
+    assert result is not None, (
+        "async_delegation completion must produce a wakeup prompt (#4912), "
+        "not be dropped"
+    )
+    assert "ASYNC DELEGATION" in result.upper()
+    # Confirm it actually delegated the event to the agent-side formatter.
+    assert seen.get("evt", {}).get("type") == "async_delegation"
+
+
+def test_format_wakeup_prompt_async_delegation_drops_gracefully_without_agent(monkeypatch):
+    """If the agent-side formatter is unavailable (import fails), async_delegation
+    degrades to None instead of raising — same safe behavior as before #4912."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _blocking_import(name, *args, **kwargs):
+        if name == "tools.process_registry" or name.startswith("tools.process_registry"):
+            raise ImportError("simulated: agent module unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocking_import)
+    evt = {"type": "async_delegation", "session_id": "s", "task_id": "t"}
+    # Must not raise; returns None when the agent formatter can't be imported.
+    assert format_wakeup_prompt(evt) is None
+
+
 def test_format_wakeup_prompt_handles_watch_disabled():
     evt = {
         "type": "watch_disabled",

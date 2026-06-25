@@ -3,6 +3,42 @@
 
 ## [Unreleased]
 
+## [v0.51.653] — 2026-06-25 — Release XI (gateway approval failures stay actionable instead of dead-ending)
+
+### Fixed
+
+- **In gateway-backed sessions, an approval card no longer disappears when the backend can't relay your approve/deny click.** Previously the WebUI cleared the approval card as soon as you clicked, before knowing whether the backend actually relayed the response to the gateway run — so if the relay failed, the card vanished and the run was left blocked with no way to respond. Now `/api/approval/respond` returns an explicit relay-failure error and preserves the pending state, and the card stays visible and actionable (with the error surfaced) until the backend confirms acceptance. Re-renders and Enter no longer re-enable or duplicate-submit an in-flight approval. Thanks @rodboev. (#4917, closes #4771)
+
+## [v0.51.652] — 2026-06-25 — Release XH (background subagent results return to chat)
+
+### Fixed
+
+- **Background `delegate_task` subagent results now re-enter the conversation instead of being silently dropped.** When a subagent dispatched via `delegate_task` finished, the WebUI showed it as perpetually "running" and its consolidated result never appeared in chat. The wakeup-prompt builder only recognized `completion` and watch-pattern events, so the `async_delegation` completion event a finished subagent emits hit the catch-all and was discarded before the server-side wakeup turn could start. The builder now renders `async_delegation` events (via the shared agent-side notification formatter), so the subagent's result is delivered back into the parent conversation. Genuinely-unrecognized event types are still skipped. Thanks @mydelren for the report and root-cause. (#4912)
+
+## [v0.51.651] — 2026-06-25 — Release XG (force update no longer aborts on undeletable Windows files)
+
+### Fixed
+
+- **Force update no longer fails when the working tree contains a file git can't delete (Windows reserved device names).** On Windows, a file named after a reserved device (`nul`, `con`, `prn`, `aux`, `com1`–`com9`, `lpt1`–`lpt9`) can end up in the working tree — for example when a shell command redirects to `> nul` under Git Bash, which treats it as a literal filename — and git cannot remove it through the normal Win32 path. That made `git clean -fd` exit non-zero, and the force-update flow treated it as fatal ("Failed to remove untracked files before force reset"), leaving the user permanently unable to force-update. The clean step is now best-effort: a failure is logged for diagnostics but no longer aborts, because the subsequent `git reset --hard` applies the update regardless (overwriting any tracked-file collisions, and the residual undeletable untracked file is harmless). A genuine reset failure still aborts as before. Thanks @rodboev for the report and root-cause. (#4914)
+
+## [v0.51.650] — 2026-06-25 — Release XF (table cells with a pipe inside inline code render correctly)
+
+### Fixed
+
+- **Markdown tables no longer break when a cell contains a `|` inside inline code.** A table cell like `` `updates.model = modelState.model || null` `` rendered the `|` (or `||`) as extra column separators, splitting one cell into several and corrupting the row. The table parser already protected pipes inside bracket pairs; it now also protects pipes inside inline-code (`<code>…</code>`) spans — which is what backtick spans become before the table pass runs — so the code renders intact in a single cell. Thanks @luandnh. (#4896)
+
+## [v0.51.649] — 2026-06-25 — Release XE (gallery-installed extensions actually activate)
+
+### Fixed
+
+- **Gallery-installed extensions are now activated after install instead of only being marked installed.** When an extension was installed from Settings -> Extensions without also preconfiguring `HERMES_WEBUI_EXTENSION_MANIFEST`, the gallery wrote files and showed the Installed state but the app shell did not inject the extension scripts. A second failure hit subdirectory manifests such as `desktop-companion/manifest.json`: relative assets like `assets/companion-adapter.js` were resolved as `/extensions/assets/...` instead of `/extensions/desktop-companion/assets/...`, producing a 404 and MIME-type console error. Gallery installs now build a runtime manifest from each installed extension's `manifest.json`, and explicit subdirectory manifests resolve relative assets from their manifest directory.
+
+## [v0.51.648] — 2026-06-25 — Release XD (settled tool cards keep their full output)
+
+### Fixed
+
+- **Terminal tool cards keep their full output, and patch/edit cards keep their diff, after a turn settles in the Transparent Stream / Worklog view.** While a turn streamed, the tool cards showed their complete output; once the stream settled (or on reload/reconnect), terminal cards collapsed to just the `$ command` line with no stdout and patch/edit cards showed their input fields with no rendered diff. The settled rebuild reconstructs each tool row from the persisted `messages[].tool_calls` (state.db / sidecar), which can carry only a short preview — or, on a cold/paginated load, nothing — for the result body; the live in-memory tool call still held the full output at settle time, but the merge dropped it (it skipped the matching live entry instead of restoring the missing body onto the surviving settled row). The merge now restores the full result body, command, and input args from the matched live tool call when the settled row is missing them (without clobbering a genuinely persisted value), so the rebuilt card shows the complete terminal stdout (with the **Show more** expander and the transparent **Output** / **Full** tabs), and renders the patch/edit diff. (#4622)
+
 ## [v0.51.647] — 2026-06-25 — Release XC (task detail action buttons reappear on mobile PWA)
 
 ### Fixed
