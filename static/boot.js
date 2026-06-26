@@ -1697,6 +1697,9 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();return;}
     if(e.key==='Enter'&&!e.shiftKey){
       if(_isImeEnter(e)){return;}
+      if(window._sendKey==='shift+enter'){
+        return;
+      }
       e.preventDefault();
       selectCmdDropdownItem();
       return;
@@ -1710,7 +1713,8 @@ $('msg').addEventListener('keydown',e=>{
   // doesn't consistently reduce vv.height by >120px. The pointer media query
   // pair is a sufficient and more reliable signal for "software keyboard only".
   // Hardware keyboards on tablets are covered by _hasFinePointerCoexisting.
-  // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
+  // The 'ctrl+enter' and 'shift+enter' settings also use this behavior
+  // (plain Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
@@ -1718,7 +1722,9 @@ $('msg').addEventListener('keydown',e=>{
     const _mobileDefault=matchMedia('(pointer:coarse)').matches
       &&!_hasFinePointerCoexisting()
       &&window._sendKey==='enter';
-    if(window._sendKey==='ctrl+enter'||_mobileDefault){
+    if(window._sendKey==='shift+enter'){
+      if(e.shiftKey){e.preventDefault();send();}
+    } else if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(isNumpadEnter||e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
       if(!e.shiftKey){e.preventDefault();send();}

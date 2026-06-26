@@ -7791,7 +7791,7 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
 _SETTINGS_DEFAULTS = {
     "default_workspace": str(DEFAULT_WORKSPACE),
     "onboarding_completed": False,
-    "send_key": "enter",  # 'enter' or 'ctrl+enter'
+    "send_key": "enter",  # 'enter', 'ctrl+enter', or 'shift+enter'
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
@@ -8019,7 +8019,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "simplified_tool_calling",
 }
 _SETTINGS_ENUM_VALUES = {
-    "send_key": {"enter", "ctrl+enter"},
+    "send_key": {"enter", "ctrl+enter", "shift+enter"},
     "sidebar_density": {"compact", "detailed"},
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
