@@ -865,6 +865,21 @@ async function _loadCronDetailRuns(jobId){
   } catch(e) { /* ignore */ }
 }
 
+function _wrapCronOutput(text){
+  const trimmed = (text || '').trim();
+  if (!trimmed) return '';
+  // If content starts with a common markdown block marker, render as-is.
+  // Otherwise wrap in triple backticks so JSON, logs, and structured text
+  // render as a <pre><code> block with preserved whitespace.
+  const isMarkdown =
+    trimmed.startsWith('#') || trimmed.startsWith('|') ||
+    trimmed.startsWith('>') || trimmed.startsWith('```') ||
+    trimmed.startsWith('~~~') || trimmed.startsWith('-') ||
+    trimmed.startsWith('*') || trimmed.startsWith('_') ||
+    trimmed.startsWith('[');
+  return isMarkdown ? trimmed : '```\n' + trimmed + '\n```';
+}
+
 async function _loadRunContent(jobId, filename, runId){
   const body = document.querySelector(`#${runId} .detail-run-body`);
   if (!body) return;
@@ -894,12 +909,7 @@ async function _loadRunContent(jobId, filename, runId){
     const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
     const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
     body.classList.toggle('expanded', expanded);
-    // Render markdown content using the same renderer as chat messages.
-    // Wrap raw output in triple backticks so JSON, logs, and structured text
-    // render as a code block with preserved whitespace and formatting.
-    const renderContent = output.trim();
-    const needsCodeWrap = !renderContent.startsWith('#') && !renderContent.startsWith('|') && !renderContent.startsWith('>') && !renderContent.startsWith('```');
-    const wrapped = needsCodeWrap ? '```\n' + renderContent + '\n```' : renderContent;
+    const wrapped = _wrapCronOutput(output);
     if (typeof renderMd === 'function') {
       body.innerHTML = renderMd(wrapped);
     } else {
@@ -920,10 +930,7 @@ async function _loadRunContent(jobId, filename, runId){
       btn.onclick = () => {
         _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
         body.classList.add('expanded');
-        const fullContent = (data.content || '').trim();
-        const needsCode = !fullContent.startsWith('#') && !fullContent.startsWith('|') && !fullContent.startsWith('>') && !fullContent.startsWith('```');
-        const wrapped = needsCode ? '```\n' + fullContent + '\n```' : fullContent;
-        body.innerHTML = renderMd ? renderMd(wrapped) : data.content;
+        body.innerHTML = renderMd ? renderMd(_wrapCronOutput(data.content)) : data.content;
         btn.remove();
       };
       body.appendChild(btn);
