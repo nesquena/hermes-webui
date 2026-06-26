@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.675] — 2026-06-26 — Release YE (long conversations open fast — bounded state.db tail reads)
+
+### Fixed
+
+- **Opening a long conversation no longer shows "Loading…" for 1-2 seconds.** `/api/session` loaded the entire `state.db` message history before trimming to the visible window; for an 844-message session that cold read took ~1.75s. The paginated path now pushes the client's `msg_limit` into SQL via a `since_timestamp` floor derived from the sidecar tail, reading only the tail window (expected drop to a few hundred ms). The optimization is taken only when it is provably output-identical to the full read: it keeps NULL-timestamp rows (`timestamp IS NULL OR timestamp >= ?`), and a below-floor prefix guard compares the **full merge identity** (`role`, `content`, and parsed `tool_calls`) between the sidecar and `state.db` prefixes — bailing to the full read whenever they can't be proven equal (or the schema lacks the needed columns), so `message_count`/`_messages_offset` and "load older" paging stay byte-identical. Callers needing all rows are unaffected (the floor is opt-in). Thanks @franksong2702. (#4920, fixes #4918 Problem-1)
+
 ## [v0.51.674] — 2026-06-26 — Release YD (server no longer exhausts threads under sidebar-poll load)
 
 ### Fixed
