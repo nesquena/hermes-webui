@@ -507,6 +507,59 @@ def test_remaining_matching_content_tool_merges_after_exact_match(driver_path):
     assert len([card for card in cards if card["name"] == "terminal"]) == 2
 
 
+def test_nested_args_with_different_key_order_merge_without_duplicate(driver_path):
+    """Nested args compare by value, not object insertion order."""
+    messages = [
+        {"role": "user", "content": "patch twice"},
+        {
+            "role": "assistant",
+            "content": [
+                "First patch.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "edit_file",
+                    "args": {"patch": {"path": "a.py", "body": "x"}},
+                },
+                "Second patch.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-b",
+                    "tool_name": "edit_file",
+                    "args": {"patch": {"path": "b.py", "body": "y"}},
+                },
+                "Done.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "content-a",
+                    "name": "edit_file",
+                    "args": {"patch": {"path": "a.py", "body": "x"}},
+                    "snippet": "PATCH A",
+                },
+                {
+                    "id": "message-b",
+                    "name": "edit_file",
+                    "args": {"patch": {"body": "y", "path": "b.py"}},
+                    "snippet": "PATCH B",
+                },
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {"messages": messages, "turnStart": 0, "lastAsstIndex": 2, "S": {"toolCalls": []}},
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["snippet"] == "PATCH A"
+    assert by_tid["content-b"]["snippet"] == "PATCH B"
+    assert "message-b" not in by_tid
+    assert len([card for card in cards if card["name"] == "edit_file"]) == 2
+
+
 def test_consumed_singleton_content_tool_keeps_distinct_live_invocation(driver_path):
     """A row consumed by message.tool_calls must not hide a later distinct live call."""
     messages = [

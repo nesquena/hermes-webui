@@ -2607,9 +2607,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _anchorSceneObjectContainsSubset(base, subset){
     if(!base||!subset||typeof base!=='object'||typeof subset!=='object') return false;
+    const stableStringify=(candidate)=>{
+      const normalize=(value)=>{
+        if(!value||typeof value!=='object') return value;
+        if(Array.isArray(value)) return value.map(normalize);
+        const normalized={};
+        Object.keys(value).sort().forEach((key)=>{normalized[key]=normalize(value[key]);});
+        return normalized;
+      };
+      try{return JSON.stringify(normalize(candidate));}catch(_){return JSON.stringify(candidate);}
+    };
     for(const [key,value] of Object.entries(subset)){
       if(!Object.prototype.hasOwnProperty.call(base,key)) return false;
-      if(JSON.stringify(base[key])!==JSON.stringify(value)) return false;
+      if(stableStringify(base[key])!==stableStringify(value)) return false;
     }
     return true;
   }
