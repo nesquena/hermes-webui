@@ -2599,6 +2599,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const incomingName=_anchorSceneToolRowName(incoming);
     return !existingName||!incomingName||existingName==='tool'||incomingName==='tool'||existingName===incomingName;
   }
+  function _anchorSceneToolRowArgs(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    const args=(tool.args&&typeof tool.args==='object'&&!Array.isArray(tool.args))?tool.args:payload.args;
+    return args&&typeof args==='object'&&!Array.isArray(args)?args:null;
+  }
+  function _anchorSceneObjectContainsSubset(base, subset){
+    if(!base||!subset||typeof base!=='object'||typeof subset!=='object') return false;
+    for(const [key,value] of Object.entries(subset)){
+      if(!Object.prototype.hasOwnProperty.call(base,key)) return false;
+      if(JSON.stringify(base[key])!==JSON.stringify(value)) return false;
+    }
+    return true;
+  }
+  function _anchorSceneToolRowsHaveCompatibleInvocation(existing, incoming){
+    const existingTool=existing&&existing.tool&&typeof existing.tool==='object'?existing.tool:{};
+    const incomingTool=incoming&&incoming.tool&&typeof incoming.tool==='object'?incoming.tool:{};
+    const existingPayload=existing&&existing.payload&&typeof existing.payload==='object'?existing.payload:{};
+    const incomingPayload=incoming&&incoming.payload&&typeof incoming.payload==='object'?incoming.payload:{};
+    const existingCommand=_anchorSceneStringPayload(existingTool.command||existingPayload.command).trim();
+    const incomingCommand=_anchorSceneStringPayload(incomingTool.command||incomingPayload.command).trim();
+    if(existingCommand&&incomingCommand) return existingCommand===incomingCommand;
+    const existingArgs=_anchorSceneToolRowArgs(existing);
+    const incomingArgs=_anchorSceneToolRowArgs(incoming);
+    if(!incomingCommand&&(!incomingArgs||!Object.keys(incomingArgs).length)) return true;
+    if(!existingArgs||!incomingArgs||!Object.keys(existingArgs).length||!Object.keys(incomingArgs).length) return false;
+    return _anchorSceneObjectContainsSubset(existingArgs,incomingArgs)||_anchorSceneObjectContainsSubset(incomingArgs,existingArgs);
+  }
   function _anchorSceneMatchingContentToolRow(contentToolRows, incomingRow, ordinal, usedRows, incomingTotal){
     if(!Array.isArray(contentToolRows)||!incomingRow) return null;
     const incomingTid=incomingRow.tool_call_id||(incomingRow.tool&&incomingRow.tool.id);
@@ -2607,9 +2635,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const tid=row.tool_call_id||(row.tool&&row.tool.id);
       if(tid&&incomingTid&&tid===incomingTid) return row;
     }
-    if(contentToolRows.length===1&&Number(incomingTotal)===1&&_anchorSceneToolRowsHaveCompatibleNames(contentToolRows[0],incomingRow)) return contentToolRows[0];
+    if(contentToolRows.length===1&&Number(incomingTotal)===1){
+      const onlyRow=contentToolRows[0];
+      if(onlyRow&&!usedRows.has(onlyRow)&&_anchorSceneToolRowsHaveCompatibleNames(onlyRow,incomingRow)) return onlyRow;
+    }
     const availableRows=contentToolRows.filter(row=>row&&!usedRows.has(row));
     if(availableRows.length===1&&Number(incomingTotal)===1&&_anchorSceneToolRowsHaveCompatibleNames(availableRows[0],incomingRow)) return availableRows[0];
+    const reusableRows=contentToolRows.filter(row=>row&&usedRows.has(row));
+    if(reusableRows.length===1&&Number(incomingTotal)===1&&_anchorSceneToolRowsHaveCompatibleInvocation(reusableRows[0],incomingRow)) return reusableRows[0];
     for(const row of contentToolRows){
       if(!row||usedRows.has(row)) continue;
       const tid=row.tool_call_id||(row.tool&&row.tool.id);
@@ -2773,7 +2806,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const tid=row.tool_call_id||(row.tool&&row.tool.id);
         if(tid&&seenToolIds.has(tid)){
           const existing=rowByToolId.get(tid);
-          if(existing) _enrichSettledToolRowBodyFromLive(existing, tool);
+          if(existing){
+            _enrichSettledToolRowBodyFromLive(existing, tool);
+            if(contentToolRows.includes(existing)) usedContentToolRows.add(existing);
+          }
           messageToolOrdinal+=1;
           continue;
         }
@@ -2803,7 +2839,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const tid=row.tool_call_id||(row.tool&&row.tool.id);
         if(tid&&seenToolIds.has(tid)){
           const existing=rowByToolId.get(tid);
-          if(existing) _enrichSettledToolRowBodyFromLive(existing, tool);
+          if(existing){
+            _enrichSettledToolRowBodyFromLive(existing, tool);
+            if(contentToolRows.includes(existing)) usedContentToolRows.add(existing);
+          }
           liveToolOrdinal+=1;
           continue;
         }

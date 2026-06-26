@@ -67,6 +67,8 @@ const messagesFns = [
 	  '_anchorSceneToolArgs','_anchorSceneContentTool','_anchorSceneStringPayload','_anchorSceneRowBase',
 	  '_anchorSceneProseRow','_anchorSceneThinkingRow','_anchorSceneToolRowFromCall',
 	  '_anchorSceneToolRowName','_anchorSceneToolRowsHaveCompatibleNames',
+	  '_anchorSceneToolRowArgs','_anchorSceneObjectContainsSubset',
+	  '_anchorSceneToolRowsHaveCompatibleInvocation',
 	  '_anchorSceneMatchingContentToolRow',
 	  '_anchorSceneMessageReasoningText','_anchorSceneRowsFromContentParts',
 	  '_enrichSettledToolRowBodyFromLive',
@@ -459,6 +461,55 @@ def test_remaining_same_name_content_tool_does_not_name_merge_after_exact_match(
     assert by_tid["content-a"]["snippet"] == "OUTPUT A"
     assert by_tid["content-b"]["snippet"] == ""
     assert by_tid["message-b"]["snippet"] == "OUTPUT B"
+
+
+def test_consumed_singleton_content_tool_keeps_distinct_live_invocation(driver_path):
+    """A row consumed by message.tool_calls must not hide a later distinct live call."""
+    messages = [
+        {"role": "user", "content": "inspect twice"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {"id": "content-a", "name": "terminal", "args": {"cmd": "ls"}, "snippet": "OUTPUT A"}
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "S": {
+                "toolCalls": [
+                    {
+                        "id": "live-b",
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "args": {"cmd": "pwd"},
+                        "snippet": "OUTPUT B",
+                    }
+                ]
+            },
+        },
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["snippet"] == "OUTPUT A"
+    assert by_tid["live-b"]["snippet"] == "OUTPUT B"
+    assert len([card for card in cards if card["name"] == "terminal"]) == 2
 
 
 def test_settled_capped_preview_restored_to_full_live_body(driver_path):

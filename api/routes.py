@@ -3791,6 +3791,53 @@ def _anchor_scene_tool_rows_have_compatible_names(existing, incoming) -> bool:
     )
 
 
+def _anchor_scene_tool_row_args(row):
+    if not isinstance(row, dict):
+        return None
+    tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    args = tool.get("args") if isinstance(tool.get("args"), dict) else payload.get("args")
+    return args if isinstance(args, dict) and args else None
+
+
+def _anchor_scene_object_contains_subset(base, subset) -> bool:
+    if not isinstance(base, dict) or not isinstance(subset, dict):
+        return False
+    for key, value in subset.items():
+        if key not in base:
+            return False
+        if json.dumps(base[key], sort_keys=True, separators=(",", ":")) != json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+        ):
+            return False
+    return True
+
+
+def _anchor_scene_tool_rows_have_compatible_invocation(existing, incoming) -> bool:
+    if not isinstance(existing, dict) or not isinstance(incoming, dict):
+        return False
+    existing_tool = existing.get("tool") if isinstance(existing.get("tool"), dict) else {}
+    incoming_tool = incoming.get("tool") if isinstance(incoming.get("tool"), dict) else {}
+    existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+    incoming_payload = incoming.get("payload") if isinstance(incoming.get("payload"), dict) else {}
+    existing_command = str(existing_tool.get("command") or existing_payload.get("command") or "").strip()
+    incoming_command = str(incoming_tool.get("command") or incoming_payload.get("command") or "").strip()
+    if existing_command and incoming_command:
+        return existing_command == incoming_command
+    existing_args = _anchor_scene_tool_row_args(existing)
+    incoming_args = _anchor_scene_tool_row_args(incoming)
+    if not incoming_command and not incoming_args:
+        return True
+    if not existing_args or not incoming_args:
+        return False
+    return _anchor_scene_object_contains_subset(
+        existing_args,
+        incoming_args,
+    ) or _anchor_scene_object_contains_subset(incoming_args, existing_args)
+
+
 def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, incoming_row, ordinal, used_indexes, incoming_total=0):
     if not isinstance(rows, list) or not isinstance(content_tool_indexes, list) or not isinstance(incoming_row, dict):
         return None
@@ -3803,7 +3850,11 @@ def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, in
             return index
     if len(content_tool_indexes) == 1 and incoming_total == 1:
         index = content_tool_indexes[0]
-        if 0 <= index < len(rows) and _anchor_scene_tool_rows_have_compatible_names(rows[index], incoming_row):
+        if (
+            index not in used_indexes
+            and 0 <= index < len(rows)
+            and _anchor_scene_tool_rows_have_compatible_names(rows[index], incoming_row)
+        ):
             return index
     available_indexes = [
         index for index in content_tool_indexes if index not in used_indexes and 0 <= index < len(rows)
@@ -3811,6 +3862,13 @@ def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, in
     if len(available_indexes) == 1 and incoming_total == 1:
         index = available_indexes[0]
         if _anchor_scene_tool_rows_have_compatible_names(rows[index], incoming_row):
+            return index
+    reusable_indexes = [
+        index for index in content_tool_indexes if index in used_indexes and 0 <= index < len(rows)
+    ]
+    if len(reusable_indexes) == 1 and incoming_total == 1:
+        index = reusable_indexes[0]
+        if _anchor_scene_tool_rows_have_compatible_invocation(rows[index], incoming_row):
             return index
     for index in content_tool_indexes:
         if index in used_indexes or index < 0 or index >= len(rows):

@@ -827,13 +827,19 @@ def test_anchor_scene_hydration_restores_durable_body_after_message_tool_merge()
             "role": "assistant",
             "content": [
                 "I will inspect first.",
-                {"type": "tool_use", "tool_use_id": "toolu_content", "tool_name": "terminal"},
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "toolu_content",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "long-output"},
+                },
                 "Done.",
             ],
             "tool_calls": [
                 {
                     "id": "toolu_message",
                     "name": "terminal",
+                    "input": {"cmd": "long-output"},
                     "snippet": capped_preview,
                 }
             ],
@@ -861,6 +867,7 @@ def test_anchor_scene_hydration_restores_durable_body_after_message_tool_merge()
                 "assistant_msg_idx": 1,
                 "tid": "toolu_durable",
                 "name": "terminal",
+                "input": {"cmd": "long-output"},
                 "snippet": full_output,
             }
         ],
@@ -884,13 +891,19 @@ def test_anchor_scene_hydration_keeps_short_persisted_body_after_durable_merge()
             "role": "assistant",
             "content": [
                 "I will inspect first.",
-                {"type": "tool_use", "tool_use_id": "toolu_content", "tool_name": "terminal"},
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "toolu_content",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "short-output"},
+                },
                 "Done.",
             ],
             "tool_calls": [
                 {
                     "id": "toolu_message",
                     "name": "terminal",
+                    "input": {"cmd": "short-output"},
                     "snippet": short_body,
                 }
             ],
@@ -918,6 +931,7 @@ def test_anchor_scene_hydration_keeps_short_persisted_body_after_durable_merge()
                 "assistant_msg_idx": 1,
                 "tid": "toolu_durable",
                 "name": "terminal",
+                "input": {"cmd": "short-output"},
                 "snippet": full_output,
             }
         ],
@@ -1086,6 +1100,70 @@ def test_anchor_scene_hydration_does_not_name_merge_remaining_same_name_tool_aft
     assert by_id["content-a"]["tool"]["snippet"] == "OUTPUT A"
     assert by_id["content-b"]["tool"]["snippet"] == ""
     assert by_id["message-b"]["tool"]["snippet"] == "OUTPUT B"
+
+
+def test_anchor_scene_hydration_keeps_distinct_used_singleton_tool_call():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "content-a",
+                    "name": "terminal",
+                    "input": {"cmd": "ls"},
+                    "snippet": "OUTPUT A",
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {
+                "assistant_msg_idx": 1,
+                "tid": "durable-b",
+                "name": "terminal",
+                "input": {"cmd": "pwd"},
+                "snippet": "OUTPUT B",
+            }
+        ],
+    )
+
+    rows = hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+    tools = [row for row in rows if row.get("role") == "tool"]
+    by_id = {row.get("tool_call_id"): row for row in tools}
+
+    assert by_id["content-a"]["tool"]["snippet"] == "OUTPUT A"
+    assert by_id["durable-b"]["tool"]["snippet"] == "OUTPUT B"
+    assert len(tools) == 2
 
 
 def test_anchor_scene_hydration_dedupes_compression_lifecycle_rows():
