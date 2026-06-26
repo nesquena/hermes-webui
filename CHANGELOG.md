@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Settings → Extensions can now show generic runtime status from healthy loopback sidecars.** When a declared sidecar's `/health` response includes an optional top-level `runtime` object, the diagnostics panel renders only allowlisted scalar fields such as sidecar, native-host, bridge, last-update, and WebUI-origin state. Raw health response bodies are still not rendered, WebUI still omits credentials, and no sidecar proxy or native launch behavior is introduced.
+
 ## [v0.51.674] — 2026-06-26 — Release YD (server no longer exhausts threads under sidebar-poll load)
 
 ### Fixed
