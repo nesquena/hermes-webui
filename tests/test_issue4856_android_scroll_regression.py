@@ -104,6 +104,26 @@ def test_rebuild_path_marks_dom_wipe_scroll_as_programmatic():
     )
 
 
+def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
+    # Some browsers emit a follow-up scroll event shortly after renderMessages()
+    # finishes (for example while late layout settles after a send). With no
+    # wheel/touch intent, that post-render upward delta is still a render
+    # artifact and must not disable live follow.
+    assert "let _lastMessageRenderAt=-Infinity" in UI_JS
+    assert "_lastMessageRenderAt=performance.now()" in UI_JS
+    assert "function _recentMessageRenderArtifactWindow" in UI_JS
+    listener_idx = UI_JS.find("el.addEventListener('scroll'")
+    assert listener_idx != -1, "messages scroll listener not found"
+    listener = UI_JS[listener_idx: listener_idx + 2500]
+    assert "_recentMessageRenderArtifactWindow(1400)" in listener
+    assert "!_recentMessageTouchScrollIntent()" in listener
+    assert "!_recentNonMessageScrollIntent()" in listener
+    assert listener.find("return;") < listener.find("if(movedUp){"), (
+        "recent render artifact scrolls must return before the movedUp branch "
+        "can mark the reader unpinned."
+    )
+
+
 def test_streaming_tick_calls_fix_before_dom_writes():
     # The streaming render tick in messages.js must call _fixMobileScrollJank()
     # before _lastRenderMs=performance.now() so anchor suppression covers every
