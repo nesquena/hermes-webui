@@ -53,7 +53,16 @@ def _content_to_text(content: Any) -> str:
                         url = c["image_url"].get("url", "")
                     url = url or c.get("url", "")
                     if url:
-                        parts.append(f"![image]({url})")
+                        # Keep the export self-contained and avoid leaking
+                        # private/signed URLs: only inline data: URIs (already
+                        # embedded, render offline). Remote http(s) images are
+                        # NOT rendered as <img> (that would fire a network
+                        # request on open) — show an inert placeholder + the
+                        # URL as plain text instead.
+                        if url.startswith("data:"):
+                            parts.append(f"![image]({url})")
+                        else:
+                            parts.append(f"`[image: {url}]`")
                 else:
                     parts.append(f"`[{c.get('type', 'content')}]`")
             else:

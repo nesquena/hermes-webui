@@ -11,7 +11,11 @@ These guard the contract that:
 """
 from __future__ import annotations
 
-from api.session_export_html import _palette_to_css, render_session_html
+from api.session_export_html import (
+    _content_to_text,
+    _palette_to_css,
+    render_session_html,
+)
 
 
 def _fake_session() -> dict:
@@ -102,3 +106,45 @@ def test_render_with_hostile_palette_drops_bad_entries_but_keeps_safe_ones() -> 
     )
     assert "display:none" not in html
     assert "--border:#abc;" in html
+
+
+# ----------------------------------------------------- self-contained images ---
+
+
+def _image_content(url: str) -> list:
+    return [
+        {"type": "text", "text": "look at this"},
+        {"type": "image_url", "image_url": {"url": url}},
+    ]
+
+
+def test_remote_image_url_is_flattened_to_inert_text() -> None:
+    # A remote http(s) image must NOT become a Markdown image (which would
+    # render as <img src="http..."> and fire a network request on open, leaking
+    # a signed/private URL). It is flattened to an inline-code placeholder that
+    # still records the URL so the transcript isn't lossy.
+    remote = "https://example.com/private/signed.png?sig=secret"
+    flat = _content_to_text(_image_content(remote))
+    assert "![image]" not in flat                 # not an active image
+    assert f"`[image: {remote}]`" in flat          # inert, URL preserved
+
+
+def test_data_uri_image_is_kept_as_inline_image() -> None:
+    # data: URIs are already self-contained (no network), so they stay as a real
+    # Markdown image and render offline.
+    data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    flat = _content_to_text(_image_content(data_uri))
+    assert f"![image]({data_uri})" in flat
+
+
+def test_remote_image_never_appears_as_active_img_in_full_html() -> None:
+    # End-to-end guard regardless of whether markdown_it is installed: the
+    # rendered document must not contain an <img> pointing at the remote URL.
+    remote = "https://example.com/leak.png?token=abc"
+    html = render_session_html(
+        {"session_id": "img1", "title": "t",
+         "messages": [{"role": "user", "content": _image_content(remote)}]},
+        theme="dark",
+    )
+    assert f'src="{remote}"' not in html
+    assert remote in html  # still present as inert text
