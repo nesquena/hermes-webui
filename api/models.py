@@ -4885,17 +4885,17 @@ def get_state_db_session_messages(
     return msgs
 
 
-def count_state_db_session_messages_before_timestamp(
+def get_state_db_session_message_keys_before_timestamp(
     sid,
     before_timestamp,
     *,
     profile=None,
-) -> int | None:
-    """Return the raw state.db row count before ``before_timestamp`` for ``sid``.
+) -> list[tuple[str, str]] | None:
+    """Return sorted raw ``(role, content)`` keys before ``before_timestamp``.
 
     Missing timestamps are intentionally excluded because the bounded reader
     keeps them with ``timestamp IS NULL OR timestamp >= ?``.  The caller uses
-    this as a conservative coordinate-space guard before taking the optimized
+    this as a conservative prefix-identity guard before taking the optimized
     tail-read path.
     """
     try:
@@ -4917,7 +4917,7 @@ def count_state_db_session_messages_before_timestamp(
     else:
         db_path = _active_state_db_path()
     if not db_path.exists():
-        return 0
+        return []
 
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
@@ -4925,18 +4925,21 @@ def count_state_db_session_messages_before_timestamp(
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(messages)")
             available = {str(row['name']) for row in cur.fetchall()}
-            if not {'session_id', 'timestamp'}.issubset(available):
+            if not {'session_id', 'role', 'content', 'timestamp'}.issubset(available):
                 return None
             cur.execute(
                 """
-                SELECT COUNT(*) AS message_count
+                SELECT COALESCE(role, '') AS role, COALESCE(content, '') AS content
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
+                ORDER BY timestamp ASC, id ASC
                 """,
                 (str(sid), before_ts),
             )
-            row = cur.fetchone()
-            return max(0, int(row['message_count'] or 0)) if row else 0
+            return sorted(
+                (str(row['role'] or ''), str(row['content'] or ''))
+                for row in cur.fetchall()
+            )
     except Exception:
         return None
 

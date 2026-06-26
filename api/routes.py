@@ -6127,13 +6127,20 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, sidecar_messages
 
     floor = min(sidecar_timestamps[-raw_budget:])
-    sidecar_before_count = sum(1 for ts in sidecar_timestamps if ts < floor)
-    state_before_count = count_state_db_session_messages_before_timestamp(
+    sidecar_before_keys = sorted(
+        (
+            str(msg.get("role") or ""),
+            str(msg.get("content") or ""),
+        )
+        for msg, ts in zip(sidecar_messages, sidecar_timestamps)
+        if ts < floor
+    )
+    state_before_keys = get_state_db_session_message_keys_before_timestamp(
         getattr(session, "session_id", None),
         floor,
         profile=getattr(session, "profile", None) or None,
     )
-    if state_before_count is None or state_before_count != sidecar_before_count:
+    if state_before_keys is None or state_before_keys != sidecar_before_keys:
         return None, sidecar_messages
     return floor, sidecar_messages
 
@@ -6712,7 +6719,7 @@ from api.models import (
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
-    count_state_db_session_messages_before_timestamp,
+    get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
     _enrich_sidebar_lineage_metadata,
