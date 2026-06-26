@@ -289,7 +289,8 @@ Settled mixed `content[]` assistant messages now bridge into the same
 `activity_scene_v1` ownership. When the final assistant message interleaves text
 parts with `tool_use` parts, settlement and read-side hydration promote those
 ordered parts into anchor activity rows. The final answer remains the text after
-the last tool use, while earlier text and tool rows stay in chronological
+the last tool use on the final assistant message, while earlier text, non-final
+post-tool process text, thinking rows, and tool rows stay in chronological
 activity order for Compact Worklog and Transparent Stream renderers. The
 Transparent Stream raw `content[]` helper remains a fallback for settled
 messages that do not yet carry `_anchor_activity_scene`.

@@ -5,7 +5,7 @@
 
 ### Fixed
 
-- **Anchor-owned settled assistant turns now preserve mixed text/tool ordering in Transparent Stream.** When a settled assistant message stores interleaved `content[]` text and `tool_use` parts, settlement and reload hydration now promote those parts into the `_anchor_activity_scene` instead of relying on the raw Transparent Stream fallback. The final answer stays distinct as the text after the last tool use, while earlier prose and tool rows render chronologically in both Compact Worklog and Transparent Stream.
+- **Anchor-owned settled assistant turns now preserve mixed text/tool ordering in Transparent Stream.** When a settled assistant message stores interleaved `content[]` text and `tool_use` parts, settlement and reload hydration now promote those parts into the `_anchor_activity_scene` instead of relying on the raw Transparent Stream fallback. The final answer stays distinct as the text after the last tool use on the final assistant message, while earlier prose, non-final post-tool process text, thinking rows, and tool rows render chronologically in both Compact Worklog and Transparent Stream.
 
 ## [v0.51.674] — 2026-06-26 — Release YD (server no longer exhausts threads under sidebar-poll load)
 

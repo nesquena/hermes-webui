@@ -768,6 +768,54 @@ def test_anchor_scene_hydration_promotes_final_content_array_tool_use_to_ordered
     assert rows[-1]["role"] == "terminal"
 
 
+def test_anchor_scene_hydration_preserves_non_final_post_tool_text():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "I will inspect first.",
+                {"type": "tool_use", "tool_use_id": "toolu_content", "tool_name": "grep"},
+                {"type": "text", "text": "I found the relevant file."},
+                {"type": "thinking", "text": "Need one more check."},
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+    records = {
+        "record": {
+            "message_index": 2,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[2]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "final answer",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records, tool_calls=[])
+
+    scene = hydrated[2]["_anchor_activity_scene"]
+    rows = scene["activity_rows"]
+    activity = [
+        (row.get("role"), row.get("text") or row.get("tool_call_id"))
+        for row in rows
+    ]
+
+    assert scene["final_answer"] == "final answer"
+    assert activity == [
+        ("prose", "I will inspect first."),
+        ("tool", "toolu_content"),
+        ("prose", "I found the relevant file."),
+        ("thinking", "Need one more check."),
+    ]
+
+
 def test_anchor_scene_hydration_restores_durable_body_after_message_tool_merge():
     from api import routes
 

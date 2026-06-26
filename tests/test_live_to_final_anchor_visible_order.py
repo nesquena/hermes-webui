@@ -849,10 +849,11 @@ def test_settled_anchor_scene_promotes_final_content_array_to_ordered_activity_r
     assert "for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)" in complete
     assert "options=(options&&typeof options==='object')?options:{};" in rows_by_message
     assert "const endIndex=options&&options.includeFinal?lastAsstIndex+1:lastAsstIndex;" in rows_by_message
-    assert "const contentRows=_anchorSceneRowsFromContentParts(message,idx);" in rows_by_message
+    assert "const contentRows=_anchorSceneRowsFromContentParts(message,idx,{isFinalMessage:idx===lastAsstIndex});" in rows_by_message
     assert "part.type==='tool_use'" in content_rows
+    assert "const isFinalMessage=!!options.isFinalMessage;" in content_rows
     assert "if(!part||typeof part!=='object'){" in content_rows
-    assert "if(i>lastToolIndex) continue;" in content_rows
+    assert "if(isFinalMessage&&i>lastToolIndex) continue;" in content_rows
     assert "_anchorSceneProseRow(text,rows.length,messageIndex)" in content_rows
     assert "_anchorSceneToolRowFromCall(_anchorSceneContentTool(part),rows.length,messageIndex)" in content_rows
     assert "lastToolIndex+1" in final_answer

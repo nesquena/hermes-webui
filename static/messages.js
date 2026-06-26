@@ -2621,8 +2621,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!message||typeof message!=='object') return '';
     return String(message.reasoning||message._reasoning||message.reasoning_content||message.thinking||'');
   }
-  function _anchorSceneRowsFromContentParts(message, messageIndex){
+  function _anchorSceneRowsFromContentParts(message, messageIndex, options){
     if(!_anchorSceneMessageHasContentToolUse(message)) return null;
+    options=(options&&typeof options==='object')?options:{};
+    const isFinalMessage=!!options.isFinalMessage;
     const rows=[];
     const content=Array.isArray(message.content)?message.content:[];
     let lastToolIndex=-1;
@@ -2633,19 +2635,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     for(let i=0;i<content.length;i+=1){
       const part=content[i];
       if(!part||typeof part!=='object'){
-        if(i>lastToolIndex) continue;
+        if(isFinalMessage&&i>lastToolIndex) continue;
         const text=_anchorSceneContentText(part);
         if(_anchorSceneCleanText(text)) rows.push(_anchorSceneProseRow(text,rows.length,messageIndex));
         continue;
       }
       if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
-        if(i>lastToolIndex) continue;
+        if(isFinalMessage&&i>lastToolIndex) continue;
         const text=_anchorSceneContentText(part);
         if(_anchorSceneCleanText(text)) rows.push(_anchorSceneProseRow(text,rows.length,messageIndex));
         continue;
       }
       if(part.type==='thinking'||part.type==='reasoning'){
-        if(i>lastToolIndex) continue;
+        if(isFinalMessage&&i>lastToolIndex) continue;
         const text=_anchorSceneContentText(part);
         if(_anchorSceneCleanText(text)) rows.push(_anchorSceneThinkingRow(text,rows.length,messageIndex));
         continue;
@@ -2742,7 +2744,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!message||message.role!=='assistant') continue;
       const pool=[];
       const text=_anchorSceneMessageText(message);
-      const contentRows=_anchorSceneRowsFromContentParts(message,idx);
+      const contentRows=_anchorSceneRowsFromContentParts(message,idx,{isFinalMessage:idx===lastAsstIndex});
       const hasOrderedContentRows=Array.isArray(contentRows)&&contentRows.length>0;
       const contentToolRows=[];
       const usedContentToolRows=new Set();

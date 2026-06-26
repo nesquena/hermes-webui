@@ -88,8 +88,13 @@ process.stdin.on('end',()=>{
   var lastAsstIndex=p.lastAsstIndex!==undefined?p.lastAsstIndex:messages.length-1;
   var byIdx=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex);
   var cards=[];
-  byIdx.forEach(function(rows,idx){
-    rows.forEach(function(row){
+  var rows=[];
+  byIdx.forEach(function(bucket,idx){
+    bucket.forEach(function(row){
+      rows.push({
+        idx:idx, role:row.role||'', text:row.text||'',
+        tool_call_id:row.tool_call_id||'', kind:row.kind||''
+      });
       if(row.role!=='tool') return;
       var tc=_anchorSceneToolCallFromRow(row,{settled:true});
       var outputTab=String((tc.snippet||tc.preview||tc.result||tc.output)||'').trim();
@@ -104,7 +109,8 @@ process.stdin.on('end',()=>{
       });
     });
   });
-  process.stdout.write(JSON.stringify(cards));
+  if(p.returnRows) process.stdout.write(JSON.stringify({cards:cards,rows:rows}));
+  else process.stdout.write(JSON.stringify(cards));
 });
 })();
 `;
@@ -184,6 +190,44 @@ def _card(cards, name):
     matches = [c for c in cards if c["name"] == name]
     assert matches, f"no settled card for {name}: {[c['name'] for c in cards]}"
     return matches[0]
+
+
+def test_non_final_post_tool_text_survives_fresh_settlement(driver_path):
+    """A non-final assistant message may contain process text after a tool_use.
+    That text is activity, not the final answer tail, and must survive fresh
+    settlement in the anchor rows."""
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": [
+                "I will inspect first.",
+                {"type": "tool_use", "tool_use_id": "term-content", "tool_name": "terminal"},
+                {"type": "text", "text": "I found the relevant file."},
+                {"type": "thinking", "text": "Need one more check."},
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    result = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "S": {"toolCalls": []},
+            "returnRows": True,
+        },
+    )
+
+    rows = [row for row in result["rows"] if row["idx"] == 1]
+    assert [(row["role"], row["text"] or row["tool_call_id"]) for row in rows] == [
+        ("prose", "I will inspect first."),
+        ("tool", "term-content"),
+        ("prose", "I found the relevant file."),
+        ("thinking", "Need one more check."),
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -3821,7 +3821,7 @@ def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, in
     return None
 
 
-def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""):
+def _anchor_scene_content_rows(message, order_index, message_index, stream_id="", *, is_final_message=False):
     if not _anchor_scene_message_has_content_tool_use(message):
         return None
     rows = []
@@ -3832,7 +3832,7 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
             last_tool_index = idx
     for idx, part in enumerate(content):
         if not isinstance(part, dict):
-            if idx > last_tool_index:
+            if is_final_message and idx > last_tool_index:
                 continue
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
@@ -3840,14 +3840,14 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
             continue
         part_type = part.get("type")
         if part_type in ("text", "input_text", "output_text"):
-            if idx > last_tool_index:
+            if is_final_message and idx > last_tool_index:
                 continue
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
                 rows.append(_anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id))
             continue
         if part_type in ("thinking", "reasoning"):
-            if idx > last_tool_index:
+            if is_final_message and idx > last_tool_index:
                 continue
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
@@ -4046,7 +4046,13 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             continue
         absolute_idx = int(message_offset or 0) + local_idx
         text = _anchor_scene_message_text(message)
-        content_rows = _anchor_scene_content_rows(message, order, absolute_idx, stream_id)
+        content_rows = _anchor_scene_content_rows(
+            message,
+            order,
+            absolute_idx,
+            stream_id,
+            is_final_message=local_idx == local_final_idx,
+        )
         content_tool_indexes = []
         used_content_tool_indexes = set()
         if content_rows:
