@@ -2623,9 +2623,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(existingCommand&&incomingCommand) return existingCommand===incomingCommand;
     const existingArgs=_anchorSceneToolRowArgs(existing);
     const incomingArgs=_anchorSceneToolRowArgs(incoming);
-    if(!incomingCommand&&(!incomingArgs||!Object.keys(incomingArgs).length)) return true;
     if(!existingArgs||!incomingArgs||!Object.keys(existingArgs).length||!Object.keys(incomingArgs).length) return false;
     return _anchorSceneObjectContainsSubset(existingArgs,incomingArgs)||_anchorSceneObjectContainsSubset(incomingArgs,existingArgs);
+  }
+  function _anchorSceneToolRowHasInvocationEvidence(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    const command=_anchorSceneStringPayload(tool.command||payload.command).trim();
+    const args=_anchorSceneToolRowArgs(row);
+    return !!command||!!(args&&Object.keys(args).length);
+  }
+  function _anchorSceneToolRowsCanNameMatch(existing, incoming){
+    if(!_anchorSceneToolRowsHaveCompatibleNames(existing,incoming)) return false;
+    if(_anchorSceneToolRowHasInvocationEvidence(existing)&&_anchorSceneToolRowHasInvocationEvidence(incoming)){
+      return _anchorSceneToolRowsHaveCompatibleInvocation(existing,incoming);
+    }
+    return true;
   }
   function _anchorSceneMatchingContentToolRow(contentToolRows, incomingRow, ordinal, usedRows, incomingTotal){
     if(!Array.isArray(contentToolRows)||!incomingRow) return null;
@@ -2637,16 +2650,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(contentToolRows.length===1&&Number(incomingTotal)===1){
       const onlyRow=contentToolRows[0];
-      if(onlyRow&&!usedRows.has(onlyRow)&&_anchorSceneToolRowsHaveCompatibleNames(onlyRow,incomingRow)) return onlyRow;
+      if(onlyRow&&!usedRows.has(onlyRow)&&_anchorSceneToolRowsCanNameMatch(onlyRow,incomingRow)) return onlyRow;
     }
     const availableRows=contentToolRows.filter(row=>row&&!usedRows.has(row));
-    if(availableRows.length===1&&Number(incomingTotal)===1&&_anchorSceneToolRowsHaveCompatibleNames(availableRows[0],incomingRow)) return availableRows[0];
+    if(availableRows.length===1&&Number(incomingTotal)===1&&_anchorSceneToolRowsCanNameMatch(availableRows[0],incomingRow)) return availableRows[0];
     const reusableRows=contentToolRows.filter(row=>row&&usedRows.has(row));
     if(reusableRows.length===1&&Number(incomingTotal)===1&&_anchorSceneToolRowsHaveCompatibleInvocation(reusableRows[0],incomingRow)) return reusableRows[0];
     for(const row of contentToolRows){
       if(!row||usedRows.has(row)) continue;
       const tid=row.tool_call_id||(row.tool&&row.tool.id);
-      if(!tid&&!incomingTid&&_anchorSceneToolRowsHaveCompatibleNames(row,incomingRow)) return row;
+      if(!tid&&!incomingTid&&_anchorSceneToolRowsCanNameMatch(row,incomingRow)) return row;
     }
     return null;
   }

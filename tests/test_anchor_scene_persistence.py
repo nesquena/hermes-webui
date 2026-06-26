@@ -743,6 +743,7 @@ def test_anchor_scene_hydration_promotes_final_content_array_tool_use_to_ordered
                 "assistant_msg_idx": 1,
                 "tid": "toolu_durable",
                 "name": "grep",
+                "input": {"pattern": "TODO"},
                 "snippet": "TODO in static/messages.js",
             }
         ],
@@ -1163,6 +1164,122 @@ def test_anchor_scene_hydration_keeps_distinct_used_singleton_tool_call():
 
     assert by_id["content-a"]["tool"]["snippet"] == "OUTPUT A"
     assert by_id["durable-b"]["tool"]["snippet"] == "OUTPUT B"
+    assert len(tools) == 2
+
+
+def test_anchor_scene_hydration_keeps_body_only_distinct_used_singleton_tool_call():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "content-a",
+                    "name": "terminal",
+                    "input": {"cmd": "ls"},
+                    "snippet": "OUTPUT A",
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {
+                "assistant_msg_idx": 1,
+                "tid": "durable-b",
+                "name": "terminal",
+                "snippet": "OUTPUT B",
+            }
+        ],
+    )
+
+    rows = hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+    tools = [row for row in rows if row.get("role") == "tool"]
+    by_id = {row.get("tool_call_id"): row for row in tools}
+
+    assert by_id["content-a"]["tool"]["snippet"] == "OUTPUT A"
+    assert by_id["durable-b"]["tool"]["snippet"] == "OUTPUT B"
+    assert len(tools) == 2
+
+
+def test_anchor_scene_hydration_does_not_name_merge_singleton_with_conflicting_args():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "Patch a.py.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "edit_file",
+                    "args": {"path": "a.py"},
+                },
+            ],
+            "tool_calls": [
+                {
+                    "id": "message-b",
+                    "name": "edit_file",
+                    "input": {"path": "b.py"},
+                    "snippet": "PATCH B",
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records, tool_calls=[])
+
+    rows = hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+    tools = [row for row in rows if row.get("role") == "tool"]
+    by_id = {row.get("tool_call_id"): row for row in tools}
+
+    assert by_id["content-a"]["tool"]["args"] == {"path": "a.py"}
+    assert by_id["content-a"]["tool"]["snippet"] == ""
+    assert by_id["message-b"]["tool"]["args"] == {"path": "b.py"}
+    assert by_id["message-b"]["tool"]["snippet"] == "PATCH B"
     assert len(tools) == 2
 
 

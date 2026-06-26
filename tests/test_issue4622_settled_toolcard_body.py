@@ -69,6 +69,7 @@ const messagesFns = [
 	  '_anchorSceneToolRowName','_anchorSceneToolRowsHaveCompatibleNames',
 	  '_anchorSceneToolRowArgs','_anchorSceneObjectContainsSubset',
 	  '_anchorSceneToolRowsHaveCompatibleInvocation',
+	  '_anchorSceneToolRowHasInvocationEvidence','_anchorSceneToolRowsCanNameMatch',
 	  '_anchorSceneMatchingContentToolRow',
 	  '_anchorSceneMessageReasoningText','_anchorSceneRowsFromContentParts',
 	  '_enrichSettledToolRowBodyFromLive',
@@ -510,6 +511,89 @@ def test_consumed_singleton_content_tool_keeps_distinct_live_invocation(driver_p
     assert by_tid["content-a"]["snippet"] == "OUTPUT A"
     assert by_tid["live-b"]["snippet"] == "OUTPUT B"
     assert len([card for card in cards if card["name"] == "terminal"]) == 2
+
+
+def test_consumed_singleton_body_only_live_tool_stays_distinct(driver_path):
+    """A body-only live row has no proof that it is the consumed content tool."""
+    messages = [
+        {"role": "user", "content": "inspect twice"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {"id": "content-a", "name": "terminal", "args": {"cmd": "ls"}, "snippet": "OUTPUT A"}
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "S": {
+                "toolCalls": [
+                    {
+                        "id": "live-b",
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "snippet": "OUTPUT B",
+                    }
+                ]
+            },
+        },
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["snippet"] == "OUTPUT A"
+    assert by_tid["live-b"]["snippet"] == "OUTPUT B"
+    assert len([card for card in cards if card["name"] == "terminal"]) == 2
+
+
+def test_singleton_content_tool_does_not_name_merge_conflicting_args(driver_path):
+    """A one-row content pool still must not merge explicit different invocations."""
+    messages = [
+        {"role": "user", "content": "patch"},
+        {
+            "role": "assistant",
+            "content": [
+                "Patch a.py.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "edit_file",
+                    "args": {"path": "a.py"},
+                },
+            ],
+            "tool_calls": [
+                {"id": "message-b", "name": "edit_file", "args": {"path": "b.py"}, "snippet": "PATCH B"}
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {"messages": messages, "turnStart": 0, "lastAsstIndex": 2, "S": {"toolCalls": []}},
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["args"] == {"path": "a.py"}
+    assert by_tid["content-a"]["snippet"] == ""
+    assert by_tid["message-b"]["args"] == {"path": "b.py"}
+    assert by_tid["message-b"]["snippet"] == "PATCH B"
+    assert len([card for card in cards if card["name"] == "edit_file"]) == 2
 
 
 def test_settled_capped_preview_restored_to_full_live_body(driver_path):

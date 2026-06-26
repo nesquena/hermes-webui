@@ -3828,14 +3828,30 @@ def _anchor_scene_tool_rows_have_compatible_invocation(existing, incoming) -> bo
         return existing_command == incoming_command
     existing_args = _anchor_scene_tool_row_args(existing)
     incoming_args = _anchor_scene_tool_row_args(incoming)
-    if not incoming_command and not incoming_args:
-        return True
     if not existing_args or not incoming_args:
         return False
     return _anchor_scene_object_contains_subset(
         existing_args,
         incoming_args,
     ) or _anchor_scene_object_contains_subset(incoming_args, existing_args)
+
+
+def _anchor_scene_tool_row_has_invocation_evidence(row) -> bool:
+    if not isinstance(row, dict):
+        return False
+    tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    command = str(tool.get("command") or payload.get("command") or "").strip()
+    args = _anchor_scene_tool_row_args(row)
+    return bool(command or args)
+
+
+def _anchor_scene_tool_rows_can_name_match(existing, incoming) -> bool:
+    if not _anchor_scene_tool_rows_have_compatible_names(existing, incoming):
+        return False
+    if _anchor_scene_tool_row_has_invocation_evidence(existing) and _anchor_scene_tool_row_has_invocation_evidence(incoming):
+        return _anchor_scene_tool_rows_have_compatible_invocation(existing, incoming)
+    return True
 
 
 def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, incoming_row, ordinal, used_indexes, incoming_total=0):
@@ -3853,7 +3869,7 @@ def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, in
         if (
             index not in used_indexes
             and 0 <= index < len(rows)
-            and _anchor_scene_tool_rows_have_compatible_names(rows[index], incoming_row)
+            and _anchor_scene_tool_rows_can_name_match(rows[index], incoming_row)
         ):
             return index
     available_indexes = [
@@ -3861,7 +3877,7 @@ def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, in
     ]
     if len(available_indexes) == 1 and incoming_total == 1:
         index = available_indexes[0]
-        if _anchor_scene_tool_rows_have_compatible_names(rows[index], incoming_row):
+        if _anchor_scene_tool_rows_can_name_match(rows[index], incoming_row):
             return index
     reusable_indexes = [
         index for index in content_tool_indexes if index in used_indexes and 0 <= index < len(rows)
@@ -3874,7 +3890,7 @@ def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, in
         if index in used_indexes or index < 0 or index >= len(rows):
             continue
         existing_id = _anchor_scene_tool_row_id(rows[index])
-        if not existing_id and not incoming_id and _anchor_scene_tool_rows_have_compatible_names(rows[index], incoming_row):
+        if not existing_id and not incoming_id and _anchor_scene_tool_rows_can_name_match(rows[index], incoming_row):
             return index
     return None
 
