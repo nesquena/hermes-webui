@@ -153,6 +153,61 @@ def test_get_cli_sessions_cold_followers_join_single_rebuild(monkeypatch, tmp_pa
     assert results.get("follower") == [{"session_id": "fresh", "title": "fresh-row"}]
 
 
+def test_get_cli_sessions_cold_follower_times_out_to_independent_rebuild(monkeypatch, tmp_path):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    models.clear_cli_sessions_cache()
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_WAIT_SECONDS", 0.05, raising=False)
+
+    owner_started = threading.Event()
+    owner_block = threading.Event()
+    fallback_started = threading.Event()
+    load_count = {"value": 0}
+    load_count_lock = threading.Lock()
+    results = {}
+
+    def _blocking_loader(*_args, **_kwargs):
+        with load_count_lock:
+            load_count["value"] += 1
+            call_number = load_count["value"]
+        if call_number == 1:
+            owner_started.set()
+            owner_block.wait()
+        else:
+            fallback_started.set()
+        return [{"session_id": "fresh", "title": "fresh-row"}]
+
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", _blocking_loader)
+
+    owner = threading.Thread(
+        target=lambda: results.setdefault("owner", models.get_cli_sessions()),
+        daemon=True,
+    )
+    follower = threading.Thread(
+        target=lambda: results.setdefault("follower", models.get_cli_sessions()),
+        daemon=True,
+    )
+
+    owner.start()
+    assert owner_started.wait(1.0), "owner did not start"
+    follower.start()
+    assert fallback_started.wait(1.0), "follower did not start fallback rebuild"
+    follower.join(1.0)
+
+    assert not follower.is_alive()
+    assert owner.is_alive()
+    assert load_count["value"] == 2
+    assert results.get("follower") == [{"session_id": "fresh", "title": "fresh-row"}]
+
+    owner_block.set()
+    owner.join(2.0)
+    assert not owner.is_alive()
+    assert results.get("owner") == [{"session_id": "fresh", "title": "fresh-row"}]
+
+
 def test_get_cli_sessions_clear_during_rebuild_does_not_restore_stale_rows(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
@@ -266,6 +321,71 @@ def test_get_cli_sessions_clear_during_rebuild_preserves_joiners(monkeypatch, tm
     assert results.get("owner") == [{"session_id": "owner", "title": "owner-row"}]
     assert results.get("follower_a") == [{"session_id": "fresh", "title": "fresh-row"}]
     assert results.get("follower_b") == [{"session_id": "fresh", "title": "fresh-row"}]
+
+
+def test_get_cli_sessions_clear_during_rebuild_reclaims_after_invalidated_wait(monkeypatch, tmp_path):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    models.clear_cli_sessions_cache()
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS", 0.2, raising=False)
+
+    (_, _, _, cache_key) = models._resolve_cli_sessions_context(None)
+    cache_stamp = models._cli_sessions_cache_invalidation_stamp()
+    with models._CLI_SESSIONS_CACHE_LOCK:
+        models._CLI_SESSIONS_CACHE[cache_key] = (
+            time.monotonic() - 1.0,
+            cache_stamp,
+            [{"session_id": "stale", "title": "stale-row"}],
+        )
+
+    owner_started = threading.Event()
+    owner_block = threading.Event()
+    second_started = threading.Event()
+    load_count = {"value": 0}
+    load_count_lock = threading.Lock()
+    results = {}
+
+    def _blocking_loader(*_args, **_kwargs):
+        with load_count_lock:
+            load_count["value"] += 1
+            call_number = load_count["value"]
+        if call_number == 1:
+            owner_started.set()
+            owner_block.wait()
+            return [{"session_id": "owner", "title": "owner-row"}]
+        second_started.set()
+        return [{"session_id": "fresh", "title": "fresh-row"}]
+
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", _blocking_loader)
+
+    owner = threading.Thread(
+        target=lambda: results.setdefault("owner", models.get_cli_sessions()),
+        daemon=True,
+    )
+    follower = threading.Thread(
+        target=lambda: results.setdefault("follower", models.get_cli_sessions()),
+        daemon=True,
+    )
+
+    owner.start()
+    assert owner_started.wait(1.0), "owner did not enter rebuild"
+    follower.start()
+    time.sleep(0.05)
+    models.clear_cli_sessions_cache()
+    owner_block.set()
+
+    assert second_started.wait(1.0), "follower did not reclaim the rebuild"
+    owner.join(2.0)
+    follower.join(2.0)
+
+    assert not owner.is_alive()
+    assert not follower.is_alive()
+    assert load_count["value"] == 2
+    assert results.get("owner") == [{"session_id": "owner", "title": "owner-row"}]
+    assert results.get("follower") == [{"session_id": "fresh", "title": "fresh-row"}]
 
 
 def test_cache_cli_sessions_if_current_skips_stale_store(monkeypatch, tmp_path):
