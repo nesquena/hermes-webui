@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from api.session_export_html import (
     _content_to_text,
+    _neutralize_remote_images,
     _palette_to_css,
+    _render_markdown,
     render_session_html,
 )
 
@@ -168,3 +170,61 @@ def test_remote_image_never_appears_as_active_img_in_full_html() -> None:
     )
     assert f'src="{remote}"' not in html
     assert remote in html  # still present as inert text
+
+
+# ------------------------------------------- markdown-image-in-text (P1 #4968) ---
+#
+# The multimodal-part flattening above only covers structured image_url content.
+# A *text* message body carrying Markdown image syntax — ![alt](https://...) —
+# is rendered by markdown_it into an active <img src="https://...">, which fires
+# a network request on open and leaks signed/private URLs. _neutralize_remote_images
+# closes that path post-render. These tests pin it.
+
+
+def test_text_markdown_remote_image_is_neutralized() -> None:
+    remote = "https://example.com/private.png?sig=secret"
+    out = _render_markdown(f"here is a leak ![x]({remote})")
+    # Core security invariant holds in BOTH environments:
+    #  - markdown_it present  -> <img> rendered then neutralized to placeholder
+    #  - markdown_it absent    -> fallback escapes into <pre>, never an <img>
+    assert "<img" not in out                     # no active image element
+    assert f'src="{remote}"' not in out           # remote src never emitted
+    assert remote in out                          # URL kept as inert text
+    from api.session_export_html import _MD
+    if _MD is not None:
+        assert "[image:" in out                   # shown via placeholder
+
+
+def test_text_markdown_data_uri_image_is_kept() -> None:
+    # data: images are already embedded and offline-safe. With markdown_it they
+    # render as an active <img>; without it the fallback keeps the data: URI as
+    # escaped text. Either way the URI is preserved and no remote fetch occurs.
+    data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    out = _render_markdown(f"embedded ![x]({data_uri})")
+    assert data_uri in out
+    from api.session_export_html import _MD
+    if _MD is not None:
+        assert "<img" in out
+
+
+def test_neutralize_handles_single_quoted_and_uppercase_src() -> None:
+    # Defensive: the regex must catch single-quoted src and tag-case variants,
+    # not just the canonical markdown_it output.
+    assert "<img" not in _neutralize_remote_images("<img src='http://h/x.png'>")
+    assert "<img" not in _neutralize_remote_images('<IMG SRC="http://h/x.png">')
+    # data: survives regardless of quoting/case.
+    kept = _neutralize_remote_images("<IMG src='data:image/png;base64,AAAA'>")
+    assert "<IMG" in kept or "<img" in kept
+
+
+def test_text_markdown_remote_image_absent_from_full_html() -> None:
+    # End-to-end: a remote markdown image in a plain-text turn must not survive
+    # as an <img> in the exported document.
+    remote = "https://example.com/leak2.png?token=xyz"
+    html = render_session_html(
+        {"session_id": "md-img", "title": "t",
+         "messages": [{"role": "assistant", "content": f"see ![pic]({remote})"}]},
+        theme="dark",
+    )
+    assert f'src="{remote}"' not in html
+    assert remote in html  # inert text placeholder

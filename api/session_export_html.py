@@ -25,6 +25,37 @@ except Exception:  # pragma: no cover - markdown_it always present in webui venv
     _MD = None
 
 
+def _neutralize_remote_images(rendered_html: str) -> str:
+    """Replace any <img> whose src isn't a data: URI with an inert placeholder.
+
+    This is the single chokepoint that keeps the export self-contained. The
+    multimodal flattening in _content_to_text() handles structured image_url
+    parts, but a *text* message body can carry Markdown image syntax —
+    ``![leak](https://host/private.png?sig=...)`` — which markdown_it renders
+    into an active ``<img src="https://...">``. Opening the saved file would
+    then fire a network request and leak a signed/private URL. Filtering here,
+    after rendering, catches every path into the HTML (text Markdown images and
+    any future source) regardless of how the <img> was produced. data: URIs are
+    already embedded, render offline, and make no request, so they're kept.
+    """
+    if not rendered_html or "<img" not in rendered_html:
+        return rendered_html
+
+    def _repl(match: "re.Match[str]") -> str:
+        tag = match.group(0)
+        src_m = re.search(r'src\s*=\s*"([^"]*)"', tag) or re.search(
+            r"src\s*=\s*'([^']*)'", tag
+        )
+        src = src_m.group(1) if src_m else ""
+        if src.startswith("data:"):
+            return tag  # already embedded, offline-safe
+        # Inert placeholder mirroring _content_to_text's remote-image handling.
+        label = html.escape(src) if src else "image"
+        return f"<code>[image: {label}]</code>"
+
+    return re.sub(r"<img\b[^>]*>", _repl, rendered_html, flags=re.IGNORECASE)
+
+
 def _render_markdown(text: str) -> str:
     """Render Markdown to HTML. Falls back to escaped <pre> if the lib is missing."""
     if not text:
@@ -32,7 +63,7 @@ def _render_markdown(text: str) -> str:
     if _MD is None:
         return f"<pre>{html.escape(text)}</pre>"
     try:
-        return _MD.render(text)
+        return _neutralize_remote_images(_MD.render(text))
     except Exception:
         return f"<pre>{html.escape(text)}</pre>"
 
