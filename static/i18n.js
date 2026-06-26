@@ -3935,7 +3935,7 @@ const LOCALES = {
     ext_gallery_capabilities: 'Capabilities',
     ext_gallery_next_step: '次の手順',
     ext_gallery_after_install: 'インストール後',
-    ext_gallery_local_component_required: 'この拡張機能にはローカルコンポーネントがあります。インストール後に必要なローカルアプリまたはサイドカーを起動してください。',
+    ext_gallery_local_component_required: 'この拡張機能にはローカルコンポーネントが必要です。インストール後に必要なローカルアプリまたはサイドカーを起動してください。',
     ext_gallery_local_app_label: 'ローカルアプリ',
     ext_gallery_required_suffix: '{0} が必要',
     ext_gallery_sidecar_required: 'サイドカーが必要',

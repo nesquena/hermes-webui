@@ -300,6 +300,10 @@ def test_extensions_post_install_i18n_is_localized_outside_english():
         )
 
 
+def test_extensions_i18n_does_not_include_replacement_characters():
+    assert "\ufffd" not in I18N_JS
+
+
 def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims():
     diagnostics_section = DOCS_EXTENSIONS[DOCS_EXTENSIONS.index("## Diagnostics"):]
 
