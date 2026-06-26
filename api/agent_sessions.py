@@ -534,15 +534,19 @@ def read_importable_agent_session_rows(
 
         if use_messages_join and messages_has_timestamp:
             order_by_clause = "ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC"
+            latest_messages_cte = (
+                "latest_messages AS (\n"
+                "                    SELECT mx.session_id AS session_id, MAX(mx.timestamp) AS last_message_at\n"
+                "                    FROM messages mx\n"
+                "                    GROUP BY mx.session_id\n"
+                "                )"
+            )
             candidate_order_clause = (
-                "ORDER BY COALESCE(\n"
-                "                        (SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id),\n"
-                "                        s.started_at\n"
-                "                    ) DESC,\n"
-                "                    s.started_at DESC"
+                "ORDER BY COALESCE(lm.last_message_at, s.started_at) DESC, s.started_at DESC"
             )
         else:
             order_by_clause = "ORDER BY s.started_at DESC"
+            latest_messages_cte = None
             candidate_order_clause = "ORDER BY s.started_at DESC"
 
         where_clauses = ["s.source IS NOT NULL"]
@@ -592,15 +596,38 @@ def read_importable_agent_session_rows(
             # Oversampling preserves room for hidden compression segments or
             # other rows filtered after projection.
             candidate_limit = max(result_limit * 8, result_limit)
+            if latest_messages_cte:
+                candidate_cte = (
+                    "WITH {latest_messages_cte}, candidates AS (\n"
+                    "                    SELECT s.id\n"
+                    "                    FROM sessions s\n"
+                    "                    LEFT JOIN latest_messages lm ON lm.session_id = s.id\n"
+                    "                    WHERE {where_clause}\n"
+                    "                    {candidate_order_clause}\n"
+                    "                    LIMIT ?\n"
+                    "                )"
+                ).format(
+                    latest_messages_cte=latest_messages_cte,
+                    where_clause=" AND ".join(where_clauses),
+                    candidate_order_clause=candidate_order_clause,
+                )
+            else:
+                candidate_cte = (
+                    "WITH candidates AS (\n"
+                    "                    SELECT s.id\n"
+                    "                    FROM sessions s\n"
+                    "                    WHERE {where_clause}\n"
+                    "                    {candidate_order_clause}\n"
+                    "                    LIMIT ?\n"
+                    "                )"
+                ).format(
+                    where_clause=" AND ".join(where_clauses),
+                    candidate_order_clause=candidate_order_clause,
+                )
+
             cur.execute(
                 f"""
-                WITH candidates AS (
-                    SELECT s.id
-                    FROM sessions s
-                    WHERE {' AND '.join(where_clauses)}
-                    {candidate_order_clause}
-                    LIMIT ?
-                )
+                {candidate_cte}
                 {select_sql}
                 FROM sessions s
                 JOIN candidates c ON c.id = s.id

@@ -4,12 +4,15 @@ import pathlib
 import sqlite3
 import time
 
+import pytest
+
 import api.agent_sessions as agent_sessions
 
+_REAL_SQLITE_CONNECT = sqlite3.connect
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-def _make_state_db(path, *, sessions=80, messages_per_session=3):
+def _make_state_db(path, *, sessions=80, messages_per_session=3, create_messages_index=True):
     conn = sqlite3.connect(str(path))
     conn.executescript(
         """
@@ -33,7 +36,6 @@ def _make_state_db(path, *, sessions=80, messages_per_session=3):
             content TEXT,
             timestamp REAL
         );
-        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
         """
     )
     base = time.time() - sessions
@@ -53,8 +55,113 @@ def _make_state_db(path, *, sessions=80, messages_per_session=3):
                 "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, 'hello', ?)",
                 (f"msg_{i:04d}_{j:02d}", sid, "user" if j == 0 else "assistant", started + j / 10),
             )
+    if create_messages_index:
+        conn.execute("CREATE INDEX idx_messages_session ON messages(session_id, timestamp)")
     conn.commit()
     conn.close()
+
+
+def _newest_first_reference_ids(db_path):
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.id
+            FROM sessions s
+            LEFT JOIN messages m ON m.session_id = s.id
+            WHERE s.source IS NOT NULL AND s.source NOT IN (?)
+            GROUP BY s.id
+            ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
+            """
+            ,
+            ("webui",),
+        ).fetchall()
+        return [row["id"] for row in rows]
+    finally:
+        conn.close()
+
+
+def _execute_candidate_ordering_baseline_sql(db_path, candidate_limit, *, budget_ops):
+    def _on_progress():
+        nonlocal steps
+        steps += 1
+        return 1 if steps > budget_ops else 0
+
+    steps = 0
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
+    conn.set_progress_handler(_on_progress, 1)
+    try:
+        return conn.execute(
+            """
+            WITH candidates AS (
+                SELECT s.id
+                FROM sessions s
+                WHERE s.source IS NOT NULL AND s.source NOT IN (?)
+                ORDER BY COALESCE(
+                    (SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id),
+                    s.started_at
+                ) DESC,
+                s.started_at DESC
+                LIMIT ?
+            )
+            SELECT s.id
+            FROM sessions s
+            JOIN candidates c ON c.id = s.id
+            LEFT JOIN messages m ON m.session_id = s.id
+            GROUP BY s.id
+            ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
+            """
+        , ("webui", candidate_limit)).fetchall()
+    finally:
+        conn.close()
+
+
+def _make_connect_with_progress_budget(*, budget_ops, interval=1):
+    def _connect(database, *_, **__):
+        steps = {"count": 0}
+        database_uri = str(database)
+        if database_uri.startswith("file:"):
+            target_uri = database_uri
+        else:
+            target_uri = f"file:{database_uri}?mode=ro&immutable=1"
+
+        def _on_progress():
+            steps["count"] += 1
+            return 1 if steps["count"] > budget_ops else 0
+
+        conn = _REAL_SQLITE_CONNECT(
+            target_uri,
+            uri=True,
+        )
+        conn.set_progress_handler(_on_progress, interval)
+        return conn
+
+    return _connect
+
+
+def _make_connect_with_progress_counter(*, interval=1):
+    steps = {"count": 0}
+
+    def _connect(database, *_, **__):
+        database_uri = str(database)
+        if database_uri.startswith("file:"):
+            target_uri = database_uri
+        else:
+            target_uri = f"file:{database_uri}?mode=ro&immutable=1"
+
+        def _on_progress():
+            steps["count"] += 1
+            return 0
+
+        conn = _REAL_SQLITE_CONNECT(
+            target_uri,
+            uri=True,
+        )
+        conn.set_progress_handler(_on_progress, interval)
+        return conn
+
+    return _connect, steps
 
 
 def test_importable_agent_rows_push_sidebar_limit_into_sql(tmp_path):
@@ -71,8 +178,64 @@ def test_importable_agent_rows_push_sidebar_limit_into_sql(tmp_path):
     src = (REPO_ROOT / "api" / "agent_sessions.py").read_text()
     assert "WITH candidates AS" in src
     assert "JOIN candidates c ON c.id = s.id" in src
-    assert "SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id" in src
+    assert "latest_messages AS" in src
+    assert "MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id" not in src
     assert "candidate_limit = max(result_limit * 8, result_limit)" in src
+
+
+def test_importable_agent_rows_candidate_ordering_respects_progress_budget(tmp_path, monkeypatch):
+    """Correlated candidate ordering should fail under an old-shape budget, then pass after pre-aggregation."""
+    db = tmp_path / "state.db"
+    _make_state_db(
+        db,
+        sessions=120,
+        messages_per_session=120,
+        create_messages_index=False,
+    )
+    reference_ids = _newest_first_reference_ids(db)
+    candidate_limit = max(20 * 8, 20)
+
+    original_connect = agent_sessions.sqlite3.connect
+    connect_with_progress_counter, progress_counter = _make_connect_with_progress_counter(interval=1)
+    monkeypatch.setattr(agent_sessions.sqlite3, "connect", connect_with_progress_counter)
+    try:
+        measured_rows = agent_sessions.read_importable_agent_session_rows(
+            db,
+            limit=20,
+            exclude_sources=("webui",),
+        )
+        assert [row["id"] for row in measured_rows] == reference_ids[:20]
+    finally:
+        # Keep this helper isolated; the baseline must still run without the
+        # counting handler to validate raw cost differences.
+        monkeypatch.setattr(agent_sessions.sqlite3, "connect", original_connect)
+
+    # Give the head path a deterministic margin while preserving a strict cap
+    # that a single-pass candidate-ordering query can still satisfy.
+    progress_budget_ops = max(progress_counter["count"] + 2500, 1)
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        _execute_candidate_ordering_baseline_sql(
+            db,
+            candidate_limit,
+            budget_ops=progress_budget_ops,
+        )
+
+    monkeypatch.setattr(
+        agent_sessions.sqlite3,
+        "connect",
+        _make_connect_with_progress_budget(
+            budget_ops=progress_budget_ops,
+            interval=1,
+        ),
+    )
+
+    rows = agent_sessions.read_importable_agent_session_rows(
+        db,
+        limit=20,
+        exclude_sources=("webui",),
+    )
+    assert [row["id"] for row in rows] == reference_ids[:20]
 
 
 def test_importable_agent_rows_limit_includes_resumed_old_session(tmp_path):
