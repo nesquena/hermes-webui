@@ -233,5 +233,6 @@ class TestCancelledTurnPersistenceGuards:
         cancel_stream_block = src[cancel_stream_start:]
 
         assert "_cancel_event_payload('Cancelled by user', s)" not in worker_block
+        assert "_cancel_event_payload('Cancelled by user', session=" not in worker_block
         assert "None if ephemeral else s" not in worker_block
-        assert "_payload['session'] = _cancel_session_payload" in cancel_stream_block
+        assert "_cancel_event_payload('Cancelled by user', session=_cancel_session_payload)" in cancel_stream_block

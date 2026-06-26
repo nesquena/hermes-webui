@@ -104,13 +104,21 @@ def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) ->
         return None
 
 
-def _cancel_event_payload(message: str = "Cancelled by user") -> dict:
+def _cancel_event_payload(
+    message: str = "Cancelled by user",
+    *,
+    session: dict | None = None,
+) -> dict:
     """Return base cancel terminal event metadata."""
-    return {
+    payload = {
         'message': message,
         'type': 'cancelled',
         'status': 'cancelled',
     }
+    if session:
+        payload['session'] = session
+        payload['session_id'] = session.get('session_id')
+    return payload
 
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
@@ -9665,10 +9673,7 @@ def cancel_stream(stream_id: str) -> bool:
             except Exception:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
-            _payload = _cancel_event_payload('Cancelled by user')
-            if _cancel_session_payload:
-                _payload['session'] = _cancel_session_payload
-                _payload['session_id'] = _cancel_session_payload.get('session_id')
+            _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
             q.put_nowait(('cancel', _payload))
         except Exception:
             logger.debug("Failed to put cancel event to queue")
