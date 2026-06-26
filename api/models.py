@@ -4852,7 +4852,7 @@ def get_state_db_session_messages(
                 except (TypeError, ValueError):
                     since_ts = None
                 if since_ts is not None:
-                    since_clause = " AND timestamp >= ?"
+                    since_clause = " AND (timestamp IS NULL OR timestamp >= ?)"
                     params.append(since_ts)
             cur.execute(f"""
                 SELECT {', '.join(selected)}, session_id
@@ -4883,6 +4883,62 @@ def get_state_db_session_messages(
     except Exception:
         return []
     return msgs
+
+
+def count_state_db_session_messages_before_timestamp(
+    sid,
+    before_timestamp,
+    *,
+    profile=None,
+) -> int | None:
+    """Return the raw state.db row count before ``before_timestamp`` for ``sid``.
+
+    Missing timestamps are intentionally excluded because the bounded reader
+    keeps them with ``timestamp IS NULL OR timestamp >= ?``.  The caller uses
+    this as a conservative coordinate-space guard before taking the optimized
+    tail-read path.
+    """
+    try:
+        import sqlite3
+    except ImportError:
+        return None
+
+    if not sid:
+        return None
+    try:
+        before_ts = float(before_timestamp)
+    except (TypeError, ValueError):
+        return None
+
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        return 0
+
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'timestamp'}.issubset(available):
+                return None
+            cur.execute(
+                """
+                SELECT COUNT(*) AS message_count
+                FROM messages
+                WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
+                """,
+                (str(sid), before_ts),
+            )
+            row = cur.fetchone()
+            return max(0, int(row['message_count'] or 0)) if row else 0
+    except Exception:
+        return None
 
 
 def get_state_db_session_summary(sid, *, profile=None) -> dict:

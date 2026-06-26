@@ -6108,9 +6108,14 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, None
     if getattr(session, "truncation_watermark", None) not in (None, ""):
         return None, None
+    if getattr(session, "truncation_boundary", None) not in (None, ""):
+        return None, None
 
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
     if not sidecar_messages:
+        return None, sidecar_messages
+    sidecar_timestamps = [_message_timestamp_as_float(msg) for msg in sidecar_messages]
+    if any(ts is None for ts in sidecar_timestamps):
         return None, sidecar_messages
 
     try:
@@ -6121,15 +6126,16 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     if len(sidecar_messages) <= raw_budget:
         return None, sidecar_messages
 
-    tail = sidecar_messages[-raw_budget:]
-    timestamps = [
-        ts
-        for ts in (_message_timestamp_as_float(msg) for msg in tail)
-        if ts is not None
-    ]
-    if not timestamps:
+    floor = min(sidecar_timestamps[-raw_budget:])
+    sidecar_before_count = sum(1 for ts in sidecar_timestamps if ts < floor)
+    state_before_count = count_state_db_session_messages_before_timestamp(
+        getattr(session, "session_id", None),
+        floor,
+        profile=getattr(session, "profile", None) or None,
+    )
+    if state_before_count is None or state_before_count != sidecar_before_count:
         return None, sidecar_messages
-    return min(timestamps), sidecar_messages
+    return floor, sidecar_messages
 
 
 def _messages_start_with_visible_prefix(messages, prefix) -> bool:
@@ -6706,6 +6712,7 @@ from api.models import (
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
+    count_state_db_session_messages_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
     _enrich_sidebar_lineage_metadata,

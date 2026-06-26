@@ -228,6 +228,26 @@ def test_state_db_reader_can_filter_by_timestamp_floor(monkeypatch, tmp_path):
     assert [m["content"] for m in messages] == ["kept", "also kept"]
 
 
+def test_state_db_reader_since_timestamp_keeps_null_timestamp_rows(monkeypatch, tmp_path):
+    import api.models as models
+
+    sid = "webui_reconcile_since_null_001"
+    _install_test_session(monkeypatch, tmp_path, sid, [])
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "old", "timestamp": 10.0},
+            {"role": "assistant", "content": "null timestamp kept", "timestamp": None},
+            {"role": "assistant", "content": "kept", "timestamp": 20.0},
+        ],
+    )
+
+    messages = models.get_state_db_session_messages(sid, since_timestamp=20.0)
+
+    assert [m["content"] for m in messages] == ["null timestamp kept", "kept"]
+
+
 def test_limited_display_with_precomputed_sidecar_keeps_empty_state_db_guard(monkeypatch, tmp_path):
     import api.routes as routes
 
@@ -299,6 +319,146 @@ def test_msg_limit_session_load_reads_only_recent_state_db_tail(monkeypatch, tmp
     assert messages[0]["content"] == "sidecar 472"
     assert messages[-2]["content"] == "external user"
     assert messages[-1]["content"] == "external answer"
+
+
+def test_msg_limit_session_load_matches_full_read_with_null_state_db_timestamp(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_limited_tail_null"
+    sidecar_messages = [
+        {"role": "user", "content": f"sidecar {idx}", "timestamp": float(idx)}
+        for idx in range(500)
+    ]
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        sidecar_messages
+        + [
+            {
+                "role": "assistant",
+                "content": "state null timestamp only",
+                "timestamp": None,
+            },
+        ],
+    )
+
+    real_reader = routes.get_state_db_session_messages
+    full_state_messages = real_reader(sid)
+    full_all_messages = routes._limited_webui_messages_for_display(
+        session,
+        full_state_messages,
+    )
+    expected_window, expected_offset = routes._message_window_for_display(
+        full_all_messages,
+        msg_limit=30,
+    )
+    captured = {}
+
+    def wrapped_reader(*args, **kwargs):
+        captured["since_timestamp"] = kwargs.get("since_timestamp")
+        messages = real_reader(*args, **kwargs)
+        captured["row_count"] = len(messages)
+        return messages
+
+    monkeypatch.setattr(routes, "get_state_db_session_messages", wrapped_reader)
+
+    handler = _GetHandler(
+        f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert captured["since_timestamp"] == 200.0
+    assert captured["row_count"] == 301
+    session_payload = handler.response_json["session"]
+    assert session_payload["messages"] == expected_window
+    assert session_payload["message_count"] == len(full_all_messages)
+    assert session_payload["_messages_offset"] == expected_offset
+
+
+def test_msg_limit_session_load_bails_when_older_state_db_row_changes_offsets(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_limited_tail_offset_bail"
+    sidecar_messages = [
+        {"role": "user", "content": f"sidecar {idx}", "timestamp": float(idx)}
+        for idx in range(500)
+    ]
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        sidecar_messages
+        + [
+            {
+                "role": "assistant",
+                "content": "state older than floor only",
+                "timestamp": 199.5,
+            },
+        ],
+    )
+
+    real_reader = routes.get_state_db_session_messages
+    full_state_messages = real_reader(sid)
+    full_all_messages = routes._limited_webui_messages_for_display(
+        session,
+        full_state_messages,
+    )
+    expected_window, expected_offset = routes._message_window_for_display(
+        full_all_messages,
+        msg_limit=30,
+    )
+    captured = {}
+
+    def wrapped_reader(*args, **kwargs):
+        captured["since_timestamp"] = kwargs.get("since_timestamp")
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "get_state_db_session_messages", wrapped_reader)
+
+    handler = _GetHandler(
+        f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert captured["since_timestamp"] is None
+    session_payload = handler.response_json["session"]
+    assert session_payload["messages"] == expected_window
+    assert session_payload["message_count"] == len(full_all_messages)
+    assert session_payload["_messages_offset"] == expected_offset
+
+
+def test_msg_limit_session_load_bails_when_truncation_boundary_is_set(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_limited_tail_boundary"
+    sidecar_messages = [
+        {"role": "user", "content": f"sidecar {idx}", "timestamp": float(idx)}
+        for idx in range(500)
+    ]
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    session.truncation_boundary = 250.0
+    session.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", sid, sidecar_messages)
+
+    real_reader = routes.get_state_db_session_messages
+    captured = {}
+
+    def wrapped_reader(*args, **kwargs):
+        captured["since_timestamp"] = kwargs.get("since_timestamp")
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "get_state_db_session_messages", wrapped_reader)
+
+    handler = _GetHandler(
+        f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert captured["since_timestamp"] is None
 
 
 def test_msg_before_session_load_keeps_full_state_db_reader(monkeypatch, tmp_path):
