@@ -464,6 +464,92 @@ function enhanceMarkdownTables(root){
   });
 }
 
+function _sanitizeMarkdownTableCellText(cell){
+  if(!cell) return '';
+  const sortButton=cell.querySelector?cell.querySelector('.markdown-table-sort'):null;
+  if(sortButton){
+    const sortLabel=sortButton.querySelector?sortButton.querySelector('.markdown-table-sort-label'):null;
+    if(sortLabel) return _markdownTableCellText(sortLabel);
+    return _markdownTableCellText(sortButton);
+  }
+  return _markdownTableCellText(cell);
+}
+
+function _markdownTableCopyHtmlEscape(value){
+  return String(value||'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+
+function _markdownTableCopyPayloadForTable(table){
+  if(!table||!table.rows) return null;
+  const rows=Array.from(table.rows||[]);
+  if(!rows.length) return null;
+
+  const htmlRows=rows.map((row)=>{
+    const cellTag=(cell)=>String(cell&&cell.tagName?cell.tagName.toLowerCase():'td');
+    const cells=Array.from(row.cells||[])
+      .filter((cell)=>cell&&cell.nodeType===1 || cell&&cell.nodeType===3)
+      .map((cell)=>{
+        const tag=cellTag(cell);
+        const text=_sanitizeMarkdownTableCellText(cell);
+        return `<${tag}>${_markdownTableCopyHtmlEscape(text)}</${tag}>`;
+      })
+      .join('');
+    return `<tr>${cells}</tr>`;
+  }).join('');
+
+  const plainRows=rows.map((row)=>{
+    return Array.from(row.cells||[])
+      .map(_sanitizeMarkdownTableCellText)
+      .join('\t');
+  }).join('\n');
+
+  return {html:`<table>${htmlRows}</table>`, plain:plainRows};
+}
+
+function _findEnhancedMarkdownTable(node){
+  let current=node&&node.nodeType===3?node.parentElement:node;
+  while(current){
+    if(current.matches&&current.matches('table[data-markdown-table-enhanced]')) return current;
+    current=current.parentElement||current.parentNode;
+  }
+  return null;
+}
+
+function _findEnhancedMarkdownTableFromRange(range){
+  if(!range) return null;
+  const found=_findEnhancedMarkdownTable(range.startContainer)
+    || _findEnhancedMarkdownTable(range.endContainer)
+    || _findEnhancedMarkdownTable(range.commonAncestorContainer);
+  return found;
+}
+
+function _handleMarkdownTableCopy(event){
+  if(!event) return;
+  if(!window.getSelection)return;
+  const selection=window.getSelection();
+  if(!selection||selection.isCollapsed||!selection.rangeCount) return;
+  const range=selection.getRangeAt(0);
+  if(!range) return;
+  const table=_findEnhancedMarkdownTableFromRange(range);
+  if(!table||!table.matches||!table.matches('table[data-markdown-table-enhanced]')) return;
+  const payload=_markdownTableCopyPayloadForTable(table);
+  if(!payload) return;
+  if(typeof event.preventDefault==='function') event.preventDefault();
+  const clipboardData=event.clipboardData||event.originalEvent&&event.originalEvent.clipboardData;
+  if(!clipboardData||typeof clipboardData.setData!=='function') return;
+  clipboardData.setData('text/html', payload.html);
+  clipboardData.setData('text/plain', payload.plain);
+}
+
+function _wireMarkdownTableCopyHandler(root){
+  if(!root||!root.addEventListener||root.__markdownTableCopyHandlerInstalled) return;
+  root.addEventListener('copy', _handleMarkdownTableCopy);
+  root.__markdownTableCopyHandlerInstalled=true;
+}
+
 function _markdownTableText(value){
   return String(value||'').replace(/\s+/g,' ').trim();
 }
@@ -481,6 +567,7 @@ window.enhanceMarkdownTables=enhanceMarkdownTables;
     const result=baseRenderMessages.apply(this,args);
     const inner=typeof $==='function'?$('msgInner'):document.getElementById('msgInner');
     enhanceMarkdownTables(inner);
+    _wireMarkdownTableCopyHandler(inner);
     return result;
   };
   window.renderMessages._markdownTablesEnhanced=true;
