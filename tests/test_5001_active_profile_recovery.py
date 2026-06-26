@@ -93,13 +93,7 @@ eval(extractFunction(bootSrc, '_resolveActiveProfileBootstrapState'));
 
   for (const attempt of attempts) {
     const state = await _resolveActiveProfileBootstrapState({
-      loadActiveProfile: makeAttempt(
-        attempt,
-        storage,
-        markerKey,
-        redirectUrls,
-        attempt.nextUrl || '/'
-      ),
+      loadActiveProfile: makeAttempt(attempt),
       markerStorage: storage,
       markerKey,
       getNextUrl: () => attempt.nextUrl || '/',
@@ -160,8 +154,8 @@ def test_active_profile_boot_recovery_is_one_shot_and_bounded(driver_path):
         {
             "markerKey": "test-5001-active-profile-recovery",
             "attempts": [
-                {"type": "error", "status": 401, "nextUrl": "/"},
-                {"type": "error", "status": 401, "nextUrl": "/"},
+                {"type": "undefined", "nextUrl": "/"},
+                {"type": "undefined", "nextUrl": "/"},
             ],
         },
     )
@@ -174,6 +168,28 @@ def test_active_profile_boot_recovery_is_one_shot_and_bounded(driver_path):
     assert payload["redirects"] == ["login?next=%2F"]
     assert payload["storageHistory"][0].get("test-5001-active-profile-recovery") == "1"
     assert payload["storageHistory"][1].get("test-5001-active-profile-recovery") is None
+    assert payload["storageSnapshot"] == {}
+
+
+def test_active_profile_boot_recovery_handles_loader_thrown_401s(driver_path):
+    payload = _run_boot_profile_scenario(
+        driver_path,
+        {
+            "markerKey": "test-5001-active-profile-recovery-throws",
+            "attempts": [
+                {"type": "error", "status": 401, "nextUrl": "/"},
+                {"type": "error", "status": 401, "nextUrl": "/"},
+            ],
+        },
+    )
+
+    assert payload["attempts"][0]["status"] == "recovery-redirect"
+    assert payload["attempts"][1]["status"] == "fallback"
+    assert payload["attempts"][1]["profile"] == "default"
+    assert payload["attempts"][1]["isDefault"] is True
+    assert payload["redirects"] == ["login?next=%2F"]
+    assert payload["storageHistory"][0].get("test-5001-active-profile-recovery-throws") == "1"
+    assert payload["storageHistory"][1].get("test-5001-active-profile-recovery-throws") is None
     assert payload["storageSnapshot"] == {}
 
 

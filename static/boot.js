@@ -2319,6 +2319,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
+  applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';

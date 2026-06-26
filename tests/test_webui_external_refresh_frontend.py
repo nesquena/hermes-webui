@@ -78,7 +78,8 @@ def test_session_event_profile_filter_tolerates_default_root_aliases():
     assert "function _sessionEventProfilesMatch(eventProfile, activeProfile)" in SESSIONS_JS
     assert "if (!_profileMatchesActiveProfile(sessionProfile, activeProfile)) return false;" in SESSIONS_JS
     assert "activeProfileIsDefault:true" in UI_JS
-    assert "S.activeProfileIsDefault=!!p.is_default;" in BOOT_JS
+    assert "const activeProfileState = await _resolveActiveProfileBootstrapState();" in BOOT_JS
+    assert "S.activeProfileIsDefault = activeProfileState.isDefault;" in BOOT_JS
     assert "S.activeProfileIsDefault = !!data.is_default;" in PANELS_JS
 
 
