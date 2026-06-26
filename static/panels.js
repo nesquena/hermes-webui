@@ -894,9 +894,14 @@ async function _loadRunContent(jobId, filename, runId){
     const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
     const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
     body.classList.toggle('expanded', expanded);
-    // Render markdown content using the same renderer as chat messages
+    // Render markdown content using the same renderer as chat messages.
+    // Wrap raw output in triple backticks so JSON, logs, and structured text
+    // render as a code block with preserved whitespace and formatting.
+    const renderContent = output.trim();
+    const needsCodeWrap = !renderContent.startsWith('#') && !renderContent.startsWith('|') && !renderContent.startsWith('>') && !renderContent.startsWith('```');
+    const wrapped = needsCodeWrap ? '```\n' + renderContent + '\n```' : renderContent;
     if (typeof renderMd === 'function') {
-      body.innerHTML = renderMd(output);
+      body.innerHTML = renderMd(wrapped);
     } else {
       body.textContent = output;
     }
@@ -915,7 +920,10 @@ async function _loadRunContent(jobId, filename, runId){
       btn.onclick = () => {
         _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
         body.classList.add('expanded');
-        body.innerHTML = renderMd ? renderMd(data.content) : data.content;
+        const fullContent = (data.content || '').trim();
+        const needsCode = !fullContent.startsWith('#') && !fullContent.startsWith('|') && !fullContent.startsWith('>') && !fullContent.startsWith('```');
+        const wrapped = needsCode ? '```\n' + fullContent + '\n```' : fullContent;
+        body.innerHTML = renderMd ? renderMd(wrapped) : data.content;
         btn.remove();
       };
       body.appendChild(btn);
