@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.667] — 2026-06-26 — Release XW (compaction markers stay internal; code-shaped tool output stays intact)
+
+### Fixed
+
+- **Internal compaction/reference markers no longer leak into the visible transcript as a fake user turn, and code-shaped tool output is no longer mangled by redaction.** Two correctness bugs in long sessions (#4821): (1) synthetic compaction/reference markers could re-enter a restored/searched/displayed session as a `role:user` turn, so the agent acted on fake user intent — now filtered out of the visible merge and canonicalized to a single internal assistant reference in the context merge; a genuine user message whose text merely starts with "context compaction" is no longer misclassified as a marker. (2) The env-secret redaction's value pattern had been narrowed in a way that could mangle code-shaped strings; it now keeps a broad capture (no secret-tail leak through `,;)]'"`) while preserving real code env-key literals that carry no secret. Thanks @franksong2702. (#4823, fixes #4821)
+
 ## [v0.51.666] — 2026-06-25 — Release XV (command approvals work again on the local backend)
 
 ### Fixed

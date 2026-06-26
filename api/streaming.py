@@ -3788,12 +3788,28 @@ def _deduplicate_context_messages(messages):
 
     Prevents the agent from seeing the same message twice in conversation_history
     when result_messages contain duplicates that weren't caught by display-merge.
+    Compression/reference markers are internal recovery material: keep at most
+    one canonical assistant reference so a mis-role ``user`` marker cannot become
+    the next active user instruction.
     """
     if not messages:
         return messages
     seen = set()
     deduped = []
     for msg in messages:
+        if _is_context_compression_marker(msg):
+            marker_key = (
+                '__context_compression_marker__',
+                " ".join(_message_text(msg.get('content', '')).split())[:500],
+            )
+            if marker_key in seen:
+                continue
+            seen.add(marker_key)
+            if isinstance(msg, dict) and msg.get('role') != 'assistant':
+                msg = copy.deepcopy(msg)
+                msg['role'] = 'assistant'
+            deduped.append(msg)
+            continue
         key = _message_identity(msg)
         if key is not None and key in seen:
             continue
@@ -4602,9 +4618,13 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     If Hermes Agent returns a normal append-only history, append that delta to
     the UI transcript. If the model/context history was compacted and no longer
     has the prior context as a prefix, keep the previous UI transcript and append
-    only compaction marker messages plus the current user turn onward.
+    the current user turn onward. Synthetic compaction/reference markers remain
+    internal recovery material and must not become visible user/assistant turns.
     """
-    previous_display = list(previous_display or [])
+    previous_display = [
+        m for m in list(previous_display or [])
+        if not _is_context_compression_marker(m)
+    ]
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -4750,10 +4770,6 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
-        marker_candidates = [
-            m for m in result_messages[:current_user_idx if current_user_idx is not None else len(result_messages)]
-            if _is_context_compression_marker(m)
-        ]
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
         # Normalize stale merges only in the current-turn slice.
         if msg_text and previous_user_tail:
@@ -4763,7 +4779,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                 previous_user_tail,
                 previous_context=previous_context,
             )
-        candidates = marker_candidates + turn_candidates
+        candidates = turn_candidates
 
     merged = previous_display[:]
     seen = {_message_identity(m) for m in merged}
@@ -4803,6 +4819,8 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         candidates = candidates[:insert_at] + [current_user_msg] + candidates[insert_at:]
 
     for msg in candidates:
+        if _is_context_compression_marker(msg):
+            continue
         key = _message_identity(msg)
         is_current_user_turn = _looks_like_current_user_turn(msg, msg_text)
         if (

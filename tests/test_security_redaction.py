@@ -261,6 +261,98 @@ def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
         importlib.reload(helpers)
 
 
+def test_redaction_preserves_secret_key_literals_in_code_without_values():
+    import api.helpers as helpers
+
+    key = "DISCORD" + "_BOT" + "_TOKEN"
+    snippet = (
+        f'if line.startswith("{key}="):\n'
+        '    return line.split("=", 1)[1].strip()'
+    )
+
+    assert helpers._redact_value(snippet) == snippet
+
+
+def test_redaction_masks_authorization_bot_value_without_breaking_code_structure():
+    import ast
+    import api.helpers as helpers
+
+    token = "M" + ("T" * 40) + ".abc123"
+    snippet = (
+        'headers = ["-H", '
+        f'f"Authorization: Bot {token}", '
+        '"-H", "User-Agent: HermesBot/1.0"]'
+    )
+
+    redacted = helpers._redact_value(snippet)
+
+    assert token not in redacted
+    assert 'f"Authorization: Bot ' in redacted
+    assert '", "-H", "User-Agent: HermesBot/1.0"]' in redacted
+    ast.parse(redacted)
+
+
+def _reload_helpers_with_fallback_redactor(monkeypatch):
+    fake_agent = types.ModuleType("agent")
+    fake_redact = types.ModuleType("agent.redact")
+    monkeypatch.setitem(sys.modules, "agent", fake_agent)
+    monkeypatch.setitem(sys.modules, "agent.redact", fake_redact)
+
+    import api.helpers as helpers
+    return importlib.reload(helpers)
+
+
+@pytest.mark.parametrize("text,leaked", [
+    ("API_KEY=val,with,commas", "val,with,commas"),
+    ('TOKEN="quoted"', "quoted"),
+    ("PASSWORD=ends)", "ends)"),
+])
+def test_fallback_env_redaction_masks_values_with_delimiters(monkeypatch, text, leaked):
+    helpers = _reload_helpers_with_fallback_redactor(monkeypatch)
+    try:
+        redacted = helpers._redact_value(text)
+        assert leaked not in redacted
+        assert "..." in redacted or "***" in redacted
+    finally:
+        importlib.reload(helpers)
+
+
+def test_agent_redaction_restore_is_occurrence_aware_for_code_key_literals(monkeypatch):
+    key = "DISCORD" + "_BOT" + "_TOKEN"
+    secret = "real-secret-value-123456789"
+    mask = "real-s...6789"
+    original = (
+        f"env line: {key}={secret}\n"
+        f'if line.startswith("{key}="):\n'
+        "    return True"
+    )
+
+    fake_agent = types.ModuleType("agent")
+    fake_redact = types.ModuleType("agent.redact")
+
+    def _fake_redact_sensitive_text(text, force=True):
+        assert force is True
+        return (
+            text
+            .replace(f"{key}={secret}", f"{key}={mask}")
+            .replace(f'{key}="):', f"{key}={mask}")
+        )
+
+    fake_redact.redact_sensitive_text = _fake_redact_sensitive_text
+    monkeypatch.setitem(sys.modules, "agent", fake_agent)
+    monkeypatch.setitem(sys.modules, "agent.redact", fake_redact)
+
+    import api.helpers as helpers
+    helpers = importlib.reload(helpers)
+    try:
+        redacted = helpers._redact_value(original)
+        assert secret not in redacted
+        assert f'if line.startswith("{key}="):' in redacted
+        assert f"env line: {key}=\"):" not in redacted
+    finally:
+        importlib.reload(helpers)
+
+
 def test_redact_session_data_messages():
     """redact_session_data masks credentials in messages[]."""
     from api.helpers import redact_session_data
