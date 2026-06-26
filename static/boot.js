@@ -1516,6 +1516,36 @@ $('btnExportJSON').onclick=()=>{
   const a=document.createElement('a');a.href=url;
   a.download=`hermes-${S.session.session_id}.json`;a.click();
 };
+function exportSessionHTML(){
+  if(!S.session)return;
+  const theme=document.documentElement.classList.contains('dark')?'dark':'light';
+  // Capture the live WebUI palette so the export matches the user's active
+  // theme + skin exactly, not just the built-in dark/light fallback. Map each
+  // export-template variable to its WebUI source; getComputedStyle resolves to
+  // the currently rendered colour regardless of which skin is selected.
+  const cs=getComputedStyle(document.documentElement);
+  const read=(...names)=>{for(const n of names){const v=cs.getPropertyValue(n).trim();if(v)return v;}return '';};
+  const palette={
+    'bg':read('--bg'),
+    'panel':read('--surface','--bg'),
+    'panel2':read('--code-bg','--surface'),
+    'border':read('--border'),
+    'text':read('--text'),
+    'muted':read('--muted','--text'),
+    'accent':read('--accent'),
+    'code-bg':read('--code-bg'),
+    'code-border':read('--border2','--border'),
+    'code-text':read('--text'),
+  };
+  // Drop empties so the inlined fallback keeps working for anything we couldn't read.
+  const clean={};for(const k in palette){if(palette[k])clean[k]=palette[k];}
+  const paletteB64=btoa(unescape(encodeURIComponent(JSON.stringify(clean))));
+  const url=`/api/session/export?session_id=${encodeURIComponent(S.session.session_id)}&format=html&theme=${theme}&palette=${encodeURIComponent(paletteB64)}`;
+  const a=document.createElement('a');a.href=url;
+  a.download=`hermes-${S.session.session_id}.html`;a.click();
+}
+$('btnExportHTML').onclick=exportSessionHTML;
+if($('btnExportHTMLComposer'))$('btnExportHTMLComposer').onclick=exportSessionHTML;
 $('btnImportJSON').onclick=()=>$('importFileInput').click();
 $('importFileInput').onchange=async(e)=>{
   const file=e.target.files[0];
