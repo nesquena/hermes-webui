@@ -865,21 +865,6 @@ async function _loadCronDetailRuns(jobId){
   } catch(e) { /* ignore */ }
 }
 
-function _wrapCronOutput(text){
-  const trimmed = (text || '').trim();
-  if (!trimmed) return '';
-  // If content starts with a common markdown block marker, render as-is.
-  // Otherwise wrap in triple backticks so JSON, logs, and structured text
-  // render as a <pre><code> block with preserved whitespace.
-  const isMarkdown =
-    trimmed.startsWith('#') || trimmed.startsWith('|') ||
-    trimmed.startsWith('>') || trimmed.startsWith('```') ||
-    trimmed.startsWith('~~~') || trimmed.startsWith('-') ||
-    trimmed.startsWith('*') || trimmed.startsWith('_') ||
-    trimmed.startsWith('[');
-  return isMarkdown ? trimmed : '```\n' + trimmed + '\n```';
-}
-
 async function _loadRunContent(jobId, filename, runId){
   const body = document.querySelector(`#${runId} .detail-run-body`);
   if (!body) return;
@@ -909,12 +894,17 @@ async function _loadRunContent(jobId, filename, runId){
     const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
     const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
     body.classList.toggle('expanded', expanded);
-    const wrapped = _wrapCronOutput(output);
-    if (typeof renderMd === 'function') {
-      body.innerHTML = renderMd(wrapped);
-    } else {
-      body.textContent = output;
-    }
+    // Cron run output is never authored Markdown — render as literal
+    // preformatted text using DOM-created <pre><code> so all content
+    // (including shapes starting with #, |, >, ``` and embedded fences)
+    // renders verbatim without Markdown interpretation.
+    body.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.className = 'cron-run-pre';
+    const code = document.createElement('code');
+    code.textContent = output;
+    pre.appendChild(code);
+    body.appendChild(pre);
     const usageStrip = _formatCronRunUsageStrip(data.usage);
     if (usageStrip) {
       const usage = document.createElement('div');
@@ -930,7 +920,20 @@ async function _loadRunContent(jobId, filename, runId){
       btn.onclick = () => {
         _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
         body.classList.add('expanded');
-        body.innerHTML = renderMd ? renderMd(_wrapCronOutput(data.content)) : data.content;
+        body.innerHTML = '';
+        const pre = document.createElement('pre');
+        pre.className = 'cron-run-pre';
+        const code = document.createElement('code');
+        code.textContent = data.content || '';
+        pre.appendChild(code);
+        body.appendChild(pre);
+        const usageStrip = _formatCronRunUsageStrip(data.usage);
+        if (usageStrip) {
+          const usage = document.createElement('div');
+          usage.className = 'cron-run-usage-strip cron-run-usage-footer';
+          usage.textContent = usageStrip;
+          body.appendChild(usage);
+        }
         btn.remove();
       };
       body.appendChild(btn);
