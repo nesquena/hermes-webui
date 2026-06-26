@@ -6872,19 +6872,24 @@ def _pre_compression_continuation_session_id(session) -> str | None:
                 ) or 0
             ),
         )
-        latest_sid = _row_value(latest, "session_id", None) or None
+        latest_sid = _safe_first(_row_value(latest, "session_id", None)) or None
         # Only hand the client a well-formed session id (it gets written to URL/localStorage).
         if latest_sid and not is_safe_session_id(latest_sid):
             return None
         return latest_sid
 
-    seen_ids: set[str] = set()
-    rows = _child_rows_from_memory(seen_ids)
-    index_rows = _child_rows_from_index(seen_ids)
+    memory_seen_ids: set[str] = set()
+    rows = _child_rows_from_memory(memory_seen_ids)
+    index_seen_ids = set(memory_seen_ids)
+    index_rows = _child_rows_from_index(index_seen_ids)
     if index_rows is not None:
-        return _resolve_from_rows(rows + index_rows)
+        indexed_result = _resolve_from_rows(rows + index_rows)
+        if indexed_result:
+            return indexed_result
+        rows.extend(_child_rows_from_sidecars(set(memory_seen_ids)))
+        return _resolve_from_rows(rows)
 
-    rows.extend(_child_rows_from_sidecars(seen_ids))
+    rows.extend(_child_rows_from_sidecars(memory_seen_ids))
     return _resolve_from_rows(rows)
 
 from api.workspace import (

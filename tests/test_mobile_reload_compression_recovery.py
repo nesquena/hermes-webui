@@ -9,6 +9,19 @@ ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = ROOT / "static" / "sessions.js"
 
 
+def _write_sidecar(session_dir: Path, sid: str, **overrides):
+    payload = {
+        "session_id": sid,
+        "title": sid,
+        "created_at": 100.0,
+        "updated_at": 100.0,
+        "profile": "work",
+        "messages": [],
+    }
+    payload.update(overrides)
+    (session_dir / f"{sid}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
 def _function_block(source: str, marker: str) -> str:
     start = source.index(marker)
     brace = source.index("{", start)
@@ -87,7 +100,7 @@ def test_continuation_lookup_is_profile_scoped(tmp_path, monkeypatch):
 
 def test_continuation_lookup_uses_index_without_scanning_sidecars(tmp_path, monkeypatch):
     """Indexed continuation metadata should avoid an O(all sidecars) recovery scan."""
-    from api import routes, config
+    from api import routes, config, models
 
     class _S:
         def __init__(self, sid, profile, snap=False):
@@ -120,6 +133,7 @@ def test_continuation_lookup_uses_index_without_scanning_sidecars(tmp_path, monk
     )
 
     monkeypatch.setattr(config, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path, raising=False)
     monkeypatch.setattr(routes, "SESSION_DIR", tmp_path, raising=False)
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file, raising=False)
     monkeypatch.setattr(routes, "SESSIONS", collections.OrderedDict(), raising=False)
@@ -132,9 +146,99 @@ def test_continuation_lookup_uses_index_without_scanning_sidecars(tmp_path, monk
     assert routes._pre_compression_continuation_session_id(snapshot) == "childindex01"
 
 
+def test_empty_indexed_continuation_lookup_falls_back_to_sidecars(tmp_path, monkeypatch):
+    """A valid but stale/empty index must not suppress durable sidecar recovery."""
+    from api import routes, config
+
+    class _S:
+        def __init__(self, sid, profile, parent=None, snap=False, updated=100.0):
+            self.session_id = sid
+            self.profile = profile
+            self.parent_session_id = parent
+            self.pre_compression_snapshot = snap
+            self.updated_at = updated
+            self.created_at = updated
+
+    snapshot = _S("snapempty001", "work", snap=True)
+    index_file = tmp_path / "_index.json"
+    index_file.write_text("[]", encoding="utf-8")
+    (tmp_path / "childempty01.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(routes, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file, raising=False)
+    monkeypatch.setattr(routes, "SESSIONS", collections.OrderedDict(), raising=False)
+    loaded = []
+    monkeypatch.setattr(
+        routes.Session,
+        "load_metadata_only",
+        staticmethod(
+            lambda sid: loaded.append(sid)
+            or _S("childempty01", "work", parent="snapempty001", updated=300.0)
+        ),
+    )
+
+    assert routes._pre_compression_continuation_session_id(snapshot) == "childempty01"
+    assert loaded == ["childempty01"]
+
+
+def test_indexed_continuation_lookup_follows_snapshot_hops_without_scanning(tmp_path, monkeypatch):
+    """Repeated compression can resolve through index-backed snapshot descendants."""
+    from api import routes, config
+
+    class _S:
+        def __init__(self, sid, profile, snap=False):
+            self.session_id = sid
+            self.profile = profile
+            self.parent_session_id = None
+            self.pre_compression_snapshot = snap
+            self.updated_at = 100.0
+            self.created_at = 100.0
+
+    snapshot = _S("snapindex003", "work", snap=True)
+    index_file = tmp_path / "_index.json"
+    _write_sidecar(tmp_path, "midindex001")
+    _write_sidecar(tmp_path, "finalindex1")
+    index_file.write_text(
+        json.dumps(
+            [
+                {
+                    "session_id": "midindex001",
+                    "profile": "work",
+                    "parent_session_id": "snapindex003",
+                    "pre_compression_snapshot": True,
+                    "updated_at": 200.0,
+                    "created_at": 150.0,
+                },
+                {
+                    "session_id": "finalindex1",
+                    "profile": "work",
+                    "parent_session_id": "midindex001",
+                    "pre_compression_snapshot": False,
+                    "updated_at": 300.0,
+                    "created_at": 250.0,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(routes, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file, raising=False)
+    monkeypatch.setattr(routes, "SESSIONS", collections.OrderedDict(), raising=False)
+    monkeypatch.setattr(
+        routes.Session,
+        "load_metadata_only",
+        staticmethod(lambda _sid: (_ for _ in ()).throw(AssertionError("must not scan sidecars"))),
+    )
+
+    assert routes._pre_compression_continuation_session_id(snapshot) == "finalindex1"
+
+
 def test_indexed_continuation_lookup_keeps_profile_scope(tmp_path, monkeypatch):
     """The index fast path must preserve the cross-profile continuation guard."""
-    from api import routes, config
+    from api import routes, config, models
 
     class _S:
         def __init__(self, sid, profile, snap=False):
@@ -147,7 +251,14 @@ def test_indexed_continuation_lookup_keeps_profile_scope(tmp_path, monkeypatch):
 
     snapshot = _S("snapindex002", "work", snap=True)
     index_file = tmp_path / "_index.json"
-    (tmp_path / "foreignidx01.json").write_text("{}", encoding="utf-8")
+    _write_sidecar(
+        tmp_path,
+        "foreignidx01",
+        profile="personal",
+        parent_session_id="snapindex002",
+        updated_at=300.0,
+        created_at=200.0,
+    )
     index_file.write_text(
         json.dumps(
             [
@@ -164,13 +275,9 @@ def test_indexed_continuation_lookup_keeps_profile_scope(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(config, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path, raising=False)
     monkeypatch.setattr(routes, "SESSION_DIR", tmp_path, raising=False)
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file, raising=False)
     monkeypatch.setattr(routes, "SESSIONS", collections.OrderedDict(), raising=False)
-    monkeypatch.setattr(
-        routes.Session,
-        "load_metadata_only",
-        staticmethod(lambda _sid: (_ for _ in ()).throw(AssertionError("must not scan sidecars"))),
-    )
 
     assert routes._pre_compression_continuation_session_id(snapshot) is None
