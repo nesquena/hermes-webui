@@ -4816,6 +4816,7 @@ def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
     source_filter = _normalize_cli_session_source_filter(source_filter)
     if all_profiles:
         contexts, context_cache_key = _all_profiles_cli_contexts()
+        db_path = "all profiles"
         # #4842: freeze the volatile per-profile state.db component while
         # streaming so a streamed message row in one profile doesn't bust the
         # all-profiles CLI cache and re-run every profile's heavy projection.
