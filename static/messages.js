@@ -2653,7 +2653,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(onlyRow&&!usedRows.has(onlyRow)&&_anchorSceneToolRowsCanNameMatch(onlyRow,incomingRow)) return onlyRow;
     }
     const availableRows=contentToolRows.filter(row=>row&&!usedRows.has(row));
-    if(availableRows.length===1&&Number(incomingTotal)===1&&_anchorSceneToolRowsCanNameMatch(availableRows[0],incomingRow)) return availableRows[0];
+    if(availableRows.length===1){
+      if(Number(incomingTotal)===1&&_anchorSceneToolRowsCanNameMatch(availableRows[0],incomingRow)) return availableRows[0];
+      if(
+        _anchorSceneToolRowsHaveCompatibleNames(availableRows[0],incomingRow)&&
+        _anchorSceneToolRowsHaveCompatibleInvocation(availableRows[0],incomingRow)
+      ) return availableRows[0];
+    }
     const reusableRows=contentToolRows.filter(row=>row&&usedRows.has(row));
     if(
       reusableRows.length===1&&

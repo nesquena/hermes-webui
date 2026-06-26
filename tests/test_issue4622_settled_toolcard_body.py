@@ -464,6 +464,49 @@ def test_remaining_same_name_content_tool_does_not_name_merge_after_exact_match(
     assert by_tid["message-b"]["snippet"] == "OUTPUT B"
 
 
+def test_remaining_matching_content_tool_merges_after_exact_match(driver_path):
+    """After an exact match, one remaining row may merge with matching invocation evidence."""
+    messages = [
+        {"role": "user", "content": "inspect twice"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-b",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "pwd"},
+                },
+                "Done.",
+            ],
+            "tool_calls": [
+                {"id": "content-a", "name": "terminal", "args": {"cmd": "ls"}, "snippet": "OUTPUT A"},
+                {"id": "message-b", "name": "terminal", "args": {"cmd": "pwd"}, "snippet": "OUTPUT B"},
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {"messages": messages, "turnStart": 0, "lastAsstIndex": 2, "S": {"toolCalls": []}},
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["snippet"] == "OUTPUT A"
+    assert by_tid["content-b"]["snippet"] == "OUTPUT B"
+    assert "message-b" not in by_tid
+    assert len([card for card in cards if card["name"] == "terminal"]) == 2
+
+
 def test_consumed_singleton_content_tool_keeps_distinct_live_invocation(driver_path):
     """A row consumed by message.tool_calls must not hide a later distinct live call."""
     messages = [

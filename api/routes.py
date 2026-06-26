@@ -3875,9 +3875,14 @@ def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, in
     available_indexes = [
         index for index in content_tool_indexes if index not in used_indexes and 0 <= index < len(rows)
     ]
-    if len(available_indexes) == 1 and incoming_total == 1:
+    if len(available_indexes) == 1:
         index = available_indexes[0]
-        if _anchor_scene_tool_rows_can_name_match(rows[index], incoming_row):
+        if incoming_total == 1 and _anchor_scene_tool_rows_can_name_match(rows[index], incoming_row):
+            return index
+        if _anchor_scene_tool_rows_have_compatible_names(
+            rows[index],
+            incoming_row,
+        ) and _anchor_scene_tool_rows_have_compatible_invocation(rows[index], incoming_row):
             return index
     reusable_indexes = [
         index for index in content_tool_indexes if index in used_indexes and 0 <= index < len(rows)
