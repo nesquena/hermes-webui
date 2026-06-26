@@ -7,6 +7,12 @@
 
 - **Extension gallery post-install guidance now stays localized in non-English UI languages.** The new next-step card labels, local-component fallback, requirement chips, setup-guide link text, restart-required toast, and install follow-up toast no longer appear as English placeholders in translated locale bundles. (#4964)
 
+## [v0.51.679] — 2026-06-26 — Release YI (faster fresh sidebar boot — parallel session/project fetches)
+
+### Fixed
+
+- **Opening a fresh tab / cold sidebar boot is faster.** The boot sequence fetched the session list (`/api/sessions`) and the project list (`/api/projects`) one after the other; the two are independent reads, so they now run concurrently — the project fetch is kicked off immediately and awaited after the session fetch. Error handling is unchanged: a failing project fetch still falls back to the cached project list without dropping the session list, and the session-fetch error/timeout path is untouched. Thanks @rodboev. (#4992, fixes #4759)
+
 ## [v0.51.678] — 2026-06-26 — Release YH (the chat no longer jumps to the bottom right after a reply renders)
 
 ### Fixed
