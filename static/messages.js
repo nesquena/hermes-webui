@@ -486,11 +486,17 @@ function _markdownTableCopyPayloadForTable(table){
   if(!table||!table.rows) return null;
   const rows=Array.from(table.rows||[]);
   if(!rows.length) return null;
+  let headerRowCount=0;
+  while(headerRowCount<rows.length){
+    const cells=Array.from(rows[headerRowCount].cells||[]);
+    if(!cells.length||!cells.every((cell)=>cell&&cell.tagName==='TH')) break;
+    headerRowCount++;
+  }
 
-  const htmlRows=rows.map((row)=>{
+  const renderRows=(rowSet)=>rowSet.map((row)=>{
     const cellTag=(cell)=>String(cell&&cell.tagName?cell.tagName.toLowerCase():'td');
     const cells=Array.from(row.cells||[])
-      .filter((cell)=>cell&&cell.nodeType===1 || cell&&cell.nodeType===3)
+      .filter((cell)=>cell&&cell.nodeType===1)
       .map((cell)=>{
         const tag=cellTag(cell);
         const text=_sanitizeMarkdownTableCellText(cell);
@@ -499,6 +505,12 @@ function _markdownTableCopyPayloadForTable(table){
       .join('');
     return `<tr>${cells}</tr>`;
   }).join('');
+  const headerRows=headerRowCount?renderRows(rows.slice(0, headerRowCount)):'';
+  const bodyRows=renderRows(rows.slice(headerRowCount));
+  const tableSections=[
+    headerRows?`<thead>${headerRows}</thead>`:'',
+    bodyRows?`<tbody>${bodyRows}</tbody>`:'',
+  ].join('');
 
   const plainRows=rows.map((row)=>{
     return Array.from(row.cells||[])
@@ -506,13 +518,22 @@ function _markdownTableCopyPayloadForTable(table){
       .join('\t');
   }).join('\n');
 
-  return {html:`<table>${htmlRows}</table>`, plain:plainRows};
+  return {html:`<table>${tableSections}</table>`, plain:plainRows};
 }
 
 function _findEnhancedMarkdownTable(node){
   let current=node&&node.nodeType===3?node.parentElement:node;
   while(current){
     if(current.matches&&current.matches('table[data-markdown-table-enhanced]')) return current;
+    current=current.parentElement||current.parentNode;
+  }
+  return null;
+}
+
+function _findMarkdownTableCell(node){
+  let current=node&&node.nodeType===3?node.parentElement:node;
+  while(current){
+    if(current.matches&&current.matches('th,td')) return current;
     current=current.parentElement||current.parentNode;
   }
   return null;
@@ -543,6 +564,9 @@ function _handleMarkdownTableCopy(event){
   if(!selection||selection.isCollapsed||!selection.rangeCount) return;
   const range=selection.getRangeAt(0);
   if(!range) return;
+  const startCell=_findMarkdownTableCell(range.startContainer);
+  const endCell=_findMarkdownTableCell(range.endContainer);
+  if(startCell&&endCell&&startCell===endCell) return;
   const table=_findEnhancedMarkdownTableFromRange(range);
   if(!table||!table.matches||!table.matches('table[data-markdown-table-enhanced]')) return;
   const payload=_markdownTableCopyPayloadForTable(table);

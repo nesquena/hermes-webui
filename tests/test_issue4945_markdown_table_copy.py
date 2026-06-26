@@ -24,15 +24,53 @@ function extractFunc(name) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
   const start = src.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start);
-  let depth = 1;
-  i++;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
-    i++;
+  const braceStart = src.indexOf('{', start);
+  let depth = 0;
+  let inString = null;
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let i = braceStart; i < src.length; i++) {
+    const ch = src[i];
+    const next = i + 1 < src.length ? src[i + 1] : '';
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      inLineComment = true;
+      i++;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      inString = ch;
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
   }
-  return src.slice(start, i);
+  throw new Error(name + ' brace scan failed');
 }
 
 const required = [
@@ -41,6 +79,7 @@ const required = [
   '_markdownTableCellText',
   '_sanitizeMarkdownTableCellText',
   '_findEnhancedMarkdownTable',
+  '_findMarkdownTableCell',
   '_findEnhancedMarkdownTableFromRange',
   '_markdownTableCopyPayloadForTable',
   '_handleMarkdownTableCopy',
@@ -260,6 +299,8 @@ const payload = _markdownTableCopyPayloadForTable(table);
 console.log(JSON.stringify(payload));
 """
     )
+    assert "<thead><tr><th>Product</th><th>Price</th></tr></thead>" in out["html"]
+    assert "<tbody><tr><td>Widget</td><td>12</td></tr></tbody>" in out["html"]
     assert "<th>Product</th>" in out["html"]
     assert "<th>Price</th>" in out["html"]
     assert "markdown-table-sort" not in out["html"]
@@ -434,3 +475,43 @@ console.log(JSON.stringify({ prevented: event.preventDefaultCalled, data: clipbo
     assert out["prevented"] is True
     assert "<th>Product</th>" in out["data"]["text/html"]
     assert out["data"]["text/plain"].startswith("Product\tPrice")
+
+
+def test_single_cell_subselection_leaves_native_copy_unmodified():
+    out = _run_js(
+        """
+const {table, body} = buildEnhancedTableFixture(true);
+
+const range = {
+  startContainer: body.cells[0].children[0],
+  endContainer: body.cells[0].children[0],
+  commonAncestorContainer: body.cells[0],
+};
+
+window.getSelection = () => ({
+  isCollapsed: false,
+  rangeCount: 1,
+  getRangeAt: () => range,
+});
+
+const clipboard = {
+  data: {},
+  setData(type, value) {
+    this.data[type] = value;
+  }
+};
+
+const event = {
+  preventDefaultCalled: false,
+  preventDefault() {
+    this.preventDefaultCalled = true;
+  },
+  clipboardData: clipboard,
+};
+
+_handleMarkdownTableCopy(event);
+console.log(JSON.stringify({ prevented: event.preventDefaultCalled, data: clipboard.data }));
+"""
+    )
+    assert out["prevented"] is False
+    assert out["data"] == {}
