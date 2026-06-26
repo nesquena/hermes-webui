@@ -7754,17 +7754,32 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
+function _pendingCurrentTailUserMessage(messages){
+  const list=Array.isArray(messages)?messages:[];
+  for(let i=list.length-1;i>=0;i--){
+    const msg=list[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user') return msg;
+    if(msg._live||String(msg.role||'')==='tool') continue;
+    return null;
+  }
+  return null;
+}
+
 function getPendingSessionMessage(session, messagesOverride=null){
   const text=String(session?.pending_user_message||'').trim();
   if(!text) return null;
   const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
   const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
   const messages=Array.isArray(sourceMessages)?sourceMessages:[];
-  const lastUser=[...messages].reverse().find(m=>m&&m.role==='user');
-  if(lastUser){
-    const lastText=String(msgContent(lastUser)||'').trim();
-    if(lastText===text){
-      if(attachments.length&&!lastUser.attachments?.length) lastUser.attachments=attachments;
+  const currentTailUser=_pendingCurrentTailUserMessage(messages);
+  if(currentTailUser){
+    const pendingCandidate={role:'user',content:text};
+    const sameCurrentTurn=typeof _sameTranscriptMessage==='function'
+      ? _sameTranscriptMessage(currentTailUser,pendingCandidate)
+      : String(msgContent(currentTailUser)||'').trim()===text;
+    if(sameCurrentTurn){
+      if(attachments.length&&!currentTailUser.attachments?.length) currentTailUser.attachments=attachments;
       return null;
     }
   }

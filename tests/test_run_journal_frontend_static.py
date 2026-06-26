@@ -143,6 +143,74 @@ process.stdout.write(JSON.stringify({{
     return json.loads(proc.stdout)
 
 
+def _run_pending_session_message_probe() -> dict:
+    prompt = "repeat me"
+    historical_workspace_prompt = f"[Workspace::v1: /tmp/old]\n{prompt}"
+    current_workspace_prompt = f"[Workspace::v1: /tmp/current]\n{prompt}"
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _stripWorkspaceDisplayPrefix"),
+            _function_body(UI_SRC, "function msgContent"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _function_body(UI_SRC, "function getPendingSessionMessage"),
+        ]
+    )
+    script = f"""
+{helpers}
+const prompt = {json.dumps(prompt)};
+const historical = {{role:'user', content:prompt, _ts:1}};
+const historicalWorkspace = {{role:'user', content:{json.dumps(historical_workspace_prompt)}, _ts:1}};
+const historicalAnswer = {{role:'assistant', content:'done', _ts:2}};
+const currentTail = {{role:'user', content:prompt, _ts:3}};
+const currentWorkspaceTail = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3}};
+const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:4}};
+const attachments = [{{name:'note.txt', path:'note.txt', mime:'text/plain'}}];
+
+const fromHistoricalSameText = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:3}},
+  [historical, historicalAnswer]
+);
+const fromHistoricalWorkspace = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:3}},
+  [historicalWorkspace, historicalAnswer]
+);
+const exactCurrentMessages = [historical, historicalAnswer, currentTail];
+const exactCurrentResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:4, pending_attachments:attachments}},
+  exactCurrentMessages
+);
+const workspaceCurrentResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:4}},
+  [historical, historicalAnswer, currentWorkspaceTail]
+);
+const liveAfterCurrentResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:4}},
+  [historical, historicalAnswer, currentWorkspaceTail, liveAssistant]
+);
+const differentTailResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:4}},
+  [historical, historicalAnswer, {{role:'user', content:'different prompt', _ts:3}}]
+);
+
+process.stdout.write(JSON.stringify({{
+  historicalSameTextSurvives: !!fromHistoricalSameText && fromHistoricalSameText.content===prompt && fromHistoricalSameText._pending===true,
+  historicalWorkspaceSurvives: !!fromHistoricalWorkspace && fromHistoricalWorkspace.content===prompt && fromHistoricalWorkspace._pending===true,
+  exactCurrentTailDedupe: exactCurrentResult===null,
+  exactCurrentTailAttachmentsCopied: Array.isArray(currentTail.attachments) && currentTail.attachments[0].name==='note.txt',
+  workspaceCurrentTailDedupe: workspaceCurrentResult===null,
+  liveAfterCurrentTailDedupe: liveAfterCurrentResult===null,
+  differentCurrentTailSurvives: !!differentTailResult && differentTailResult.content===prompt && differentTailResult._pending===true,
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
 def test_reattach_path_uses_replay_when_status_reports_journal():
     reattach_pos = MESSAGES_SRC.index("let replayOnly=false;")
     block = MESSAGES_SRC[reattach_pos : reattach_pos + 1200]
@@ -307,6 +375,26 @@ def test_user_turn_dedupe_is_scoped_to_current_turn_by_behavior():
 
     assert result["inflightAfterHistoryRoles"] == ["user", "assistant", "user", "assistant"]
     assert result["inflightWithCurrentRoles"] == ["user", "assistant", "user", "assistant"]
+
+
+def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
+    """Deferred active reload must not hide a current repeat prompt.
+
+    In the default deferred save mode, chat start persists only
+    pending_user_message before the worker appends the display row.  If an older
+    turn has the same visible user text, getPendingSessionMessage still has to
+    return the current pending row; downstream merge code then dedupes only
+    against the current tail.
+    """
+    result = _run_pending_session_message_probe()
+
+    assert result["historicalSameTextSurvives"] is True
+    assert result["historicalWorkspaceSurvives"] is True
+    assert result["exactCurrentTailDedupe"] is True
+    assert result["exactCurrentTailAttachmentsCopied"] is True
+    assert result["workspaceCurrentTailDedupe"] is True
+    assert result["liveAfterCurrentTailDedupe"] is True
+    assert result["differentCurrentTailSurvives"] is True
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
