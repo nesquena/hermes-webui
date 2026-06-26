@@ -211,7 +211,6 @@ class TestMergeToolCallsEndToEnd:
         )
 
         # The tool result must stay immediately after its assistant(tool_calls).
-        idxs = {id(m): i for i, m in enumerate(result)}
         asst_idx = next(i for i, m in enumerate(result)
                         if m.get("tool_calls") and m["tool_calls"][0]["id"] == "call_1")
         res_idx = next(i for i, m in enumerate(result)

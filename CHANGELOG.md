@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.670] — 2026-06-26 — Release XZ (settled tool-call rows stay before the final answer)
+
+### Fixed
+
+- **A complete final answer no longer looks unfinished when an earlier tool call shares its timestamp.** On a paginated load, older `state.db` assistant rows carrying distinct tool calls were appended after the settled final answer instead of inserted in order, so the renderer treated the real final answer as a non-final segment until a refresh. The merge now inserts those tool-call rows chronologically — including the equal-timestamp case (a fast tool call and the final answer landing in the same second), where the final answer now correctly stays last. The existing dedupe, tool-call→result block integrity, and watermark reconciliation are unchanged. Thanks @franksong2702. (#4893)
+
 ## [v0.51.669] — 2026-06-26 — Release XY (set OpenAI priority service tier from the model picker)
 
 ### Added
