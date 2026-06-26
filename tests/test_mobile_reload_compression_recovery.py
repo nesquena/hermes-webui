@@ -10,15 +10,16 @@ SESSIONS_JS = ROOT / "static" / "sessions.js"
 
 
 def _write_sidecar(session_dir: Path, sid: str, **overrides):
+    messages = overrides.pop("messages", [])
     payload = {
         "session_id": sid,
         "title": sid,
         "created_at": 100.0,
         "updated_at": 100.0,
         "profile": "work",
-        "messages": [],
     }
     payload.update(overrides)
+    payload["messages"] = messages
     (session_dir / f"{sid}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -128,6 +129,7 @@ def test_continuation_lookup_uses_index_without_scanning_sidecars(tmp_path, monk
                     "created_at": 200.0,
                 }
             ]
+            + [{"session_id": f"noise{idx:08d}", "profile": "work"} for idx in range(50)]
         ),
         encoding="utf-8",
     )
@@ -180,6 +182,128 @@ def test_empty_indexed_continuation_lookup_falls_back_to_sidecars(tmp_path, monk
 
     assert routes._pre_compression_continuation_session_id(snapshot) == "childempty01"
     assert loaded == ["childempty01"]
+
+
+def test_stale_index_with_existing_candidate_falls_back_to_newer_sidecar(tmp_path, monkeypatch):
+    """A complete-looking result is not trusted when another sidecar is absent from the index."""
+    from api import routes, config, models
+
+    class _S:
+        def __init__(self, sid, profile, snap=False):
+            self.session_id = sid
+            self.profile = profile
+            self.parent_session_id = None
+            self.pre_compression_snapshot = snap
+            self.updated_at = 100.0
+            self.created_at = 100.0
+
+    snapshot = _S("snapstale001", "work", snap=True)
+    index_file = tmp_path / "_index.json"
+    _write_sidecar(
+        tmp_path,
+        "oldstale001",
+        parent_session_id="snapstale001",
+        updated_at=200.0,
+        created_at=150.0,
+    )
+    _write_sidecar(
+        tmp_path,
+        "newstale001",
+        parent_session_id="snapstale001",
+        updated_at=400.0,
+        created_at=350.0,
+    )
+    index_file.write_text(
+        json.dumps(
+            [
+                {
+                    "session_id": "oldstale001",
+                    "profile": "work",
+                    "parent_session_id": "snapstale001",
+                    "updated_at": 200.0,
+                    "created_at": 150.0,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(routes, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file, raising=False)
+    monkeypatch.setattr(routes, "SESSIONS", collections.OrderedDict(), raising=False)
+
+    assert routes._pre_compression_continuation_session_id(snapshot) == "newstale001"
+
+
+def test_stale_index_multihop_falls_back_to_missing_descendant_sidecar(tmp_path, monkeypatch):
+    """An indexed snapshot ancestor must not hide a newer descendant omitted from the index."""
+    from api import routes, config, models
+
+    class _S:
+        def __init__(self, sid, profile, snap=False):
+            self.session_id = sid
+            self.profile = profile
+            self.parent_session_id = None
+            self.pre_compression_snapshot = snap
+            self.updated_at = 100.0
+            self.created_at = 100.0
+
+    snapshot = _S("snapstale002", "work", snap=True)
+    index_file = tmp_path / "_index.json"
+    _write_sidecar(
+        tmp_path,
+        "oldstale002",
+        parent_session_id="snapstale002",
+        updated_at=200.0,
+        created_at=150.0,
+    )
+    _write_sidecar(
+        tmp_path,
+        "midstale002",
+        parent_session_id="snapstale002",
+        pre_compression_snapshot=True,
+        updated_at=300.0,
+        created_at=250.0,
+    )
+    _write_sidecar(
+        tmp_path,
+        "newstale002",
+        parent_session_id="midstale002",
+        updated_at=500.0,
+        created_at=450.0,
+    )
+    index_file.write_text(
+        json.dumps(
+            [
+                {
+                    "session_id": "oldstale002",
+                    "profile": "work",
+                    "parent_session_id": "snapstale002",
+                    "updated_at": 200.0,
+                    "created_at": 150.0,
+                },
+                {
+                    "session_id": "midstale002",
+                    "profile": "work",
+                    "parent_session_id": "snapstale002",
+                    "pre_compression_snapshot": True,
+                    "updated_at": 300.0,
+                    "created_at": 250.0,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(routes, "SESSION_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file, raising=False)
+    monkeypatch.setattr(routes, "SESSIONS", collections.OrderedDict(), raising=False)
+
+    assert routes._pre_compression_continuation_session_id(snapshot) == "newstale002"
 
 
 def test_indexed_continuation_lookup_follows_snapshot_hops_without_scanning(tmp_path, monkeypatch):

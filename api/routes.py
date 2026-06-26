@@ -6787,20 +6787,30 @@ def _pre_compression_continuation_session_id(session) -> str | None:
             return None
         if not isinstance(entries, list):
             return None
+        try:
+            persisted_sidecar_ids = {
+                path.stem
+                for path in SESSION_DIR.glob("*.json")
+                if not path.name.startswith("_") and is_safe_session_id(path.stem)
+            }
+        except Exception:
+            return None
+        indexed_ids: set[str] = set()
+        row_seen_ids = set(seen_ids)
         rows = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
             child_sid = _safe_first(entry.get("session_id"))
-            if (
-                not child_sid
-                or child_sid in seen_ids
-                or not is_safe_session_id(child_sid)
-                or not _safe_first(entry.get("parent_session_id"))
-            ):
+            if not child_sid or not is_safe_session_id(child_sid):
                 continue
-            seen_ids.add(child_sid)
+            indexed_ids.add(child_sid)
+            if child_sid in row_seen_ids or not _safe_first(entry.get("parent_session_id")):
+                continue
+            row_seen_ids.add(child_sid)
             rows.append(entry)
+        if persisted_sidecar_ids - indexed_ids - seen_ids:
+            return None
         return rows
 
     def _child_rows_from_sidecars(seen_ids: set[str]) -> list:
@@ -6880,14 +6890,9 @@ def _pre_compression_continuation_session_id(session) -> str | None:
 
     memory_seen_ids: set[str] = set()
     rows = _child_rows_from_memory(memory_seen_ids)
-    index_seen_ids = set(memory_seen_ids)
-    index_rows = _child_rows_from_index(index_seen_ids)
+    index_rows = _child_rows_from_index(memory_seen_ids)
     if index_rows is not None:
-        indexed_result = _resolve_from_rows(rows + index_rows)
-        if indexed_result:
-            return indexed_result
-        rows.extend(_child_rows_from_sidecars(set(memory_seen_ids)))
-        return _resolve_from_rows(rows)
+        return _resolve_from_rows(rows + index_rows)
 
     rows.extend(_child_rows_from_sidecars(memory_seen_ids))
     return _resolve_from_rows(rows)
