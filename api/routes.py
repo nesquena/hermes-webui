@@ -20452,7 +20452,12 @@ def _handle_background(handler, body):
 
     thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
     thr.start()
-    return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
+    return j(handler, {
+        "task_id": task_id,
+        "stream_id": stream_id,
+        "session_id": bg.session_id,
+        "parent_session_id": parent_sid,
+    })
 
 
 def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None, source: str = "webui") -> None:

@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _DURABLE_SCHEMA_VERSION = 1
 _PROMPT_PREVIEW_LIMIT = 500
+_BACKGROUND_CARD_TEXT = "Background task running…"
 
 # parent_session_id -> list of task dicts
 _BACKGROUND_TASKS: dict[str, list[dict[str, Any]]] = {}
@@ -35,6 +36,14 @@ def _prompt_preview(prompt: str) -> str:
     if len(text) <= _PROMPT_PREVIEW_LIMIT:
         return text
     return text[:_PROMPT_PREVIEW_LIMIT] + "\n…(truncated)"
+
+
+def _task_card_message_id(task_id: str) -> str:
+    return f"bgcard_{task_id}"
+
+
+def _task_result_message_id(task_id: str) -> str:
+    return f"bgresult_{task_id}"
 
 
 def _read_durable_tasks_unlocked(parent_sid: str) -> list[dict[str, Any]]:
@@ -100,6 +109,11 @@ def _upsert_durable_task_unlocked(parent_sid: str, task_id: str, updates: dict[s
     return dict(task)
 
 
+def _mark_durable_parent_append(parent_sid: str, task_id: str, updates: dict[str, Any]) -> None:
+    with _lock:
+        _upsert_durable_task_unlocked(parent_sid, task_id, updates)
+
+
 def _public_task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
     """Return the durable task fields safe for status/list API responses."""
     return {
@@ -114,7 +128,198 @@ def _public_task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         "updated_at": task.get("updated_at"),
         "answer": task.get("answer"),
         "error": task.get("error"),
+        "parent_append_status": task.get("parent_append_status"),
+        "parent_card_message_id": task.get("parent_card_message_id"),
+        "parent_result_message_id": task.get("parent_result_message_id"),
     }
+
+
+def _find_message_by_id(messages: list[dict[str, Any]], message_id: str) -> dict[str, Any] | None:
+    for message in messages:
+        if isinstance(message, dict) and message.get("_message_id") == message_id:
+            return message
+    return None
+
+
+def _background_task_metadata(task: dict[str, Any], *, result_message_id: str | None = None) -> dict[str, Any]:
+    task_id = str(task.get("task_id") or "")
+    meta = {
+        "task_id": task_id,
+        "status": task.get("status") or "unknown",
+        "origin_turn_id": task.get("origin_turn_id"),
+        "prompt_preview": task.get("prompt_preview"),
+        "started_at": task.get("started_at"),
+        "completed_at": task.get("completed_at"),
+        "can_cancel": task.get("status") == "running",
+    }
+    if task.get("bg_session_id"):
+        meta["bg_session_id"] = task.get("bg_session_id")
+    if task.get("stream_id"):
+        meta["stream_id"] = task.get("stream_id")
+    if result_message_id:
+        meta["result_message_id"] = result_message_id
+    return meta
+
+
+def _build_background_card(task: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(task.get("task_id") or "")
+    started_at = task.get("started_at")
+    timestamp = int(started_at if isinstance(started_at, (int, float)) and started_at > 0 else time.time())
+    return {
+        "role": "assistant",
+        "content": _BACKGROUND_CARD_TEXT,
+        "timestamp": timestamp,
+        "_background": True,
+        "_message_id": _task_card_message_id(task_id),
+        "_background_task": _background_task_metadata(task),
+    }
+
+
+def _build_background_result_message(task: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(task.get("task_id") or "")
+    completed_at = task.get("completed_at")
+    timestamp = int(completed_at if isinstance(completed_at, (int, float)) and completed_at > 0 else time.time())
+    answer = str(task.get("answer") or "").strip() or "(no answer produced)"
+    return {
+        "role": "assistant",
+        "content": f"**Background result**\n\n{answer}",
+        "timestamp": timestamp,
+        "_background": True,
+        "_message_id": _task_result_message_id(task_id),
+        "_background_result": {
+            "task_id": task_id,
+            "origin_turn_id": task.get("origin_turn_id"),
+            "completed_at": task.get("completed_at"),
+            "status": task.get("status") or "done",
+        },
+    }
+
+
+def _parent_has_live_turn(parent_session) -> bool:
+    stream_id = getattr(parent_session, "active_stream_id", None)
+    if not stream_id:
+        return False
+    try:
+        from api import config as _cfg
+        with _cfg.STREAMS_LOCK:
+            if stream_id in (_cfg.STREAMS or {}):
+                return True
+        with _cfg.ACTIVE_RUNS_LOCK:
+            if stream_id in (_cfg.ACTIVE_RUNS or {}):
+                return True
+    except Exception:
+        logger.debug(
+            "Could not inspect active parent stream for %s",
+            getattr(parent_session, "session_id", None),
+            exc_info=True,
+        )
+    return False
+
+
+def _apply_parent_update(parent_session, task: dict[str, Any], update_kind: str) -> bool:
+    messages = list(getattr(parent_session, "messages", None) or [])
+    task_id = str(task.get("task_id") or "")
+    card_id = _task_card_message_id(task_id)
+    result_id = _task_result_message_id(task_id)
+    changed = False
+
+    card = _find_message_by_id(messages, card_id)
+    if card is None:
+        messages.append(_build_background_card(task))
+        changed = True
+        card = messages[-1]
+    if isinstance(card, dict):
+        desired_meta = _background_task_metadata(
+            task,
+            result_message_id=result_id if update_kind in {"done", "result"} else None,
+        )
+        if card.get("_background_task") != desired_meta:
+            card["_background_task"] = desired_meta
+            changed = True
+        if card.get("content") != _BACKGROUND_CARD_TEXT:
+            card["content"] = _BACKGROUND_CARD_TEXT
+            changed = True
+
+    if update_kind in {"done", "result"}:
+        desired_result = _build_background_result_message(task)
+        result_msg = _find_message_by_id(messages, result_id)
+        if result_msg is None:
+            messages.append(desired_result)
+            changed = True
+        elif result_msg != desired_result:
+            result_msg.clear()
+            result_msg.update(desired_result)
+            changed = True
+
+    if changed:
+        parent_session.messages = messages
+    return changed
+
+
+def append_or_queue_background_parent_update(parent_sid: str, task_id: str, update_kind: str) -> str:
+    """Persist a background task card/result into the parent session when safe.
+
+    The durable task sidecar remains authoritative for lifecycle state. Parent
+    transcript mutation is an idempotent display projection. If the parent turn
+    is active, this function records a pending parent append state instead of
+    writing to ``messages``; a later drain hook can safely materialize it at the
+    active-turn boundary.
+    """
+    with _lock:
+        task = next(
+            (dict(t) for t in _read_durable_tasks_unlocked(parent_sid)
+             if str(t.get("task_id") or "") == str(task_id or "")),
+            None,
+        )
+    if task is None:
+        return "missing_task"
+
+    card_id = _task_card_message_id(str(task_id))
+    result_id = _task_result_message_id(str(task_id))
+    pending_status = "card_pending" if update_kind == "running" else "result_pending"
+    written_status = "card_written" if update_kind == "running" else "result_written"
+    try:
+        from api.config import _get_session_agent_lock
+        from api.models import Session
+        with _get_session_agent_lock(parent_sid):
+            parent = Session.load(parent_sid)
+            if parent is None:
+                _mark_durable_parent_append(parent_sid, str(task_id), {
+                    "parent_append_status": "parent_missing",
+                    "parent_card_message_id": card_id,
+                    "parent_result_message_id": result_id if update_kind != "running" else None,
+                })
+                return "parent_missing"
+            if _parent_has_live_turn(parent):
+                _mark_durable_parent_append(parent_sid, str(task_id), {
+                    "parent_append_status": pending_status,
+                    "parent_card_message_id": card_id,
+                    "parent_result_message_id": result_id if update_kind != "running" else None,
+                })
+                return pending_status
+            changed = _apply_parent_update(parent, task, update_kind)
+            if changed:
+                parent.save()
+    except Exception:
+        logger.warning(
+            "Failed to project background task %s into parent session %s",
+            task_id,
+            parent_sid,
+            exc_info=True,
+        )
+        _mark_durable_parent_append(parent_sid, str(task_id), {
+            "parent_append_status": "parent_append_failed",
+            "parent_card_message_id": card_id,
+            "parent_result_message_id": result_id if update_kind != "running" else None,
+        })
+        return "parent_append_failed"
+
+    _mark_durable_parent_append(parent_sid, str(task_id), {
+        "parent_append_status": written_status,
+        "parent_card_message_id": card_id,
+        "parent_result_message_id": result_id if update_kind != "running" else None,
+    })
+    return written_status
 
 
 def list_durable_background_tasks(parent_sid: str) -> list[dict[str, Any]]:
@@ -169,7 +374,11 @@ def track_background(parent_sid: str, bg_sid: str, stream_id: str,
             "completed_at": None,
             "answer": None,
             "error": None,
+            "parent_append_status": "card_pending",
+            "parent_card_message_id": _task_card_message_id(task_id),
+            "parent_result_message_id": None,
         })
+    append_or_queue_background_parent_update(parent_sid, task_id, "running")
 
 
 def track_btw(parent_sid: str, ephemeral_sid: str, stream_id: str,
@@ -196,7 +405,11 @@ def complete_background(parent_sid: str, task_id: str, answer: str) -> None:
             "answer": str(answer or ""),
             "completed_at": completed_at,
             "error": None,
+            "parent_append_status": "result_pending",
+            "parent_card_message_id": _task_card_message_id(task_id),
+            "parent_result_message_id": _task_result_message_id(task_id),
         })
+    append_or_queue_background_parent_update(parent_sid, task_id, "done")
 
 
 def get_results(parent_sid: str) -> list[dict[str, Any]]:
