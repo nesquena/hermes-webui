@@ -313,6 +313,8 @@ const LOCALES = {
     settings_desc_busy_input_mode: 'Controls what happens when you send a message while the agent is running. Queue waits; Interrupt cancels and starts fresh; Steer injects a correction mid-turn without interrupting. If Steer is unavailable, the draft is restored so you can choose the next action.',
     settings_label_fade_text_effect: 'Fade text effect',
     settings_desc_fade_text_effect: 'Fade newly streamed words in while the assistant is responding. Similar to OpenWebUI; off by default for maximum performance.',
+    settings_label_max_tokens: 'Max output tokens',
+    settings_desc_max_tokens: 'Caps assistant output for new streaming turns. Leave blank to use the active profile config fallback.',
     settings_busy_input_mode_queue: 'Queue follow-up',
     settings_busy_input_mode_interrupt: 'Interrupt current turn',
     settings_busy_input_mode_steer: 'Steer (mid-turn correction)',

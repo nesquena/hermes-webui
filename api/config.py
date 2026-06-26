@@ -3482,6 +3482,71 @@ def get_reasoning_status(
     }
 
 
+def get_max_tokens_status() -> int | None:
+    """Return the Settings-facing max token cap from the active profile's config.yaml.
+
+    Mirrors CLI precedence exactly:
+      1) root-level ``max_tokens``
+      2) fallback to ``agent.max_tokens``
+      only when the value parses as a positive integer.
+    """
+    config_data = _load_yaml_config_file(_get_config_path())
+    if not isinstance(config_data, dict):
+        return None
+
+    raw = config_data.get("max_tokens")
+    if raw is not None and not isinstance(raw, bool):
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
+
+    agent_cfg = config_data.get("agent")
+    if isinstance(agent_cfg, dict):
+        raw = agent_cfg.get("max_tokens")
+        if raw is not None and not isinstance(raw, bool):
+            try:
+                parsed = int(raw)
+                if parsed > 0:
+                    return parsed
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def set_max_tokens(max_tokens) -> int | None:
+    """Persist a root-level ``max_tokens`` override to the active profile config.
+
+    Blank/``None`` clears the root override so ``agent.max_tokens`` can resume.
+    Positive integers are written to the active profile's ``config.yaml``.
+    Unrelated YAML keys are preserved verbatim.
+    """
+    if isinstance(max_tokens, str):
+        max_tokens = max_tokens.strip()
+    clear_root = max_tokens in (None, "")
+    parsed_max_tokens = None
+    if not clear_root:
+        try:
+            parsed_max_tokens = int(max_tokens)
+        except (TypeError, ValueError):
+            parsed_max_tokens = None
+        if not isinstance(parsed_max_tokens, int) or parsed_max_tokens <= 0 or isinstance(max_tokens, bool):
+            parsed_max_tokens = None
+
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        if clear_root:
+            config_data.pop("max_tokens", None)
+        elif parsed_max_tokens is not None:
+            config_data["max_tokens"] = parsed_max_tokens
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    return get_max_tokens_status()
+
+
 def set_reasoning_display(show: bool) -> dict:
     """Persist ``display.show_reasoning`` to the active profile's config.yaml.
 

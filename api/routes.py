@@ -9200,6 +9200,11 @@ def handle_get(handler, parsed) -> bool:
         settings = load_settings()
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
+        try:
+            from api.config import get_max_tokens_status
+            settings["max_tokens"] = get_max_tokens_status()
+        except Exception:
+            settings["max_tokens"] = None
         # Surface env-var precedence so the UI can disable the password field
         # instead of silently no-oping the save (#1560). The setting takes
         # precedence in api.auth.get_password_hash(), but until now the UI
@@ -11905,6 +11910,13 @@ def handle_post(handler, parsed) -> bool:
                     409,
                 )
 
+        max_tokens_provided = "max_tokens" in body
+        max_tokens_status = None
+        max_tokens_value = body.pop("max_tokens", None) if max_tokens_provided else None
+        if max_tokens_provided:
+            from api.config import set_max_tokens
+            max_tokens_status = set_max_tokens(max_tokens_value)
+
         # First password creation decides who owns a previously passwordless
         # WebUI. While auth is disabled, the generic /api/settings route is also
         # unauthenticated, so gate bootstrap password setup the same way as
@@ -11957,6 +11969,8 @@ def handle_post(handler, parsed) -> bool:
 
         saved = save_settings(body)
         saved.pop("password_hash", None)  # never expose hash to client
+        if max_tokens_provided:
+            saved["max_tokens"] = max_tokens_status
 
         # Settings that change which sessions appear in the sidebar must
         # invalidate the session-list cache directly. Relying on the cache's

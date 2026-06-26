@@ -7722,6 +7722,15 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const maxTokensField=$('settingsMaxTokens');
+    if(maxTokensField){
+      const rawMaxTokens=settings.max_tokens;
+      const parsedMaxTokens=parseInt(rawMaxTokens,10);
+      maxTokensField.value=(Number.isFinite(parsedMaxTokens)&&parsedMaxTokens>0)
+        ? String(parsedMaxTokens)
+        : '';
+      maxTokensField.addEventListener('input',_markSettingsDirty,{once:false});
+    }
     // Ambient provider quota chip toggle — default off; only shows at ≥1400px viewport
     // when enabled (see style.css @media (max-width:1399.98px) rule).
     const showQuotaChipCb=$('settingsShowQuotaChip');
@@ -10129,6 +10138,14 @@ async function saveSettings(andClose){
   Object.assign(body,_structuredCodeViewFromUi());
   body.language=language;
   body.show_token_usage=showTokenUsage;
+  const maxTokensField=$('settingsMaxTokens');
+  const maxTokensRaw=(maxTokensField&&String(maxTokensField.value||'').trim())||'';
+  if(maxTokensRaw){
+    const parsedMaxTokens=(/^\d+$/).test(maxTokensRaw)?parseInt(maxTokensRaw,10):0;
+    body.max_tokens=(parsedMaxTokens>0)?parsedMaxTokens:null;
+  }else{
+    body.max_tokens=null;
+  }
   body.show_quota_chip=showQuotaChip===true;
   body.show_conversation_outline=showConversationOutline===true;
   body.show_tps=showTps;
