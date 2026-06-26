@@ -66,7 +66,9 @@ const messagesFns = [
 	  '_anchorSceneSafePayload','_anchorSceneToolId','_anchorSceneToolName',
 	  '_anchorSceneToolArgs','_anchorSceneContentTool','_anchorSceneStringPayload','_anchorSceneRowBase',
 	  '_anchorSceneProseRow','_anchorSceneThinkingRow','_anchorSceneToolRowFromCall',
-	  '_anchorSceneToolRowName','_anchorSceneToolRowsHaveCompatibleNames',
+	  '_anchorSceneToolRowName','_anchorSceneToolRowId',
+	  '_anchorSceneToolRowsHaveNonConflictingIds','_anchorSceneToolRowsHaveDifferentExplicitIds',
+	  '_anchorSceneToolRowsHaveCompatibleNames',
 	  '_anchorSceneToolRowArgs','_anchorSceneObjectContainsSubset',
 	  '_anchorSceneToolRowsHaveCompatibleInvocation',
 	  '_anchorSceneToolRowHasInvocationEvidence','_anchorSceneToolRowsCanNameMatch',
@@ -596,6 +598,55 @@ def test_consumed_singleton_content_tool_keeps_distinct_live_invocation(driver_p
                         "name": "terminal",
                         "assistant_msg_idx": 1,
                         "args": {"cmd": "pwd"},
+                        "snippet": "OUTPUT B",
+                    }
+                ]
+            },
+        },
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["snippet"] == "OUTPUT A"
+    assert by_tid["live-b"]["snippet"] == "OUTPUT B"
+    assert len([card for card in cards if card["name"] == "terminal"]) == 2
+
+
+def test_consumed_singleton_same_command_live_tool_stays_distinct(driver_path):
+    """A repeated same-command invocation with a new id must keep its own card."""
+    messages = [
+        {"role": "user", "content": "inspect twice"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {"id": "content-a", "name": "terminal", "args": {"cmd": "ls"}, "snippet": "OUTPUT A"}
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "S": {
+                "toolCalls": [
+                    {
+                        "id": "live-b",
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "args": {"cmd": "ls"},
                         "snippet": "OUTPUT B",
                     }
                 ]

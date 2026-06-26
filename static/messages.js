@@ -2594,6 +2594,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
     return String(tool.name||payload.name||'tool').trim().toLowerCase();
   }
+  function _anchorSceneToolRowId(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    return String(
+      (row&&row.tool_call_id)||
+      tool.id||
+      tool.tid||
+      tool.tool_call_id||
+      tool.tool_use_id||
+      tool.call_id||
+      payload.tid||
+      payload.id||
+      ''
+    ).trim();
+  }
+  function _anchorSceneToolRowsHaveNonConflictingIds(existing, incoming){
+    const existingId=_anchorSceneToolRowId(existing);
+    const incomingId=_anchorSceneToolRowId(incoming);
+    return !existingId||!incomingId||existingId===incomingId;
+  }
+  function _anchorSceneToolRowsHaveDifferentExplicitIds(existing, incoming){
+    const existingId=_anchorSceneToolRowId(existing);
+    const incomingId=_anchorSceneToolRowId(incoming);
+    return !!existingId&&!!incomingId&&existingId!==incomingId;
+  }
   function _anchorSceneToolRowsHaveCompatibleNames(existing, incoming){
     const existingName=_anchorSceneToolRowName(existing);
     const incomingName=_anchorSceneToolRowName(incoming);
@@ -2650,7 +2675,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return true;
   }
-  function _anchorSceneMatchingContentToolRow(contentToolRows, incomingRow, ordinal, usedRows, incomingTotal){
+  function _anchorSceneMatchingContentToolRow(contentToolRows, incomingRow, ordinal, usedRows, incomingTotal, idFlexibleRows){
     if(!Array.isArray(contentToolRows)||!incomingRow) return null;
     const incomingTid=incomingRow.tool_call_id||(incomingRow.tool&&incomingRow.tool.id);
     for(const row of contentToolRows){
@@ -2674,6 +2699,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(
       reusableRows.length===1&&
       Number(incomingTotal)===1&&
+      (_anchorSceneToolRowsHaveNonConflictingIds(reusableRows[0],incomingRow)||(idFlexibleRows&&idFlexibleRows.has(reusableRows[0])))&&
       _anchorSceneToolRowsHaveCompatibleNames(reusableRows[0],incomingRow)&&
       _anchorSceneToolRowsHaveCompatibleInvocation(reusableRows[0],incomingRow)
     ) return reusableRows[0];
@@ -2815,6 +2841,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const hasOrderedContentRows=Array.isArray(contentRows)&&contentRows.length>0;
       const contentToolRows=[];
       const usedContentToolRows=new Set();
+      const idFlexibleContentToolRows=new Set();
       const seenToolIds=new Set();
       const rowByToolId=new Map();
       if(hasOrderedContentRows){
@@ -2847,8 +2874,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           messageToolOrdinal+=1;
           continue;
         }
-        const contentMatch=_anchorSceneMatchingContentToolRow(contentToolRows,row,messageToolOrdinal,usedContentToolRows,messageTools.length);
+        const contentMatch=_anchorSceneMatchingContentToolRow(contentToolRows,row,messageToolOrdinal,usedContentToolRows,messageTools.length,idFlexibleContentToolRows);
         if(contentMatch){
+          if(_anchorSceneToolRowsHaveDifferentExplicitIds(contentMatch,row)) idFlexibleContentToolRows.add(contentMatch);
           _enrichSettledToolRowBodyFromLive(contentMatch, tool);
           if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,contentMatch); }
           usedContentToolRows.add(contentMatch);
@@ -2881,8 +2909,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           continue;
         }
         const liveTools=toolsByIdx.get(idx)||[];
-        const contentMatch=_anchorSceneMatchingContentToolRow(contentToolRows,row,liveToolOrdinal,usedContentToolRows,liveTools.length);
+        const contentMatch=_anchorSceneMatchingContentToolRow(contentToolRows,row,liveToolOrdinal,usedContentToolRows,liveTools.length,idFlexibleContentToolRows);
         if(contentMatch){
+          if(_anchorSceneToolRowsHaveDifferentExplicitIds(contentMatch,row)) idFlexibleContentToolRows.add(contentMatch);
           _enrichSettledToolRowBodyFromLive(contentMatch, tool);
           if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,contentMatch); }
           usedContentToolRows.add(contentMatch);

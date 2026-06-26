@@ -3854,7 +3854,21 @@ def _anchor_scene_tool_rows_can_name_match(existing, incoming) -> bool:
     return True
 
 
-def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, incoming_row, ordinal, used_indexes, incoming_total=0):
+def _anchor_scene_tool_rows_have_different_explicit_ids(existing, incoming) -> bool:
+    existing_id = _anchor_scene_tool_row_id(existing)
+    incoming_id = _anchor_scene_tool_row_id(incoming)
+    return bool(existing_id and incoming_id and existing_id != incoming_id)
+
+
+def _anchor_scene_matching_content_tool_row_index(
+    rows,
+    content_tool_indexes,
+    incoming_row,
+    ordinal,
+    used_indexes,
+    incoming_total=0,
+    id_flexible_indexes=None,
+):
     if not isinstance(rows, list) or not isinstance(content_tool_indexes, list) or not isinstance(incoming_row, dict):
         return None
     incoming_id = _anchor_scene_tool_row_id(incoming_row)
@@ -3889,9 +3903,13 @@ def _anchor_scene_matching_content_tool_row_index(rows, content_tool_indexes, in
     ]
     if len(reusable_indexes) == 1 and incoming_total == 1:
         index = reusable_indexes[0]
+        existing_id = _anchor_scene_tool_row_id(rows[index])
+        id_flexible = isinstance(id_flexible_indexes, set) and index in id_flexible_indexes
         if _anchor_scene_tool_rows_have_compatible_names(
             rows[index],
             incoming_row,
+        ) and (
+            id_flexible or not existing_id or not incoming_id or existing_id == incoming_id
         ) and _anchor_scene_tool_rows_have_compatible_invocation(rows[index], incoming_row):
             return index
     for index in content_tool_indexes:
@@ -4122,6 +4140,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     order = 0
     content_tool_indexes_by_idx = {}
     used_content_tool_indexes_by_idx = {}
+    id_flexible_content_tool_indexes_by_idx = {}
     for local_idx in range(turn_start + 1, local_final_idx + 1):
         message = messages[local_idx]
         if not isinstance(message, dict) or message.get("role") != "assistant":
@@ -4137,6 +4156,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         )
         content_tool_indexes = []
         used_content_tool_indexes = set()
+        id_flexible_content_tool_indexes = set()
         if content_rows:
             for row in content_rows:
                 previous_len = len(rows)
@@ -4147,6 +4167,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             if content_tool_indexes:
                 content_tool_indexes_by_idx[absolute_idx] = content_tool_indexes
                 used_content_tool_indexes_by_idx[absolute_idx] = used_content_tool_indexes
+                id_flexible_content_tool_indexes_by_idx[absolute_idx] = id_flexible_content_tool_indexes
         elif _anchor_scene_clean_text(text):
             push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
             order += 1
@@ -4166,8 +4187,14 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                         tool_ordinal,
                         used_content_tool_indexes,
                         len(calls),
+                        id_flexible_content_tool_indexes,
                     )
                     if content_match_index is not None:
+                        if _anchor_scene_tool_rows_have_different_explicit_ids(
+                            rows[content_match_index],
+                            row,
+                        ):
+                            id_flexible_content_tool_indexes.add(content_match_index)
                         rows[content_match_index] = merge_duplicate_tool_row(rows[content_match_index], row)
                         incoming_key = _anchor_scene_row_key(row)
                         if incoming_key:
@@ -4207,8 +4234,11 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             tool_ordinal,
             used_content_tool_indexes_by_idx.setdefault(absolute_idx, set()),
             external_tool_counts.get(absolute_idx, 0),
+            id_flexible_content_tool_indexes_by_idx.setdefault(absolute_idx, set()),
         )
         if content_match_index is not None:
+            if _anchor_scene_tool_rows_have_different_explicit_ids(rows[content_match_index], row):
+                id_flexible_content_tool_indexes_by_idx.setdefault(absolute_idx, set()).add(content_match_index)
             rows[content_match_index] = merge_duplicate_tool_row(
                 rows[content_match_index],
                 row,
