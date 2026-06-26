@@ -69,6 +69,26 @@ def test_palette_to_css_caps_value_length() -> None:
     assert out == ""
 
 
+def test_palette_to_css_drops_fetchable_url_values() -> None:
+    # A value carrying a fetchable url() must be dropped: the charset has no
+    # `/`, `:`, `'` or `"`, so a real `url(http://...)` / `url(/path)` can't
+    # survive — pinning that so the no-outbound-request guarantee can't
+    # silently regress if the charset is ever widened.
+    out = _palette_to_css({
+        "bg": "url(http://evil.example/x.png)",   # protocol-bearing
+        "fg": "url(//evil.example/x.png)",          # scheme-relative
+        "accent": "url(/leak/signed-url)",          # path-bearing
+        "border": "url('http://evil.example/y')",   # quoted
+        "ok": "#abc",                                # legit sibling survives
+    })
+    assert "evil.example" not in out
+    assert "url(http" not in out
+    assert "url(//" not in out
+    assert "url(/" not in out
+    # The one safe entry still makes it through.
+    assert "--ok:#abc;" in out
+
+
 # ---------------------------------------------------------------- end-to-end ---
 
 
