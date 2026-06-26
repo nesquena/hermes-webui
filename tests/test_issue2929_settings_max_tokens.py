@@ -192,6 +192,34 @@ def test_set_max_tokens_invalid_non_empty_input_is_a_true_no_op(monkeypatch):
     assert _read_config()["agent"]["max_tokens"] == 512
 
 
+def test_set_max_tokens_blank_without_root_override_is_a_true_no_op(monkeypatch):
+    import api.config as config
+
+    _write_config(
+        "agent:\n"
+        "  max_tokens: 512\n"
+        "  name: fallback\n"
+    )
+
+    monkeypatch.setattr(
+        config,
+        "_save_yaml_config_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected config save")),
+    )
+    monkeypatch.setattr(
+        config,
+        "reload_config",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected reload")),
+    )
+
+    assert config.set_max_tokens(None) == {
+        "max_tokens": None,
+        "max_tokens_effective": 512,
+        "max_tokens_fallback": 512,
+    }
+    assert _read_config()["agent"]["max_tokens"] == 512
+
+
 def test_get_settings_exposes_max_tokens_from_the_active_profile(monkeypatch):
     import api.config as config
     from api.routes import handle_get
@@ -362,7 +390,7 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
     assert "settingsMaxTokens" in save_block
     assert "body.max_tokens" in save_block
     assert "initialMaxTokens" in save_block
-    assert "maxTokensRaw!==initialMaxTokens" in save_block.replace(" ", "")
+    assert "maxTokensRaw===''||maxTokensRaw!==initialMaxTokens" in save_block.replace(" ", "")
     assert "body.max_tokens=maxTokensRaw===''?null:maxTokensRaw" in save_block.replace(" ", "")
 
     assert 'id="settingsMaxTokens"' in index_html

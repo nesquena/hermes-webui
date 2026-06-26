@@ -3541,13 +3541,20 @@ def set_max_tokens(max_tokens) -> dict[str, int | None]:
         return get_max_tokens_status()
 
     config_path = _get_config_path()
+    should_save = True
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
         if clear_root:
-            config_data.pop("max_tokens", None)
+            if "max_tokens" not in config_data:
+                should_save = False
+            else:
+                config_data.pop("max_tokens", None)
         elif parsed_max_tokens is not None:
             config_data["max_tokens"] = parsed_max_tokens
-        _save_yaml_config_file(config_path, config_data)
+        if should_save:
+            _save_yaml_config_file(config_path, config_data)
+    if not should_save:
+        return get_max_tokens_status()
     reload_config()
     return get_max_tokens_status()
 
