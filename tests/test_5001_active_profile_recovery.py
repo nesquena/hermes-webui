@@ -104,11 +104,12 @@ eval(extractFunction(bootSrc, '_resolveActiveProfileBootstrapState'));
         redirectUrls.push(`login?next=${encodeURIComponent(nextUrl)}`);
       },
     });
+    const bootContinues = state.status !== 'recovery-redirect';
 
-    results.push(state);
+    results.push({...state, bootContinues});
     storageHistory.push(storage.snapshot());
 
-    if (scenario.simulateBootContinue && state.status === 'resolved') {
+    if (scenario.simulateBootContinue && bootContinues) {
       bootProfile = state.profile;
       bootIsDefault = state.isDefault;
       applyBotNameCalls += 1;
@@ -164,7 +165,9 @@ def test_active_profile_boot_recovery_is_one_shot_and_bounded(driver_path):
     )
 
     assert payload["attempts"][0]["status"] == "recovery-redirect"
+    assert payload["attempts"][0]["bootContinues"] is False
     assert payload["attempts"][1]["status"] == "fallback"
+    assert payload["attempts"][1]["bootContinues"] is True
     assert payload["attempts"][1]["profile"] == "default"
     assert payload["attempts"][1]["isDefault"] is True
     assert payload["loadCalls"] == 2
@@ -187,7 +190,9 @@ def test_active_profile_boot_recovery_handles_loader_thrown_401s(driver_path):
     )
 
     assert payload["attempts"][0]["status"] == "recovery-redirect"
+    assert payload["attempts"][0]["bootContinues"] is False
     assert payload["attempts"][1]["status"] == "fallback"
+    assert payload["attempts"][1]["bootContinues"] is True
     assert payload["attempts"][1]["profile"] == "default"
     assert payload["attempts"][1]["isDefault"] is True
     assert payload["redirects"] == ["login?next=%2F"]
@@ -208,6 +213,7 @@ def test_active_profile_boot_non_401_errors_fallback_without_redirect(driver_pat
     )
 
     assert payload["attempts"][0]["status"] == "fallback"
+    assert payload["attempts"][0]["bootContinues"] is True
     assert payload["attempts"][0]["profile"] == "default"
     assert payload["attempts"][0]["isDefault"] is True
     assert payload["redirects"] == []
@@ -227,6 +233,7 @@ def test_active_profile_boot_invalid_payload_falls_back_without_redirect(driver_
     )
 
     assert payload["attempts"][0]["status"] == "fallback"
+    assert payload["attempts"][0]["bootContinues"] is True
     assert payload["attempts"][0]["profile"] == "default"
     assert payload["attempts"][0]["isDefault"] is True
     assert payload["redirects"] == []
@@ -250,6 +257,7 @@ def test_active_profile_success_path_applies_boot_state_and_continues(driver_pat
     )
 
     assert payload["attempts"][0]["status"] == "resolved"
+    assert payload["attempts"][0]["bootContinues"] is True
     assert payload["attempts"][0]["profile"] == "team-profile"
     assert payload["attempts"][0]["isDefault"] is False
     assert payload["bootProfile"] == "team-profile"
