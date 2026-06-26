@@ -492,18 +492,19 @@ def read_importable_agent_session_rows(
         use_messages_join = messages_has_session_id
         count_col = 'id' if 'id' in message_cols else 'session_id'
 
-        # Defensive index prime (#3887). The candidate-ordering query below sorts
-        # sessions by a correlated ``MAX(mx.timestamp)`` subquery over ``messages``.
-        # That is fast only when the agent's standard
+        # Defensive index prime (#3887). The candidate-ordering path below now
+        # builds a pre-aggregated latest-message relation over ``messages`` and
+        # the final grouped projection still joins ``messages`` by ``session_id``.
+        # Both stay fast only when the agent's standard
         # ``idx_messages_session ON messages(session_id, timestamp)`` index exists.
         # A normally-migrated hermes-agent state.db has it, but a db that lost its
         # migrations (older hermes-agent, or a hand-rebuilt/reimported db) does
-        # not — and the subquery then degrades to a full ``messages`` scan per
-        # candidate session, stalling ``/api/sessions`` for seconds on every
-        # refresh (the 5s-TTL cache never settles). Priming the index is a no-op
-        # (~free) when it already exists, and self-heals an affected db in
-        # milliseconds. Best-effort: degrade silently on a read-only db or any
-        # error so the listing never fails because of the prime.
+        # not — and the aggregate scan then degrades into a much more expensive
+        # walk over ``messages``, stalling ``/api/sessions`` on large stores.
+        # Priming the index is a no-op (~free) when it already exists, and
+        # self-heals an affected db in milliseconds. Best-effort: degrade
+        # silently on a read-only db or any error so the listing never fails
+        # because of the prime.
         if messages_has_session_id and messages_has_timestamp:
             try:
                 cur.execute(
