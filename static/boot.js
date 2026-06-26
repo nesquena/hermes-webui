@@ -2260,8 +2260,65 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
     api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false})}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
+  async function _resolveActiveProfileBootstrapState({
+    loadActiveProfile = () => api('/api/profile/active', {redirect401: false}),
+    getNextUrl = () => window.location.pathname + window.location.search,
+    redirectToLogin = (nextUrl) => {
+      window.location.href = 'login?next=' + encodeURIComponent(nextUrl);
+    },
+    markerStorage = sessionStorage,
+    markerKey = 'hermes-webui-active-profile-bootstrap-401',
+  } = {}) {
+    const getAttempted = () => {
+      try {
+        return markerStorage && markerStorage.getItem
+          ? markerStorage.getItem(markerKey) === '1'
+          : false;
+      } catch (_) {
+        return false;
+      }
+    };
+    const markAttempt = () => {
+      try {
+        if (markerStorage && markerStorage.setItem) markerStorage.setItem(markerKey, '1');
+      } catch (_) {}
+    };
+    const clearAttempt = () => {
+      try {
+        if (markerStorage && markerStorage.removeItem) markerStorage.removeItem(markerKey);
+      } catch (_) {}
+    };
+
+    const alreadyAttempted = getAttempted();
+    try {
+      const p = await loadActiveProfile();
+      if (p && typeof p === 'object' && typeof p.name === 'string') {
+        clearAttempt();
+        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+      }
+      if (p === undefined && !alreadyAttempted) {
+        markAttempt();
+        redirectToLogin(getNextUrl());
+        return {status: 'recovery-redirect'};
+      }
+      clearAttempt();
+      return {status: 'fallback', profile: 'default', isDefault: true};
+    } catch (e) {
+      clearAttempt();
+      if (!alreadyAttempted && e && e.status === 401) {
+        markAttempt();
+        redirectToLogin(getNextUrl());
+        return {status: 'recovery-redirect'};
+      }
+      return {status: 'fallback', profile: 'default', isDefault: true};
+    }
+  }
+
   // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';S.activeProfileIsDefault=!!p.is_default;}catch(e){S.activeProfile='default';S.activeProfileIsDefault=true;}
+  const activeProfileState = await _resolveActiveProfileBootstrapState();
+  if (activeProfileState.status === 'recovery-redirect') return;
+  S.activeProfile = activeProfileState.profile;
+  S.activeProfileIsDefault = activeProfileState.isDefault;
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
