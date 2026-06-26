@@ -109,6 +109,13 @@ def test_get_max_tokens_status_prefers_root_then_agent():
         "max_tokens_fallback": 512,
     }
 
+    _write_config("max_tokens: true\n")
+    assert config.get_max_tokens_status() == {
+        "max_tokens": 1,
+        "max_tokens_effective": 1,
+        "max_tokens_fallback": None,
+    }
+
 
 def test_set_max_tokens_writes_root_override_and_clears_back_to_agent_fallback():
     import api.config as config
@@ -292,6 +299,10 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
     assert "maxTokensField.dataset.initialValue=maxTokensField.value" in load_block.replace(" ", "")
     assert "maxTokensField.addEventListener('input',_markSettingsDirty" in load_block.replace(" ", "")
     assert "_schedulePreferencesAutosave" not in load_window
+
+    apply_saved_block = _function_block(panels_js, "_applySavedSettingsUi")
+    assert "saved&&saved.max_tokens" in apply_saved_block
+    assert "maxTokensField.dataset.initialValue=maxTokensField.value" in apply_saved_block.replace(" ", "")
 
     prefs_block = _function_block(panels_js, "_preferencesPayloadFromUi")
     assert "settingsMaxTokens" not in prefs_block

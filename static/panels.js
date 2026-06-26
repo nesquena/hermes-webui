@@ -9588,6 +9588,15 @@ function _applySavedSettingsUi(saved, body, opts){
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  const maxTokensField=$('settingsMaxTokens');
+  if(maxTokensField){
+    const savedRawMaxTokens=saved&&saved.max_tokens;
+    const parsedSavedMaxTokens=parseInt(savedRawMaxTokens,10);
+    maxTokensField.value=(Number.isFinite(parsedSavedMaxTokens)&&parsedSavedMaxTokens>0)
+      ? String(parsedSavedMaxTokens)
+      : '';
+    maxTokensField.dataset.initialValue=maxTokensField.value;
+  }
   if(typeof startGatewaySSE==='function'){
     if(showCliSessions) startGatewaySSE();
     else if(typeof stopGatewaySSE==='function') stopGatewaySSE();

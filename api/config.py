@@ -3483,7 +3483,7 @@ def get_reasoning_status(
 
 
 def _parse_positive_int_config_value(raw) -> int | None:
-    if raw is None or isinstance(raw, bool):
+    if raw is None:
         return None
     try:
         parsed = int(raw)
