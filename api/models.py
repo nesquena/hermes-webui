@@ -5405,6 +5405,19 @@ def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
     return None
 
 
+def _tool_call_assistant_should_precede_content_assistant(existing: dict, msg: dict) -> bool:
+    return (
+        isinstance(existing, dict)
+        and isinstance(msg, dict)
+        and str(msg.get("role") or "").lower() == "assistant"
+        and bool(msg.get("tool_calls"))
+        and not _message_content_text(msg).strip()
+        and str(existing.get("role") or "").lower() == "assistant"
+        and not existing.get("tool_calls")
+        and bool(_message_content_text(existing).strip())
+    )
+
+
 def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
     """Insert a state.db-only row before newer sidecar rows when safe.
 
@@ -5424,8 +5437,13 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
             existing_timestamp > timestamp
             or (
                 existing_timestamp == timestamp
-                and msg.get("role") == "user"
-                and existing.get("role") == "assistant"
+                and (
+                    (
+                        msg.get("role") == "user"
+                        and existing.get("role") == "assistant"
+                    )
+                    or _tool_call_assistant_should_precede_content_assistant(existing, msg)
+                )
             )
         )
         if not should_insert:
@@ -5477,6 +5495,7 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
                 and idx > 0
                 and messages[idx - 1].get("role") == msg.get("role")
                 and _message_timestamp_as_float(messages[idx]) == timestamp
+                and not _tool_call_assistant_should_precede_content_assistant(messages[idx], msg)
             ):
                 idx += 1
                 advanced = True

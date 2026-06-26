@@ -154,6 +154,46 @@ class TestMergeToolCallsEndToEnd:
             "call_2",
         ]
 
+    def test_equal_timestamp_state_tool_call_stays_before_final_answer(self):
+        """Same-second tool-call rows must still stay before the final answer."""
+        sidecar_tool = _assistant_tc("call_1", "read_file", timestamp=1000)
+        final_answer = {
+            "role": "assistant",
+            "content": "Final answer.",
+            "timestamp": 1000,
+        }
+        state_tool = _assistant_tc("call_2", "terminal", timestamp=1000)
+
+        result = merge_session_messages_append_only(
+            [sidecar_tool, final_answer],
+            [state_tool],
+        )
+
+        assert result[-1] == final_answer
+        assert [
+            m.get("tool_calls", [{}])[0].get("id")
+            for m in result
+            if m.get("tool_calls")
+        ] == ["call_1", "call_2"]
+
+    def test_pre_window_state_tool_call_row_is_not_tail_appended(self):
+        """Pre-window tool-call resurrection candidates stay dropped."""
+        sidecar_tool = _assistant_tc("call_1", "read_file", timestamp=1000)
+        final_answer = {
+            "role": "assistant",
+            "content": "Final answer.",
+            "timestamp": 1001,
+        }
+        state_tool = _assistant_tc("call_2", "terminal", timestamp=999)
+
+        result = merge_session_messages_append_only(
+            [sidecar_tool, final_answer],
+            [state_tool],
+        )
+
+        assert result == [sidecar_tool, final_answer]
+        assert result[-1] == final_answer
+
     def test_no_tool_calls_still_deduped(self):
         """Messages without tool_calls are deduplicated by legacy key as before."""
         msg = {"role": "assistant", "content": "hello", "timestamp": 1000}
