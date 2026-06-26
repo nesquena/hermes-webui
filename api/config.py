@@ -172,10 +172,19 @@ def _discover_agent_dir() -> Path:
         candidates.append(Path(sys_prefix) / "hermes-agent")
 
     for path in candidates:
-        if path.exists() and (path / "run_agent.py").exists():
+        if path.exists() and _looks_like_agent_source_root(path):
             return path.resolve()
 
     return None
+
+
+def _looks_like_agent_source_root(path: Path) -> bool:
+    """Return True when a directory resembles a hermes-agent source root."""
+    if (path / "run_agent.py").exists():
+        return True
+    if not (path / "cron" / "jobs.py").exists():
+        return False
+    return any((path / marker).exists() for marker in ("hermes", "hermes_cli", "plugins"))
 
 
 def _discover_python(agent_dir: Path) -> str:
