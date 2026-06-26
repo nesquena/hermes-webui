@@ -138,13 +138,13 @@ def _discover_agent_dir() -> Path:
       5. Common install paths            -- ~/.hermes/hermes-agent (again as fallback)
       6. HOME / hermes-agent             -- ~/hermes-agent (simple flat layout)
     """
-    candidates = []
+    explicit_override = os.getenv("HERMES_WEBUI_AGENT_DIR")
+    if explicit_override:
+        explicit_path = Path(explicit_override).expanduser().resolve()
+        if explicit_path.exists() and _looks_like_agent_source_root(explicit_path):
+            return explicit_path
 
-    # 1. Explicit env var
-    if os.getenv("HERMES_WEBUI_AGENT_DIR"):
-        candidates.append(
-            Path(os.getenv("HERMES_WEBUI_AGENT_DIR")).expanduser().resolve()
-        )
+    candidates = []
 
     # 2. HERMES_HOME / hermes-agent
     hermes_home = os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))
@@ -154,7 +154,7 @@ def _discover_agent_dir() -> Path:
     candidates.append(REPO_ROOT.parent / "hermes-agent")
 
     # 4. Parent is the agent repo itself (repo cloned inside hermes-agent/)
-    if (REPO_ROOT.parent / "run_agent.py").exists():
+    if _looks_like_agent_source_root(REPO_ROOT.parent):
         candidates.append(REPO_ROOT.parent)
 
     # 5. ~/.hermes/hermes-agent (explicit common path)
@@ -171,11 +171,36 @@ def _discover_agent_dir() -> Path:
     for sys_prefix in ("/opt", "/usr/local", "/usr/local/share"):
         candidates.append(Path(sys_prefix) / "hermes-agent")
 
+    # Prefer real source checkouts before pip-style roots so lookalikes cannot preempt them.
     for path in candidates:
         if path.exists() and (path / "run_agent.py").exists():
             return path.resolve()
 
+    for path in candidates:
+        if path.exists() and _looks_like_pip_style_agent_source_root(path):
+            return path.resolve()
+
     return None
+
+
+def _looks_like_agent_source_root(path: Path) -> bool:
+    """Return True when a directory resembles a hermes-agent source root."""
+    if (path / "run_agent.py").exists():
+        return True
+    return _looks_like_pip_style_agent_source_root(path)
+
+
+def _looks_like_pip_style_agent_source_root(path: Path) -> bool:
+    """Return True for pip-style agent roots with a real agent package signal."""
+    if not (path / "cron" / "jobs.py").exists():
+        return False
+    if (path / "hermes").exists():
+        return True
+    hermes_cli_dir = path / "hermes_cli"
+    return (
+        (hermes_cli_dir / "__init__.py").exists()
+        or (hermes_cli_dir / "main.py").exists()
+    )
 
 
 def _discover_python(agent_dir: Path) -> str:
@@ -1169,6 +1194,37 @@ _PROVIDER_ALIASES = {
     # OpenAI-compat path. See #1384.
     "local": "custom",
 }
+
+
+def _get_anthropic_fallback_env_vars() -> tuple[str, ...]:
+    """Read Anthropic auth env vars from the shared agent registry when available."""
+    fallback = (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    )
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
+        anthropic = (
+            PROVIDER_REGISTRY.get("anthropic")
+            if isinstance(PROVIDER_REGISTRY, dict)
+            else None
+        )
+        env_vars = getattr(anthropic, "api_key_env_vars", None)
+        if not env_vars:
+            return fallback
+
+        out = []
+        for _var in env_vars:
+            if not isinstance(_var, str):
+                continue
+            _normalized = _var.strip()
+            if _normalized and _normalized not in out:
+                out.append(_normalized)
+        return tuple(out) if out else fallback
+    except Exception:
+        return fallback
 
 
 def _resolve_provider_alias(name: str) -> str:
@@ -5687,8 +5743,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 except Exception:
                     logger.debug("Failed to parse hermes env file")
             all_env = {**env_keys}
+            _anthropic_env_vars = _get_anthropic_fallback_env_vars()
             for k in (
-                "ANTHROPIC_API_KEY",
+                *_anthropic_env_vars,
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
                 "GOOGLE_API_KEY",
@@ -5707,10 +5764,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 "AWS_ACCESS_KEY_ID",
                 "AWS_SECRET_ACCESS_KEY",
             ):
-                val = _thread_local_env_value(k)
+                val = _thread_local_env_value(k).strip()
                 if val:
                     all_env[k] = val
-            if all_env.get("ANTHROPIC_API_KEY"):
+            if any(all_env.get(env_var) for env_var in _anthropic_env_vars):
                 detected_providers.add("anthropic")
             if all_env.get("OPENAI_API_KEY"):
                 # hermes-agent registers its OPENAI_API_KEY/OPENAI_BASE_URL provider

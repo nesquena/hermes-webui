@@ -53,8 +53,8 @@ class TestComposerPlaceholderProfile:
     def test_boot_applies_placeholder_after_active_profile_loads(self):
         """Boot must set the composer placeholder after S.activeProfile is known."""
         src = _src("boot.js")
-        fetch_idx = src.find("api('/api/profile/active')")
-        assert fetch_idx >= 0, "boot.js should fetch the active profile during boot"
+        fetch_idx = src.find("const activeProfileState = await _resolveActiveProfileBootstrapState();")
+        assert fetch_idx >= 0, "boot.js should resolve the active profile during boot"
         label_idx = src.find("const profileLabel=$('profileChipLabel');", fetch_idx)
         assert label_idx >= 0, "profile chip sync should follow active profile fetch"
         assert "applyBotName();" in src[fetch_idx:label_idx], (
