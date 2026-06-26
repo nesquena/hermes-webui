@@ -45,7 +45,12 @@ _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # expensive state.db CLI/cron projection is re-run on every poll. (#4842)
 _CLI_SESSIONS_CACHE_STREAMING_TTL_SECONDS = 30.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
+_CLI_SESSIONS_CACHE_INFLIGHT: "dict[tuple, threading.Event]" = {}
+_CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 _CLI_SESSIONS_CACHE = {}
+_CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
+# Event waits that keep stale rows visible while a rebuild is in flight.
+_CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
 
 # Per-file parse cache for Claude Code JSONL transcripts (#4718/#4662 phase 4).
 # ``~/.claude/projects`` is a GLOBAL, profile-independent directory, but the
@@ -3298,6 +3303,18 @@ def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> di
             source_expr = 's.source' if 'source' in session_cols else 'NULL AS source'
             session_source_expr = 's.session_source' if 'session_source' in session_cols else 'NULL AS session_source'
             title_expr = 's.title' if 'title' in session_cols else 'NULL AS title'
+            message_count_expr = 's.message_count' if 'message_count' in session_cols else 'NULL AS message_count'
+
+            cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
+            has_messages_table = cur.fetchone() is not None
+            messages_has_session_id = False
+            messages_has_timestamp = False
+            if has_messages_table:
+                cur.execute("PRAGMA table_info(messages)")
+                message_cols = {str(row[1]) for row in cur.fetchall()}
+                messages_has_session_id = 'session_id' in message_cols
+                messages_has_timestamp = 'timestamp' in message_cols
+
             overrides: dict[str, dict] = {}
             ids = list(wanted)
             chunk_size = 500
@@ -3306,7 +3323,7 @@ def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> di
                 placeholders = ','.join('?' * len(chunk))
                 cur.execute(
                     f"""
-                    SELECT s.id, {source_expr}, {session_source_expr}, {title_expr}
+                    SELECT s.id, {source_expr}, {session_source_expr}, {title_expr}, {message_count_expr}
                     FROM sessions s
                     WHERE s.id IN ({placeholders})
                     """,
@@ -3326,8 +3343,39 @@ def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> di
                         entry['_state_db_raw_source'] = source_meta.get('raw_source')
                         entry['_state_db_session_source'] = source_meta.get('session_source')
                         entry['_state_db_source_label'] = source_meta.get('source_label')
+                    if row['message_count'] is not None:
+                        try:
+                            entry['_state_db_message_count'] = max(0, int(row['message_count'] or 0))
+                        except (TypeError, ValueError):
+                            pass
                     if entry:
                         overrides[sid] = entry
+                if has_messages_table and messages_has_session_id:
+                    last_at_expr = "MAX(timestamp) AS last_message_at" if messages_has_timestamp else "NULL AS last_message_at"
+                    cur.execute(
+                        f"""
+                        SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
+                        FROM messages
+                        WHERE session_id IN ({placeholders})
+                        GROUP BY session_id
+                        """,
+                        chunk,
+                    )
+                    for row in cur.fetchall():
+                        sid = str(row['session_id'])
+                        entry = overrides.setdefault(sid, {})
+                        try:
+                            entry['_state_db_message_count'] = max(
+                                int(entry.get('_state_db_message_count') or 0),
+                                int(row['actual_message_count'] or 0),
+                            )
+                        except (TypeError, ValueError):
+                            pass
+                        if row['last_message_at'] is not None:
+                            try:
+                                entry['_state_db_last_message_at'] = float(row['last_message_at'] or 0)
+                            except (TypeError, ValueError):
+                                pass
             return overrides
     except Exception:
         return {}
@@ -3357,12 +3405,45 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_raw_source = entry.pop('_state_db_raw_source', None)
         state_db_session_source = entry.pop('_state_db_session_source', None)
         state_db_source_label = entry.pop('_state_db_source_label', None)
+        state_db_message_count = entry.pop('_state_db_message_count', None)
+        state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
         if state_db_source == 'webui':
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
             session['session_source'] = state_db_session_source
             session['source_label'] = state_db_source_label
             session['is_cli_session'] = False
+            try:
+                current_count = max(0, int(session.get('message_count') or 0))
+                state_count = max(0, int(state_db_message_count or 0))
+            except (TypeError, ValueError):
+                current_count = 0
+                state_count = 0
+            try:
+                current_last = max(
+                    float(session.get('last_message_at') or 0),
+                    float(session.get('updated_at') or 0),
+                )
+            except (TypeError, ValueError):
+                current_last = 0.0
+            try:
+                state_last = float(state_db_last_message_at or 0)
+            except (TypeError, ValueError):
+                state_last = 0.0
+            # ``current_last`` intentionally includes ``updated_at``: if a
+            # sidecar metadata-only write happened after the state.db append,
+            # keep the conservative anti-resurrection guard and wait for a
+            # newer settled state.db message before overlaying counts again.
+            if state_count > current_count and (state_last <= 0 or state_last > current_last):
+                try:
+                    existing_actual = max(0, int(session.get('actual_message_count') or 0))
+                except (TypeError, ValueError):
+                    existing_actual = 0
+                session['message_count'] = state_count
+                session['actual_message_count'] = max(state_count, existing_actual)
+                if state_last > 0:
+                    session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
+                    session['updated_at'] = max(float(session.get('updated_at') or 0), state_last)
         title = session.get('title')
         if (
             state_db_title
@@ -3489,6 +3570,34 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
                     )
+            missing_persisted_ids = []
+            if persisted_ids is not None:
+                indexed_ids = {str(sid) for sid in index_map.keys() if sid}
+                missing_persisted_ids = sorted(
+                    str(sid) for sid in persisted_ids
+                    if sid and str(sid) not in indexed_ids
+                )
+            recovered_sidecars = []
+            if missing_persisted_ids:
+                _diag_stage(diag, "all_sessions.recover_missing_index_sidecars")
+                for sid in missing_persisted_ids:
+                    try:
+                        sidecar = Session.load_metadata_only(sid)
+                    except Exception:
+                        sidecar = None
+                    if not sidecar:
+                        continue
+                    index_map[sidecar.session_id] = sidecar.compact(
+                        include_runtime=True,
+                        active_stream_ids=active_stream_ids,
+                    )
+                    recovered_sidecars.append(sidecar)
+                if recovered_sidecars:
+                    try:
+                        _diag_stage(diag, "all_sessions.recover_missing_index_write")
+                        _write_session_index(updates=recovered_sidecars)
+                    except Exception:
+                        logger.debug("Failed to persist recovered sidebar index rows")
             _diag_stage(diag, "all_sessions.refresh_sidecar_metadata")
             index_message_counts = _index_message_count_map(index)
             refreshed_index_rows = _refresh_index_rows_from_sidecar_metadata(
@@ -4101,6 +4210,8 @@ def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None
 
 def clear_cli_sessions_cache() -> None:
     with _CLI_SESSIONS_CACHE_LOCK:
+        global _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+        _CLI_SESSIONS_CACHE_INVALIDATION_VERSION += 1
         _CLI_SESSIONS_CACHE.clear()
     # The sidecar-metadata projection cache is stat-keyed (self-invalidating on
     # any file change), but clear it alongside the CLI cache so an explicit
@@ -4110,6 +4221,154 @@ def clear_cli_sessions_cache() -> None:
 
 def _copy_cli_sessions(sessions: list) -> list:
     return copy.deepcopy(sessions)
+
+
+def _cli_sessions_cache_invalidation_stamp() -> int:
+    with _CLI_SESSIONS_CACHE_LOCK:
+        return int(_CLI_SESSIONS_CACHE_INVALIDATION_VERSION)
+
+
+def _cli_sessions_cache_claim_rebuild(cache_key: tuple) -> tuple[threading.Event, bool]:
+    with _CLI_SESSIONS_CACHE_LOCK:
+        current = _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key)
+        if current is not None:
+            return current, False
+        event = threading.Event()
+        _CLI_SESSIONS_CACHE_INFLIGHT[cache_key] = event
+        return event, True
+
+
+def _cli_sessions_cache_done(cache_key: tuple, event: threading.Event | None) -> None:
+    with _CLI_SESSIONS_CACHE_LOCK:
+        if event is None:
+            return
+        if _CLI_SESSIONS_CACHE_INFLIGHT.get(cache_key) is event:
+            _CLI_SESSIONS_CACHE_INFLIGHT.pop(cache_key, None)
+    if event is not None:
+        event.set()
+
+
+def _cache_cli_sessions_if_current(
+    cache_key: tuple,
+    ttl: float,
+    invalidation_stamp: int,
+    sessions: list,
+) -> bool:
+    with _CLI_SESSIONS_CACHE_LOCK:
+        if _CLI_SESSIONS_CACHE_INVALIDATION_VERSION != invalidation_stamp:
+            return False
+        _CLI_SESSIONS_CACHE[cache_key] = (
+            time.monotonic() + ttl,
+            invalidation_stamp,
+            _copy_cli_sessions(sessions),
+        )
+    return True
+
+
+def _copy_fresh_cli_sessions_cache_entry(cache_key: tuple):
+    with _CLI_SESSIONS_CACHE_LOCK:
+        cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
+        if cached_entry is None:
+            return None
+        if len(cached_entry) == 3:
+            cached_expires_at, cached_stamp, cached_sessions = cached_entry
+        else:
+            cached_expires_at, cached_sessions = cached_entry
+            cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+        if cached_stamp != _CLI_SESSIONS_CACHE_INVALIDATION_VERSION:
+            _CLI_SESSIONS_CACHE.pop(cache_key, None)
+            return None
+        if cached_expires_at <= time.monotonic():
+            return None
+        return _copy_cli_sessions(cached_sessions)
+
+
+def _load_and_cache_cli_sessions(
+    *,
+    cache_key: tuple,
+    ttl: float,
+    invalidation_stamp: int,
+    load_sessions,
+    stale_sessions,
+    stale_stamp,
+    all_profiles: bool,
+    db_path,
+) -> list:
+    try:
+        sessions = load_sessions()
+    except Exception as _cli_err:
+        logger.warning(
+            "get_cli_sessions() failed — check state.db schema or path (%s): %s",
+            "all profiles" if all_profiles else db_path, _cli_err,
+        )
+        if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
+            return stale_sessions
+        return []
+    _cache_cli_sessions_if_current(
+        cache_key,
+        ttl,
+        invalidation_stamp,
+        sessions,
+    )
+    return _copy_cli_sessions(sessions)
+
+
+def _reload_cli_sessions_after_inflight(
+    *,
+    cache_key: tuple,
+    ttl: float,
+    stale_sessions,
+    stale_stamp,
+    load_sessions,
+    all_profiles: bool,
+    db_path: str,
+) -> list:
+    while True:
+        event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
+        if is_owner:
+            break
+        wait_finished = False
+        try:
+            wait_finished = bool(
+                event.wait(
+                    _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS
+                    if stale_sessions is not None
+                    else _CLI_SESSIONS_CACHE_WAIT_SECONDS
+                )
+            )
+        except Exception:
+            pass
+        cached_sessions = _copy_fresh_cli_sessions_cache_entry(cache_key)
+        if cached_sessions is not None:
+            return cached_sessions
+        if stale_sessions is not None and stale_stamp == _cli_sessions_cache_invalidation_stamp():
+            return stale_sessions
+        if not wait_finished:
+            fallback_invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
+            return _load_and_cache_cli_sessions(
+                cache_key=cache_key,
+                ttl=ttl,
+                invalidation_stamp=fallback_invalidation_stamp,
+                load_sessions=load_sessions,
+                stale_sessions=stale_sessions,
+                stale_stamp=stale_stamp,
+                all_profiles=all_profiles,
+                db_path=db_path,
+            )
+    try:
+        invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
+        return _load_and_cache_cli_sessions(
+            cache_key=cache_key,
+            ttl=ttl,
+            invalidation_stamp=invalidation_stamp,
+            load_sessions=load_sessions,
+            stale_sessions=stale_sessions,
+            stale_stamp=stale_stamp,
+            all_profiles=all_profiles,
+            db_path=db_path,
+        )
+    finally:
+        _cli_sessions_cache_done(cache_key, event)
 
 
 def _cli_sessions_cache_ttl_seconds() -> float:
@@ -4661,6 +4920,7 @@ def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
     source_filter = _normalize_cli_session_source_filter(source_filter)
     if all_profiles:
         contexts, context_cache_key = _all_profiles_cli_contexts()
+        db_path = "all profiles"
         # #4842: freeze the volatile per-profile state.db component while
         # streaming so a streamed message row in one profile doesn't bust the
         # all-profiles CLI cache and re-run every profile's heavy projection.
@@ -4699,26 +4959,48 @@ def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
         return _load_cli_sessions_uncached(hermes_home, db_path, cli_profile, source_filter=source_filter)
 
     if ttl > 0:
+        stale_sessions = None
+        stale_stamp = None
         with _CLI_SESSIONS_CACHE_LOCK:
-            cached = _CLI_SESSIONS_CACHE.get(cache_key)
-            if cached:
-                expires_at, cached_sessions = cached
-                if expires_at > now:
+            cached_entry = _CLI_SESSIONS_CACHE.get(cache_key)
+            if cached_entry is not None:
+                if len(cached_entry) == 3:
+                    cached_expires_at, cached_stamp, cached_sessions = cached_entry
+                else:
+                    cached_expires_at, cached_sessions = cached_entry
+                    cached_stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+                if cached_stamp != _CLI_SESSIONS_CACHE_INVALIDATION_VERSION:
+                    _CLI_SESSIONS_CACHE.pop(cache_key, None)
+                elif cached_expires_at > now:
                     return _copy_cli_sessions(cached_sessions)
-                _CLI_SESSIONS_CACHE.pop(cache_key, None)
+                else:
+                    stale_sessions = _copy_cli_sessions(cached_sessions)
+                    stale_stamp = cached_stamp
+        event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
+        if is_owner:
             try:
-                sessions = _load_sessions()
-            except Exception as _cli_err:
-                logger.warning(
-                    "get_cli_sessions() failed — check state.db schema or path (%s): %s",
-                    "all profiles" if all_profiles else db_path, _cli_err,
+                invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
+                return _load_and_cache_cli_sessions(
+                    cache_key=cache_key,
+                    ttl=ttl,
+                    invalidation_stamp=invalidation_stamp,
+                    load_sessions=_load_sessions,
+                    stale_sessions=stale_sessions,
+                    stale_stamp=stale_stamp,
+                    all_profiles=all_profiles,
+                    db_path=db_path,
                 )
-                return []
-            _CLI_SESSIONS_CACHE[cache_key] = (
-                time.monotonic() + ttl,
-                _copy_cli_sessions(sessions),
-            )
-            return _copy_cli_sessions(sessions)
+            finally:
+                _cli_sessions_cache_done(cache_key, event)
+        return _reload_cli_sessions_after_inflight(
+            cache_key=cache_key,
+            ttl=ttl,
+            stale_sessions=stale_sessions,
+            stale_stamp=stale_stamp,
+            load_sessions=_load_sessions,
+            all_profiles=all_profiles,
+            db_path=db_path,
+        )
 
     try:
         return _load_sessions()
@@ -4728,7 +5010,6 @@ def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
             "all profiles" if all_profiles else db_path, _cli_err,
         )
         return []
-
 
 def _json_loads_if_string(value):
     if not isinstance(value, str):
@@ -5301,6 +5582,19 @@ def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
     return None
 
 
+def _tool_call_assistant_should_precede_content_assistant(existing: dict, msg: dict) -> bool:
+    return (
+        isinstance(existing, dict)
+        and isinstance(msg, dict)
+        and str(msg.get("role") or "").lower() == "assistant"
+        and bool(msg.get("tool_calls"))
+        and not _message_content_text(msg).strip()
+        and str(existing.get("role") or "").lower() == "assistant"
+        and not existing.get("tool_calls")
+        and bool(_message_content_text(existing).strip())
+    )
+
+
 def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
     """Insert a state.db-only row before newer sidecar rows when safe.
 
@@ -5320,8 +5614,13 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
             existing_timestamp > timestamp
             or (
                 existing_timestamp == timestamp
-                and msg.get("role") == "user"
-                and existing.get("role") == "assistant"
+                and (
+                    (
+                        msg.get("role") == "user"
+                        and existing.get("role") == "assistant"
+                    )
+                    or _tool_call_assistant_should_precede_content_assistant(existing, msg)
+                )
             )
         )
         if not should_insert:
@@ -5373,6 +5672,7 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
                 and idx > 0
                 and messages[idx - 1].get("role") == msg.get("role")
                 and _message_timestamp_as_float(messages[idx]) == timestamp
+                and not _tool_call_assistant_should_precede_content_assistant(messages[idx], msg)
             ):
                 idx += 1
                 advanced = True
@@ -5718,7 +6018,17 @@ def merge_session_messages_append_only(
                 if _tc:
                     _ck = _session_message_content_key(msg)
                     if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
-                        pass  # different tool_calls from sidecar — preserve
+                        # Different tool_calls from sidecar — preserve, but keep
+                        # the row in timestamp order. Falling through to the
+                        # generic append path would move older tool-call-only
+                        # assistant rows after the settled final answer.
+                        if _insert_state_message_chronologically(merged_messages, msg):
+                            seen_message_keys.add(key)
+                            seen_dedup_keys.add(dedup_key)
+                            seen_content_keys.add(_session_message_content_key(msg))
+                            seen_visible_keys.add(visible_key)
+                            _remember_merged_message(msg)
+                        continue
                     else:
                         _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                         continue

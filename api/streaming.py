@@ -7026,7 +7026,11 @@ def _run_agent_streaming(
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
-            _main_request_overrides = _main_model_request_overrides(_cfg)
+            _main_request_overrides = _main_model_request_overrides(
+                _cfg,
+                effective_model=resolved_model,
+                effective_provider=resolved_provider,
+            )
             put('context_status', {
                 'session_id': session_id,
                 'prefill': _public_prefill_context_status(_prefill_context),
