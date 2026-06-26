@@ -533,25 +533,13 @@ def read_importable_agent_session_rows(
             join_clause = ""
             group_by_clause = ""
 
-        if use_messages_join and messages_has_timestamp:
-            order_by_clause = "ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC"
-            latest_messages_cte = (
-                "latest_messages AS (\n"
-                "                    SELECT mx.session_id AS session_id, MAX(mx.timestamp) AS last_message_at\n"
-                "                    FROM messages mx\n"
-                "                    GROUP BY mx.session_id\n"
-                "                )"
-            )
-            candidate_order_clause = (
-                "ORDER BY COALESCE(lm.last_message_at, s.started_at) DESC, s.started_at DESC"
-            )
-        else:
-            order_by_clause = "ORDER BY s.started_at DESC"
-            latest_messages_cte = None
-            candidate_order_clause = "ORDER BY s.started_at DESC"
+        order_by_clause = "ORDER BY s.started_at DESC"
+        latest_messages_cte = None
+        candidate_order_clause = "ORDER BY s.started_at DESC"
 
         where_clauses = ["s.source IS NOT NULL"]
         params: list[object] = []
+        included = ()
         if include_sources:
             included = tuple(str(source) for source in include_sources if source)
             if included:
@@ -564,6 +552,29 @@ def read_importable_agent_session_rows(
                 placeholders = ", ".join("?" for _ in excluded)
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
+
+        use_preaggregated_candidate_order = (
+            use_messages_join and messages_has_timestamp and included == ("cron",)
+        )
+        if use_preaggregated_candidate_order:
+            order_by_clause = "ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC"
+            latest_messages_cte = (
+                "latest_messages AS (\n"
+                "                    SELECT mx.session_id AS session_id, MAX(mx.timestamp) AS last_message_at\n"
+                "                    FROM messages mx\n"
+                "                    GROUP BY mx.session_id\n"
+                "                )"
+            )
+            candidate_order_clause = "ORDER BY COALESCE(lm.last_message_at, s.started_at) DESC, s.started_at DESC"
+        elif use_messages_join and messages_has_timestamp:
+            order_by_clause = "ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC"
+            candidate_order_clause = (
+                "ORDER BY COALESCE(\n"
+                "                        (SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id),\n"
+                "                        s.started_at\n"
+                "                    ) DESC,\n"
+                "                    s.started_at DESC"
+            )
 
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,

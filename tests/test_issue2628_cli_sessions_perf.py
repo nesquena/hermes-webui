@@ -12,7 +12,7 @@ _REAL_SQLITE_CONNECT = sqlite3.connect
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-def _make_state_db(path, *, sessions=80, messages_per_session=3, create_messages_index=True):
+def _make_state_db(path, *, sessions=80, messages_per_session=3, create_messages_index=True, source="cli", session_source="cli"):
     conn = sqlite3.connect(str(path))
     conn.executescript(
         """
@@ -46,9 +46,9 @@ def _make_state_db(path, *, sessions=80, messages_per_session=3, create_messages
             """
             INSERT INTO sessions
             (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-            VALUES (?, 'cli', 'cli', ?, 'openai/gpt-5', ?, ?, NULL, NULL, NULL)
+            VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, ?, NULL, NULL, NULL)
             """,
-            (sid, sid, started, messages_per_session),
+            (sid, source, session_source, sid, started, messages_per_session),
         )
         for j in range(messages_per_session):
             conn.execute(
@@ -61,28 +61,48 @@ def _make_state_db(path, *, sessions=80, messages_per_session=3, create_messages
     conn.close()
 
 
-def _newest_first_reference_ids(db_path):
+def _newest_first_reference_ids(db_path, *, include_sources=None, exclude_sources=("webui",)):
+    where_clauses = ["s.source IS NOT NULL"]
+    params = []
+    if include_sources:
+        placeholders = ", ".join("?" for _ in include_sources)
+        where_clauses.append(f"s.source IN ({placeholders})")
+        params.extend(include_sources)
+    if exclude_sources:
+        placeholders = ", ".join("?" for _ in exclude_sources)
+        where_clauses.append(f"s.source NOT IN ({placeholders})")
+        params.extend(exclude_sources)
     conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT s.id
             FROM sessions s
             LEFT JOIN messages m ON m.session_id = s.id
-            WHERE s.source IS NOT NULL AND s.source NOT IN (?)
+            WHERE {' AND '.join(where_clauses)}
             GROUP BY s.id
             ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
-            """
-            ,
-            ("webui",),
+            """,
+            params,
         ).fetchall()
         return [row["id"] for row in rows]
     finally:
         conn.close()
 
 
-def _execute_candidate_ordering_baseline_sql(db_path, candidate_limit, *, budget_ops):
+def _execute_candidate_ordering_baseline_sql(db_path, candidate_limit, *, budget_ops, include_sources=None, exclude_sources=("webui",)):
+    where_clauses = ["s.source IS NOT NULL"]
+    params = []
+    if include_sources:
+        placeholders = ", ".join("?" for _ in include_sources)
+        where_clauses.append(f"s.source IN ({placeholders})")
+        params.extend(include_sources)
+    if exclude_sources:
+        placeholders = ", ".join("?" for _ in exclude_sources)
+        where_clauses.append(f"s.source NOT IN ({placeholders})")
+        params.extend(exclude_sources)
+
     def _on_progress():
         nonlocal steps
         steps += 1
@@ -93,11 +113,11 @@ def _execute_candidate_ordering_baseline_sql(db_path, candidate_limit, *, budget
     conn.set_progress_handler(_on_progress, 1)
     try:
         return conn.execute(
-            """
+            f"""
             WITH candidates AS (
                 SELECT s.id
                 FROM sessions s
-                WHERE s.source IS NOT NULL AND s.source NOT IN (?)
+                WHERE {' AND '.join(where_clauses)}
                 ORDER BY COALESCE(
                     (SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id),
                     s.started_at
@@ -111,8 +131,9 @@ def _execute_candidate_ordering_baseline_sql(db_path, candidate_limit, *, budget
             LEFT JOIN messages m ON m.session_id = s.id
             GROUP BY s.id
             ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
-            """
-        , ("webui", candidate_limit)).fetchall()
+            """,
+            [*params, candidate_limit],
+        ).fetchall()
     finally:
         conn.close()
 
@@ -179,20 +200,23 @@ def test_importable_agent_rows_push_sidebar_limit_into_sql(tmp_path):
     assert "WITH candidates AS" in src
     assert "JOIN candidates c ON c.id = s.id" in src
     assert "latest_messages AS" in src
-    assert "MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id" not in src
+    assert 'included == ("cron",)' in src
+    assert "MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id" in src
     assert "candidate_limit = max(result_limit * 8, result_limit)" in src
 
 
 def test_importable_agent_rows_candidate_ordering_respects_progress_budget(tmp_path, monkeypatch):
-    """Correlated candidate ordering should fail under an old-shape budget, then pass after pre-aggregation."""
+    """Cron-only candidate ordering should fail under the old shape budget, then pass after pre-aggregation."""
     db = tmp_path / "state.db"
     _make_state_db(
         db,
         sessions=120,
         messages_per_session=120,
         create_messages_index=False,
+        source="cron",
+        session_source="cron",
     )
-    reference_ids = _newest_first_reference_ids(db)
+    reference_ids = _newest_first_reference_ids(db, include_sources=("cron",), exclude_sources=None)
     candidate_limit = max(20 * 8, 20)
 
     original_connect = agent_sessions.sqlite3.connect
@@ -202,7 +226,8 @@ def test_importable_agent_rows_candidate_ordering_respects_progress_budget(tmp_p
         measured_rows = agent_sessions.read_importable_agent_session_rows(
             db,
             limit=20,
-            exclude_sources=("webui",),
+            exclude_sources=None,
+            include_sources=("cron",),
         )
         assert [row["id"] for row in measured_rows] == reference_ids[:20]
     finally:
@@ -219,6 +244,8 @@ def test_importable_agent_rows_candidate_ordering_respects_progress_budget(tmp_p
             db,
             candidate_limit,
             budget_ops=progress_budget_ops,
+            include_sources=("cron",),
+            exclude_sources=None,
         )
 
     monkeypatch.setattr(
@@ -233,7 +260,8 @@ def test_importable_agent_rows_candidate_ordering_respects_progress_budget(tmp_p
     rows = agent_sessions.read_importable_agent_session_rows(
         db,
         limit=20,
-        exclude_sources=("webui",),
+        exclude_sources=None,
+        include_sources=("cron",),
     )
     assert [row["id"] for row in rows] == reference_ids[:20]
 
