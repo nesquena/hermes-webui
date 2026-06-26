@@ -7205,7 +7205,7 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}&messages=1&resolve_model=0&msg_limit=100`);
     S.session = data.session;
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
