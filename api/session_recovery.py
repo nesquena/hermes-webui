@@ -65,6 +65,42 @@ def _msg_count(p: Path) -> int:
     return len(msgs) if isinstance(msgs, list) else -1
 
 
+def _session_records_intentional_compress_shrink(session_path: Path) -> bool:
+    """Return True when the live sidecar records an intentional context shrink.
+
+    Manual ``/compress`` keeps the visible transcript but replaces the
+    model-facing ``context_messages`` with a smaller compacted prefix. That
+    operation must not be treated as accidental data loss by the #1558
+    ``.bak`` safeguard or startup recovery (#4836).
+    """
+    try:
+        data = json.loads(session_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    context_messages = data.get('context_messages')
+    messages = data.get('messages')
+    has_shorter_context = (
+        isinstance(context_messages, list)
+        and isinstance(messages, list)
+        and len(context_messages) < len(messages)
+    )
+    anchor_summary = str(data.get('compression_anchor_summary') or '').strip()
+    anchor_key = data.get('compression_anchor_message_key')
+    mode = str(data.get('compression_anchor_mode') or '').strip().lower()
+    watermark = data.get('truncation_watermark')
+
+    if mode == 'manual':
+        return True
+    if has_shorter_context and anchor_summary and anchor_key is not None:
+        return True
+    if has_shorter_context and watermark is not None:
+        return True
+    return False
+
+
 def inspect_session_recovery_status(session_path: Path) -> dict:
     """Return a status dict describing whether recovery is recommended.
 
@@ -86,6 +122,14 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
         }
     bak_count = _msg_count(bak_path)
     if bak_count > live_count:
+        if _session_records_intentional_compress_shrink(session_path):
+            return {
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_compress_shrink": True,
+            }
         return {
             "session_id": session_path.stem,
             "live_messages": live_count,
