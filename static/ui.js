@@ -3731,12 +3731,19 @@ let _messageTouchScrollActive=false;
 let _lastMessageTouchScrollIntentMs=-Infinity;
 let _deferredOlderMessagesTimer=0;
 const MESSAGE_TOUCH_SCROLL_SUPPRESS_MS=1200;
-// #4970: track recent LOW-DELTA upward message-pane wheel intent separately from
+// #4970 review: track recent LOW-DELTA upward message-pane wheel intent separately from
 // the decisive deltaY<-30 sticky-unpin threshold. A gentle trackpad wheel
 // (deltaY:-5) is real user intent but never crosses -30, so without this the
 // post-render artifact suppression would swallow it for the whole window.
 const MESSAGE_WHEEL_INTENT_SUPPRESS_MS=1200;
 let _lastMessageWheelIntentMs=-Infinity;
+// #4970 review (greptile P1): keyboard scrolling of the message pane (PageUp/Down,
+// arrows, Space, Home/End) fires a native `scroll` event with NO wheel/touch/
+// scrollbar/non-message intent. Without recording it, a keyboard scroll-up inside
+// the post-render artifact window is swallowed and live-follow snaps the reader
+// back to the bottom. Stamp a generic scroll-key intent so the suppression skips it.
+const MESSAGE_KEY_SCROLL_INTENT_SUPPRESS_MS=1200;
+let _lastMessageKeyScrollIntentMs=-Infinity;
 let _newMessageCueVisible=false;
 let _lastMessageRenderAt=-Infinity;
 function _recentMessageRenderArtifactWindow(ms){
@@ -3756,6 +3763,12 @@ function _recentMessageTouchScrollIntent(){
 // true, otherwise a real gentle scroll-up right after a render gets swallowed.
 function _recentMessageWheelIntent(){
   return performance.now()-_lastMessageWheelIntentMs<MESSAGE_WHEEL_INTENT_SUPPRESS_MS;
+}
+// #4970 review (greptile P1): true when the reader recently used the keyboard to
+// scroll the message pane. Keyboard scrolls fire a native scroll event with no
+// wheel/touch intent, so the post-render artifact suppression must skip them.
+function _recentMessageKeyScrollIntent(){
+  return performance.now()-_lastMessageKeyScrollIntentMs<MESSAGE_KEY_SCROLL_INTENT_SUPPRESS_MS;
 }
 function _isMessageReaderUnpinned(){
   return !!_messageUserUnpinned;
@@ -3883,6 +3896,8 @@ function _resetScrollDirectionTracker(){
   // into the new chat's first post-render window — the artifact then isn't
   // suppressed, falls into movedUp, and falsely unpins live-follow.
   _lastMessageWheelIntentMs=-Infinity;
+  // #4970 review (greptile P1): same hygiene for keyboard scroll intent.
+  _lastMessageKeyScrollIntentMs=-Infinity;
   clearTimeout(_deferredOlderMessagesTimer);
   _deferredOlderMessagesTimer=0;
 }
@@ -3896,6 +3911,8 @@ function _resetStreamScrollFollow(){
   // gentle upward wheel within the prior 1200ms can under-suppress a genuine
   // no-intent render artifact and silently disable live follow for the new stream.
   _lastMessageWheelIntentMs=-Infinity;
+  // #4970 review (greptile P1): same hygiene for keyboard scroll intent.
+  _lastMessageKeyScrollIntentMs=-Infinity;
   _cancelBottomSettle();
 }
 if(typeof window!=='undefined'){
@@ -3991,6 +4008,27 @@ if(typeof window!=='undefined'){
   document.addEventListener('visibilitychange',()=>{
     if(document.visibilityState==='hidden') _scrollbarDragActive=false;
   },{passive:true});
+  // #4970 review (greptile P1): record keyboard-driven message-pane scrolling as
+  // user intent. PageUp/PageDown, Arrow keys, Space/Shift+Space, Home/End scroll
+  // the pane and fire a native scroll event with no wheel/touch intent — without
+  // this stamp a keyboard scroll-up inside the post-render artifact window is
+  // swallowed and live-follow snaps the reader back to the bottom. Only count it
+  // when the scroll container (or a descendant) is the active/scrolling target,
+  // not when typing in the composer.
+  const _MESSAGE_SCROLL_KEYS=new Set([
+    'PageUp','PageDown','ArrowUp','ArrowDown','Home','End','Spacebar',' ',
+  ]);
+  document.addEventListener('keydown',(e)=>{
+    if(!e||!_MESSAGE_SCROLL_KEYS.has(e.key)) return;
+    const a=document.activeElement;
+    // Ignore keys aimed at editable fields (composer, inputs, contenteditable).
+    if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'||a.isContentEditable)) return;
+    // Count only when the message pane itself is the scroll target: it is focused,
+    // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
+    if(a===el||el.contains(a)||el.matches(':hover')){
+      _lastMessageKeyScrollIntentMs=performance.now();
+    }
+  },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     _scheduleMessageVirtualizedRender();
@@ -4026,16 +4064,21 @@ if(typeof window!=='undefined'){
       // manual scrollbar-drag upward scroll inside the window is real intent.
       // typeof guard keeps the #4295 node harness (no _scrollbarDragActive
       // injected) inert via short-circuit.
+      // #4970 review (greptile P1): likewise skip suppression when the reader
+      // recently scrolled the pane with the keyboard — a keyboard scroll-up is
+      // real intent that produces a native scroll event with no wheel/touch.
       if(movedUp
         && typeof _recentMessageRenderArtifactWindow==='function'
         && typeof _recentMessageTouchScrollIntent==='function'
         && typeof _recentNonMessageScrollIntent==='function'
         && typeof _recentMessageWheelIntent==='function'
+        && typeof _recentMessageKeyScrollIntent==='function'
         && (typeof _scrollbarDragActive==='undefined' || !_scrollbarDragActive)
         && _recentMessageRenderArtifactWindow(1400)
         && !_recentMessageTouchScrollIntent()
         && !_recentNonMessageScrollIntent()
-        && !_recentMessageWheelIntent()){
+        && !_recentMessageWheelIntent()
+        && !_recentMessageKeyScrollIntent()){
         _lastScrollTop=top;
         return;
       }

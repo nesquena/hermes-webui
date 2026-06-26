@@ -160,7 +160,7 @@ def _scroll_listener_raf_body() -> str:
 
 
 def _run_listener_with_wheel_intent(
-    samples, *, render_artifact, wheel_intent, scrollbar_drag=False
+    samples, *, render_artifact, wheel_intent, scrollbar_drag=False, key_scroll=False
 ):
     """Run the extracted scroll-listener body in node with controllable stubs.
 
@@ -174,6 +174,7 @@ def _run_listener_with_wheel_intent(
         "renderArtifact": bool(render_artifact),
         "wheelIntent": bool(wheel_intent),
         "scrollbarDrag": bool(scrollbar_drag),
+        "keyScroll": bool(key_scroll),
     }
     script = (
         "const payload = " + json.dumps(payload) + ";\n"
@@ -199,6 +200,7 @@ const step = new Function(
   '_recentNonMessageScrollIntent',
   '_recentMessageWheelIntent',
   '_scrollbarDragActive',
+  '_recentMessageKeyScrollIntent',
   // The extracted listener body uses bare `return;` in the suppression branch.
   // Wrap it in an inner arrow IIFE so that early return exits the IIFE (not the
   // outer Function), then read the mutated locals afterward. Without this the
@@ -227,6 +229,7 @@ const renderArtifact = () => payload.renderArtifact;
 const noTouch = () => false;
 const noNonMessage = () => false;
 const wheelIntent = () => payload.wheelIntent;
+const keyScroll = () => payload.keyScroll;
 
 for (const sample of payload.samples) {
   state = step(
@@ -249,7 +252,8 @@ for (const sample of payload.samples) {
     noTouch,
     noNonMessage,
     wheelIntent,
-    payload.scrollbarDrag
+    payload.scrollbarDrag,
+    keyScroll
   );
 }
 
@@ -324,6 +328,22 @@ class TestPostRenderWheelIntentScope:
         )
         assert state["_scrollPinned"] is False
 
+    def test_keyboard_scroll_inside_window_still_unpins(self):
+        # #4970 review (greptile P1): a keyboard scroll-up (PageUp/Arrow/etc.)
+        # inside the post-render window is real intent and must NOT be swallowed,
+        # even with no wheel/touch/scrollbar intent recorded.
+        state = _run_listener_with_wheel_intent(
+            self._SAMPLES,
+            render_artifact=True,
+            wheel_intent=False,
+            key_scroll=True,
+        )
+        assert state["_messageUserUnpinned"] is True, (
+            "A keyboard scroll-up inside the artifact window must unpin; the "
+            "suppression must not swallow a recent keyboard scroll intent."
+        )
+        assert state["_scrollPinned"] is False
+
 
 def test_low_delta_wheel_intent_is_tracked_separately():
     # The intent recorder must stamp _lastMessageWheelIntentMs for ANY upward
@@ -391,6 +411,33 @@ def test_suppression_gates_on_scrollbar_drag():
     assert "!_scrollbarDragActive" in listener, (
         "#4970 review: the suppression branch must reference !_scrollbarDragActive "
         "so a scrollbar-drag upward scroll inside the window is not swallowed."
+    )
+
+
+def test_keyboard_scroll_intent_tracked_and_gated():
+    # #4970 review (greptile P1): keyboard message-pane scrolling must be recorded
+    # as user intent and excluded from the post-render suppression branch.
+    assert "let _lastMessageKeyScrollIntentMs=-Infinity" in UI_JS
+    assert "function _recentMessageKeyScrollIntent" in UI_JS
+    # A keydown listener must stamp the intent for the pane scroll keys.
+    assert "_lastMessageKeyScrollIntentMs=performance.now()" in UI_JS, (
+        "a keydown handler must stamp _lastMessageKeyScrollIntentMs when the "
+        "reader uses the keyboard to scroll the message pane."
+    )
+    assert "'PageUp'" in UI_JS and "'PageDown'" in UI_JS
+    # The suppression branch must consult it.
+    listener_idx = UI_JS.find("el.addEventListener('scroll'")
+    listener = UI_JS[listener_idx: listener_idx + 4000]
+    assert "!_recentMessageKeyScrollIntent()" in listener, (
+        "#4970 review: the suppression branch must reference "
+        "!_recentMessageKeyScrollIntent() so a keyboard scroll-up unpins."
+    )
+    # Both resets must clear the keyboard stamp (stale-state hygiene).
+    assert "_lastMessageKeyScrollIntentMs=-Infinity" in _extract_fn_body(
+        "_resetScrollDirectionTracker"
+    )
+    assert "_lastMessageKeyScrollIntentMs=-Infinity" in _extract_fn_body(
+        "_resetStreamScrollFollow"
     )
 
 
