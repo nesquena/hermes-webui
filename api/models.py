@@ -4176,6 +4176,7 @@ def _reload_cli_sessions_after_inflight(
             return stale_sessions
         return []
     try:
+        fallback_invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
         try:
             sessions = load_sessions()
         except Exception as _cli_err:
