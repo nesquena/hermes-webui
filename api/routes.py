@@ -11882,6 +11882,11 @@ def handle_get(handler, parsed) -> bool:
             },
         )
 
+    if parsed.path == "/api/fast/health":
+        from api.fast_mode import health_payload
+
+        return j(handler, health_payload())
+
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
 
