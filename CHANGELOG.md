@@ -7,6 +7,12 @@
 
 - **Anchor-owned settled assistant turns now preserve mixed text/tool ordering in Transparent Stream.** When a settled assistant message stores interleaved `content[]` text and `tool_use` parts, settlement and reload hydration now promote those parts into the `_anchor_activity_scene` instead of relying on the raw Transparent Stream fallback. The final answer stays distinct as the text after the last tool use on the final assistant message, while earlier prose, non-final post-tool process text, thinking rows, and tool rows render chronologically in both Compact Worklog and Transparent Stream.
 
+## [v0.51.677] — 2026-06-26 — Release YG (cron run logs render as literal text, not mangled markdown)
+
+### Fixed
+
+- **Cron job run logs (prompt/response in the cron detail panel) now render as literal preformatted text instead of being mangled by Markdown.** The expanded run body and the "View full output" view passed raw output through `renderMd()`, so JSON/plain-text logs lost their newlines, had special characters interpreted, and lines beginning with `#`/`|`/`>` turned into headings/tables/blockquotes. Both paths now render via a DOM-created `<pre><code>` with `textContent`, preserving whitespace exactly and rendering nothing as Markdown (also XSS-safe — no `innerHTML` on raw output). The usage footer and action button stay outside the preformatted block. Thanks @luandnh. (#4977)
+
 ## [v0.51.676] — 2026-06-26 — Release YF (submitted message no longer renders twice — or vanishes — on active reload)
 
 ### Fixed
