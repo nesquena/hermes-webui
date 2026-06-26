@@ -299,6 +299,8 @@ def _run_gateway_runs_api_streaming(
         except Exception:
             logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
             message_content = str(msg_text or "")
+    from api.streaming import _strip_oob_blocks
+
     instructions_parts = []
     conversation_history = []
     for entry in getattr(session, "context_messages", None) or []:
@@ -309,6 +311,7 @@ def _run_gateway_runs_api_streaming(
             continue
         content = entry.get("content")
         if content is not None:
+            content = _strip_oob_blocks(content)
             conversation_history.append({"role": role, "content": content})
     for entry in prefill_messages or []:
         if not isinstance(entry, dict):
@@ -323,6 +326,8 @@ def _run_gateway_runs_api_streaming(
             continue
         if role not in {"user", "assistant"}:
             continue
+        if content is not None:
+            content = _strip_oob_blocks(content)
         conversation_history.append({"role": role, "content": content})
     run_input = message_content
     if isinstance(run_input, list):
