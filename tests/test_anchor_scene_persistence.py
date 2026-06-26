@@ -696,6 +696,350 @@ def test_anchor_scene_hydration_backfills_turn_duration_from_final_message():
     assert hydrated[1]["_anchor_activity_scene"]["turn_duration"] == 731.2
 
 
+def test_anchor_scene_hydration_promotes_final_content_array_tool_use_to_ordered_rows():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "Let me inspect the files first.",
+                {"type": "tool_use", "tool_use_id": "toolu_content", "tool_name": "grep", "args": {"pattern": "TODO"}},
+                "Found it,",
+                {"type": "text", "text": "here's the fix."},
+            ],
+            "tool_calls": [
+                {
+                    "id": "toolu_message",
+                    "name": "grep",
+                    "input": {"pattern": "TODO"},
+                    "snippet": "TODO in static/messages.js",
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [
+                    {"row_id": "done", "role": "terminal", "kind": "terminal_status", "source_event_type": "done"}
+                ],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {
+                "assistant_msg_idx": 1,
+                "tid": "toolu_durable",
+                "name": "grep",
+                "snippet": "TODO in static/messages.js",
+            }
+        ],
+    )
+
+    scene = hydrated[1]["_anchor_activity_scene"]
+    rows = scene["activity_rows"]
+    activity = [
+        (row.get("role"), row.get("text") or row.get("tool_call_id"))
+        for row in rows
+        if row.get("role") != "terminal"
+    ]
+
+    assert scene["final_answer"] == "Found it,\nhere's the fix."
+    assert activity == [
+        ("prose", "Let me inspect the files first."),
+        ("tool", "toolu_content"),
+    ]
+    assert rows[1]["tool"]["name"] == "grep"
+    assert rows[1]["tool"]["args"] == {"pattern": "TODO"}
+    assert rows[1]["tool"]["snippet"] == "TODO in static/messages.js"
+    assert len([row for row in rows if row.get("role") == "tool"]) == 1
+    assert rows[-1]["role"] == "terminal"
+
+
+def test_anchor_scene_hydration_restores_durable_body_after_message_tool_merge():
+    from api import routes
+
+    full_output = "X" * 9000
+    capped_preview = full_output[:4000]
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "I will inspect first.",
+                {"type": "tool_use", "tool_use_id": "toolu_content", "tool_name": "terminal"},
+                "Done.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "toolu_message",
+                    "name": "terminal",
+                    "snippet": capped_preview,
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {
+                "assistant_msg_idx": 1,
+                "tid": "toolu_durable",
+                "name": "terminal",
+                "snippet": full_output,
+            }
+        ],
+    )
+
+    tools = [row for row in hydrated[1]["_anchor_activity_scene"]["activity_rows"] if row.get("role") == "tool"]
+    assert len(tools) == 1
+    assert tools[0]["tool_call_id"] == "toolu_content"
+    assert tools[0]["tool"]["snippet"] == full_output
+    assert tools[0]["payload"]["snippet"] == full_output
+
+
+def test_anchor_scene_hydration_keeps_short_persisted_body_after_durable_merge():
+    from api import routes
+
+    full_output = "short output line\nwith more detail that came later"
+    short_body = "short output line"
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "I will inspect first.",
+                {"type": "tool_use", "tool_use_id": "toolu_content", "tool_name": "terminal"},
+                "Done.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "toolu_message",
+                    "name": "terminal",
+                    "snippet": short_body,
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {
+                "assistant_msg_idx": 1,
+                "tid": "toolu_durable",
+                "name": "terminal",
+                "snippet": full_output,
+            }
+        ],
+    )
+
+    tools = [row for row in hydrated[1]["_anchor_activity_scene"]["activity_rows"] if row.get("role") == "tool"]
+    assert len(tools) == 1
+    assert tools[0]["tool"]["snippet"] == short_body
+    assert tools[0]["payload"]["snippet"] == short_body
+
+
+def test_anchor_scene_hydration_merges_missing_args_after_content_tool_match():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "I will patch the file.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "patch-content",
+                    "tool_name": "edit_file",
+                    "args": {"path": "x.py"},
+                },
+                "Done.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "patch-message",
+                    "name": "edit_file",
+                    "input": {
+                        "path": "x.py",
+                        "old_string": "old",
+                        "new_string": "new",
+                    },
+                    "snippet": "@@ -1 +1 @@\n-old\n+new",
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records, tool_calls=[])
+
+    tools = [
+        row
+        for row in hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+        if row.get("role") == "tool"
+    ]
+    assert len(tools) == 1
+    assert tools[0]["tool"]["args"] == {
+        "path": "x.py",
+        "old_string": "old",
+        "new_string": "new",
+    }
+    assert tools[0]["payload"]["args"] == {
+        "path": "x.py",
+        "old_string": "old",
+        "new_string": "new",
+    }
+
+
+def test_anchor_scene_hydration_does_not_position_merge_ambiguous_different_id_tools():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {"type": "tool_use", "tool_use_id": "content-a", "tool_name": "terminal"},
+                "Second check.",
+                {"type": "tool_use", "tool_use_id": "content-b", "tool_name": "terminal"},
+                "Done.",
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {"assistant_msg_idx": 1, "tid": "message-b", "name": "terminal", "snippet": "OUTPUT B"},
+            {"assistant_msg_idx": 1, "tid": "message-a", "name": "terminal", "snippet": "OUTPUT A"},
+        ],
+    )
+
+    rows = hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+    tools = [row for row in rows if row.get("role") == "tool"]
+    by_id = {row.get("tool_call_id"): row for row in tools}
+
+    assert by_id["content-a"]["tool"]["snippet"] == ""
+    assert by_id["content-b"]["tool"]["snippet"] == ""
+    assert by_id["message-a"]["tool"]["snippet"] == "OUTPUT A"
+    assert by_id["message-b"]["tool"]["snippet"] == "OUTPUT B"
+
+
+def test_anchor_scene_hydration_does_not_name_merge_remaining_same_name_tool_after_exact_match():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {"type": "tool_use", "tool_use_id": "content-a", "tool_name": "terminal"},
+                "Second check.",
+                {"type": "tool_use", "tool_use_id": "content-b", "tool_name": "terminal"},
+                "Done.",
+            ],
+            "tool_calls": [
+                {"id": "content-a", "name": "terminal", "snippet": "OUTPUT A"},
+                {"id": "message-b", "name": "terminal", "snippet": "OUTPUT B"},
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records, tool_calls=[])
+
+    rows = hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+    tools = [row for row in rows if row.get("role") == "tool"]
+    by_id = {row.get("tool_call_id"): row for row in tools}
+
+    assert by_id["content-a"]["tool"]["snippet"] == "OUTPUT A"
+    assert by_id["content-b"]["tool"]["snippet"] == ""
+    assert by_id["message-b"]["tool"]["snippet"] == "OUTPUT B"
+
+
 def test_anchor_scene_hydration_dedupes_compression_lifecycle_rows():
     from api import routes
 

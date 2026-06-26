@@ -721,7 +721,7 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
 
     projected_idx = complete.index("const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];")
     projected_push_idx = complete.index("for(const row of projectedRows){")
-    backfill_idx = complete.index("for(let idx=turnStart+1;idx<lastAsstIndex;idx+=1)")
+    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)")
     terminal_idx = complete.index("if(row&&row.role==='terminal') pushRow(row);", backfill_idx)
     assert projected_idx < projected_push_idx < backfill_idx < terminal_idx
 
@@ -835,6 +835,33 @@ def test_settled_anchor_scene_final_answer_does_not_fold_into_worklog_source():
     assert "seg.classList.add('assistant-segment-worklog-source')" in render
     assert "seg.hidden=true" in render
     assert "_renderSettledAnchorSceneForMessage(msg, seg, rawIdx)" in render
+
+
+def test_settled_anchor_scene_promotes_final_content_array_to_ordered_activity_rows():
+    complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
+    rows_by_message = _function_body(MESSAGES_JS, "_anchorSceneRowsByMessageIndex")
+    content_rows = _function_body(MESSAGES_JS, "_anchorSceneRowsFromContentParts")
+    final_answer = _function_body(MESSAGES_JS, "_anchorSceneFinalAnswerText")
+
+    assert "const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);" in complete
+    assert "const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)" in complete
+    assert "_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true})" in complete
+    assert "for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)" in complete
+    assert "options=(options&&typeof options==='object')?options:{};" in rows_by_message
+    assert "const endIndex=options&&options.includeFinal?lastAsstIndex+1:lastAsstIndex;" in rows_by_message
+    assert "const contentRows=_anchorSceneRowsFromContentParts(message,idx);" in rows_by_message
+    assert "part.type==='tool_use'" in content_rows
+    assert "if(!part||typeof part!=='object'){" in content_rows
+    assert "if(i>lastToolIndex) continue;" in content_rows
+    assert "_anchorSceneProseRow(text,rows.length,messageIndex)" in content_rows
+    assert "_anchorSceneToolRowFromCall(_anchorSceneContentTool(part),rows.length,messageIndex)" in content_rows
+    assert "lastToolIndex+1" in final_answer
+    assert "if(typeof part==='string') return part;" in _function_body(MESSAGES_JS, "_anchorSceneContentText")
+    content_tool = _function_body(MESSAGES_JS, "_anchorSceneContentTool")
+    assert "part.id||part.tid||part.tool_call_id||part.tool_use_id||part.call_id" in content_tool
+    assert "part.name||part.tool_name||fn.name||'tool'" in content_tool
+    assert "args:part.args" in content_tool
+    assert "input:part.input" in content_tool
 
 
 def test_settled_anchor_scene_hides_prior_process_segments_not_final_answer():
