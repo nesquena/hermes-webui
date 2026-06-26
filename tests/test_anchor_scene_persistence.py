@@ -1009,6 +1009,74 @@ def test_anchor_scene_hydration_merges_missing_args_after_content_tool_match():
     }
 
 
+def test_anchor_scene_hydration_keeps_consumed_different_name_tool_distinct():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "edit then inspect"},
+        {
+            "role": "assistant",
+            "content": [
+                "Edit the file.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "edit_file",
+                    "args": {"path": "x.py"},
+                },
+                "Inspect it.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "content-a",
+                    "name": "edit_file",
+                    "input": {"path": "x.py"},
+                    "snippet": "EDITED",
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {
+                "assistant_msg_idx": 1,
+                "tid": "live-b",
+                "name": "terminal",
+                "input": {"path": "x.py"},
+                "snippet": "TERMINAL OUTPUT",
+            }
+        ],
+    )
+
+    tools = [
+        row
+        for row in hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+        if row.get("role") == "tool"
+    ]
+    by_id = {row["tool"]["id"]: row for row in tools}
+
+    assert by_id["content-a"]["tool"]["name"] == "edit_file"
+    assert by_id["content-a"]["tool"]["snippet"] == "EDITED"
+    assert by_id["live-b"]["tool"]["name"] == "terminal"
+    assert by_id["live-b"]["tool"]["snippet"] == "TERMINAL OUTPUT"
+
+
 def test_anchor_scene_hydration_does_not_position_merge_ambiguous_different_id_tools():
     from api import routes
 

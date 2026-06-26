@@ -561,6 +561,61 @@ def test_consumed_singleton_body_only_live_tool_stays_distinct(driver_path):
     assert len([card for card in cards if card["name"] == "terminal"]) == 2
 
 
+def test_consumed_singleton_different_name_live_tool_stays_distinct(driver_path):
+    """A consumed content row must not be reused for a different tool name."""
+    messages = [
+        {"role": "user", "content": "edit then inspect"},
+        {
+            "role": "assistant",
+            "content": [
+                "Edit the file.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "edit_file",
+                    "args": {"path": "x.py"},
+                },
+                "Inspect it.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "content-a",
+                    "name": "edit_file",
+                    "args": {"path": "x.py"},
+                    "snippet": "EDITED",
+                }
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "S": {
+                "toolCalls": [
+                    {
+                        "id": "live-b",
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "args": {"path": "x.py"},
+                        "snippet": "TERMINAL OUTPUT",
+                    }
+                ]
+            },
+        },
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["name"] == "edit_file"
+    assert by_tid["content-a"]["snippet"] == "EDITED"
+    assert by_tid["live-b"]["name"] == "terminal"
+    assert by_tid["live-b"]["snippet"] == "TERMINAL OUTPUT"
+
+
 def test_singleton_content_tool_does_not_name_merge_conflicting_args(driver_path):
     """A one-row content pool still must not merge explicit different invocations."""
     messages = [

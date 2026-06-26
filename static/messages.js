@@ -2655,7 +2655,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const availableRows=contentToolRows.filter(row=>row&&!usedRows.has(row));
     if(availableRows.length===1&&Number(incomingTotal)===1&&_anchorSceneToolRowsCanNameMatch(availableRows[0],incomingRow)) return availableRows[0];
     const reusableRows=contentToolRows.filter(row=>row&&usedRows.has(row));
-    if(reusableRows.length===1&&Number(incomingTotal)===1&&_anchorSceneToolRowsHaveCompatibleInvocation(reusableRows[0],incomingRow)) return reusableRows[0];
+    if(
+      reusableRows.length===1&&
+      Number(incomingTotal)===1&&
+      _anchorSceneToolRowsHaveCompatibleNames(reusableRows[0],incomingRow)&&
+      _anchorSceneToolRowsHaveCompatibleInvocation(reusableRows[0],incomingRow)
+    ) return reusableRows[0];
     for(const row of contentToolRows){
       if(!row||usedRows.has(row)) continue;
       const tid=row.tool_call_id||(row.tool&&row.tool.id);
