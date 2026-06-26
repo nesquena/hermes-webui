@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Extension gallery post-install guidance now stays localized in non-English UI languages.** The new next-step card labels, local-component fallback, requirement chips, setup-guide link text, restart-required toast, and install follow-up toast no longer appear as English placeholders in translated locale bundles. (#4964)
+
 ## [v0.51.678] — 2026-06-26 — Release YH (the chat no longer jumps to the bottom right after a reply renders)
 
 ### Fixed

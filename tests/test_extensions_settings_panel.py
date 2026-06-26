@@ -38,6 +38,12 @@ def _locale_blocks() -> dict[str, str]:
     return blocks
 
 
+def _locale_string(block: str, key: str) -> str:
+    match = re.search(rf"\b{re.escape(key)}:\s*([\"'])(.*?)\1", block, re.DOTALL)
+    assert match, f"{key} not found in locale block"
+    return match.group(2)
+
+
 def _contains_post_method(block: str) -> bool:
     """Return True when a JS block contains a method: 'POST' style mutation."""
     return bool(re.search(r"\bmethod\s*:\s*([\"'`])POST\1", block))
@@ -258,6 +264,40 @@ def test_extensions_i18n_keys_exist_for_all_locales():
     }
     missing = {name: keys for name, keys in missing.items() if keys}
     assert not missing, f"Locale(s) missing extension i18n key(s): {missing}"
+
+
+def test_extensions_post_install_i18n_is_localized_outside_english():
+    blocks = _locale_blocks()
+    english = blocks["en"]
+    post_install_keys = [
+        "ext_gallery_next_step",
+        "ext_gallery_after_install",
+        "ext_gallery_local_component_required",
+        "ext_gallery_local_app_label",
+        "ext_gallery_required_suffix",
+        "ext_gallery_sidecar_required",
+        "ext_gallery_native_host_required",
+        "ext_gallery_open_setup_guide",
+        "ext_gallery_install_restart_required",
+        "ext_gallery_install_followup",
+    ]
+    english_values = {key: _locale_string(english, key) for key in post_install_keys}
+    untranslated = {
+        name: [
+            key
+            for key in post_install_keys
+            if _locale_string(block, key) == english_values[key]
+        ]
+        for name, block in blocks.items()
+        if name != "en"
+    }
+    untranslated = {name: keys for name, keys in untranslated.items() if keys}
+
+    assert not untranslated, f"Locale(s) keep English post-install guidance: {untranslated}"
+    for name, block in blocks.items():
+        assert "{0}" in _locale_string(block, "ext_gallery_required_suffix"), (
+            f"{name} must preserve the local-app label placeholder"
+        )
 
 
 def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims():
