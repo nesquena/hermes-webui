@@ -119,6 +119,14 @@ def _load_sessions() -> dict[str, float]:
             'starting fresh with an empty session table',
         )
         return {}
+    except UnicodeDecodeError as e:
+        _warn_auth_persistence_failure(
+            'Ignoring malformed auth session store',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:

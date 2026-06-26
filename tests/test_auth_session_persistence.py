@@ -124,6 +124,20 @@ class TestSessionPersistence(unittest.TestCase):
         self.assertIn(str(sessions_file), warning)
         self.assertIn(str(_TEST_STATE), warning)
 
+    def test_session_decode_failure_warns_with_state_dir_and_starts_fresh(self) -> None:
+        """Invalid UTF-8 in the sessions file must warn and start with an empty dict."""
+        sessions_file = _TEST_STATE / '.sessions.json'
+        sessions_file.write_bytes(b'\xff')
+        decode_error = UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid start byte')
+        with mock.patch.object(Path, 'read_text', side_effect=decode_error):
+            with self.assertLogs('api.auth', level='WARNING') as captured:
+                self._simulate_restart()
+        self.assertEqual(auth._sessions, {})
+        warning = '\n'.join(captured.output)
+        self.assertIn('Ignoring malformed auth session store', warning)
+        self.assertIn(str(sessions_file), warning)
+        self.assertIn(str(_TEST_STATE), warning)
+
     def test_session_save_failure_warns_with_state_dir_and_keeps_in_process_session(self) -> None:
         """Write failures must warn but keep the live session usable in-process."""
         with mock.patch.object(auth.os, 'replace', side_effect=OSError('replace failed')):
