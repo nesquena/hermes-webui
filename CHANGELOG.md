@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [v0.51.680] — 2026-06-26 — Release YJ (session-index rebuild can't be clobbered by a late worker)
+
+### Fixed
+
+- **A late-finishing background session-index rebuild can no longer clobber a newer rebuild's state.** When a session-index rebuild worker finished, it cleared the rebuild bookkeeping globals if only the target tuple matched — so an older worker completing after a newer rebuild had already taken over could wipe the newer owner's registration. The cleanup now also requires that the finishing worker is still the registered owner thread (`_SESSION_INDEX_REBUILD_THREAD is current_thread`, checked under the rebuild lock), so an out-of-order older worker leaves the newer owner's state intact while the genuine owner still clears normally. Thanks @rodboev. (#4993, #3894)
+
+## [v0.51.679] — 2026-06-26 — Release YI (faster fresh sidebar boot — parallel session/project fetches)
+
+### Fixed
+
+- **Opening a fresh tab / cold sidebar boot is faster.** The boot sequence fetched the session list (`/api/sessions`) and the project list (`/api/projects`) one after the other; the two are independent reads, so they now run concurrently — the project fetch is kicked off immediately and awaited after the session fetch. Error handling is unchanged: a failing project fetch still falls back to the cached project list without dropping the session list, and the session-fetch error/timeout path is untouched. Thanks @rodboev. (#4992, fixes #4759)
+
 ## [v0.51.678] — 2026-06-26 — Release YH (the chat no longer jumps to the bottom right after a reply renders)
 
 ### Fixed
