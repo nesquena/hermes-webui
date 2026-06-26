@@ -3496,9 +3496,10 @@ def get_max_tokens_status() -> dict[str, int | None]:
     """Return the Settings-facing max_tokens state from the active profile config.
 
     ``max_tokens`` is the root override the Settings field owns directly.
-    ``max_tokens_fallback`` is the agent-level fallback only when the root key is
-    absent, matching the streaming path exactly. ``max_tokens_effective`` is the
-    runtime cap a new streaming turn would currently use.
+    ``max_tokens_fallback`` is the agent-level fallback when the root config
+    resolves to ``None``, matching the streaming path exactly.
+    ``max_tokens_effective`` is the runtime cap a new streaming turn would
+    currently use.
     """
     config_data = _load_yaml_config_file(_get_config_path())
     if not isinstance(config_data, dict):
@@ -3508,11 +3509,11 @@ def get_max_tokens_status() -> dict[str, int | None]:
             "max_tokens_fallback": None,
         }
 
-    root_present = "max_tokens" in config_data
-    root_value = _parse_positive_int_config_value(config_data.get("max_tokens"))
+    raw_root_value = config_data.get("max_tokens")
+    root_value = _parse_positive_int_config_value(raw_root_value)
 
     fallback_value = None
-    if not root_present:
+    if raw_root_value is None:
         agent_cfg = config_data.get("agent")
         if isinstance(agent_cfg, dict):
             fallback_value = _parse_positive_int_config_value(agent_cfg.get("max_tokens"))

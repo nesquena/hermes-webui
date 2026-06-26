@@ -109,6 +109,18 @@ def test_get_max_tokens_status_prefers_root_then_agent():
         "max_tokens_fallback": 512,
     }
 
+    _write_config(
+        "max_tokens: null\n"
+        "agent:\n"
+        "  max_tokens: 512\n"
+        "  name: fallback\n"
+    )
+    assert config.get_max_tokens_status() == {
+        "max_tokens": None,
+        "max_tokens_effective": 512,
+        "max_tokens_fallback": 512,
+    }
+
     _write_config("max_tokens: true\n")
     assert config.get_max_tokens_status() == {
         "max_tokens": 1,
@@ -336,6 +348,11 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
     apply_saved_block = _function_block(panels_js, "_applySavedSettingsUi")
     assert "saved&&saved.max_tokens" in apply_saved_block
     assert "maxTokensField.dataset.initialValue=maxTokensField.value" in apply_saved_block.replace(" ", "")
+
+    autosave_block = _function_block(panels_js, "_autosavePreferencesSettings")
+    assert "const maxTokensField=$('settingsMaxTokens');" in autosave_block
+    assert "String(maxTokensField.value||'')!==String(maxTokensField.dataset.initialValue||'')" in autosave_block.replace(" ", "")
+    assert "if(!pwDirty&&!modelDirty&&!maxTokensDirty)" in autosave_block.replace(" ", "")
 
     prefs_block = _function_block(panels_js, "_preferencesPayloadFromUi")
     assert "settingsMaxTokens" not in prefs_block
