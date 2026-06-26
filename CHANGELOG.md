@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [v0.51.677] — 2026-06-26 — Release YG (cron run logs render as literal text, not mangled markdown)
+
+### Fixed
+
+- **Cron job run logs (prompt/response in the cron detail panel) now render as literal preformatted text instead of being mangled by Markdown.** The expanded run body and the "View full output" view passed raw output through `renderMd()`, so JSON/plain-text logs lost their newlines, had special characters interpreted, and lines beginning with `#`/`|`/`>` turned into headings/tables/blockquotes. Both paths now render via a DOM-created `<pre><code>` with `textContent`, preserving whitespace exactly and rendering nothing as Markdown (also XSS-safe — no `innerHTML` on raw output). The usage footer and action button stay outside the preformatted block. Thanks @luandnh. (#4977)
+
+## [v0.51.676] — 2026-06-26 — Release YF (submitted message no longer renders twice — or vanishes — on active reload)
+
+### Fixed
+
+- **On an active-session reload/reconnect, the submitted user turn no longer renders twice (and a distinct repeated prompt no longer vanishes).** The browser can see the current turn through several recovery sources (optimistic/in-flight, `pending_user_message`, replay/checkpoint), and the de-duplication had to balance two failure modes. Pending/in-flight user-turn dedupe is now scoped to the **current-turn tail** only (stopping at the most recent non-live assistant), so: a genuine double-render of the *same* current turn is still collapsed to one, while a *new* turn whose text matches an *earlier* historical message (e.g. sending the same prompt twice, including under the default deferred save mode where only `pending_user_message` exists) is correctly preserved instead of being suppressed. Display-only wrappers (workspace/attachment/forced-skill envelopes) are normalized for the comparison; pending attachments reattach only on a genuine same-turn match. Thanks @franksong2702. (#4826, fixes #4825)
+
 ## [v0.51.675] — 2026-06-26 — Release YE (long conversations open fast — bounded state.db tail reads)
 
 ### Fixed
