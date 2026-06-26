@@ -165,8 +165,13 @@ class TestSessionPersistence(unittest.TestCase):
         """A sessions file containing a non-dict must be ignored."""
         sessions_file = _TEST_STATE / '.sessions.json'
         sessions_file.write_text(json.dumps(["list", "not", "dict"]))
-        self._simulate_restart()
+        with self.assertLogs('api.auth', level='WARNING') as captured:
+            self._simulate_restart()
         self.assertEqual(auth._sessions, {})
+        warning = '\n'.join(captured.output)
+        self.assertIn('Ignoring malformed auth session store', warning)
+        self.assertIn(str(sessions_file), warning)
+        self.assertIn(str(_TEST_STATE), warning)
 
 
 if __name__ == "__main__":
