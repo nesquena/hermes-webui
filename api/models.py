@@ -4890,13 +4890,14 @@ def get_state_db_session_message_keys_before_timestamp(
     before_timestamp,
     *,
     profile=None,
-) -> list[tuple[str, str]] | None:
-    """Return sorted raw ``(role, content)`` keys before ``before_timestamp``.
+) -> list[tuple] | None:
+    """Return visible-identity keys before ``before_timestamp`` in DB order.
 
     Missing timestamps are intentionally excluded because the bounded reader
     keeps them with ``timestamp IS NULL OR timestamp >= ?``.  The caller uses
     this as a conservative prefix-identity guard before taking the optimized
-    tail-read path.
+    tail-read path, so schemas that cannot prove the merge-visible identity
+    force a full read.
     """
     try:
         import sqlite3
@@ -4925,21 +4926,30 @@ def get_state_db_session_message_keys_before_timestamp(
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(messages)")
             available = {str(row['name']) for row in cur.fetchall()}
-            if not {'session_id', 'role', 'content', 'timestamp'}.issubset(available):
+            if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
                 return None
             cur.execute(
                 """
-                SELECT COALESCE(role, '') AS role, COALESCE(content, '') AS content
+                SELECT
+                    COALESCE(role, '') AS role,
+                    COALESCE(content, '') AS content,
+                    tool_calls
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
                 ORDER BY timestamp ASC, id ASC
                 """,
                 (str(sid), before_ts),
             )
-            return sorted(
-                (str(row['role'] or ''), str(row['content'] or ''))
+            return [
+                _session_message_visible_key(
+                    {
+                        "role": row["role"],
+                        "content": row["content"],
+                        "tool_calls": _json_loads_if_string(row["tool_calls"]),
+                    }
+                )
                 for row in cur.fetchall()
-            )
+            ]
     except Exception:
         return None
 

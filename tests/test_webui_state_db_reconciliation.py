@@ -537,6 +537,69 @@ def test_msg_limit_session_load_bails_when_prefloor_key_counts_mask_offset_chang
     assert len(full_all_messages) == len(sidecar_messages) + 1
 
 
+def test_msg_limit_session_load_bails_when_prefloor_tool_calls_mask_offset_change(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_limited_tail_tool_calls_bail"
+    sidecar_tool_calls = [{"id": "call_sidecar", "function": {"name": "terminal", "arguments": "{}"}}]
+    state_tool_calls = [{"id": "call_state", "function": {"name": "terminal", "arguments": "{}"}}]
+    sidecar_messages = [
+        {"role": "user", "content": f"sidecar {idx}", "timestamp": float(idx)}
+        for idx in range(500)
+    ]
+    sidecar_messages[100] = {
+        "role": "assistant",
+        "content": "",
+        "timestamp": 100.0,
+        "tool_calls": sidecar_tool_calls,
+    }
+    state_messages = [
+        dict(msg, tool_calls=json.dumps(msg["tool_calls"]))
+        if msg.get("tool_calls")
+        else dict(msg)
+        for msg in sidecar_messages
+    ]
+    state_messages[100] = {
+        "role": "assistant",
+        "content": "",
+        "timestamp": 100.0,
+        "tool_calls": json.dumps(state_tool_calls),
+    }
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(tmp_path / "state.db", sid, state_messages)
+
+    real_reader = routes.get_state_db_session_messages
+    full_state_messages = real_reader(sid)
+    full_all_messages = routes._limited_webui_messages_for_display(
+        session,
+        full_state_messages,
+    )
+    expected_window, expected_offset = routes._message_window_for_display(
+        full_all_messages,
+        msg_limit=30,
+    )
+    captured = {}
+
+    def wrapped_reader(*args, **kwargs):
+        captured["since_timestamp"] = kwargs.get("since_timestamp")
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "get_state_db_session_messages", wrapped_reader)
+
+    handler = _GetHandler(
+        f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert captured["since_timestamp"] is None
+    session_payload = handler.response_json["session"]
+    assert session_payload["messages"] == expected_window
+    assert session_payload["message_count"] == len(full_all_messages)
+    assert session_payload["_messages_offset"] == expected_offset
+    assert len(full_all_messages) == len(sidecar_messages) + 1
+
+
 def test_msg_limit_session_load_bails_when_truncation_boundary_is_set(monkeypatch, tmp_path):
     import api.routes as routes
 

@@ -6127,14 +6127,11 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, sidecar_messages
 
     floor = min(sidecar_timestamps[-raw_budget:])
-    sidecar_before_keys = sorted(
-        (
-            str(msg.get("role") or ""),
-            str(msg.get("content") or ""),
-        )
+    sidecar_before_keys = [
+        _session_message_visible_key(msg)
         for msg, ts in zip(sidecar_messages, sidecar_timestamps, strict=True)
         if ts < floor
-    )
+    ]
     state_before_keys = get_state_db_session_message_keys_before_timestamp(
         getattr(session, "session_id", None),
         floor,
