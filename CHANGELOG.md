@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.678] — 2026-06-26 — Release YH (the chat no longer jumps to the bottom right after a reply renders)
+
+### Fixed
+
+- **Live-follow no longer breaks (and the transcript no longer snaps back to the bottom) from a phantom scroll right after a message renders.** After a normal `renderMessages()` (send / late-layout-settle), the browser could emit a spurious upward `scroll` event with no real user intent, which set the "user scrolled up" flag and broke scroll-follow. The post-render window now suppresses that artifact — but only when there's genuinely no recent user scroll intent, across every modality: wheel (including gentle low-delta trackpad scrolls below the unpin threshold), touch, scrollbar drag, and keyboard scrolling (PageUp/PageDown/arrows/Space/Home/End). A real upward scroll by any of those still unpins immediately, the intent state is cleared on session-switch and stream-reset (so it can't leak across conversations), and pressing Space to activate a focused transcript control is not mistaken for a scroll. Follow-up to the #4934 DOM-wipe clamp. Thanks @allenliang2022. (#4970)
+
 ## [v0.51.677] — 2026-06-26 — Release YG (cron run logs render as literal text, not mangled markdown)
 
 ### Fixed
