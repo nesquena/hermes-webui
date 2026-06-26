@@ -439,6 +439,62 @@ def test_keyboard_scroll_intent_tracked_and_gated():
     assert "_lastMessageKeyScrollIntentMs=-Infinity" in _extract_fn_body(
         "_resetStreamScrollFollow"
     )
+    assert "_isMessageInteractiveKeyTarget" in UI_JS
+    assert "button,a[href],select,summary" in UI_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_space_on_transcript_button_does_not_stamp_key_scroll_intent():
+    # Maintainer MUST-FIX: Space on a focused transcript control activates the
+    # control; it is NOT a scroll. Because the handler is capture-phase, it must
+    # inspect the target/active element directly rather than rely on defaultPrevented.
+    start = UI_JS.index("const _MESSAGE_SCROLL_KEYS=new Set")
+    end = UI_JS.index("  let _scrollRaf=0;", start)
+    region = UI_JS[start:end]
+    script = (
+        "const region = " + json.dumps(region) + ";\n"
+        + r"""
+let _lastMessageKeyScrollIntentMs = -Infinity;
+const performance = { now: () => 1234 };
+const el = {
+  contains(node){ return !!(node && node.inMessages); },
+  matches(sel){ return sel === ':hover'; },
+};
+const document = {
+  activeElement: null,
+  _handler: null,
+  addEventListener(type, fn){ if(type === 'keydown') this._handler = fn; },
+};
+function makeNode({tag='DIV', inMessages=true, interactive=false, editable=false}={}){
+  return {
+    tagName: tag,
+    inMessages,
+    isContentEditable: editable,
+    closest(sel){ return interactive ? this : null; },
+  };
+}
+// Run via a closure so the stamped variable lives with the extracted handler.
+const env = Function('el','document','performance', `let _lastMessageKeyScrollIntentMs=-Infinity; ${region}\nreturn {handler:document._handler, get:()=>_lastMessageKeyScrollIntentMs, setActive:(n)=>{document.activeElement=n;}};`)(el, document, performance);
+const button = makeNode({tag:'BUTTON', interactive:true});
+env.setActive(button);
+env.handler({key:' ', target:button});
+const afterSpace = env.get();
+const pane = makeNode({tag:'DIV', interactive:false});
+env.setActive(pane);
+env.handler({key:'PageUp', target:pane});
+const afterPageUp = env.get();
+console.log(JSON.stringify({afterSpace, afterPageUp}));
+"""
+    )
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout.strip())
+    assert state["afterSpace"] is None, (
+        "JSON serializes -Infinity as null; Space on a focused transcript button "
+        "must leave the stamp at -Infinity/null."
+    )
+    assert state["afterPageUp"] == 1234
 
 
 def test_streaming_tick_calls_fix_before_dom_writes():

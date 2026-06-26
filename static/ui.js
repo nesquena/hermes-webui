@@ -4014,15 +4014,26 @@ if(typeof window!=='undefined'){
   // this stamp a keyboard scroll-up inside the post-render artifact window is
   // swallowed and live-follow snaps the reader back to the bottom. Only count it
   // when the scroll container (or a descendant) is the active/scrolling target,
-  // not when typing in the composer.
+  // not when typing in the composer or activating an in-transcript control.
   const _MESSAGE_SCROLL_KEYS=new Set([
     'PageUp','PageDown','ArrowUp','ArrowDown','Home','End','Spacebar',' ',
   ]);
+  const _isMessageInteractiveKeyTarget=(node)=>{
+    if(!node||!el.contains(node)) return false;
+    if(node.tagName==='INPUT'||node.tagName==='TEXTAREA'||node.isContentEditable) return true;
+    return !!(node.closest&&node.closest('button,a[href],select,summary,[role="button"],[role="tab"],[role="menuitem"],[contenteditable="true"]'));
+  };
   document.addEventListener('keydown',(e)=>{
     if(!e||!_MESSAGE_SCROLL_KEYS.has(e.key)) return;
     const a=document.activeElement;
+    const t=e.target;
     // Ignore keys aimed at editable fields (composer, inputs, contenteditable).
     if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'||a.isContentEditable)) return;
+    // Space/Spacebar activates focused transcript controls (buttons, role=button,
+    // links, tabs) rather than scrolling. The listener is capture-phase, so target
+    // handlers have not yet preventDefault()/stopPropagation()'d; inspect the
+    // active/target control path directly.
+    if((e.key===' '||e.key==='Spacebar')&&(_isMessageInteractiveKeyTarget(t)||_isMessageInteractiveKeyTarget(a))) return;
     // Count only when the message pane itself is the scroll target: it is focused,
     // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
     if(a===el||el.contains(a)||el.matches(':hover')){
