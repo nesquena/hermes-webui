@@ -263,11 +263,15 @@ def _build_redact_fn():
         r"|brv_[A-Za-z0-9]{10,}"          # ByteRover API key
         r")(?![A-Za-z0-9_-])"
     )
-    _AUTH_HDR_RE = _re.compile(r"(Authorization:\s*Bearer\s+)(\S+)", _re.IGNORECASE)
+    _AUTH_HDR_RE = _re.compile(
+        r"""(Authorization:\s*(?:Bearer|Bot)\s+)([^\s'",\]\)]+)""",
+        _re.IGNORECASE,
+    )
     _ENV_RE = _re.compile(
         r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50})"
         r"\s*=\s*(['\"]?)(\S+)\2"
     )
+
     _PRIVKEY_RE = _re.compile(
         r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
     )
@@ -275,14 +279,63 @@ def _build_redact_fn():
     def _mask(token: str) -> str:
         return f"{token[:6]}...{token[-4:]}" if len(token) >= 18 else "***"
 
+    def _env_replacement(match) -> str:
+        key, quote, value = match.group(1), match.group(2), match.group(3)
+        if not any(ch.isalnum() for ch in value):
+            return match.group(0)
+        return f"{key}={quote}{_mask(value)}{quote}"
+
+    _CODE_ENV_KEY_LITERAL_RE = _re.compile(
+        r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50}=)([\"'][)\]:,]+|[)\]:,]+)"
+    )
+    _ENV_KEY_PREFIX_RE = _re.compile(
+        r"([A-Z0-9_]{0,50}(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)[A-Z0-9_]{0,50}=)"
+    )
+    _REDACTED_ENV_VALUE_RE = _re.compile(
+        r"(?:\*{3,}|[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,32}\.\.\.[A-Za-z0-9_.:/+-]{1,16})"
+    )
+
+    def _restore_code_env_key_literals(original: str, redacted: str) -> str:
+        if not isinstance(original, str) or not isinstance(redacted, str):
+            return redacted
+        literal_occurrences: dict[tuple[str, int], str] = {}
+        original_counts: dict[str, int] = {}
+        for match in _ENV_KEY_PREFIX_RE.finditer(original):
+            key_prefix = match.group(1)
+            occurrence = original_counts.get(key_prefix, 0)
+            original_counts[key_prefix] = occurrence + 1
+            literal_match = _CODE_ENV_KEY_LITERAL_RE.match(original, match.start())
+            if literal_match:
+                literal_occurrences[(key_prefix, occurrence)] = literal_match.group(2)
+        if not literal_occurrences:
+            return redacted
+        redacted_counts: dict[str, int] = {}
+        pieces = []
+        last = 0
+        for match in _ENV_KEY_PREFIX_RE.finditer(redacted):
+            key_prefix = match.group(1)
+            occurrence = redacted_counts.get(key_prefix, 0)
+            redacted_counts[key_prefix] = occurrence + 1
+            literal_suffix = literal_occurrences.get((key_prefix, occurrence))
+            if literal_suffix is None:
+                continue
+            value_match = _REDACTED_ENV_VALUE_RE.match(redacted, match.end())
+            if not value_match:
+                continue
+            pieces.append(redacted[last:value_match.start()])
+            pieces.append(literal_suffix)
+            last = value_match.end()
+        if not pieces:
+            return redacted
+        pieces.append(redacted[last:])
+        return "".join(pieces)
+
     def _fallback_redact(text: str) -> str:
         if not isinstance(text, str) or not text:
             return text
         text = _CRED_RE.sub(lambda m: _mask(m.group(1)), text)
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
-        text = _ENV_RE.sub(
-            lambda m: f"{m.group(1)}={m.group(2)}{_mask(m.group(3))}{m.group(2)}", text
-        )
+        text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
         return text
 
@@ -304,6 +357,7 @@ def _build_redact_fn():
         except TypeError:
             # Older hermes-agent builds that predate the force kwarg.
             agent_redacted = redact_sensitive_text(text)
+        agent_redacted = _restore_code_env_key_literals(text, agent_redacted)
         return _fallback_redact(agent_redacted)
 
     return _combined_redact
@@ -357,6 +411,7 @@ _SENSITIVE_CASE_MARKERS = (
 )
 _SENSITIVE_LOWER_MARKERS = (
     "authorization: bearer ",
+    "authorization: bot ",
     "private key",
     "postgres://",
     "postgresql://",

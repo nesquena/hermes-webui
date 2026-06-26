@@ -28,8 +28,9 @@ def _persistence_block():
     src = STREAMING.read_text(encoding="utf-8")
     start = src.find("Persist reasoning trace in the session")
     assert start != -1, "Reasoning trace marker not found in streaming.py"
-    end = src.find("\n                s.save()", start)
-    assert end != -1, "s.save() not found after the reasoning trace marker"
+    save_match = re.search(r"\n[ \t]+s\.save\(\)", src[start:])
+    assert save_match is not None, "s.save() not found after the reasoning trace marker"
+    end = start + save_match.start()
     # Include the s.save() line so we can verify ordering
     end = src.find("\n", end + 1)
     return src[start:end]

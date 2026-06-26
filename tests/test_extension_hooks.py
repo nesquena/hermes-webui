@@ -50,10 +50,15 @@ class FakeHandler:
         return None
 
 
-def test_extension_config_disabled_by_default(monkeypatch):
+def test_extension_config_disabled_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_WEBUI_EXTENSION_DIR", raising=False)
     monkeypatch.delenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", raising=False)
     monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+    # Point the managed state dir at an empty temp dir so the default extension
+    # root does not exist yet — config stays disabled until the first install.
+    import api.extensions as extensions
+
+    monkeypatch.setattr(extensions, "_extension_state_dir", lambda: tmp_path)
 
     from api.extensions import get_extension_config
 

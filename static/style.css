@@ -2462,6 +2462,7 @@
     .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
     .app-titlebar-new-chat{display:inline-flex;}
+    .app-titlebar-reload{display:inline-flex;}
     .app-titlebar-inner{flex:1 1 auto;}
     .system-health-panel.insights-card{gap:10px;padding:12px;}
     .system-health-head{align-items:flex-start;}

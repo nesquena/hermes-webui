@@ -2200,6 +2200,13 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   // During active streaming, skip — clearing S.toolCalls would lose Activity
   // and the renderMessages fallback is blocked by S.busy=true.
   if(S.busy||S.activeStreamId) return;
+  // Persist the loaded compact tool summary onto S.session so the renderMessages
+  // derived rebuild can use it as a durable per-tid snippet fallback on cold
+  // load (#4927). loadSession keeps the messages=0 session object (tool_calls
+  // []), and the messages=1 summary arrives only as this argument — without
+  // copying it across, the fallback source is empty exactly on the cold-load
+  // path it's meant to repair.
+  if(S.session&&Array.isArray(sessionToolCalls)) S.session.tool_calls=sessionToolCalls.map(tc=>({...tc}));
   const hasMessageToolMetadata=msgs.some(m=>{
     if(!m) return false;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;

@@ -3,6 +3,95 @@
 
 ## [Unreleased]
 
+## [v0.51.668] — 2026-06-26 — Release XX (WebUI stays in sync after the Desktop app continues a session)
+
+### Fixed
+
+- **A WebUI-created session stays in sync after the official Hermes Desktop app continues the same Agent session.** When the Desktop app appended settled rows to the shared `state.db` and you returned to WebUI, the sidebar/detail could show a stale or incomplete transcript and the next WebUI turn's context missed the externally-appended messages. The sidebar now refreshes WebUI-origin rows from settled `state.db` count/timestamp even when external/CLI sessions are hidden (overlaying only when the DB strictly grew, metadata-only, with the active-stream hold-down preserved), and full loads avoid duplicating the sidecar prefix when merging `state.db`. Read-only reconciliation — no Desktop change, no live-stream mirroring. Thanks @franksong2702. (#4834, fixes #4833)
+
+## [v0.51.667] — 2026-06-26 — Release XW (compaction markers stay internal; code-shaped tool output stays intact)
+
+### Fixed
+
+- **Internal compaction/reference markers no longer leak into the visible transcript as a fake user turn, and code-shaped tool output is no longer mangled by redaction.** Two correctness bugs in long sessions (#4821): (1) synthetic compaction/reference markers could re-enter a restored/searched/displayed session as a `role:user` turn, so the agent acted on fake user intent — now filtered out of the visible merge and canonicalized to a single internal assistant reference in the context merge; a genuine user message whose text merely starts with "context compaction" is no longer misclassified as a marker. (2) The env-secret redaction's value pattern had been narrowed in a way that could mangle code-shaped strings; it now keeps a broad capture (no secret-tail leak through `,;)]'"`) while preserving real code env-key literals that carry no secret. Thanks @franksong2702. (#4823, fixes #4821)
+
+## [v0.51.666] — 2026-06-25 — Release XV (command approvals work again on the local backend)
+
+### Fixed
+
+- **Command approvals work again on the default local backend (#4771 regression).** On the in-process WebUI chat runtime, clicking Approve/Deny on a guarded-command card failed with `Gateway approval could not be relayed because the active run is unavailable` (HTTP 409, `gateway_run_unavailable`) on every click — a regression from #4771 (v0.51.653), which surfaced that 409 for gateway approvals whose run had gone but emitted it regardless of backend. Local approvals have no gateway run by design, so the check always tripped. The 409 is now gated on the WebUI actually running the gateway chat backend; local approvals resolve in-process as before, and the gateway behavior is unchanged. Reported by b3nw and claw-io (#4948).
+
+## [v0.51.665] — 2026-06-25 — Release XU (sidebar stops re-querying every poll during streaming)
+
+### Fixed
+
+- **`/api/sessions` no longer re-runs the expensive CLI/cron session projection on every poll while a turn is streaming**, a major cause of the multi-second sidebar latency and 100% CPU on cron-heavy installs (#4842, continuing #4672/#4808/#4889). The CLI/cron sidebar projection is cached, but its cache key folded in a state.db content fingerprint (`MAX(rowid) FROM messages`) that advances on every streamed message row — so during a live turn the frontend's ~5s poll always missed the cache and re-ran the full candidate-join + projection (and the lineage-metadata pass), contending for the same SQLite/global lock the streaming worker holds. The route-level session-list cache already froze its key during streaming (#4808), but that freeze never reached this inner CLI-sessions cache. Now, while any turn is streaming, the CLI-sessions cache key folds in the same stable streaming-freeze marker (keyed only on the set of active stream ids) and its TTL widens (30s), so the heavy projection is reused across polls and rebuilt at most once per streaming window instead of once per poll. In-app structural sidebar mutations (new/renamed/archived sessions, attention) clear the cache directly so they stay instant; externally-driven changes that don't fire that listener (a scheduled cron completing, an external CLI writing rows) surface within one streaming-TTL window (≤30s) — a bounded, self-healing lag. Idle behavior is unchanged.
+
+## [v0.51.664] — 2026-06-25 — Release XT (transparent stream keeps prose in chronological order)
+
+### Fixed
+
+- **In the transparent activity stream, a settled assistant turn that mixes commentary and tool activity now keeps its prose in chronological order instead of collapsing all text above the tool rows.** Settled mixed-content messages previously merged every text segment into one block before the activity rows landed, so the natural "explain → run tool → explain → run tool" reading order was lost. The transcript now interleaves text and tool cards in their original order for those turns. The Worklog / Transparent Stream model is unchanged; this only fixes the surviving ordering gap. Thanks @rodboev. (#4932, #3397)
+
+## [v0.51.663] — 2026-06-25 — Release XS (mobile reload button shows outside standalone mode)
+
+### Fixed
+
+- **The reload/refresh button is now visible in the mobile titlebar in a normal browser, not only in installed/standalone (PWA) mode.** The phone-width titlebar re-showed only the new-chat button while the reload button was re-shown by a separate standalone/fullscreen rule, so on a regular mobile browser there was no reload affordance. The phone-width rule now shows it too (it stays hidden on desktop, where it isn't needed). Thanks @rodboev. (#4939, fixes #4784)
+
+## [v0.51.662] — 2026-06-25 — Release XR (live replies keep following during transcript rebuilds)
+
+### Fixed
+
+- **A streaming reply no longer stops following (or appears to jump backward) when the transcript rebuilds mid-stream.** `renderMessages` rebuilds the message pane by clearing it (`innerHTML=''`), and during that brief gap the scroll container can collapse and the browser clamps `scrollTop` to 0, emitting a scroll event. The scroll listener was interpreting that render artifact as a deliberate user scroll-up and unpinning the reader, so the live reply stopped auto-following. The DOM-wipe scroll is now marked programmatic and ignored; genuine user scroll-up (wheel/touch) during a render is still detected and still unpins. Thanks @allenliang2022. (#4934)
+
+## [v0.51.661] — 2026-06-25 — Release XQ (no more fabricated multi-hour processing time)
+
+### Fixed
+
+- **A freshly-started conversation no longer shows a fabricated "Processed 15h 32m" (or other wildly wrong) turn duration.** A settled turn that recorded no live duration fell back to computing `now − pending_started_at`, but `pending_started_at` marks the start of an *in-flight* turn — so for a settled turn it could be stale (left from an earlier turn, or a session that sat idle) and produced a duration equal to the idle gap. The fallback now only computes elapsed time while a turn is actually in flight; a settled turn with no recorded duration shows no duration instead of an invented one. The real recorded turn duration is unaffected. (#4930)
+
+## [v0.51.660] — 2026-06-25 — Release XP (terminal output and diffs survive a reload)
+
+### Fixed
+
+- **Terminal command output and patch/edit diffs no longer intermittently vanish after a reload in the transparent activity stream.** A settled tool card renders its output/diff from a `snippet`, but on a cold or paginated reload the card could rebuild from the raw assistant message envelope — which carries the command but not the result — and the join to the separate result message would sometimes miss (id mismatch, recovery-rebuilt turn), leaving the body empty. The rebuild now falls back to the durable per-tool snippet from the persisted session summary across all tool formats (OpenAI, Anthropic `tool_use`, and partial), and the loaded summary is now carried onto the session object so that fallback source is populated on cold load. The live in-memory enrichment becomes a fast path rather than the only path that shows the body. (#4927, completes #4925)
+
+## [v0.51.659] — 2026-06-25 — Release XO (one-click extension install works with no setup)
+
+### Fixed
+
+- **One-click extension install now works out of the box with no configuration (#4933).** Previously the Settings → Extensions gallery offered an **Install** button even when extensions weren't configured, then dead-ended on `Install failed: Extensions not configured` because the install path required `HERMES_WEBUI_EXTENSION_DIR` to be set to an existing directory before the server started — documented nowhere user-facing. Install now bootstraps a WebUI-managed default extension directory under the state dir (`STATE_DIR/extensions`, e.g. `~/.hermes/webui/extensions/`) on first use and installs into it, so any user can open Settings, pick an extension, and click Install with zero environment setup; the extension loads automatically on the next app-shell render. `HERMES_WEBUI_EXTENSION_DIR` remains an optional override for operators who want a specific path (WebUI never auto-creates an admin-specified path). The managed directory lives in the WebUI-owned state dir alongside sessions/settings — a different trust domain from a user-writable directory on a shared box — and the trust model is unchanged (installed code still runs with full session authority, so only install vetted/trusted extensions). `docs/EXTENSIONS.md` documents the zero-config flow.
+
+## [v0.51.658] — 2026-06-25 — Release XN (tool cards keep long commands and reconstruct diffs)
+
+### Fixed
+
+- **Long tool-call commands, paths, and reconstructed diffs are no longer cut to 120 characters in tool cards.** Tool-call arguments were truncated to 120 chars when persisted and when rebuilt for rendering, which clipped long single-line commands and file paths and — most damagingly — broke the diff shown for recovery-rebuilt sessions (whose diffs are reconstructed from the `old_string`/`new_string`/`patch` args). Content/diff-bearing arg keys (`command`, `cmd`, `script`, `code`, `patch`, `diff`, `old_string`, `new_string`, `content`, `path`, `file_path`) now keep their full value (bounded at a much larger storage-safe cap); incidental args still use the short cap. Secret-bearing values newly visible in the full command are masked at every render and clipboard-copy path. (#4928, part of #4925)
+
+## [v0.51.657] — 2026-06-25 — Release XM (expanded shell tool cards show the full command)
+
+### Fixed
+
+- **Expanding a shell/terminal tool card now shows the full multi-line command, not just the first line.** In the transparent activity stream, a shell card's collapsed header correctly shows only the first line (compact metadata), but the expanded card reused that same first-line-only value — so a multi-line script still rendered as line 1 when you expanded it. The expanded detail lead now shows the complete command. As part of this, command redaction was broadened to mask common secret forms (env/colon assignments for `*TOKEN`/`*API_KEY`/`*SECRET`/`*ACCESS_KEY`/`*PRIVATE_KEY`/`*CREDENTIAL`/`*CLIENT_SECRET`/`*SESSION_KEY`/`*AUTH*`, `--token`/`--api-key`/`--secret`-style flags, `Authorization:` headers, and secret-looking URL query params) across the whole command, so exposing lines beyond the first never leaks a key. (#4926, part of #4925)
+## [v0.51.656] — 2026-06-25 — Release XL (stream writeback timing diagnostics)
+
+### Fixed
+
+- **Final stream writeback now emits slow-stage diagnostics without changing the writeback contract.** Successful agent turns time the result merge, session save, persistent-state scan, optional `state.db` sync, and terminal `done` payload phases, logging a debug line only when the full writeback exceeds `HERMES_WEBUI_STREAM_WRITEBACK_DIAG_MS` (250 ms by default, negative disables). This gives the remaining #4918 lock-contention work a measured next step while preserving the existing active-stream lifecycle.
+
+## [v0.51.655] — 2026-06-25 — Release XK (live metering stops reloading the session every tick)
+
+### Fixed
+
+- **Live metering during active streams no longer reloads the session on every usage tick.** The streaming worker now reuses its current session object for `_live_usage_snapshot()` and only falls back to `get_session()` once before the worker has loaded that object. This removes another avoidable global-session-lock touch point while tokens and tool events are streaming, narrowing the lock-contention half of #4918 without changing usage payloads or active-stream state.
+
+## [v0.51.654] — 2026-06-25 — Release XJ (session saves block reads less during streaming)
+
+### Changed
+
+- **Saving a session no longer holds the in-memory session lock while it parses, merges, and writes the sidebar index to disk.** During active streaming, every session save rewrites the sidebar `_index.json`; previously that whole read-modify-write held the in-memory `SESSIONS` lock, so an ordinary session read issued mid-stream queued behind the writer (part of the "laggy while a task streams" symptom in long-lived instances). The lock now guards only the in-memory session snapshot; JSON parsing, payload construction, and disk I/O run outside it. The on-disk index read-modify-write stays fully serialized by a separate dedicated index-write lock, so there's no new lost-update or corruption risk. Part of the #4918 performance work. Thanks @franksong2702. (#4921)
+
 ## [v0.51.653] — 2026-06-25 — Release XI (gateway approval failures stay actionable instead of dead-ending)
 
 ### Fixed
@@ -38,7 +127,6 @@
 ### Fixed
 
 - **Terminal tool cards keep their full output, and patch/edit cards keep their diff, after a turn settles in the Transparent Stream / Worklog view.** While a turn streamed, the tool cards showed their complete output; once the stream settled (or on reload/reconnect), terminal cards collapsed to just the `$ command` line with no stdout and patch/edit cards showed their input fields with no rendered diff. The settled rebuild reconstructs each tool row from the persisted `messages[].tool_calls` (state.db / sidecar), which can carry only a short preview — or, on a cold/paginated load, nothing — for the result body; the live in-memory tool call still held the full output at settle time, but the merge dropped it (it skipped the matching live entry instead of restoring the missing body onto the surviving settled row). The merge now restores the full result body, command, and input args from the matched live tool call when the settled row is missing them (without clobbering a genuinely persisted value), so the rebuilt card shows the complete terminal stdout (with the **Show more** expander and the transparent **Output** / **Full** tabs), and renders the patch/edit diff. (#4622)
-
 ## [v0.51.647] — 2026-06-25 — Release XC (task detail action buttons reappear on mobile PWA)
 
 ### Fixed
