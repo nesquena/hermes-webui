@@ -99,7 +99,7 @@ def test_extensions_panel_fetches_status_endpoint_without_mutating_settings():
 def test_extensions_diagnostics_tab_refreshes_runtime_status():
     tab_block = _function_block("switchExtensionsTab", extra=900)
 
-    assert "if(tab==='diagnostics') loadExtensionsPanel();" in tab_block
+    assert "if(tab==='diagnostics') loadExtensionsPanel({preserveExisting:true});" in tab_block
     assert "if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();" in tab_block
 
 
@@ -156,12 +156,18 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     assert "_monitorExtensionSidecars(sidecars,seq)" in render_block
     assert "function _renderExtensionsPanel(data,seq)" in render_block
     assert "const seq=++_extensionsSidecarMonitorSeq" in load_block
+    assert "preserveExisting=!!(opts&&opts.preserveExisting&&target.innerHTML.trim())" in load_block
+    assert "if(!preserveExisting) target.innerHTML" in load_block
+    assert "loadExtensionsPanel({preserveExisting:true})" in load_block
     assert "if(seq!==_extensionsSidecarMonitorSeq) return;" in load_block
     assert "_renderExtensionsPanel(data,seq)" in load_block
     assert "res.ok" in monitor_block
     assert "res.text" not in monitor_block
     assert "body=await res.json()" in monitor_block
     assert "_setExtensionSidecarRuntime(index,body&&typeof body==='object'?body.runtime:null)" in monitor_block
+    assert "String(value??'').trim()" in runtime_block
+    assert r"/^\d+(?:\.\d+)?$/.test(text)" in runtime_block
+    assert "seconds>now+300" in runtime_block
     assert "runtime.sidecar" in runtime_block
     assert "runtime.native_host" in runtime_block
     assert "runtime.bridge" in runtime_block

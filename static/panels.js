@@ -8086,10 +8086,14 @@ function _extensionRuntimeStatusLabel(value){
 }
 
 function _extensionRuntimeLastSeen(value){
-  const raw=Number(value);
+  const text=String(value??'').trim();
+  if(!/^\d+(?:\.\d+)?$/.test(text)) return '';
+  const raw=Number(text);
   if(!Number.isFinite(raw)||raw<=0) return '';
   const seconds=raw>1000000000000?raw/1000:raw;
-  const age=Math.max(0,Math.floor(Date.now()/1000-seconds));
+  const now=Math.floor(Date.now()/1000);
+  if(seconds>now+300) return '';
+  const age=Math.max(0,Math.floor(now-seconds));
   if(age<5) return 'just now';
   if(age<60) return `${age}s ago`;
   const minutes=Math.floor(age/60);
@@ -8348,13 +8352,14 @@ async function handleExtensionToggle(btn){
   }
 }
 
-async function loadExtensionsPanel(){
+async function loadExtensionsPanel(opts){
   const target=$('extensionsDiagnostics');
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
-  if(copyBtn) copyBtn.disabled=true;
+  const preserveExisting=!!(opts&&opts.preserveExisting&&target.innerHTML.trim());
+  if(copyBtn&&!preserveExisting) copyBtn.disabled=true;
   const seq=++_extensionsSidecarMonitorSeq;
-  target.innerHTML='<div class="extensions-loading">Loading extension diagnostics…</div>';
+  if(!preserveExisting) target.innerHTML='<div class="extensions-loading">Loading extension diagnostics…</div>';
   try{
     const data=await api('/api/extensions/status');
     if(seq!==_extensionsSidecarMonitorSeq) return;
@@ -8375,7 +8380,7 @@ function switchExtensionsTab(tab){
   document.querySelectorAll('[data-extensions-pane]').forEach(pane=>{
     pane.hidden=pane.dataset.extensionsPane!==tab;
   });
-  if(tab==='diagnostics') loadExtensionsPanel();
+  if(tab==='diagnostics') loadExtensionsPanel({preserveExisting:true});
   if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();
 }
 
