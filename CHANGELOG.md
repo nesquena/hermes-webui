@@ -7,6 +7,12 @@
 
 - **Anchor-owned settled assistant turns now preserve mixed text/tool ordering in Transparent Stream.** When a settled assistant message stores interleaved `content[]` text and `tool_use` parts, settlement and reload hydration now promote those parts into the `_anchor_activity_scene` instead of relying on the raw Transparent Stream fallback. The final answer stays distinct as the text after the last tool use on the final assistant message, while earlier prose, non-final post-tool process text, thinking rows, and tool rows render chronologically in both Compact Worklog and Transparent Stream.
 
+## [v0.51.680] — 2026-06-26 — Release YJ (session-index rebuild can't be clobbered by a late worker)
+
+### Fixed
+
+- **A late-finishing background session-index rebuild can no longer clobber a newer rebuild's state.** When a session-index rebuild worker finished, it cleared the rebuild bookkeeping globals if only the target tuple matched — so an older worker completing after a newer rebuild had already taken over could wipe the newer owner's registration. The cleanup now also requires that the finishing worker is still the registered owner thread (`_SESSION_INDEX_REBUILD_THREAD is current_thread`, checked under the rebuild lock), so an out-of-order older worker leaves the newer owner's state intact while the genuine owner still clears normally. Thanks @rodboev. (#4993, #3894)
+
 ## [v0.51.679] — 2026-06-26 — Release YI (faster fresh sidebar boot — parallel session/project fetches)
 
 ### Fixed
