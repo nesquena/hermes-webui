@@ -159,7 +159,9 @@ def _scroll_listener_raf_body() -> str:
     return _balanced_block(UI_JS, brace_start)
 
 
-def _run_listener_with_wheel_intent(samples, *, render_artifact, wheel_intent):
+def _run_listener_with_wheel_intent(
+    samples, *, render_artifact, wheel_intent, scrollbar_drag=False
+):
     """Run the extracted scroll-listener body in node with controllable stubs.
 
     Mirrors the #4295 harness shape but injects the #4970 helpers so we can
@@ -171,6 +173,7 @@ def _run_listener_with_wheel_intent(samples, *, render_artifact, wheel_intent):
         "samples": samples,
         "renderArtifact": bool(render_artifact),
         "wheelIntent": bool(wheel_intent),
+        "scrollbarDrag": bool(scrollbar_drag),
     }
     script = (
         "const payload = " + json.dumps(payload) + ";\n"
@@ -195,6 +198,7 @@ const step = new Function(
   '_recentMessageTouchScrollIntent',
   '_recentNonMessageScrollIntent',
   '_recentMessageWheelIntent',
+  '_scrollbarDragActive',
   // The extracted listener body uses bare `return;` in the suppression branch.
   // Wrap it in an inner arrow IIFE so that early return exits the IIFE (not the
   // outer Function), then read the mutated locals afterward. Without this the
@@ -244,7 +248,8 @@ for (const sample of payload.samples) {
     renderArtifact,
     noTouch,
     noNonMessage,
-    wheelIntent
+    wheelIntent,
+    payload.scrollbarDrag
   );
 }
 
@@ -303,6 +308,22 @@ class TestPostRenderWheelIntentScope:
         assert state["_messageUserUnpinned"] is True
         assert state["_scrollPinned"] is False
 
+    def test_scrollbar_drag_inside_window_still_unpins(self):
+        # #4970 review SHOULD-FIX: a manual scrollbar-drag upward scroll inside
+        # the post-render window is real user intent and must NOT be swallowed,
+        # even with no wheel/touch intent recorded.
+        state = _run_listener_with_wheel_intent(
+            self._SAMPLES,
+            render_artifact=True,
+            wheel_intent=False,
+            scrollbar_drag=True,
+        )
+        assert state["_messageUserUnpinned"] is True, (
+            "A scrollbar-drag upward scroll inside the artifact window must "
+            "unpin; the suppression must not swallow an active scrollbar drag."
+        )
+        assert state["_scrollPinned"] is False
+
 
 def test_low_delta_wheel_intent_is_tracked_separately():
     # The intent recorder must stamp _lastMessageWheelIntentMs for ANY upward
@@ -319,6 +340,57 @@ def test_low_delta_wheel_intent_is_tracked_separately():
     # The decisive sticky-unpin threshold must remain unchanged.
     assert "e.deltaY< -30" in rec, (
         "The existing deltaY<-30 direct sticky-unpin threshold must be preserved."
+    )
+
+
+def _extract_fn_body(name: str) -> str:
+    idx = UI_JS.find("function " + name + "(")
+    assert idx != -1, name + " not found in ui.js"
+    brace = UI_JS.index("{", idx)
+    depth = 0
+    for i in range(brace, len(UI_JS)):
+        ch = UI_JS[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return UI_JS[idx : i + 1]
+    raise AssertionError("unbalanced body for " + name)
+
+
+def test_session_switch_reset_clears_wheel_intent():
+    # #4970 review MUST-FIX 1: _resetScrollDirectionTracker() must clear the
+    # low-delta wheel intent stamp so a gentle wheel in the previous chat does
+    # not leak into the new chat's first post-render artifact window.
+    body = _extract_fn_body("_resetScrollDirectionTracker")
+    assert "_lastMessageWheelIntentMs=-Infinity" in body, (
+        "_resetScrollDirectionTracker() must reset _lastMessageWheelIntentMs so "
+        "stale wheel intent cannot cross a session switch."
+    )
+
+
+def test_stream_start_reset_clears_wheel_intent():
+    # #4970 review MUST-FIX 2: _resetStreamScrollFollow() must clear the wheel
+    # intent stamp so a gentle wheel just before a fresh stream cannot
+    # under-suppress a no-intent artifact and silently disable live follow.
+    body = _extract_fn_body("_resetStreamScrollFollow")
+    assert "_lastMessageWheelIntentMs=-Infinity" in body, (
+        "_resetStreamScrollFollow() must reset _lastMessageWheelIntentMs so "
+        "stale wheel intent cannot cross a fresh stream start."
+    )
+
+
+def test_suppression_gates_on_scrollbar_drag():
+    # #4970 review SHOULD-FIX 3: the post-render suppression must not fire while
+    # a scrollbar drag is active — that upward scroll is real user intent.
+    assert "let _scrollbarDragActive=false" in UI_JS
+    listener_idx = UI_JS.find("el.addEventListener('scroll'")
+    assert listener_idx != -1, "messages scroll listener not found"
+    listener = UI_JS[listener_idx: listener_idx + 4000]
+    assert "!_scrollbarDragActive" in listener, (
+        "#4970 review: the suppression branch must reference !_scrollbarDragActive "
+        "so a scrollbar-drag upward scroll inside the window is not swallowed."
     )
 
 

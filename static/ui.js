@@ -3878,6 +3878,11 @@ function _resetScrollDirectionTracker(){
   _touchStartY=null;
   _messageTouchScrollActive=false;
   _lastMessageTouchScrollIntentMs=-Infinity;
+  // #4970 review: also clear low-delta wheel intent on session switch, else a
+  // gentle wheel in the previous chat leaves _recentMessageWheelIntent() true
+  // into the new chat's first post-render window — the artifact then isn't
+  // suppressed, falls into movedUp, and falsely unpins live-follow.
+  _lastMessageWheelIntentMs=-Infinity;
   clearTimeout(_deferredOlderMessagesTimer);
   _deferredOlderMessagesTimer=0;
 }
@@ -3887,6 +3892,10 @@ function _resetStreamScrollFollow(){
   _scrollPinned=true;
   _nearBottomCount=0;
   _lastScrollTop=null;
+  // #4970 review: clear low-delta wheel intent on fresh stream start too, else a
+  // gentle upward wheel within the prior 1200ms can under-suppress a genuine
+  // no-intent render artifact and silently disable live follow for the new stream.
+  _lastMessageWheelIntentMs=-Infinity;
   _cancelBottomSettle();
 }
 if(typeof window!=='undefined'){
@@ -4013,11 +4022,16 @@ if(typeof window!=='undefined'){
       // #4970: also require no recent low-delta message-pane wheel intent, so a
       // gentle trackpad scroll-up (deltaY>-30) right after a render still unpins
       // instead of being swallowed for the artifact window.
+      // #4970 review: and never suppress while a scrollbar drag is active — a
+      // manual scrollbar-drag upward scroll inside the window is real intent.
+      // typeof guard keeps the #4295 node harness (no _scrollbarDragActive
+      // injected) inert via short-circuit.
       if(movedUp
         && typeof _recentMessageRenderArtifactWindow==='function'
         && typeof _recentMessageTouchScrollIntent==='function'
         && typeof _recentNonMessageScrollIntent==='function'
         && typeof _recentMessageWheelIntent==='function'
+        && (typeof _scrollbarDragActive==='undefined' || !_scrollbarDragActive)
         && _recentMessageRenderArtifactWindow(1400)
         && !_recentMessageTouchScrollIntent()
         && !_recentNonMessageScrollIntent()
