@@ -97,6 +97,18 @@ def _session_list_cache_active_stream_ids():
     return _active_stream_ids()
 
 
+def _session_list_cache_resolved_source_stamp(key: tuple):
+    try:
+        import api.routes as _routes
+
+        override = getattr(_routes, "_session_list_cache_source_stamp", None)
+        if callable(override) and override is not _session_list_cache_source_stamp:
+            return override(key)
+    except Exception:
+        pass
+    return _session_list_cache_source_stamp(key)
+
+
 def _session_list_cache_profile_scope(profile: str | None) -> str:
     normalized = str(profile or "").strip() or "default"
     if _profiles_match(normalized, "default"):
@@ -135,7 +147,7 @@ def _session_list_cache_get(
     allow_stale: bool = False,
 ) -> tuple[dict | None, bool]:
     now = time.monotonic()
-    current_stamp = _session_list_cache_source_stamp(key)
+    current_stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         entry = _SESSIONS_CACHE.get(key)
         if not entry:
@@ -166,7 +178,7 @@ def _session_list_cache_get(
 def _session_list_cache_set(key: tuple, payload: dict) -> None:
     if not isinstance(payload, dict):
         return
-    stamp = _session_list_cache_source_stamp(key)
+    stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         _SESSIONS_CACHE[key] = (time.monotonic(), stamp, copy.deepcopy(payload))
         _SESSIONS_CACHE.move_to_end(key)

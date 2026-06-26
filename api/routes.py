@@ -1634,37 +1634,45 @@ def _clear_live_models_cache() -> None:
         _LIVE_MODELS_CACHE.clear()
 
 
-from api.route_session_list_cache import (
-    _SESSIONS_CACHE,
-    _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION,
-    _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION,
-    _SESSIONS_CACHE_INFLIGHT,
-    _SESSIONS_CACHE_LOCK,
-    _SESSIONS_CACHE_MAX_ENTRIES,
-    _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION,
-    _SESSIONS_CACHE_STALE_WAIT_SECONDS,
-    _SESSIONS_CACHE_STREAMING_TTL_SECONDS,
-    _SESSIONS_CACHE_TTL_SECONDS,
-    _SESSIONS_CACHE_WAIT_SECONDS,
-    _clear_session_list_cache,
-    _session_list_cache_clear,
-    _session_list_cache_claim_rebuild,
-    _session_list_cache_done,
-    _session_list_cache_get,
-    _session_list_cache_invalidation_stamp,
-    _session_list_cache_key,
-    _session_list_cache_overlay_runtime_rows,
-    _session_list_cache_path_stamp,
-    _session_list_cache_profile_scope,
-    _session_list_row_is_runtime_active,
-    _session_list_row_numeric_value,
-    _session_list_row_timestamp,
-    _session_list_runtime_sort_key,
-    _session_list_cache_set,
-    _session_list_cache_source_stamp,
-    _session_list_cache_state_db_fingerprint,
-    _session_list_cache_streaming_freeze_marker,
-)  # noqa: F401
+from api import route_session_list_cache as _route_session_list_cache
+
+_SESSIONS_CACHE = _route_session_list_cache._SESSIONS_CACHE
+_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION = (
+    _route_session_list_cache._SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION
+)
+_SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION = (
+    _route_session_list_cache._SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION
+)
+_SESSIONS_CACHE_INFLIGHT = _route_session_list_cache._SESSIONS_CACHE_INFLIGHT
+_SESSIONS_CACHE_LOCK = _route_session_list_cache._SESSIONS_CACHE_LOCK
+_SESSIONS_CACHE_MAX_ENTRIES = _route_session_list_cache._SESSIONS_CACHE_MAX_ENTRIES
+_SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION = (
+    _route_session_list_cache._SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION
+)
+_SESSIONS_CACHE_STALE_WAIT_SECONDS = _route_session_list_cache._SESSIONS_CACHE_STALE_WAIT_SECONDS
+_SESSIONS_CACHE_STREAMING_TTL_SECONDS = (
+    _route_session_list_cache._SESSIONS_CACHE_STREAMING_TTL_SECONDS
+)
+_SESSIONS_CACHE_TTL_SECONDS = _route_session_list_cache._SESSIONS_CACHE_TTL_SECONDS
+_SESSIONS_CACHE_WAIT_SECONDS = _route_session_list_cache._SESSIONS_CACHE_WAIT_SECONDS
+_clear_session_list_cache = _route_session_list_cache._clear_session_list_cache
+_session_list_cache_clear = _route_session_list_cache._session_list_cache_clear
+_session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cache_claim_rebuild
+_session_list_cache_done = _route_session_list_cache._session_list_cache_done
+_session_list_cache_get = _route_session_list_cache._session_list_cache_get
+_session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
+_session_list_cache_key = _route_session_list_cache._session_list_cache_key
+_session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
+_session_list_cache_path_stamp = _route_session_list_cache._session_list_cache_path_stamp
+_session_list_cache_profile_scope = _route_session_list_cache._session_list_cache_profile_scope
+_session_list_row_is_runtime_active = _route_session_list_cache._session_list_row_is_runtime_active
+_session_list_row_numeric_value = _route_session_list_cache._session_list_row_numeric_value
+_session_list_row_timestamp = _route_session_list_cache._session_list_row_timestamp
+_session_list_runtime_sort_key = _route_session_list_cache._session_list_runtime_sort_key
+_session_list_cache_set = _route_session_list_cache._session_list_cache_set
+_session_list_cache_source_stamp = _route_session_list_cache._session_list_cache_source_stamp
+_session_list_cache_state_db_fingerprint = _route_session_list_cache._session_list_cache_state_db_fingerprint
+_session_list_cache_streaming_freeze_marker = _route_session_list_cache._session_list_cache_streaming_freeze_marker
 
 
 def _build_session_list_cache_payload(
