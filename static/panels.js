@@ -894,12 +894,17 @@ async function _loadRunContent(jobId, filename, runId){
     const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
     const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
     body.classList.toggle('expanded', expanded);
-    // Render markdown content using the same renderer as chat messages
-    if (typeof renderMd === 'function') {
-      body.innerHTML = renderMd(output);
-    } else {
-      body.textContent = output;
-    }
+    // Cron run output is never authored Markdown — render as literal
+    // preformatted text using DOM-created <pre><code> so all content
+    // (including shapes starting with #, |, >, ``` and embedded fences)
+    // renders verbatim without Markdown interpretation.
+    body.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.className = 'cron-run-pre';
+    const code = document.createElement('code');
+    code.textContent = output;
+    pre.appendChild(code);
+    body.appendChild(pre);
     const usageStrip = _formatCronRunUsageStrip(data.usage);
     if (usageStrip) {
       const usage = document.createElement('div');
@@ -915,7 +920,20 @@ async function _loadRunContent(jobId, filename, runId){
       btn.onclick = () => {
         _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
         body.classList.add('expanded');
-        body.innerHTML = renderMd ? renderMd(data.content) : data.content;
+        body.innerHTML = '';
+        const pre = document.createElement('pre');
+        pre.className = 'cron-run-pre';
+        const code = document.createElement('code');
+        code.textContent = data.content || '';
+        pre.appendChild(code);
+        body.appendChild(pre);
+        const usageStrip = _formatCronRunUsageStrip(data.usage);
+        if (usageStrip) {
+          const usage = document.createElement('div');
+          usage.className = 'cron-run-usage-strip cron-run-usage-footer';
+          usage.textContent = usageStrip;
+          body.appendChild(usage);
+        }
         btn.remove();
       };
       body.appendChild(btn);
