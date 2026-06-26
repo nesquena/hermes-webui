@@ -3482,41 +3482,50 @@ def get_reasoning_status(
     }
 
 
-def get_max_tokens_status() -> int | None:
-    """Return the Settings-facing max token cap from the active profile's config.yaml.
+def _parse_positive_int_config_value(raw) -> int | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
-    Mirrors CLI precedence exactly:
-      1) root-level ``max_tokens``
-      2) fallback to ``agent.max_tokens``
-      only when the value parses as a positive integer.
+
+def get_max_tokens_status() -> dict[str, int | None]:
+    """Return the Settings-facing max_tokens state from the active profile config.
+
+    ``max_tokens`` is the root override the Settings field owns directly.
+    ``max_tokens_fallback`` is the agent-level fallback only when the root key is
+    absent, matching the streaming path exactly. ``max_tokens_effective`` is the
+    runtime cap a new streaming turn would currently use.
     """
     config_data = _load_yaml_config_file(_get_config_path())
     if not isinstance(config_data, dict):
-        return None
+        return {
+            "max_tokens": None,
+            "max_tokens_effective": None,
+            "max_tokens_fallback": None,
+        }
 
-    raw = config_data.get("max_tokens")
-    if raw is not None and not isinstance(raw, bool):
-        try:
-            parsed = int(raw)
-            if parsed > 0:
-                return parsed
-        except (TypeError, ValueError):
-            pass
+    root_present = "max_tokens" in config_data
+    root_value = _parse_positive_int_config_value(config_data.get("max_tokens"))
 
-    agent_cfg = config_data.get("agent")
-    if isinstance(agent_cfg, dict):
-        raw = agent_cfg.get("max_tokens")
-        if raw is not None and not isinstance(raw, bool):
-            try:
-                parsed = int(raw)
-                if parsed > 0:
-                    return parsed
-            except (TypeError, ValueError):
-                pass
-    return None
+    fallback_value = None
+    if not root_present:
+        agent_cfg = config_data.get("agent")
+        if isinstance(agent_cfg, dict):
+            fallback_value = _parse_positive_int_config_value(agent_cfg.get("max_tokens"))
+
+    effective_value = root_value if root_value is not None else fallback_value
+    return {
+        "max_tokens": root_value,
+        "max_tokens_effective": effective_value,
+        "max_tokens_fallback": fallback_value,
+    }
 
 
-def set_max_tokens(max_tokens) -> int | None:
+def set_max_tokens(max_tokens) -> dict[str, int | None]:
     """Persist a root-level ``max_tokens`` override to the active profile config.
 
     Blank/``None`` clears the root override so ``agent.max_tokens`` can resume.
@@ -3526,16 +3535,9 @@ def set_max_tokens(max_tokens) -> int | None:
     if isinstance(max_tokens, str):
         max_tokens = max_tokens.strip()
     clear_root = max_tokens in (None, "")
-    parsed_max_tokens = None
-    if not clear_root:
-        try:
-            parsed_max_tokens = int(max_tokens)
-        except (TypeError, ValueError):
-            parsed_max_tokens = None
-        if not isinstance(parsed_max_tokens, int) or parsed_max_tokens <= 0 or isinstance(max_tokens, bool):
-            parsed_max_tokens = None
-        if parsed_max_tokens is None:
-            return get_max_tokens_status()
+    parsed_max_tokens = _parse_positive_int_config_value(max_tokens)
+    if not clear_root and parsed_max_tokens is None:
+        return get_max_tokens_status()
 
     config_path = _get_config_path()
     with _cfg_lock:

@@ -80,7 +80,11 @@ def test_get_max_tokens_status_prefers_root_then_agent():
         "  max_tokens: 512\n"
         "  name: fallback\n"
     )
-    assert config.get_max_tokens_status() == 256
+    assert config.get_max_tokens_status() == {
+        "max_tokens": 256,
+        "max_tokens_effective": 256,
+        "max_tokens_fallback": None,
+    }
 
     _write_config(
         "max_tokens: -1\n"
@@ -88,7 +92,22 @@ def test_get_max_tokens_status_prefers_root_then_agent():
         "  max_tokens: 512\n"
         "  name: fallback\n"
     )
-    assert config.get_max_tokens_status() == 512
+    assert config.get_max_tokens_status() == {
+        "max_tokens": None,
+        "max_tokens_effective": None,
+        "max_tokens_fallback": None,
+    }
+
+    _write_config(
+        "agent:\n"
+        "  max_tokens: 512\n"
+        "  name: fallback\n"
+    )
+    assert config.get_max_tokens_status() == {
+        "max_tokens": None,
+        "max_tokens_effective": 512,
+        "max_tokens_fallback": 512,
+    }
 
 
 def test_set_max_tokens_writes_root_override_and_clears_back_to_agent_fallback():
@@ -103,7 +122,11 @@ def test_set_max_tokens_writes_root_override_and_clears_back_to_agent_fallback()
     )
 
     saved = config.set_max_tokens(768)
-    assert saved == 768
+    assert saved == {
+        "max_tokens": 768,
+        "max_tokens_effective": 768,
+        "max_tokens_fallback": None,
+    }
     data = _read_config()
     assert data["max_tokens"] == 768
     assert data["agent"]["max_tokens"] == 512
@@ -111,7 +134,11 @@ def test_set_max_tokens_writes_root_override_and_clears_back_to_agent_fallback()
     assert data["metadata"]["keep"] is True
 
     saved = config.set_max_tokens(None)
-    assert saved == 512
+    assert saved == {
+        "max_tokens": None,
+        "max_tokens_effective": 512,
+        "max_tokens_fallback": 512,
+    }
     data = _read_config()
     assert "max_tokens" not in data
     assert data["agent"]["max_tokens"] == 512
@@ -138,7 +165,11 @@ def test_set_max_tokens_invalid_non_empty_input_is_a_true_no_op(monkeypatch):
         lambda: (_ for _ in ()).throw(AssertionError("unexpected reload")),
     )
 
-    assert config.set_max_tokens("abc") == 512
+    assert config.set_max_tokens("abc") == {
+        "max_tokens": None,
+        "max_tokens_effective": 512,
+        "max_tokens_fallback": 512,
+    }
     assert _read_config()["agent"]["max_tokens"] == 512
 
 
@@ -150,7 +181,15 @@ def test_get_settings_exposes_max_tokens_from_the_active_profile(monkeypatch):
         "api.routes.load_settings",
         lambda: {"send_key": "enter", "password_hash": "secret"},
     )
-    monkeypatch.setattr(config, "get_max_tokens_status", lambda: 321)
+    monkeypatch.setattr(
+        config,
+        "get_max_tokens_status",
+        lambda: {
+            "max_tokens": 321,
+            "max_tokens_effective": 321,
+            "max_tokens_fallback": None,
+        },
+    )
 
     handler = _FakeHandler()
     handle_get(handler, urlparse("http://example.com/api/settings"))
@@ -159,6 +198,8 @@ def test_get_settings_exposes_max_tokens_from_the_active_profile(monkeypatch):
     assert handler.status == 200
     assert payload["send_key"] == "enter"
     assert payload["max_tokens"] == 321
+    assert payload["max_tokens_effective"] == 321
+    assert payload["max_tokens_fallback"] is None
     assert "password_hash" not in payload
 
 
@@ -177,7 +218,14 @@ def test_post_settings_bridges_max_tokens_without_polluting_settings_payload(mon
         return {"send_key": body.get("send_key")}
 
     monkeypatch.setattr("api.routes.save_settings", _fake_save_settings)
-    monkeypatch.setattr("api.config.set_max_tokens", lambda value: 777 if value == 123 else None)
+    monkeypatch.setattr(
+        "api.config.set_max_tokens",
+        lambda value: {
+            "max_tokens": 777 if value == 123 else None,
+            "max_tokens_effective": 777 if value == 123 else None,
+            "max_tokens_fallback": None,
+        },
+    )
 
     handler = _FakeHandler(json.dumps({"send_key": "enter", "max_tokens": 123}).encode("utf-8"))
     handle_post(handler, urlparse("http://example.com/api/settings"))
@@ -187,6 +235,8 @@ def test_post_settings_bridges_max_tokens_without_polluting_settings_payload(mon
     assert captured["body"] == {"send_key": "enter"}
     assert payload["send_key"] == "enter"
     assert payload["max_tokens"] == 777
+    assert payload["max_tokens_effective"] == 777
+    assert payload["max_tokens_fallback"] is None
 
 
 def test_post_settings_does_not_write_max_tokens_before_auth_failures(monkeypatch):
@@ -239,6 +289,7 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
     assert load_idx != -1
     load_window = load_block[load_idx:load_idx + 420]
     assert "settings.max_tokens" in load_window
+    assert "maxTokensField.dataset.initialValue=maxTokensField.value" in load_block.replace(" ", "")
     assert "maxTokensField.addEventListener('input',_markSettingsDirty" in load_block.replace(" ", "")
     assert "_schedulePreferencesAutosave" not in load_window
 
@@ -249,8 +300,9 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
     save_block = _function_block(panels_js, "saveSettings")
     assert "settingsMaxTokens" in save_block
     assert "body.max_tokens" in save_block
-    assert "parsedMaxTokens" in save_block
-    assert "body.max_tokens=null" in save_block.replace(" ", "")
+    assert "initialMaxTokens" in save_block
+    assert "maxTokensRaw!==initialMaxTokens" in save_block.replace(" ", "")
+    assert "body.max_tokens=maxTokensRaw===''?null:maxTokensRaw" in save_block.replace(" ", "")
 
     assert 'id="settingsMaxTokens"' in index_html
     assert "settings_label_max_tokens" in i18n_js

@@ -7726,9 +7726,11 @@ async function loadSettingsPanel(){
     if(maxTokensField){
       const rawMaxTokens=settings.max_tokens;
       const parsedMaxTokens=parseInt(rawMaxTokens,10);
-      maxTokensField.value=(Number.isFinite(parsedMaxTokens)&&parsedMaxTokens>0)
+      const hasRootOverride=Number.isFinite(parsedMaxTokens)&&parsedMaxTokens>0;
+      maxTokensField.value=hasRootOverride
         ? String(parsedMaxTokens)
         : '';
+      maxTokensField.dataset.initialValue=maxTokensField.value;
       maxTokensField.addEventListener('input',_markSettingsDirty,{once:false});
     }
     // Ambient provider quota chip toggle — default off; only shows at ≥1400px viewport
@@ -10139,12 +10141,12 @@ async function saveSettings(andClose){
   body.language=language;
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
-  const maxTokensRaw=(maxTokensField&&String(maxTokensField.value||'').trim())||'';
-  if(maxTokensRaw){
-    const parsedMaxTokens=(/^\d+$/).test(maxTokensRaw)?parseInt(maxTokensRaw,10):0;
-    body.max_tokens=(parsedMaxTokens>0)?parsedMaxTokens:null;
-  }else{
-    body.max_tokens=null;
+  if(maxTokensField){
+    const maxTokensRaw=String(maxTokensField.value||'').trim();
+    const initialMaxTokens=String(maxTokensField.dataset.initialValue||'');
+    if(maxTokensRaw!==initialMaxTokens){
+      body.max_tokens=maxTokensRaw===''?null:maxTokensRaw;
+    }
   }
   body.show_quota_chip=showQuotaChip===true;
   body.show_conversation_outline=showConversationOutline===true;
