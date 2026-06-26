@@ -41,11 +41,18 @@ def test_sessions_and_projects_load_independently_so_projects_failure_cannot_bla
     block_end = src.find("async function _drainRenderSessionListQueue", block_start)
     assert block_end > block_start
     block = src[block_start:block_end]
+    helper_start = src.find("async function _loadSidebarSessionListPayload")
+    assert helper_start > 0
+    helper_end = src.find("async function _drainRenderSessionListQueue", helper_start)
+    assert helper_end > helper_start
+    helper = src[helper_start:helper_end]
 
     assert "Promise.all" not in block
-    assert "api('/api/sessions' + sessionListQS" in block
-    assert "try{\n      const projectQS = _showAllProfiles ? '?all_profiles=1' : '';\n      projData = await api('/api/projects' + projectQS" in block
-    assert "console.warn('renderProjectsList'," in block
+    assert "_loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)" in block
+    assert "const projectPromise = (async() => {" in helper
+    assert "return await api('/api/projects' + projectQS,{timeoutToast:false});" in helper
+    assert "console.warn('renderProjectsList',projectError);" in helper
+    assert "const projData = await projectPromise;" in helper
     assert "_applySessionListPayload(sessData,projData)" in block
 
 
