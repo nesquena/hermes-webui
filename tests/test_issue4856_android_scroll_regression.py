@@ -114,13 +114,211 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
     assert "function _recentMessageRenderArtifactWindow" in UI_JS
     listener_idx = UI_JS.find("el.addEventListener('scroll'")
     assert listener_idx != -1, "messages scroll listener not found"
-    listener = UI_JS[listener_idx: listener_idx + 2500]
+    listener = UI_JS[listener_idx: listener_idx + 4000]
     assert "_recentMessageRenderArtifactWindow(1400)" in listener
     assert "!_recentMessageTouchScrollIntent()" in listener
     assert "!_recentNonMessageScrollIntent()" in listener
+    assert "!_recentMessageWheelIntent()" in listener, (
+        "#4970: the post-render artifact suppression must also require no recent "
+        "low-delta message-pane wheel intent so a gentle trackpad scroll-up is "
+        "not swallowed."
+    )
     assert listener.find("return;") < listener.find("if(movedUp){"), (
         "recent render artifact scrolls must return before the movedUp branch "
         "can mark the reader unpinned."
+    )
+
+
+# ── #4970 low-delta wheel intent: behavioral node-harness ────────────────────
+import json  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+import pytest  # noqa: E402
+
+NODE = shutil.which("node")
+
+
+def _balanced_block(src: str, brace_start: int) -> str:
+    depth = 0
+    for i in range(brace_start, len(src)):
+        ch = src[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[brace_start + 1 : i]
+    raise AssertionError("balanced block not found")
+
+
+def _scroll_listener_raf_body() -> str:
+    listener_start = UI_JS.index("el.addEventListener('scroll'")
+    raf_start = UI_JS.index("requestAnimationFrame(()=>", listener_start)
+    brace_start = UI_JS.index("{", raf_start)
+    return _balanced_block(UI_JS, brace_start)
+
+
+def _run_listener_with_wheel_intent(samples, *, render_artifact, wheel_intent):
+    """Run the extracted scroll-listener body in node with controllable stubs.
+
+    Mirrors the #4295 harness shape but injects the #4970 helpers so we can
+    exercise the production suppression path: artifact window active AND a
+    recent gentle wheel intent must still unpin (return _messageUserUnpinned).
+    """
+    payload = {
+        "body": _scroll_listener_raf_body(),
+        "samples": samples,
+        "renderArtifact": bool(render_artifact),
+        "wheelIntent": bool(wheel_intent),
+    }
+    script = (
+        "const payload = " + json.dumps(payload) + ";\n"
+        + r"""
+const step = new Function(
+  'el',
+  '_lastScrollTop',
+  '_lastMessageClientHeight',
+  '_nearBottomCount',
+  '_scrollPinned',
+  '_messageUserUnpinned',
+  '_newMessageCueVisible',
+  '_programmaticScroll',
+  '_cancelBottomSettle',
+  '_clearNewMessageScrollCue',
+  '_syncScrollToBottomCue',
+  '_updateSessionStartJumpButton',
+  '_isSessionEndlessScrollEnabled',
+  '_messagesTruncated',
+  '_loadOlderMessages',
+  '_recentMessageRenderArtifactWindow',
+  '_recentMessageTouchScrollIntent',
+  '_recentNonMessageScrollIntent',
+  '_recentMessageWheelIntent',
+  // The extracted listener body uses bare `return;` in the suppression branch.
+  // Wrap it in an inner arrow IIFE so that early return exits the IIFE (not the
+  // outer Function), then read the mutated locals afterward. Without this the
+  // suppression path would return undefined before the state snapshot.
+  '(()=>{' + payload.body + `})();
+return {
+  _lastScrollTop,
+  _lastMessageClientHeight,
+  _nearBottomCount,
+  _scrollPinned,
+  _messageUserUnpinned,
+};
+`
+);
+
+let state = {
+  _lastScrollTop: 800,
+  _lastMessageClientHeight: null,
+  _nearBottomCount: 0,
+  _scrollPinned: true,
+  _messageUserUnpinned: false,
+};
+
+const noop = () => {};
+const renderArtifact = () => payload.renderArtifact;
+const noTouch = () => false;
+const noNonMessage = () => false;
+const wheelIntent = () => payload.wheelIntent;
+
+for (const sample of payload.samples) {
+  state = step(
+    sample,
+    state._lastScrollTop,
+    state._lastMessageClientHeight,
+    state._nearBottomCount,
+    state._scrollPinned,
+    state._messageUserUnpinned,
+    false,
+    false,
+    noop,
+    noop,
+    noop,
+    noop,
+    () => false,
+    false,
+    noop,
+    renderArtifact,
+    noTouch,
+    noNonMessage,
+    wheelIntent
+  );
+}
+
+console.log(JSON.stringify(state));
+"""
+    )
+    result = subprocess.run(
+        [NODE, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return json.loads(result.stdout.strip())
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+class TestPostRenderWheelIntentScope:
+    # A small upward scrollTop delta (800 -> 760) is `movedUp`. We hold the
+    # render artifact window OPEN for all cases so the only variable is whether
+    # the reader had recent gentle wheel intent.
+    _SAMPLES = [{"scrollTop": 760, "scrollHeight": 1200, "clientHeight": 200}]
+
+    def test_gentle_wheel_inside_artifact_window_still_unpins(self):
+        # #4970 MUST-FIX: with the artifact window active but a recent low-delta
+        # wheel intent, a real upward scroll must NOT be swallowed — it must
+        # unpin live-follow just like any genuine scroll-up.
+        state = _run_listener_with_wheel_intent(
+            self._SAMPLES, render_artifact=True, wheel_intent=True
+        )
+        assert state["_messageUserUnpinned"] is True, (
+            "A genuine gentle (low-delta) wheel scroll-up inside the post-render "
+            "artifact window must still unpin; the suppression must be scoped to "
+            "the no-intent artifact case only."
+        )
+        assert state["_scrollPinned"] is False
+
+    def test_no_intent_artifact_inside_window_is_suppressed(self):
+        # Control: same upward delta, same open window, but NO wheel intent — a
+        # true post-render artifact — stays pinned (the suppression still works).
+        state = _run_listener_with_wheel_intent(
+            self._SAMPLES, render_artifact=True, wheel_intent=False
+        )
+        assert state["_messageUserUnpinned"] is False, (
+            "A no-intent upward delta inside the artifact window is a render "
+            "artifact and must be suppressed (reader stays pinned)."
+        )
+        assert state["_scrollPinned"] is True
+
+    def test_gentle_wheel_outside_window_unpins(self):
+        # Outside the artifact window the suppression never applies, so the
+        # upward delta unpins regardless of intent tracking.
+        state = _run_listener_with_wheel_intent(
+            self._SAMPLES, render_artifact=False, wheel_intent=False
+        )
+        assert state["_messageUserUnpinned"] is True
+        assert state["_scrollPinned"] is False
+
+
+def test_low_delta_wheel_intent_is_tracked_separately():
+    # The intent recorder must stamp _lastMessageWheelIntentMs for ANY upward
+    # wheel (deltaY<0), not only the decisive deltaY<-30 sticky-unpin threshold.
+    assert "let _lastMessageWheelIntentMs=-Infinity" in UI_JS
+    assert "function _recentMessageWheelIntent" in UI_JS
+    rec_idx = UI_JS.find("function _recordNonMessageScrollIntent")
+    assert rec_idx != -1, "_recordNonMessageScrollIntent not found"
+    rec = UI_JS[rec_idx: rec_idx + 1400]
+    assert "e.deltaY<0) _lastMessageWheelIntentMs=performance.now()" in rec, (
+        "#4970: _recordNonMessageScrollIntent must record low-delta upward wheel "
+        "intent (deltaY<0) separately from the decisive deltaY<-30 unpin."
+    )
+    # The decisive sticky-unpin threshold must remain unchanged.
+    assert "e.deltaY< -30" in rec, (
+        "The existing deltaY<-30 direct sticky-unpin threshold must be preserved."
     )
 
 
