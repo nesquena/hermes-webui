@@ -14,6 +14,7 @@ import secrets
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 from api.config import STATE_DIR, load_settings
 
@@ -85,6 +86,18 @@ def _resolve_cookie_name() -> str:
     return COOKIE_NAME
 
 
+def _warn_auth_persistence_failure(prefix: str, artifact: Path, exc: Exception, consequence: str) -> None:
+    logger.warning(
+        '%s at %s (STATE_DIR=%s): %s: %s; %s',
+        prefix,
+        artifact,
+        STATE_DIR,
+        exc.__class__.__name__,
+        exc,
+        consequence,
+    )
+
+
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
 
@@ -95,16 +108,38 @@ def _load_sessions() -> dict[str, float]:
     blocked by a corrupt or missing sessions file.
     """
     try:
-        if _SESSIONS_FILE.exists():
-            data = json.loads(_SESSIONS_FILE.read_text(encoding='utf-8'))
-            if not isinstance(data, dict):
-                raise ValueError('malformed sessions file — expected dict')
-            now = time.time()
-            return {t: exp for t, exp in data.items()
-                    if isinstance(t, str) and isinstance(exp, (int, float)) and exp > now}
-    except Exception as e:
-        logger.debug("Failed to load sessions file, starting fresh: %s", e)
-    return {}
+        if not _SESSIONS_FILE.exists():
+            return {}
+        raw = _SESSIONS_FILE.read_text(encoding='utf-8')
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth session store read failed',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _warn_auth_persistence_failure(
+            'Ignoring malformed auth session store',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
+    if not isinstance(data, dict):
+        _warn_auth_persistence_failure(
+            'Ignoring malformed auth session store',
+            _SESSIONS_FILE,
+            ValueError('malformed sessions file: expected dict'),
+            'starting fresh with an empty session table',
+        )
+        return {}
+    now = time.time()
+    return {t: exp for t, exp in data.items()
+            if isinstance(t, str) and isinstance(exp, (int, float)) and exp > now}
 
 
 def _save_sessions(sessions: dict[str, float]) -> None:
@@ -128,7 +163,12 @@ def _save_sessions(sessions: dict[str, float]) -> None:
                 pass
             raise
     except Exception as e:
-        logger.debug("Failed to persist sessions: %s", e)
+        _warn_auth_persistence_failure(
+            'Auth session persistence failed',
+            _SESSIONS_FILE,
+            e,
+            'keeping the in-process session table available',
+        )
 
 
 # Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
@@ -231,15 +271,25 @@ def _load_key(filename: str) -> bytes:
             raw = key_file.read_bytes()
             if len(raw) >= 32:
                 return raw[:32]
-    except OSError:
-        logger.debug("Failed to read key %s", filename)
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth key read failed',
+            key_file,
+            e,
+            'generating a new key and continuing',
+        )
     key = secrets.token_bytes(32)
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         key_file.write_bytes(key)
         key_file.chmod(0o600)
-    except OSError:
-        logger.debug("Failed to persist key %s", filename)
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth key persistence failed',
+            key_file,
+            e,
+            'returning the generated key so startup can continue',
+        )
     return key
 
 
