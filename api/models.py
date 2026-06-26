@@ -200,6 +200,7 @@ def _session_dir_has_persisted_session_files() -> bool:
 
 def _rebuild_session_index_background(expected_session_dir: Path, expected_index_file: Path) -> None:
     global _SESSION_INDEX_REBUILD_THREAD, _SESSION_INDEX_REBUILD_THREAD_TARGET
+    current_thread = threading.current_thread()
     try:
         with _SESSION_INDEX_REBUILD_LOCK:
             if SESSION_DIR != expected_session_dir or SESSION_INDEX_FILE != expected_index_file:
@@ -213,7 +214,7 @@ def _rebuild_session_index_background(expected_session_dir: Path, expected_index
         logger.debug("Background session-index rebuild failed", exc_info=True)
     finally:
         with _SESSION_INDEX_REBUILD_LOCK:
-            if _SESSION_INDEX_REBUILD_THREAD_TARGET == (
+            if _SESSION_INDEX_REBUILD_THREAD is current_thread and _SESSION_INDEX_REBUILD_THREAD_TARGET == (
                 expected_session_dir,
                 expected_index_file,
             ):
