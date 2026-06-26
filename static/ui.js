@@ -23,21 +23,6 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
-/* ── Chat sidebar toggle ── */
-function toggleSidebar(){
-  const d=document.documentElement;
-  const collapsed=d.getAttribute('data-sidebar-collapsed')==='1';
-  if(collapsed){
-    document.querySelector('.layout')?.classList.remove('sidebar-collapsed');
-    d.removeAttribute('data-sidebar-collapsed');
-    localStorage.setItem('hermes-webui-sidebar-collapsed','');
-  }else{
-    document.querySelector('.layout')?.classList.add('sidebar-collapsed');
-    d.setAttribute('data-sidebar-collapsed','1');
-    localStorage.setItem('hermes-webui-sidebar-collapsed','1');
-  }
-}
-/* ── End chat sidebar toggle ── */
 const OFFLINE_RECHECK_MS=2500;
 let _offlineVisible=false;
 let _offlineReason='browser';
