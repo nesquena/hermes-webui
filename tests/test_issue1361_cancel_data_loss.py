@@ -310,12 +310,16 @@ class TestCancelWithReasoningOnlyNoText:
         q = config.STREAMS[stream_id]
 
         config.STREAM_PARTIAL_TEXT[stream_id] = ""
-        if hasattr(config, 'STREAM_REASONING_TEXT'):
-            config.STREAM_REASONING_TEXT[stream_id] = "Important cancelled reasoning"
-        if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
-            config.STREAM_LIVE_TOOL_CALLS[stream_id] = [
-                {"name": "terminal", "args": {"command": "pytest -q"}, "done": False},
-            ]
+        assert hasattr(config, "STREAM_REASONING_TEXT"), (
+            "cancel payload test requires reasoning capture"
+        )
+        assert hasattr(config, "STREAM_LIVE_TOOL_CALLS"), (
+            "cancel payload test requires live tool capture"
+        )
+        config.STREAM_REASONING_TEXT[stream_id] = "Important cancelled reasoning"
+        config.STREAM_LIVE_TOOL_CALLS[stream_id] = [
+            {"name": "terminal", "args": {"command": "pytest -q"}, "done": False},
+        ]
 
         cancel_stream(stream_id)
 
