@@ -7,6 +7,12 @@
 
 - **Anchor-owned settled assistant turns now preserve mixed text/tool ordering in Transparent Stream.** When a settled assistant message stores interleaved `content[]` text and `tool_use` parts, settlement and reload hydration now promote those parts into the `_anchor_activity_scene` instead of relying on the raw Transparent Stream fallback. The final answer stays distinct as the text after the last tool use on the final assistant message, while earlier prose, non-final post-tool process text, thinking rows, and tool rows render chronologically in both Compact Worklog and Transparent Stream.
 
+## [v0.51.676] — 2026-06-26 — Release YF (submitted message no longer renders twice — or vanishes — on active reload)
+
+### Fixed
+
+- **On an active-session reload/reconnect, the submitted user turn no longer renders twice (and a distinct repeated prompt no longer vanishes).** The browser can see the current turn through several recovery sources (optimistic/in-flight, `pending_user_message`, replay/checkpoint), and the de-duplication had to balance two failure modes. Pending/in-flight user-turn dedupe is now scoped to the **current-turn tail** only (stopping at the most recent non-live assistant), so: a genuine double-render of the *same* current turn is still collapsed to one, while a *new* turn whose text matches an *earlier* historical message (e.g. sending the same prompt twice, including under the default deferred save mode where only `pending_user_message` exists) is correctly preserved instead of being suppressed. Display-only wrappers (workspace/attachment/forced-skill envelopes) are normalized for the comparison; pending attachments reattach only on a genuine same-turn match. Thanks @franksong2702. (#4826, fixes #4825)
+
 ## [v0.51.675] — 2026-06-26 — Release YE (long conversations open fast — bounded state.db tail reads)
 
 ### Fixed

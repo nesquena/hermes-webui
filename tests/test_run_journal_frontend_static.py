@@ -1,9 +1,214 @@
+import json
+import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text()
 SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text()
+UI_SRC = (ROOT / "static" / "ui.js").read_text()
+
+
+def _function_body(src: str, signature: str) -> str:
+    start = src.index(signature)
+    brace = src.index("{", start)
+    depth = 0
+    for idx in range(brace, len(src)):
+        char = src[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"could not extract function body for {signature!r}")
+
+
+def _run_session_identity_probe() -> dict:
+    prompt = "same submitted prompt\nwith a second line"
+    workspace_prompt = f"[Workspace::v1: /tmp/hermes-webui]\n{prompt}"
+    legacy_workspace_prompt = f"[Workspace: /tmp/hermes-webui]\n{prompt}"
+    attached_prompt = f"{prompt}\n\n[Attached files: /tmp/a.txt]"
+    forced_prompt = (
+        "[USER OVERRIDE] You MUST follow the skill 'hermes-webui-coordinator' "
+        "content provided below before responding to the next message.\n\n"
+        "[FORCED SKILL CONTEXT: hermes-webui-coordinator]\n"
+        "skill body that should not make a second user bubble\n"
+        "[/FORCED SKILL CONTEXT]\n\n"
+        f"{prompt}"
+    )
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _stripWorkspaceDisplayPrefix"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
+            _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
+            _function_body(SESSIONS_SRC, "function _inflightHasVisibleLiveState"),
+        ]
+    )
+    script = f"""
+{helpers}
+const plain = {{role:'user', content:{json.dumps(prompt)}}};
+const workspace = {{role:'user', content:{json.dumps(workspace_prompt)}}};
+const legacyWorkspace = {{role:'user', content:{json.dumps(legacy_workspace_prompt)}}};
+const attached = {{role:'user', content:{json.dumps(attached_prompt)}}};
+const forced = {{role:'user', content:{json.dumps(forced_prompt)}}};
+const different = {{role:'user', content:'a different submitted prompt'}};
+process.stdout.write(JSON.stringify({{
+  workspaceDedupe: _sameTranscriptMessage(plain, workspace),
+  legacyWorkspaceDedupe: _sameTranscriptMessage(plain, legacyWorkspace),
+  attachedDedupe: _sameTranscriptMessage(plain, attached),
+  forcedSkillDedupe: _sameTranscriptMessage(plain, forced),
+  differentUserNotDedupe: !_sameTranscriptMessage(plain, different),
+  roleMismatchNotDedupe: !_sameTranscriptMessage(plain, {{role:'assistant', content:{json.dumps(prompt)}}}),
+  userOnlyInflightVisible: _inflightHasVisibleLiveState({{messages:[plain]}}),
+  emptyUserOnlyInflightNotVisible: !_inflightHasVisibleLiveState({{messages:[{{role:'user', content:'   '}}]}}),
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
+def _run_current_turn_scope_probe() -> dict:
+    prompt = "repeat me"
+    historical_workspace_prompt = f"[Workspace::v1: /tmp/old]\n{prompt}"
+    current_workspace_prompt = f"[Workspace::v1: /tmp/current]\n{prompt}"
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _stripWorkspaceDisplayPrefix"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(SESSIONS_SRC, "function _currentTailUserMessage"),
+            _function_body(SESSIONS_SRC, "function _hasCurrentTailUserDuplicate"),
+            _function_body(SESSIONS_SRC, "function _mergePendingSessionMessage"),
+            _function_body(SESSIONS_SRC, "function _mergeInflightTailMessages"),
+        ]
+    )
+    script = f"""
+{helpers}
+function getPendingSessionMessage(session, messages){{
+  const text=String(session&&session.pending_user_message||'').trim();
+  if(!text) return null;
+  return {{
+    role:'user',
+    content:text,
+    _ts:session.pending_started_at||10,
+    _pending:true,
+  }};
+}}
+const historical = {{role:'user', content:{json.dumps(historical_workspace_prompt)}, _ts:1}};
+const historicalAnswer = {{role:'assistant', content:'done', _ts:2}};
+const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:4}};
+const pendingSession = {{pending_user_message:{json.dumps(prompt)}, pending_started_at:3}};
+
+const pendingAfterHistory = [historical, historicalAnswer];
+const insertedAfterHistory = _mergePendingSessionMessage(pendingSession, pendingAfterHistory);
+
+const pendingBeforeLive = [historical, historicalAnswer, liveAssistant];
+const insertedBeforeLive = _mergePendingSessionMessage(pendingSession, pendingBeforeLive);
+
+const optimisticCurrent = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3}};
+const pendingWithCurrent = [historical, historicalAnswer, optimisticCurrent, liveAssistant];
+const insertedWithCurrent = _mergePendingSessionMessage(pendingSession, pendingWithCurrent);
+
+const inflightAfterHistory = _mergeInflightTailMessages(
+  [historical, historicalAnswer],
+  [{{role:'user', content:{json.dumps(prompt)}, _ts:3}}, liveAssistant]
+);
+
+const inflightWithCurrent = _mergeInflightTailMessages(
+  [historical, historicalAnswer, optimisticCurrent],
+  [{{role:'user', content:{json.dumps(prompt)}, _ts:3}}, liveAssistant]
+);
+
+process.stdout.write(JSON.stringify({{
+  insertedAfterHistory,
+  pendingAfterHistoryRoles: pendingAfterHistory.map(m=>m.role),
+  insertedBeforeLive,
+  pendingBeforeLiveRoles: pendingBeforeLive.map(m=>m.role),
+  insertedWithCurrent,
+  pendingWithCurrentRoles: pendingWithCurrent.map(m=>m.role),
+  inflightAfterHistoryRoles: inflightAfterHistory.map(m=>m.role),
+  inflightWithCurrentRoles: inflightWithCurrent.map(m=>m.role),
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
+
+
+def _run_pending_session_message_probe() -> dict:
+    prompt = "repeat me"
+    historical_workspace_prompt = f"[Workspace::v1: /tmp/old]\n{prompt}"
+    current_workspace_prompt = f"[Workspace::v1: /tmp/current]\n{prompt}"
+    helpers = "\n".join(
+        [
+            _function_body(UI_SRC, "function _stripWorkspaceDisplayPrefix"),
+            _function_body(UI_SRC, "function msgContent"),
+            _function_body(SESSIONS_SRC, "function _messageComparableText"),
+            _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
+            _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
+            _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
+            _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
+            _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _function_body(UI_SRC, "function getPendingSessionMessage"),
+        ]
+    )
+    script = f"""
+{helpers}
+const prompt = {json.dumps(prompt)};
+const historical = {{role:'user', content:prompt, _ts:1}};
+const historicalWorkspace = {{role:'user', content:{json.dumps(historical_workspace_prompt)}, _ts:1}};
+const historicalAnswer = {{role:'assistant', content:'done', _ts:2}};
+const currentTail = {{role:'user', content:prompt, _ts:3}};
+const currentWorkspaceTail = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3}};
+const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:4}};
+const attachments = [{{name:'note.txt', path:'note.txt', mime:'text/plain'}}];
+
+const fromHistoricalSameText = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:3}},
+  [historical, historicalAnswer]
+);
+const fromHistoricalWorkspace = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:3}},
+  [historicalWorkspace, historicalAnswer]
+);
+const exactCurrentMessages = [historical, historicalAnswer, currentTail];
+const exactCurrentResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:4, pending_attachments:attachments}},
+  exactCurrentMessages
+);
+const workspaceCurrentResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:4}},
+  [historical, historicalAnswer, currentWorkspaceTail]
+);
+const liveAfterCurrentResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:4}},
+  [historical, historicalAnswer, currentWorkspaceTail, liveAssistant]
+);
+const differentTailResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:4}},
+  [historical, historicalAnswer, {{role:'user', content:'different prompt', _ts:3}}]
+);
+
+process.stdout.write(JSON.stringify({{
+  historicalSameTextSurvives: !!fromHistoricalSameText && fromHistoricalSameText.content===prompt && fromHistoricalSameText._pending===true,
+  historicalWorkspaceSurvives: !!fromHistoricalWorkspace && fromHistoricalWorkspace.content===prompt && fromHistoricalWorkspace._pending===true,
+  exactCurrentTailDedupe: exactCurrentResult===null,
+  exactCurrentTailAttachmentsCopied: Array.isArray(currentTail.attachments) && currentTail.attachments[0].name==='note.txt',
+  workspaceCurrentTailDedupe: workspaceCurrentResult===null,
+  liveAfterCurrentTailDedupe: liveAfterCurrentResult===null,
+  differentCurrentTailSurvives: !!differentTailResult && differentTailResult.content===prompt && differentTailResult._pending===true,
+}}));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout)
 
 
 def test_reattach_path_uses_replay_when_status_reports_journal():
@@ -125,6 +330,71 @@ def test_server_runtime_journal_snapshot_restores_structured_inflight_state():
     assert "activity_burst_anchors" in helper_block
     for key in ("tid", "id", "tool_call_id", "tool_use_id", "call_id"):
         assert key in helper_block
+
+
+def test_active_reload_keeps_user_only_inflight_visible_until_pending_dedupe():
+    """A just-submitted user row is visible live state before first assistant text.
+
+    On an active first-turn reload, the sidecar can still have messages=[] while
+    pending_user_message and the submitted turn journal record the same prompt.
+    The browser must not discard the user-only optimistic INFLIGHT entry as a
+    cursor-only snapshot before pending/live replay reconciliation runs.
+    """
+    result = _run_session_identity_probe()
+
+    assert result["userOnlyInflightVisible"] is True
+    assert result["emptyUserOnlyInflightNotVisible"] is True
+
+
+def test_pending_user_merge_dedupes_user_turn_variants_by_behavior():
+    """Pending user rows and replayed/checkpointed user rows share one turn.
+
+    Execute the same JavaScript helpers the browser uses so the regression test
+    catches regex/order/trim mistakes, not just identifier wiring.
+    """
+    result = _run_session_identity_probe()
+
+    assert result["workspaceDedupe"] is True
+    assert result["legacyWorkspaceDedupe"] is True
+    assert result["attachedDedupe"] is True
+    assert result["forcedSkillDedupe"] is True
+    assert result["differentUserNotDedupe"] is True
+    assert result["roleMismatchNotDedupe"] is True
+
+
+def test_user_turn_dedupe_is_scoped_to_current_turn_by_behavior():
+    result = _run_current_turn_scope_probe()
+
+    assert result["insertedAfterHistory"] is True
+    assert result["pendingAfterHistoryRoles"] == ["user", "assistant", "user"]
+    assert result["insertedBeforeLive"] is True
+    assert result["pendingBeforeLiveRoles"] == ["user", "assistant", "user", "assistant"]
+
+    assert result["insertedWithCurrent"] is False
+    assert result["pendingWithCurrentRoles"] == ["user", "assistant", "user", "assistant"]
+
+    assert result["inflightAfterHistoryRoles"] == ["user", "assistant", "user", "assistant"]
+    assert result["inflightWithCurrentRoles"] == ["user", "assistant", "user", "assistant"]
+
+
+def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
+    """Deferred active reload must not hide a current repeat prompt.
+
+    In the default deferred save mode, chat start persists only
+    pending_user_message before the worker appends the display row.  If an older
+    turn has the same visible user text, getPendingSessionMessage still has to
+    return the current pending row; downstream merge code then dedupes only
+    against the current tail.
+    """
+    result = _run_pending_session_message_probe()
+
+    assert result["historicalSameTextSurvives"] is True
+    assert result["historicalWorkspaceSurvives"] is True
+    assert result["exactCurrentTailDedupe"] is True
+    assert result["exactCurrentTailAttachmentsCopied"] is True
+    assert result["workspaceCurrentTailDedupe"] is True
+    assert result["liveAfterCurrentTailDedupe"] is True
+    assert result["differentCurrentTailSurvives"] is True
 
 
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
