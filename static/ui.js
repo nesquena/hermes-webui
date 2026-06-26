@@ -3985,10 +3985,18 @@ if(typeof window!=='undefined'){
       _lastMessageClientHeight=el.clientHeight;
       const movedUp=!grew&&_lastScrollTop!==null&&top<_lastScrollTop-2;
       const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
+      // Suppress the post-render scroll artifact: right after renderMessages()
+      // rebuilds #msgInner, the browser can emit a non-user upward scroll event.
+      // The typeof guards keep this branch inert in unit harnesses that inject
+      // the listener body without these helpers (and short-circuit before any
+      // call), while production evaluates the real intent/recency helpers.
       if(movedUp
+        && typeof _recentMessageRenderArtifactWindow==='function'
+        && typeof _recentMessageTouchScrollIntent==='function'
+        && typeof _recentNonMessageScrollIntent==='function'
+        && _recentMessageRenderArtifactWindow(1400)
         && !_recentMessageTouchScrollIntent()
-        && !_recentNonMessageScrollIntent()
-        && _recentMessageRenderArtifactWindow(1400)){
+        && !_recentNonMessageScrollIntent()){
         _lastScrollTop=top;
         return;
       }
