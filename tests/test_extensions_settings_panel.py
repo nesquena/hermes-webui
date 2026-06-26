@@ -141,6 +141,7 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     monitor_block = _between("async function _checkExtensionSidecarHealth", "function _renderExtensionsPanel")
     render_block = _between("function _renderExtensionsPanel", "async function loadExtensionsPanel")
     load_block = _between("async function loadExtensionsPanel", "async function copyExtensionsDiagnostics")
+    load_catch_block = load_block[load_block.index("}catch(e){"):]
 
     assert "Loopback sidecars" in sidecar_block
     assert "No loopback sidecars declared." in sidecar_block
@@ -160,6 +161,8 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     assert "if(!preserveExisting) target.innerHTML" in load_block
     assert "loadExtensionsPanel({preserveExisting:true})" in load_block
     assert "if(seq!==_extensionsSidecarMonitorSeq) return;" in load_block
+    assert "if(seq!==_extensionsSidecarMonitorSeq) return;" in load_catch_block
+    assert "if(preserveExisting&&target.innerHTML.trim()) return;" in load_catch_block
     assert "_renderExtensionsPanel(data,seq)" in load_block
     assert "res.ok" in monitor_block
     assert "res.text" not in monitor_block

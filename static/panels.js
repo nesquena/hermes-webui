@@ -8383,6 +8383,8 @@ async function loadExtensionsPanel(opts){
     if(seq!==_extensionsSidecarMonitorSeq) return;
     _renderExtensionsPanel(data,seq);
   }catch(e){
+    if(seq!==_extensionsSidecarMonitorSeq) return;
+    if(preserveExisting&&target.innerHTML.trim()) return;
     _extensionsStatusData=null;
     if(copyBtn) copyBtn.disabled=true;
     target.innerHTML='<div class="extensions-error">Failed to load extension diagnostics: '+esc(e.message||String(e))+'</div>';
