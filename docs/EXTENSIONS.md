@@ -58,6 +58,13 @@ applies — installed extension code runs with full session authority — so onl
 install extensions from the vetted gallery or sources you trust as much as the
 WebUI source itself.
 
+Some gallery entries need more than WebUI assets. If an extension declares
+post-install guidance or lifecycle requirements such as a loopback sidecar or a
+native host, Settings -> Extensions shows a **Next step** note on the card after
+install. For example, Desktop Companion can install the WebUI bridge from the
+gallery, but the desktop pet is only visible after the local Desktop Companion
+app is started.
+
 ### Manual / advanced configuration (optional)
 
 `HERMES_WEBUI_EXTENSION_DIR` is **optional** and overrides the managed default.

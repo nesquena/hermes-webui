@@ -177,6 +177,40 @@ def test_extensions_panel_toggle_uses_dedicated_endpoint_without_settings_or_ins
     assert "marketplace" not in combined.lower()
 
 
+def test_extensions_gallery_renders_post_install_guidance():
+    url_block = _between("function _extensionSafeHttpUrl", "function _extensionPostInstallNote")
+    gallery_block = _between("function _extensionPostInstallNote", "async function loadExtensionsGallery")
+    render_block = _between("function _renderExtensionsGallery", "function _bindExtensionGalleryButtons")
+    install_block = _between("async function handleExtensionInstall", "async function handleExtensionUninstall")
+
+    assert "/^https?:\\/\\//i.test(raw)" in url_block
+    assert "url.username||url.password" in url_block
+    assert "entry.post_install" in gallery_block
+    assert "post&&post.docs_url" in gallery_block
+    assert "sidecar_start_required" in gallery_block
+    assert "native_host_start_required" in gallery_block
+    assert "requires_local_app" in gallery_block
+    assert "local_app_label" in gallery_block
+    assert "t('ext_gallery_local_component_required')" in gallery_block
+    assert "t('ext_gallery_local_app_label')" in gallery_block
+    assert "t('ext_gallery_required_suffix',localAppLabel)" in gallery_block
+    assert "t('ext_gallery_sidecar_required')" in gallery_block
+    assert "t('ext_gallery_native_host_required')" in gallery_block
+    assert "t('ext_gallery_open_setup_guide')" in gallery_block
+    assert "t(isInstalled?'ext_gallery_next_step':'ext_gallery_after_install')" in gallery_block
+    assert "target=\"_blank\"" in gallery_block
+    assert "rel=\"noopener noreferrer\"" in gallery_block
+    assert "extension-gallery-next-step" in gallery_block
+    assert "esc(summary)" in gallery_block
+    assert "esc(docsUrl)" in gallery_block
+    assert "esc(item)" in gallery_block
+    assert "_extensionPostInstallNote(entry,isInstalled)" in render_block
+    assert "t('ext_gallery_install_restart_required')" in install_block
+    assert "t('ext_gallery_install_followup')" in install_block
+    assert "t('ext_gallery_install_ok')" in install_block
+    assert "webui_restart_required" in install_block
+
+
 def test_copy_extensions_diagnostics_copies_current_sanitized_payload():
     copy_block = _between("function copyExtensionsDiagnostics", "// ── Plugins panel")
 
@@ -197,14 +231,33 @@ def test_extensions_styles_are_scoped_to_extensions_panel():
     assert ".extension-toggle-btn" in STYLE_CSS
     assert ".extension-sidecar-list" in STYLE_CSS
     assert ".extension-sidecar-status-badge" in STYLE_CSS
+    assert ".extension-gallery-next-step" in STYLE_CSS
+    assert ".extension-gallery-next-link" in STYLE_CSS
 
 
-def test_extensions_tab_i18n_key_exists_for_all_locales():
+def test_extensions_i18n_keys_exist_for_all_locales():
     blocks = _locale_blocks()
 
     assert len(blocks) == _locale_count()
-    missing = [name for name, block in blocks.items() if "settings_tab_extensions" not in block]
-    assert not missing, f"Locale(s) missing settings_tab_extensions: {missing}"
+    required_keys = [
+        "settings_tab_extensions",
+        "ext_gallery_next_step",
+        "ext_gallery_after_install",
+        "ext_gallery_local_component_required",
+        "ext_gallery_local_app_label",
+        "ext_gallery_required_suffix",
+        "ext_gallery_sidecar_required",
+        "ext_gallery_native_host_required",
+        "ext_gallery_open_setup_guide",
+        "ext_gallery_install_restart_required",
+        "ext_gallery_install_followup",
+    ]
+    missing = {
+        name: [key for key in required_keys if key not in block]
+        for name, block in blocks.items()
+    }
+    missing = {name: keys for name, keys in missing.items() if keys}
+    assert not missing, f"Locale(s) missing extension i18n key(s): {missing}"
 
 
 def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims():
