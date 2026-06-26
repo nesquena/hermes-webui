@@ -7,6 +7,12 @@
 
 - **Settings → Extensions can now show generic runtime status from healthy loopback sidecars.** When a declared sidecar's `/health` response includes an optional top-level `runtime` object, the diagnostics panel renders only allowlisted scalar fields such as sidecar, native-host, bridge, last-update, and WebUI-origin state. Raw health response bodies are still not rendered, WebUI still omits credentials, and no sidecar proxy or native launch behavior is introduced.
 
+## [v0.51.676] — 2026-06-26 — Release YF (submitted message no longer renders twice — or vanishes — on active reload)
+
+### Fixed
+
+- **On an active-session reload/reconnect, the submitted user turn no longer renders twice (and a distinct repeated prompt no longer vanishes).** The browser can see the current turn through several recovery sources (optimistic/in-flight, `pending_user_message`, replay/checkpoint), and the de-duplication had to balance two failure modes. Pending/in-flight user-turn dedupe is now scoped to the **current-turn tail** only (stopping at the most recent non-live assistant), so: a genuine double-render of the *same* current turn is still collapsed to one, while a *new* turn whose text matches an *earlier* historical message (e.g. sending the same prompt twice, including under the default deferred save mode where only `pending_user_message` exists) is correctly preserved instead of being suppressed. Display-only wrappers (workspace/attachment/forced-skill envelopes) are normalized for the comparison; pending attachments reattach only on a genuine same-turn match. Thanks @franksong2702. (#4826, fixes #4825)
+
 ## [v0.51.675] — 2026-06-26 — Release YE (long conversations open fast — bounded state.db tail reads)
 
 ### Fixed
