@@ -69,6 +69,31 @@ def _make_state_db(path: Path, sid: str, rows):
     conn.close()
 
 
+def _append_state_db_rows(path: Path, sid: str, rows):
+    conn = sqlite3.connect(path)
+    try:
+        for row in rows:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    sid,
+                    row["role"],
+                    row["content"],
+                    row.get("timestamp", 1000.0),
+                    row.get("tool_call_id"),
+                    row.get("tool_calls"),
+                    row.get("tool_name"),
+                ),
+            )
+        conn.execute(
+            "UPDATE sessions SET message_count = (SELECT COUNT(*) FROM messages WHERE session_id = ?) WHERE id = ?",
+            (sid, sid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages):
     import api.config as config
     import api.models as models
@@ -98,6 +123,36 @@ def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages):
     )
     session.save(touch_updated_at=False)
     return session
+
+
+def test_sidebar_state_db_overlay_preserves_numeric_actual_count():
+    import api.models as models
+
+    sid = "webui_float_actual_count"
+    sessions = [
+        {
+            "session_id": sid,
+            "source_tag": "webui",
+            "message_count": 2,
+            "actual_message_count": 5.0,
+            "last_message_at": 1001.0,
+            "updated_at": 1001.0,
+        }
+    ]
+
+    models._apply_sidebar_state_db_override_metadata(
+        sessions,
+        {
+            sid: {
+                "_state_db_source": "webui",
+                "_state_db_message_count": 4,
+                "_state_db_last_message_at": 1003.0,
+            }
+        },
+    )
+
+    assert sessions[0]["message_count"] == 4
+    assert sessions[0]["actual_message_count"] == 5
 
 
 def test_tail_cancelled_partial_blocks_state_db_replay():
@@ -171,6 +226,80 @@ def test_state_db_duplicate_backfills_turn_duration():
 
     assert len(merged) == 1
     assert merged[0]["_turnDuration"] == 42.5
+
+
+def test_api_sessions_overlays_webui_state_db_summary_after_desktop_append(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_desktop_sidebar_reconcile"
+    sidecar_messages = [
+        {"role": "user", "content": "old user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(tmp_path / "state.db", sid, list(sidecar_messages))
+    monkeypatch.setattr(routes, "load_settings", lambda: {"show_cli_sessions": False})
+    routes._clear_session_list_cache()
+
+    first = _GetHandler("/api/sessions?sidebar_source=webui")
+    routes.handle_get(first, urlparse(first.path))
+    assert first.status == 200
+    first_row = next(row for row in first.response_json["sessions"] if row["session_id"] == sid)
+    assert first_row["message_count"] == 2
+
+    # Simulate the official Hermes Desktop App continuing the same WebUI-origin
+    # Hermes Agent session and settling its final rows into state.db. The second
+    # request happens immediately, so it only updates if the WebUI sidebar cache
+    # observes state.db changes even when the CLI/external-session tab is hidden.
+    _append_state_db_rows(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "desktop user", "timestamp": 1002.0},
+            {"role": "assistant", "content": "desktop assistant", "timestamp": 1003.0},
+        ],
+    )
+
+    second = _GetHandler("/api/sessions?sidebar_source=webui")
+    routes.handle_get(second, urlparse(second.path))
+    assert second.status == 200
+    row = next(row for row in second.response_json["sessions"] if row["session_id"] == sid)
+    assert row["message_count"] == 4
+    assert row["last_message_at"] == 1003.0
+    assert row["updated_at"] == 1003.0
+
+
+def test_api_session_full_load_does_not_duplicate_state_db_prefix(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_desktop_full_reconcile"
+    sidecar_messages = [
+        {"role": "user", "content": "turn 1", "timestamp": 1000.0},
+        {"role": "assistant", "content": "answer 1", "timestamp": 1001.0},
+        {"role": "user", "content": "turn 2", "timestamp": 1002.0},
+    ]
+    desktop_tail = [
+        {"role": "assistant", "content": "answer 2 from desktop", "timestamp": 1003.0},
+        {"role": "user", "content": "desktop follow-up", "timestamp": 1004.0},
+        {"role": "assistant", "content": "desktop final", "timestamp": 1005.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(tmp_path / "state.db", sid, sidecar_messages + desktop_tail)
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    messages = handler.response_json["session"]["messages"]
+    assert [m["content"] for m in messages] == [
+        "turn 1",
+        "answer 1",
+        "turn 2",
+        "answer 2 from desktop",
+        "desktop follow-up",
+        "desktop final",
+    ]
+    assert handler.response_json["session"]["message_count"] == 6
 
 
 def test_api_session_includes_state_db_messages_newer_than_webui_sidecar(monkeypatch, tmp_path):

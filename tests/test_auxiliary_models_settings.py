@@ -108,10 +108,30 @@ class TestAuxiliaryModelsJS:
         """Main-model modal should not advertise timing knobs that the chat agent cannot apply."""
         open_idx = PANELS_JS.find("function _openAuxAdvancedOptions")
         assert open_idx >= 0
-        modal_body = PANELS_JS[open_idx:open_idx + 3200]
+        modal_body = PANELS_JS[open_idx:open_idx + 4600]
         assert "const timingFields=isMain?'':(" in modal_body
         assert "auxAdvancedExtraBody" in modal_body
         assert "auxAdvancedBaseUrl" in modal_body
+
+    def test_main_advanced_modal_exposes_service_tier_selector(self):
+        """Main-model advanced modal should expose service-tier control."""
+        open_idx = PANELS_JS.find("function _openAuxAdvancedOptions")
+        assert open_idx >= 0
+        modal_body = PANELS_JS[open_idx:open_idx + 3600]
+        helper_idx = PANELS_JS.find("function _mainModelSupportsServiceTier")
+        assert helper_idx >= 0
+        helper_body = PANELS_JS[helper_idx:helper_idx + 1300]
+        assert "_mainModelSupportsServiceTier" in PANELS_JS
+        assert "rawModel.includes('/')" in helper_body
+        assert "rawModel.slice(0,slash)!=='openai'" in helper_body
+        assert "bareModel.includes('codex')" in helper_body
+        assert "bareModel.startsWith('gpt-')" in helper_body
+        assert "bareModel.startsWith('o4')" in helper_body
+        assert "auxAdvancedServiceTier" in modal_body
+        assert "isMain&&_mainModelSupportsServiceTier(cfg)" in modal_body
+        assert "settings_main_advanced_service_tier" in modal_body
+        assert "settings_main_advanced_service_tier_default" in modal_body
+        assert "settings_main_advanced_service_tier_priority" in modal_body
 
     def test_main_advanced_save_omits_unsupported_timing_keys(self):
         """Saving main-model options must not send blank timing keys that backend treats as clears."""
@@ -269,6 +289,10 @@ class TestAuxiliaryModelsI18n:
         "settings_main_advanced_subtitle",
         "settings_main_advanced_saved",
         "settings_main_advanced_save_failed",
+        "settings_main_advanced_service_tier",
+        "settings_main_advanced_service_tier_desc",
+        "settings_main_advanced_service_tier_default",
+        "settings_main_advanced_service_tier_priority",
         "settings_aux_task_vision",
         "settings_aux_task_vision_desc",
         "settings_aux_task_compression",

@@ -5625,12 +5625,35 @@ async function respondApproval(choice) {
       _approvalResponding = null;
       const pendingEntry = _approvalPendingBySession.get(sid);
       const samePending = !!(pendingEntry && pendingEntry.pending && (pendingEntry.pending.approval_id || null) === (approvalId || null));
-      if (_approvalSessionId === sid && _approvalCurrentId === approvalId) {
+      // `stale_cleared` means the server found nothing pending for this session
+      // (the approval already resolved or its stream ended while the card was
+      // up). The orphan card must be cleared unconditionally so it can never
+      // get stuck — even if the displayed id has since drifted. (#4948 local
+      // variant: previously surfaced as a stuck "Approval response not
+      // accepted." toast.)
+      if (result.stale_cleared || (_approvalSessionId === sid && _approvalCurrentId === approvalId)) {
         _approvalSessionId = null;
         _approvalCurrentId = null;
         hideApprovalCard(true);
       }
-      if (samePending) _clearApprovalPendingForSession(sid);
+      if (samePending || result.stale_cleared) _clearApprovalPendingForSession(sid);
+      // Hardening for the narrow stale-clear race: a brand-new approval could
+      // have been parked server-side after the server's empty-check but before
+      // we processed this stale response. The unconditional clear above would
+      // hide that fresh card. Re-query the authoritative server pending state
+      // (same endpoint the fallback poll uses) so any approval that arrived in
+      // the window re-surfaces immediately instead of waiting for the next
+      // SSE/poll tick. Best-effort; poll/SSE remain the backstop. (Opus review
+      // nit on the #4948 fix.)
+      if (result.stale_cleared) {
+        api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast: false})
+          .then(data => {
+            if (data && data.pending && _approvalPromptBelongsToActiveSession(sid)) {
+              showApprovalForSession(sid, data.pending, data.pending_count || 1);
+            }
+          })
+          .catch(() => {});
+      }
       return;
     }
     const errMsg = (result && result.error) || "Approval response not accepted.";

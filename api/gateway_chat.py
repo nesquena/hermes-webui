@@ -591,6 +591,15 @@ def _run_gateway_chat_streaming(
             prefill_messages = []
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
+        try:
+            from api.config import _main_model_request_overrides
+            _gw_overrides = _main_model_request_overrides(
+                cfg,
+                effective_model=model,
+                effective_provider=model_provider,
+            )
+        except Exception:
+            _gw_overrides = {}
         # Capability gate: use runs API when gateway advertises approval support.
         _use_runs_api = _gateway_use_runs_api_enabled(cfg) and gateway_supports_approval(base_url, api_key)
         if _use_runs_api:
@@ -599,6 +608,8 @@ def _run_gateway_chat_streaming(
                 body_extras["provider"] = model_provider
             if reasoning_effort is not None:
                 body_extras["reasoning_effort"] = reasoning_effort
+            if _gw_overrides.get("service_tier"):
+                body_extras["service_tier"] = _gw_overrides["service_tier"]
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
@@ -661,6 +672,8 @@ def _run_gateway_chat_streaming(
                 body["provider"] = model_provider
             if reasoning_effort is not None:
                 body["reasoning_effort"] = reasoning_effort
+            if _gw_overrides.get("service_tier"):
+                body["service_tier"] = _gw_overrides["service_tier"]
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),

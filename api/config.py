@@ -3498,14 +3498,85 @@ def _public_advanced_model_options(model_cfg: dict) -> dict:
     }
 
 
-def _main_model_request_overrides(config_data: dict) -> dict:
-    """Return supported runtime request overrides for the main chat model."""
+def _is_openai_family_provider(provider: str | None) -> bool:
+    """Return True when a provider should receive OpenAI-family request overrides."""
+    if not provider:
+        return False
+    resolved = str(_resolve_provider_alias(str(provider).strip().lower()))
+    return resolved in ("openai", "openai-api", "openai-codex")
+
+
+def _main_model_supports_service_tier(
+    model_id: str | None,
+    provider: str | None,
+) -> bool:
+    """Return True when the current main-model selection can use OpenAI service tier."""
+    if not _is_openai_family_provider(provider):
+        return False
+    resolved = str(provider or "").strip().lower()
+    if resolved == "openai-codex":
+        return False
+    raw_model = str(model_id or "").strip().lower()
+    if not raw_model:
+        return True
+    if "/" in raw_model:
+        prefix, bare_model = raw_model.split("/", 1)
+        if prefix != "openai":
+            return False
+    else:
+        bare_model = raw_model
+    if "codex" in bare_model:
+        return False
+    return (
+        _is_first_party_model("openai", bare_model)
+        or bare_model.startswith(("gpt-", "o1", "o3", "o4"))
+    )
+
+
+def _public_main_service_tier(model_cfg: dict) -> str:
+    """Return the saved main-model service tier only for OpenAI-family providers."""
+    if not isinstance(model_cfg, dict):
+        return ""
+    model_id = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+    provider = str(model_cfg.get("provider") or "").strip().lower()
+    if not provider:
+        _, provider, _ = resolve_model_provider(model_id)
+    if not _main_model_supports_service_tier(model_id, provider):
+        return ""
+    service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
+    return "priority" if service_tier == "priority" else ""
+
+
+def _main_model_request_overrides(
+    config_data: dict,
+    effective_model: str | None = None,
+    effective_provider: str | None = None,
+) -> dict:
+    """Return supported runtime request overrides for the main chat model.
+
+    When *effective_model* / *effective_provider* are supplied, the
+    service-tier gate checks those instead of the saved default model,
+    so a per-session model switch to a non-OpenAI provider does not
+    leak ``service_tier`` onto an unsupported request.
+    """
     if not isinstance(config_data, dict):
         return {}
     model_cfg = config_data.get("model", {})
     if not isinstance(model_cfg, dict):
         return {}
     overrides = {}
+    gate_model = effective_model
+    gate_provider = effective_provider
+    if not gate_model:
+        gate_model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+    if not gate_provider:
+        gate_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if not gate_provider:
+            _, gate_provider, _ = resolve_model_provider(gate_model)
+    if _main_model_supports_service_tier(gate_model, gate_provider):
+        service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
+        if service_tier == "priority":
+            overrides["service_tier"] = "priority"
     extra_body = model_cfg.get("extra_body")
     if isinstance(extra_body, dict) and extra_body:
         overrides["extra_body"] = copy.deepcopy(extra_body)
@@ -3548,6 +3619,14 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
                 model_cfg.pop("extra_body", None)
         else:
             raise ValueError("extra_body must be a JSON object")
+    if "service_tier" in advanced:
+        service_tier = str(advanced.get("service_tier") or "").strip().lower()
+        if not service_tier or service_tier == "default":
+            model_cfg.pop("service_tier", None)
+        elif service_tier == "priority":
+            model_cfg["service_tier"] = "priority"
+        else:
+            raise ValueError("service_tier must be one of: default, priority")
     if advanced.get("api_key_clear"):
         model_cfg.pop("api_key", None)
     api_key = str(advanced.get("api_key") or "").strip()
@@ -3614,6 +3693,8 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
                 model_cfg.pop("base_url", None)
 
         _apply_advanced_model_options(model_cfg, advanced)
+        if not _main_model_supports_service_tier(persisted_model, persisted_provider):
+            model_cfg.pop("service_tier", None)
 
         config_data["model"] = model_cfg
         _save_yaml_config_file(config_path, config_data)
@@ -3656,7 +3737,7 @@ def get_auxiliary_models() -> dict:
             {"task": "vision", "provider": "auto", "model": "", "base_url": ""},
             ...
         ],
-        "main": {"provider": "openrouter", "model": "anthropic/claude-opus-4.7"},
+        "main": {"provider": "openrouter", "model": "anthropic/claude-opus-4.7", "service_tier": ""},
     }
     """
     reload_config()
@@ -3692,6 +3773,7 @@ def get_auxiliary_models() -> dict:
         "main": {
             "provider": main_provider,
             "model": main_model,
+            "service_tier": _public_main_service_tier(model_cfg),
             **_public_advanced_model_options(model_cfg),
         },
     }

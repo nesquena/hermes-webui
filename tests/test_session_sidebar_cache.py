@@ -1,8 +1,21 @@
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 import api.routes as routes
 from api import session_events
+
+
+@pytest.fixture(autouse=True)
+def _isolated_session_list_cache_state():
+    routes._session_list_cache_clear()
+    with routes._SESSIONS_CACHE_LOCK:
+        routes._SESSIONS_CACHE_INFLIGHT.clear()
+    yield
+    routes._session_list_cache_clear()
+    with routes._SESSIONS_CACHE_LOCK:
+        routes._SESSIONS_CACHE_INFLIGHT.clear()
 
 
 class _StageRecorder:
@@ -74,8 +87,9 @@ def test_session_list_cache_key_separates_profile_and_all_profiles():
     assert calls == ["default", "other", "default_all"]
 
 
-def test_session_list_cache_singleflight_rebuild_once():
+def test_session_list_cache_singleflight_rebuild_once(monkeypatch):
     routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
 
     started = threading.Event()
     release = threading.Event()
@@ -121,8 +135,9 @@ def test_session_list_cache_singleflight_rebuild_once():
     assert calls == 1
 
 
-def test_session_list_cache_follower_wait_stage_when_rebuild_inflight():
+def test_session_list_cache_follower_wait_stage_when_rebuild_inflight(monkeypatch):
     routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
 
     started = threading.Event()
     release = threading.Event()
@@ -142,6 +157,15 @@ def test_session_list_cache_follower_wait_stage_when_rebuild_inflight():
 
     follower_diag = _StageRecorder()
     owner_diag = _StageRecorder()
+    wait_seen = threading.Event()
+    original_follower_stage = follower_diag.stage
+
+    def follower_stage(name):
+        original_follower_stage(name)
+        if name == "session_list_cache_wait":
+            wait_seen.set()
+
+    follower_diag.stage = follower_stage
 
     def owner():
         routes._get_cached_session_list_payload(
@@ -159,18 +183,21 @@ def test_session_list_cache_follower_wait_stage_when_rebuild_inflight():
 
     owner_thread = threading.Thread(target=owner)
     follower_thread = threading.Thread(target=follower)
-    owner_thread.start()
-    assert started.wait(1.0)
-    follower_thread.start()
-    release.set()
-    owner_thread.join(2)
-    follower_thread.join(2)
+    try:
+        owner_thread.start()
+        assert started.wait(1.0)
+        follower_thread.start()
+        assert wait_seen.wait(1.0)
+    finally:
+        release.set()
+        owner_thread.join(2)
+        follower_thread.join(2)
 
     assert "session_list_cache_wait" in follower_diag.stages
     assert "session_list_cache_hit" in owner_diag.stages or "session_list_cache_stored" in owner_diag.stages
 
 
-def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild():
+def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild(monkeypatch):
     routes._session_list_cache_clear()
 
     key = routes._session_list_cache_key(
@@ -188,6 +215,15 @@ def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild():
             stamp,
             payload,
         )
+    # Simulate the #4834 path: state.db/WAL/fingerprint changes after the
+    # stale payload was cached. Followers must still be able to use that stale
+    # payload while the owner rebuild is blocked; otherwise sidebar polling can
+    # pile up behind a slow rebuild.
+    monkeypatch.setattr(
+        routes,
+        "_session_list_cache_source_stamp",
+        lambda _key: ("changed",),
+    )
 
     started = threading.Event()
     release = threading.Event()
@@ -217,13 +253,16 @@ def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild():
 
     owner_thread = threading.Thread(target=owner)
     follower_thread = threading.Thread(target=follower)
-    owner_thread.start()
-    assert started.wait(1.0)
-    follower_thread.start()
-    follower_thread.join(1.0)
-    assert not follower_thread.is_alive()
-    release.set()
-    owner_thread.join(2.0)
+    try:
+        owner_thread.start()
+        assert started.wait(1.0)
+        follower_thread.start()
+        follower_thread.join(1.0)
+        assert not follower_thread.is_alive()
+    finally:
+        release.set()
+        owner_thread.join(2.0)
+        follower_thread.join(2.0)
 
     assert follower_result["payload"] == _session_cache_payload("stale")
     assert owner_result["payload"] == _session_cache_payload("fresh")

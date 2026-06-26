@@ -3,6 +3,48 @@
 
 ## [Unreleased]
 
+## [v0.51.674] — 2026-06-26 — Release YD (server no longer exhausts threads under sidebar-poll load)
+
+### Fixed
+
+- **The server no longer runs out of OS threads (and stops accepting connections) under sustained `/api/sessions` load.** The slow-request diagnostics helper spawned a fresh `threading.Timer` — one OS thread — for every tracked request (the high-frequency sidebar poll and chat-start), held alive until the request finished. Under sustained load that exhausted the per-process thread cap (`RuntimeError: can't start new thread`), failing both the diagnostics timer and the HTTP request worker, after which new connections were refused. The per-request timer is replaced with a single process-global watchdog daemon thread that scans in-flight requests on a ~1s tick, so timeout tracking now costs one thread per process regardless of request rate. Diagnostics behavior (slow-request warnings) is unchanged. Reported by enihcam. (#4973)
+
+## [v0.51.673] — 2026-06-26 — Release YC (a stale approval card clears instead of dead-ending)
+
+### Fixed
+
+- **A stale command-approval card now clears instead of dead-ending on "Approval response not accepted." (#4948 local variant, #4771 follow-up).** On the default local backend, if an approval card was still on screen when its turn ended (cancel, fork, provider error, or normal completion while pending), clicking Approve/Deny sent an id that no longer matched anything and the card got stuck behind that error toast. The server now distinguishes a genuinely stale card (nothing pending for the session → clears the orphan card) from a stale-id click made while a *different* approval is still live (still rejected, so it can never resolve the wrong command — #527 preserved). Reported by santastabber and b3nw.
+
+## [v0.51.672] — 2026-06-26 — Release YB (faster cron sidebar rebuild on stores missing the message index)
+
+### Fixed
+
+- **The cron/CLI sidebar rebuild is much faster on a `state.db` that lacks the message-session index.** When `idx_messages_session` is missing (an unmigrated/older store), the cron-only capped rescue scan ran a correlated per-row latest-message subquery that could take multiple seconds cold. That pass now uses a single pre-aggregated latest-message ordering (one grouped scan) for the missing-index case only; the common indexed path is unchanged (the correlated ordering is still the faster plan on a healthy migrated store), and the session set/order is identical to before. Follow-up to the #4842 chain, independent of #4952. Thanks @rodboev. (#4962)
+
+## [v0.51.671] — 2026-06-26 — Release YA (sidebar polls no longer stall behind a slow session-list rebuild)
+
+### Fixed
+
+- **The conversation sidebar no longer stalls (or pins CPU) while a cron-heavy session-list rebuild is in flight.** `get_cli_sessions()` previously held the CLI/cron cache lock across the entire slow rebuild, so one refresh serialized every follower `/api/sessions` poll for that key — a recurring multi-second `/api/session` stall and 100% CPU on long-lived, cron-heavy instances (#4842). The rebuild now runs outside the lock with stale-while-revalidate + singleflight: followers serve the existing rows during a rebuild and a single owner refreshes (cold followers join it rather than each starting a parallel rebuild), with bounded waits so a slow owner can never hang a follower, and cache invalidation stays atomic across a clear-during-rebuild. Completes the #4842 performance chain on top of #4889 and #4908/#4949. Thanks @rodboev. (#4952, closes #4842)
+
+## [v0.51.670] — 2026-06-26 — Release XZ (settled tool-call rows stay before the final answer)
+
+### Fixed
+
+- **A complete final answer no longer looks unfinished when an earlier tool call shares its timestamp.** On a paginated load, older `state.db` assistant rows carrying distinct tool calls were appended after the settled final answer instead of inserted in order, so the renderer treated the real final answer as a non-final segment until a refresh. The merge now inserts those tool-call rows chronologically — including the equal-timestamp case (a fast tool call and the final answer landing in the same second), where the final answer now correctly stays last. The existing dedupe, tool-call→result block integrity, and watermark reconciliation are unchanged. Thanks @franksong2702. (#4893)
+
+## [v0.51.669] — 2026-06-26 — Release XY (set OpenAI priority service tier from the model picker)
+
+### Added
+
+- **The main-model advanced settings can now set the OpenAI priority service tier (`service_tier`), matching the CLI/gateway fast-mode path.** Previously the WebUI model picker had no way to opt a conversation into OpenAI's priority tier even though the agent's `/fast` path supported it. The Settings → main-model advanced panel now exposes a Service tier control (Default/off · Priority) for eligible OpenAI-family models; the choice persists and is forwarded on the request. Codex models are excluded (their transport doesn't accept `service_tier`, so the selector is hidden and the value is never forwarded/persisted for them), and non-OpenAI providers never receive it. Thanks @rodboev. (#4543, fixes #4536)
+
+## [v0.51.668] — 2026-06-26 — Release XX (WebUI stays in sync after the Desktop app continues a session)
+
+### Fixed
+
+- **A WebUI-created session stays in sync after the official Hermes Desktop app continues the same Agent session.** When the Desktop app appended settled rows to the shared `state.db` and you returned to WebUI, the sidebar/detail could show a stale or incomplete transcript and the next WebUI turn's context missed the externally-appended messages. The sidebar now refreshes WebUI-origin rows from settled `state.db` count/timestamp even when external/CLI sessions are hidden (overlaying only when the DB strictly grew, metadata-only, with the active-stream hold-down preserved), and full loads avoid duplicating the sidecar prefix when merging `state.db`. Read-only reconciliation — no Desktop change, no live-stream mirroring. Thanks @franksong2702. (#4834, fixes #4833)
+
 ## [v0.51.667] — 2026-06-26 — Release XW (compaction markers stay internal; code-shaped tool output stays intact)
 
 ### Fixed
