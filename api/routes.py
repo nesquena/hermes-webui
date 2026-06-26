@@ -12802,8 +12802,20 @@ def handle_get(handler, parsed) -> bool:
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
-        from api.background import get_results
-        return j(handler, {"results": get_results(sid)})
+        from api.background import durable_background_status, get_results
+        status = durable_background_status(sid)
+        # Legacy clients expect a consumptive `results` array. Keep it for now,
+        # but durable `tasks` remains available and idempotent for Issue 39's
+        # parent-owned transcript/card migration.
+        status["results"] = get_results(sid)
+        return j(handler, status)
+
+    if parsed.path == "/api/background/tasks":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        from api.background import durable_background_status
+        return j(handler, durable_background_status(sid))
 
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))

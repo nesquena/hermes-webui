@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +36,14 @@ def test_track_and_complete_background_writes_durable_sidecar(tmp_path, monkeypa
     assert bg.get_results(parent)[0]["answer"] == "deeper answer"
     assert bg.get_results(parent) == []
     assert bg.list_durable_background_tasks(parent)[0]["answer"] == "deeper answer"
+    assert bg.get_durable_background_task(parent, "task-1")["answer"] == "deeper answer"
+    assert bg.get_durable_background_task(parent, "missing") is None
+
+    status = bg.durable_background_status(parent)
+    assert status["ok"] is True
+    assert status["session_id"] == parent
+    assert len(status["tasks"]) == 1
+    assert status["tasks"][0]["status"] == "done"
 
 
 def test_durable_task_prompt_preview_is_bounded(tmp_path, monkeypatch):
@@ -49,6 +58,13 @@ def test_durable_task_prompt_preview_is_bounded(tmp_path, monkeypatch):
     task = bg.list_durable_background_tasks(parent)[0]
     assert len(task["prompt_preview"]) < 540
     assert task["prompt_preview"].endswith("…(truncated)")
+
+
+def test_background_tasks_route_is_registered():
+    routes = Path("api/routes.py").read_text(encoding="utf-8")
+    assert 'parsed.path == "/api/background/tasks"' in routes
+    assert "durable_background_status" in routes
+    assert 'status["results"] = get_results(sid)' in routes
 
 
 def test_durable_task_store_rejects_unsafe_parent_session_id(tmp_path, monkeypatch):

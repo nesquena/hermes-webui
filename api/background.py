@@ -100,6 +100,23 @@ def _upsert_durable_task_unlocked(parent_sid: str, task_id: str, updates: dict[s
     return dict(task)
 
 
+def _public_task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+    """Return the durable task fields safe for status/list API responses."""
+    return {
+        "task_id": task.get("task_id"),
+        "parent_session_id": task.get("parent_session_id"),
+        "status": task.get("status") or "unknown",
+        "bg_session_id": task.get("bg_session_id"),
+        "stream_id": task.get("stream_id"),
+        "prompt_preview": task.get("prompt_preview"),
+        "started_at": task.get("started_at"),
+        "completed_at": task.get("completed_at"),
+        "updated_at": task.get("updated_at"),
+        "answer": task.get("answer"),
+        "error": task.get("error"),
+    }
+
+
 def list_durable_background_tasks(parent_sid: str) -> list[dict[str, Any]]:
     """Return durable background task records for a parent session.
 
@@ -108,7 +125,25 @@ def list_durable_background_tasks(parent_sid: str) -> list[dict[str, Any]]:
     polling semantics until the UI/API migration is ready.
     """
     with _lock:
-        return [dict(t) for t in _read_durable_tasks_unlocked(parent_sid)]
+        return [_public_task_snapshot(t) for t in _read_durable_tasks_unlocked(parent_sid)]
+
+
+def get_durable_background_task(parent_sid: str, task_id: str) -> dict[str, Any] | None:
+    """Return one durable task by id without consuming terminal state."""
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return None
+    with _lock:
+        for task in _read_durable_tasks_unlocked(parent_sid):
+            if str(task.get("task_id") or "") == task_id:
+                return _public_task_snapshot(task)
+    return None
+
+
+def durable_background_status(parent_sid: str) -> dict[str, Any]:
+    """Return the idempotent durable status payload for a parent session."""
+    tasks = list_durable_background_tasks(parent_sid)
+    return {"ok": True, "session_id": parent_sid, "tasks": tasks}
 
 
 def track_background(parent_sid: str, bg_sid: str, stream_id: str,
