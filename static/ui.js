@@ -2047,17 +2047,16 @@ async function populateModelDropdown(opts={}){
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
     const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
     if(requestSeq!==_modelDropdownRequestSeq) return;
-    if(_redirectIfUnauth(_modelsRes)) return;
+    const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
+    if(customRedirectIfUnauth){
+      if(customRedirectIfUnauth(_modelsRes)) return;
+    }else if(_redirectIfUnauth(_modelsRes)) return;
+    // `_activeProvider` is populated from the /api/models payload below.
     const data=await _modelsRes.json();
     if(requestSeq!==_modelDropdownRequestSeq) return;
-    // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
-    // Store default model so newSession() can apply it (#872).
-    // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
-    // Keep the g.extra_models label hydration path below in this function; tests
-    // assert populateModelDropdown preserves that full-catalog label contract.
     window._modelEndpointErrors={};
 
     const _synthGroupsFromConfigured=()=>{
