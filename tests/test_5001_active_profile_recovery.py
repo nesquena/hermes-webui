@@ -67,6 +67,9 @@ function makeAttempt(attempt) {
       const payload = attempt.payload || {name: 'default', is_default: true};
       return payload;
     }
+    if (attempt.type === 'return') {
+      return attempt.value;
+    }
     if (attempt.type === 'undefined') {
       return undefined;
     }
@@ -190,6 +193,44 @@ def test_active_profile_boot_recovery_handles_loader_thrown_401s(driver_path):
     assert payload["redirects"] == ["login?next=%2F"]
     assert payload["storageHistory"][0].get("test-5001-active-profile-recovery-throws") == "1"
     assert payload["storageHistory"][1].get("test-5001-active-profile-recovery-throws") is None
+    assert payload["storageSnapshot"] == {}
+
+
+def test_active_profile_boot_non_401_errors_fallback_without_redirect(driver_path):
+    payload = _run_boot_profile_scenario(
+        driver_path,
+        {
+            "markerKey": "test-5001-active-profile-recovery-non-401",
+            "attempts": [
+                {"type": "error", "status": 500, "nextUrl": "/"},
+            ],
+        },
+    )
+
+    assert payload["attempts"][0]["status"] == "fallback"
+    assert payload["attempts"][0]["profile"] == "default"
+    assert payload["attempts"][0]["isDefault"] is True
+    assert payload["redirects"] == []
+    assert payload["storageHistory"][0].get("test-5001-active-profile-recovery-non-401") is None
+    assert payload["storageSnapshot"] == {}
+
+
+def test_active_profile_boot_invalid_payload_falls_back_without_redirect(driver_path):
+    payload = _run_boot_profile_scenario(
+        driver_path,
+        {
+            "markerKey": "test-5001-active-profile-recovery-invalid-payload",
+            "attempts": [
+                {"type": "return", "value": {"is_default": False}, "nextUrl": "/"},
+            ],
+        },
+    )
+
+    assert payload["attempts"][0]["status"] == "fallback"
+    assert payload["attempts"][0]["profile"] == "default"
+    assert payload["attempts"][0]["isDefault"] is True
+    assert payload["redirects"] == []
+    assert payload["storageHistory"][0].get("test-5001-active-profile-recovery-invalid-payload") is None
     assert payload["storageSnapshot"] == {}
 
 
