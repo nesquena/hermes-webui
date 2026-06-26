@@ -129,13 +129,17 @@ def test_get_max_tokens_status_prefers_root_then_agent():
     }
 
 
-def test_set_max_tokens_writes_root_override_and_clears_back_to_agent_fallback():
+def test_set_max_tokens_writes_root_override_and_clears_back_to_agent_fallback(monkeypatch):
     import api.config as config
 
+    monkeypatch.setenv("OPENAI_API_KEY", "expanded-secret")
     _write_config(
         "agent:\n"
         "  max_tokens: 512\n"
         "  name: fallback\n"
+        "providers:\n"
+        "  openai:\n"
+        "    api_key: ${OPENAI_API_KEY}\n"
         "metadata:\n"
         "  keep: true\n"
     )
@@ -150,6 +154,7 @@ def test_set_max_tokens_writes_root_override_and_clears_back_to_agent_fallback()
     assert data["max_tokens"] == 768
     assert data["agent"]["max_tokens"] == 512
     assert data["agent"]["name"] == "fallback"
+    assert config._load_yaml_config_file_raw(config._get_config_path())["providers"]["openai"]["api_key"] == "${OPENAI_API_KEY}"
     assert data["metadata"]["keep"] is True
 
     saved = config.set_max_tokens(None)
@@ -161,6 +166,7 @@ def test_set_max_tokens_writes_root_override_and_clears_back_to_agent_fallback()
     data = _read_config()
     assert "max_tokens" not in data
     assert data["agent"]["max_tokens"] == 512
+    assert config._load_yaml_config_file_raw(config._get_config_path())["providers"]["openai"]["api_key"] == "${OPENAI_API_KEY}"
     assert data["metadata"]["keep"] is True
 
 
