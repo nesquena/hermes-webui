@@ -3915,6 +3915,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
+_available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
 _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
@@ -5167,7 +5168,8 @@ def _save_models_cache_to_disk(cache: dict) -> None:
 
 def _get_fresh_memory_models_cache(now: float) -> dict | None:
     """Return a valid fresh in-memory /api/models cache, or clear stale shapes."""
-    global _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint
+    global _available_models_cache, _available_models_cache_ts
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
     if _available_models_cache is None:
         return None
     if (now - _available_models_cache_ts) >= _AVAILABLE_MODELS_CACHE_TTL:
@@ -5181,12 +5183,14 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
         )
         _available_models_cache = None
         _available_models_cache_ts = 0.0
+        _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
         return None
     if _is_valid_models_cache(_available_models_cache):
         return copy.deepcopy(_available_models_cache)
     _available_models_cache = None
     _available_models_cache_ts = 0.0
+    _available_models_live_rebuild_ts = 0.0
     _available_models_cache_source_fingerprint = None
     return None
 
@@ -5205,10 +5209,12 @@ def invalidate_models_cache():
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
     """
-    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint, _cache_build_cv
+    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
+        _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
         _cache_build_in_progress = False
         _cache_build_cv.notify_all()
@@ -5262,10 +5268,12 @@ def invalidate_provider_models_cache(provider_id: str):
     Args:
         provider_id: canonical provider id (e.g. 'openai', 'anthropic', 'custom:my-key')
     """
-    global _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint, _CREDENTIAL_POOL_CACHE
+    global _available_models_cache, _available_models_cache_ts
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _CREDENTIAL_POOL_CACHE
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
+        _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
         _provider_models_invalidated_ts[provider_id] = time.time()
         # Also evict the credential pool so the next cold path re-loads it.
@@ -5443,7 +5451,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     checks that need a real live rebuild while preserving the default cache
     contract for every existing caller.
     """
-    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint, _cache_build_cv
+    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
     try:
@@ -6855,6 +6864,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # If another thread has already started the cold path, we will wait for
     # its result rather than running the cold path concurrently.
     should_wait = _cache_build_in_progress
+    force_refresh_started_at = time.monotonic() if force_refresh else None
 
     # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
     # concurrent requests.  Must come before any config reads in the cold path.
@@ -6880,29 +6890,91 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
         if should_wait:
+            wait_timeout = 60.0
+            if force_refresh and force_refresh_started_at is not None:
+                if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
+                    # The legacy synchronous path is explicitly unbounded. A
+                    # forced refresh follower should keep coalescing behind
+                    # that live rebuild instead of giving up after 60s and
+                    # duplicating it.
+                    wait_timeout = None
+                else:
+                    wait_timeout = max(
+                        0.0,
+                        _LIVE_REBUILD_BUDGET_SECONDS - (time.monotonic() - force_refresh_started_at),
+                    )
             _cache_build_cv.wait_for(
-                lambda: not _cache_build_in_progress and _available_models_cache is not None,
-                timeout=60
+                lambda: not _cache_build_in_progress,
+                timeout=wait_timeout
             )
             cached = _get_fresh_memory_models_cache(time.monotonic())
-            if cached is not None:
+            if (
+                cached is not None
+                and (
+                    not force_refresh
+                    or (
+                        force_refresh_started_at is not None
+                        and _available_models_live_rebuild_ts >= force_refresh_started_at
+                    )
+                )
+            ):
                 return cached
+            if force_refresh and _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
+                if stale_disk_groups is not None:
+                    return copy.deepcopy(stale_disk_groups)
+                return copy.deepcopy(_static_models_catalog_without_live_probes())
 
         # Reload config if changed
         if _cfg_changed:
             reload_config()
             _available_models_cache = None
             _available_models_cache_ts = 0.0
+            _available_models_live_rebuild_ts = 0.0
             _available_models_cache_source_fingerprint = None
             disk_groups = None
             stale_disk_groups = None
 
         # Serve from memory cache if fresh
         now = time.monotonic()
-        if not force_refresh:
-            cached = _get_fresh_memory_models_cache(now)
-            if cached is not None:
+        cached = _get_fresh_memory_models_cache(now)
+        if cached is not None:
+            if not force_refresh:
                 return cached
+            if (
+                force_refresh_started_at is not None
+                and _available_models_live_rebuild_ts >= force_refresh_started_at
+            ):
+                return cached
+
+        # A concurrent forced refresh may have started after this caller sampled
+        # should_wait but before it acquired the lock. Reuse that in-flight build
+        # instead of launching another one, and preserve this caller's budget.
+        if (
+            force_refresh
+            and force_refresh_started_at is not None
+            and _cache_build_in_progress
+        ):
+            remaining_budget = None
+            if _LIVE_REBUILD_BUDGET_SECONDS > 0:
+                remaining_budget = max(
+                    0.0,
+                    _LIVE_REBUILD_BUDGET_SECONDS - (time.monotonic() - force_refresh_started_at),
+                )
+            if remaining_budget is None or remaining_budget > 0:
+                _cache_build_cv.wait_for(
+                    lambda: not _cache_build_in_progress,
+                    timeout=remaining_budget,
+                )
+                cached = _get_fresh_memory_models_cache(time.monotonic())
+                if (
+                    cached is not None
+                    and _available_models_live_rebuild_ts >= force_refresh_started_at
+                ):
+                    return cached
+            if _cache_build_in_progress and _LIVE_REBUILD_BUDGET_SECONDS > 0:
+                if stale_disk_groups is not None:
+                    return copy.deepcopy(stale_disk_groups)
+                return copy.deepcopy(_static_models_catalog_without_live_probes())
 
         # Cold path: disk cache hit — use it (fast, no lock contention)
         if disk_groups is not None and not force_refresh:
@@ -6980,8 +7052,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cache_build_cv.notify_all()
                 raise
             with _cache_build_cv:
+                published_at = time.monotonic()
                 _available_models_cache = result
-                _available_models_cache_ts = time.monotonic()
+                _available_models_cache_ts = published_at
+                _available_models_live_rebuild_ts = published_at
                 _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
             try:
                 _save_models_cache_to_disk(result)
@@ -7022,10 +7096,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         def _publish_models_result(result):
             global _cache_build_in_progress, _available_models_cache
-            global _available_models_cache_ts, _available_models_cache_source_fingerprint
+            global _available_models_cache_ts, _available_models_live_rebuild_ts
+            global _available_models_cache_source_fingerprint
             with _cache_build_cv:
+                published_at = time.monotonic()
                 _available_models_cache = result
-                _available_models_cache_ts = time.monotonic()
+                _available_models_cache_ts = published_at
+                _available_models_live_rebuild_ts = published_at
                 _available_models_cache_source_fingerprint = (
                     _models_cache_source_fingerprint()
                 )
