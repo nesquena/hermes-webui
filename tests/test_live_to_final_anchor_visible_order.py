@@ -620,11 +620,16 @@ def test_stream_end_restore_attaches_projected_anchor_scene_before_render():
 def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
     cancel = _event_listener_body(MESSAGES_JS, "cancel")
 
-    fetch_idx = cancel.index("const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);")
+    fetch_idx = cancel.index("const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);")
     attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = cancel.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
     render_idx = cancel.index("renderMessages({preserveScroll:true});")
     assert fetch_idx < attach_idx < carry_idx < render_idx
+
+    embedded_idx = cancel.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
+    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);")
+    fallback_apply_idx = cancel.index("if(data&&data.session) _applyCancelSessionPayload(data.session);")
+    assert embedded_idx < fallback_get_idx < fallback_apply_idx
 
     fallback_push_idx = cancel.index("S.messages.push({role:'assistant',content:`**Task cancelled:**")
     fallback_attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);", fallback_push_idx)

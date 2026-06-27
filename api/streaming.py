@@ -93,6 +93,34 @@ def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 
     return raw, False
 
 
+def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
+    """Best-effort terminal SSE session payload for already-persisted state."""
+    try:
+        return redact_session_data(
+            _session_payload_with_full_messages(session, tool_calls=tool_calls)
+        )
+    except Exception:
+        logger.debug("Failed to build redacted session payload", exc_info=True)
+        return None
+
+
+def _cancel_event_payload(
+    message: str = "Cancelled by user",
+    *,
+    session: dict | None = None,
+) -> dict:
+    """Return base cancel terminal event metadata."""
+    payload = {
+        'message': message,
+        'type': 'cancelled',
+        'status': 'cancelled',
+    }
+    if session:
+        payload['session'] = session
+        payload['session_id'] = session.get('session_id')
+    return payload
+
+
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
 # interleave their os.environ writes. This global lock serializes the env
@@ -6244,7 +6272,7 @@ def _run_agent_streaming(
         if cancel_event.is_set():
             with _agent_lock:
                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
-            put('cancel', {'message': 'Cancelled before start'})
+            put('cancel', _cancel_event_payload('Cancelled before start'))
             return
 
         # Resolve profile home for this agent run — use the session's own profile
@@ -7426,7 +7454,7 @@ def _run_agent_streaming(
                         logger.debug("Failed to interrupt agent before start")
                     with _agent_lock:
                         _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
-                    put('cancel', {'message': 'Cancelled by user'})
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
 
             # Prepend workspace context so the agent always knows which directory
@@ -7584,7 +7612,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', {'message': 'Cancelled by user'})
+                put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
@@ -7626,7 +7654,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', {'message': 'Cancelled by user'})
+                put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
             _writeback_timings = []
             _writeback_started = time.perf_counter()
@@ -7667,7 +7695,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', {'message': 'Cancelled by user'})
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
                     _next_context_messages = _restore_reasoning_metadata(
                         _previous_context_messages,
@@ -7874,7 +7902,7 @@ def _run_agent_streaming(
                                 )
                             except Exception:
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', {'message': 'Cancelled by user'})
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
                     _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                     _err_str = str(_last_err) if _last_err else ''
@@ -8484,7 +8512,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', {'message': 'Cancelled by user'})
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
@@ -8502,7 +8530,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', {'message': 'Cancelled by user'})
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
                 if not ephemeral:
                     try:
@@ -8926,7 +8954,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-            put('cancel', {'message': 'Cancelled by user'})
+            put('cancel', _cancel_event_payload('Cancelled by user'))
             return
         _exc_is_quota = _classification['type'] == 'quota_exhausted'
         # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.
@@ -9332,6 +9360,7 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_tool_calls = None
     _snap_flag = None
     _snap_agent = None
+    _cancel_session_payload = None
 
     with streams_lock:
         stream_present = stream_id in streams
@@ -9632,6 +9661,7 @@ def cancel_stream(stream_id: str) -> bool:
                         'timestamp': int(time.time()),
                     })
                 _cs.save()
+                _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
@@ -9643,7 +9673,8 @@ def cancel_stream(stream_id: str) -> bool:
             except Exception:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
-            q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
+            _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
+            q.put_nowait(('cancel', _payload))
         except Exception:
             logger.debug("Failed to put cancel event to queue")
 

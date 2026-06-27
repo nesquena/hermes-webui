@@ -1157,7 +1157,3 @@ def test_sync_revalidates_against_concurrent_disk_write_under_lock(monkeypatch):
     # On-disk record keeps the concurrent writer's value — not overwritten.
     reloaded = Session.load(sid)
     assert reloaded.active_stream_id == "rotated_stream_after_compression"
-
-
-
-
