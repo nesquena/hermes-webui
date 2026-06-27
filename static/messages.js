@@ -2596,7 +2596,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(typeof part!=='object') return String(part||'');
     const partType=String(part.type||'');
     if(partType==='thinking'||partType==='reasoning') return '';
-    return String(part.text||part.input_text||part.output_text||(partType==='text'?part.content:'')||'');
+    const contentText=(partType==='text'||partType==='input_text'||partType==='output_text')?part.content:'';
+    return String(part.text||part.input_text||part.output_text||contentText||'');
   }
   function _anchorSceneMessageHasContentToolUse(message){
     return !!(message&&Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use'));

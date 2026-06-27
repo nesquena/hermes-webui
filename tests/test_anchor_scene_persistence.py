@@ -883,6 +883,66 @@ def test_anchor_scene_hydration_keeps_final_tail_thinking_as_activity_only():
     assert len([row for row in rows if row.get("role") == "tool"]) == 1
 
 
+def test_anchor_scene_hydration_promotes_output_text_content_tail_to_final_answer():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me check first."},
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "toolu_content",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                {"type": "output_text", "content": "Final answer from content field."},
+            ],
+            "tool_calls": [
+                {
+                    "id": "toolu_message",
+                    "name": "terminal",
+                    "args": {"cmd": "ls"},
+                    "snippet": "OUTPUT",
+                    "started_at": 100,
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records, tool_calls=[])
+
+    scene = hydrated[1]["_anchor_activity_scene"]
+    rows = scene["activity_rows"]
+    activity = [
+        (row.get("role"), row.get("text") or row.get("tool_call_id"))
+        for row in rows
+    ]
+
+    assert scene["final_answer"] == "Final answer from content field."
+    assert activity == [
+        ("prose", "Let me check first."),
+        ("tool", "toolu_content"),
+    ]
+    assert rows[1]["tool"]["snippet"] == "OUTPUT"
+    assert len([row for row in rows if row.get("role") == "tool"]) == 1
+
+
 def test_anchor_scene_hydration_restores_durable_body_after_message_tool_merge():
     from api import routes
 

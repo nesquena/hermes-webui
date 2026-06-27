@@ -3123,7 +3123,7 @@ def _anchor_scene_content_visible_text(part) -> str:
     part_type = str(part.get("type") or "")
     if part_type in ("thinking", "reasoning"):
         return ""
-    content_text = part.get("content") if part_type == "text" else ""
+    content_text = part.get("content") if part_type in ("text", "input_text", "output_text") else ""
     return str(part.get("text") or part.get("input_text") or part.get("output_text") or content_text or "")
 
 

@@ -401,6 +401,54 @@ def test_final_content_tail_thinking_stays_activity_and_content_order_wins_start
     ]
 
 
+def test_final_output_text_tail_content_becomes_answer_not_activity(driver_path):
+    """Fresh settlement treats output_text.content after the last tool as final answer text."""
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me check first."},
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "term-content",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                {"type": "output_text", "content": "Final answer from content field."},
+            ],
+            "tool_calls": [
+                {
+                    "id": "term-message",
+                    "name": "terminal",
+                    "args": {"cmd": "ls"},
+                    "snippet": "OUTPUT",
+                    "started_at": 100,
+                }
+            ],
+        },
+    ]
+
+    result = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 1,
+            "includeFinal": True,
+            "returnRows": True,
+            "S": {"toolCalls": []},
+        },
+    )
+
+    rows = [row for row in result["rows"] if row["idx"] == 1]
+    assert result["finalAnswer"] == "Final answer from content field."
+    assert [(row["role"], row["text"] or row["tool_call_id"]) for row in rows] == [
+        ("prose", "Let me check first."),
+        ("tool", "term-content"),
+    ]
+
+
 def test_ordered_content_bucket_ignores_unmatched_live_started_at(driver_path):
     """When content[] owns row order, unmatched live rows keep encounter order."""
     messages = [
