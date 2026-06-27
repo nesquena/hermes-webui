@@ -755,3 +755,118 @@ def test_repair_stale_pending_skips_parent_when_continuation_exists(hermes_home)
     assert parent.active_stream_id == "rotated-stream"
     assert parent.pending_user_message
 
+def test_get_session_syncs_sidecar_from_newer_state_db_even_when_stream_not_terminal(monkeypatch):
+    """Refresh should not lose text that already reached state.db.
+
+    Repro shape from a source-WebUI run: sidecar JSON still has
+    active_stream_id/pending_user_message and ends at the previous completed
+    turn, while the underlying Hermes agent has already written the current
+    user/assistant/tool rows to state.db. The run journal has no terminal done,
+    so stale-pending repair deliberately does not fire; read-side reconciliation
+    must still sync the sidecar from state.db.
+    """
+    sid = "state_newer_sid"
+    stream_id = "stream_live_no_done"
+    s = Session(
+        session_id=sid,
+        title="State newer",
+        messages=[
+            {"role": "user", "content": "old question", "timestamp": 100.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        ],
+        context_messages=[
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=102.0,
+    )
+    s.save()
+    models.SESSIONS.pop(sid, None)
+
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 100.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "visible text that disappeared", "timestamp": 103.0},
+        {"role": "tool", "content": "tool result", "timestamp": 104.0},
+        {"role": "assistant", "content": "latest live progress", "timestamp": 105.0},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": len(state_messages), "last_message_at": 105.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    loaded = models.get_session(sid)
+
+    assert loaded.active_stream_id is None
+    assert loaded.pending_user_message is None
+    assert [m["content"] for m in loaded.messages] == [m["content"] for m in state_messages]
+    assert loaded.context_messages[-1]["content"] == "latest live progress"
+
+    reloaded = Session.load(sid)
+    assert reloaded.active_stream_id is None
+    assert reloaded.pending_user_message is None
+    assert reloaded.messages[-1]["content"] == "latest live progress"
+
+
+def test_get_session_does_not_sync_while_stream_is_still_live(monkeypatch):
+    """A still-running worker owns its own writeback; do not race it.
+
+    If the sidecar's active_stream_id is still present in STREAMS/ACTIVE_RUNS,
+    the turn is live and will merge the agent result + clear pending state when
+    it ends. Read-side reconciliation must skip so it cannot drop the active
+    stream mid-run and make the terminal writeback look stale.
+    """
+    sid = "state_newer_live_stream_sid"
+    stream_id = "stream_still_live"
+    s = Session(
+        session_id=sid,
+        title="Live stream",
+        messages=[
+            {"role": "user", "content": "old question", "timestamp": 100.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=102.0,
+    )
+    s.save()
+    models.SESSIONS.pop(sid, None)
+
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 100.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "partial live text", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": len(state_messages), "last_message_at": 103.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    # Mark the stream as a live in-process worker.
+    config.ACTIVE_RUNS[stream_id] = {"session_id": sid, "stream_id": stream_id}
+    try:
+        loaded = models.get_session(sid)
+    finally:
+        config.ACTIVE_RUNS.pop(stream_id, None)
+
+    # The live turn keeps owning its writeback: pending state is untouched and
+    # the sidecar transcript is not force-synced from the mid-run state.db rows.
+    assert loaded.active_stream_id == stream_id
+    assert loaded.pending_user_message == "new request"
+    assert [m["content"] for m in loaded.messages] == ["old question", "old answer"]
