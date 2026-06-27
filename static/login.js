@@ -4,6 +4,7 @@
  */
 document.addEventListener('DOMContentLoaded', function () {
   var form = document.getElementById('login-form');
+  var usernameInput = document.getElementById('username');
   var input = document.getElementById('pw');
   var passkeyBtn = document.getElementById('passkey-login');
 
@@ -41,10 +42,12 @@ document.addEventListener('DOMContentLoaded', function () {
     var pw = input.value;
     hideErr();
     try {
+      var payload = { password: pw };
+      if (usernameInput) payload.username = usernameInput.value || '';
       var res = await fetch('api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: pw }),
+        body: JSON.stringify(payload),
         credentials: 'include',
       });
       var data = {};

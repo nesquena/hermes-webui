@@ -88,7 +88,7 @@ def _resolve_cookie_name() -> str:
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
 
-def _load_sessions() -> dict[str, float]:
+def _load_sessions() -> dict[str, object]:
     """Load persisted sessions from STATE_DIR, pruning expired entries.
 
     Returns an empty dict on any read or parse error so startup is never
@@ -100,14 +100,26 @@ def _load_sessions() -> dict[str, float]:
             if not isinstance(data, dict):
                 raise ValueError('malformed sessions file — expected dict')
             now = time.time()
-            return {t: exp for t, exp in data.items()
-                    if isinstance(t, str) and isinstance(exp, (int, float)) and exp > now}
+            sessions: dict[str, object] = {}
+            for token, entry in data.items():
+                if not isinstance(token, str):
+                    continue
+                raw_expiry = entry.get('expiry') if isinstance(entry, dict) else entry
+                if raw_expiry is None:
+                    continue
+                try:
+                    expiry = float(raw_expiry)
+                except (TypeError, ValueError):
+                    continue
+                if expiry > now:
+                    sessions[token] = entry
+            return sessions
     except Exception as e:
         logger.debug("Failed to load sessions file, starting fresh: %s", e)
     return {}
 
 
-def _save_sessions(sessions: dict[str, float]) -> None:
+def _save_sessions(sessions: dict[str, object]) -> None:
     """Atomically persist sessions to STATE_DIR/.sessions.json (0600).
 
     Uses a temp file + os.replace() so a crash mid-write never leaves a
@@ -131,9 +143,107 @@ def _save_sessions(sessions: dict[str, float]) -> None:
         logger.debug("Failed to persist sessions: %s", e)
 
 
-# Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
-_sessions = _load_sessions()
+# Active sessions: token -> expiry timestamp or metadata dict (persisted across restarts via STATE_DIR)
+_sessions: dict[str, object] = _load_sessions()
 _SESSIONS_LOCK = threading.Lock()
+
+
+def normalize_account_name(value) -> str | None:
+    """Return a safe WebUI account id, or None for invalid/empty values."""
+    text = str(value or '').strip()
+    if not text:
+        return None
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', text):
+        return None
+    return text
+
+
+def _session_expiry(entry) -> float | None:
+    if isinstance(entry, dict):
+        raw = entry.get('expiry')
+    else:
+        raw = entry
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_account(entry) -> str:
+    if isinstance(entry, dict):
+        return normalize_account_name(entry.get('account')) or 'main'
+    return 'main'
+
+
+def _load_accounts_config() -> dict[str, dict]:
+    """Load optional multi-account login config from env or JSON file.
+
+    Supported secret shapes:
+      {"main": {"password": "..."}, "sub": {"password": "..."}}
+      {"main": {"password_hash": "<pbkdf2 hex>"}}
+      {"main": "..."}  # shorthand for password
+    """
+    raw = os.getenv('HERMES_WEBUI_ACCOUNTS', '').strip()
+    if not raw:
+        path = os.getenv('HERMES_WEBUI_ACCOUNTS_FILE', '').strip()
+        if path and os.getenv('HERMES_WEBUI_TEST_STATE_DIR') and not os.getenv('HERMES_WEBUI_TEST_ALLOW_ACCOUNTS_FILE'):
+            path = ''
+        if path:
+            try:
+                raw = open(path, 'r', encoding='utf-8').read()
+            except OSError:
+                logger.debug("Failed to read HERMES_WEBUI_ACCOUNTS_FILE")
+                raw = ''
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        logger.warning("Ignoring invalid HERMES_WEBUI_ACCOUNTS JSON")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    accounts: dict[str, dict] = {}
+    for raw_name, entry in parsed.items():
+        name = normalize_account_name(raw_name)
+        if not name:
+            continue
+        if isinstance(entry, str):
+            accounts[name] = {'password': entry}
+        elif isinstance(entry, dict):
+            accounts[name] = dict(entry)
+    return accounts
+
+
+def accounts_configured() -> bool:
+    return bool(_load_accounts_config())
+
+
+def verify_account_credentials(username: str | None, password: str) -> str | None:
+    """Verify a WebUI login and return the authenticated account id.
+
+    With no account config, preserve the legacy single-password behavior and map
+    the session to main. With account config, username is required and the
+    matching account's password/password_hash is checked.
+    """
+    accounts = _load_accounts_config()
+    if not accounts:
+        return 'main' if verify_password(password) else None
+    account = normalize_account_name(username)
+    if not account or account not in accounts:
+        return None
+    entry = accounts.get(account) or {}
+    if bool(entry.get('disabled')):
+        return None
+    plain = entry.get('password')
+    if isinstance(plain, str) and hmac.compare_digest(plain, password or ''):
+        return account
+    expected_hash = entry.get('password_hash')
+    if isinstance(expected_hash, str) and hmac.compare_digest(_hash_password(password or ''), expected_hash):
+        return account
+    return None
 
 # ── Login rate limiter ──────────────────────────────────────────────────────
 _LOGIN_ATTEMPTS_FILE = STATE_DIR / '.login_attempts.json'
@@ -379,8 +489,8 @@ def are_passkeys_enabled() -> bool:
 
 
 def is_auth_enabled() -> bool:
-    """True if password auth or passkey-only auth is configured."""
-    return is_password_auth_enabled() or are_passkeys_enabled()
+    """True if password auth, multi-account password auth, or passkey-only auth is configured."""
+    return is_password_auth_enabled() or accounts_configured() or are_passkeys_enabled()
 
 
 def verify_password(plain: str) -> bool:
@@ -414,11 +524,16 @@ def verify_password(plain: str) -> bool:
     return False
 
 
-def create_session() -> str:
+def create_session(account: str | None = None) -> str:
     """Create a new auth session. Returns signed cookie value."""
     token = secrets.token_hex(32)
+    account_name = normalize_account_name(account) or 'main'
+    expiry = time.time() + _resolve_session_ttl()
     with _SESSIONS_LOCK:
-        _sessions[token] = time.time() + _resolve_session_ttl()
+        _sessions[token] = expiry if account_name == 'main' else {
+            'expiry': expiry,
+            'account': account_name,
+        }
         _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     return f"{token}.{sig}"
@@ -428,7 +543,11 @@ def _prune_expired_sessions():
     """Remove all expired session entries to prevent unbounded memory growth."""
     now = time.time()
     with _SESSIONS_LOCK:
-        expired = [t for t, exp in _sessions.items() if now > exp]
+        expired = []
+        for token, entry in _sessions.items():
+            expiry = _session_expiry(entry)
+            if expiry is None or now > expiry:
+                expired.append(token)
         if expired:
             for token in expired:
                 _sessions.pop(token, None)
@@ -451,12 +570,27 @@ def verify_session(cookie_value: str) -> bool:
     if not valid:
         return False
     with _SESSIONS_LOCK:
-        expiry = _sessions.get(token)
+        entry = _sessions.get(token)
+        expiry = _session_expiry(entry)
         if not expiry or time.time() > expiry:
             _sessions.pop(token, None)
             _save_sessions(_sessions)
             return False
     return True
+
+
+def session_account(cookie_value: str | None) -> str | None:
+    """Return the account bound to a valid auth cookie, defaulting legacy sessions to main."""
+    if not cookie_value or not verify_session(cookie_value):
+        return None
+    token = _session_token_from_cookie_value(cookie_value)
+    if not token:
+        return None
+    with _SESSIONS_LOCK:
+        entry = _sessions.get(token)
+        if _session_expiry(entry) is None:
+            return None
+        return _session_account(entry)
 
 
 def _session_token_from_cookie_value(cookie_value: str) -> str | None:

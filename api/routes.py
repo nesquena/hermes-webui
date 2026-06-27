@@ -480,19 +480,104 @@ def _query_flag(parsed_url, name: str) -> bool:
 
 
 def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
-    """Return whether a detail-load session belongs to the active profile.
+    """Return whether a detail-load session is visible to this request.
 
-    Real request handlers must enforce the same profile boundary as
-    /api/sessions, even when the request has no hermes_profile cookie and the
-    process-level active profile is the default/root profile. Direct unit-callers
-    without a request handler keep the historical metadata-load behavior.
+    Historical profile scoping remains the default. When account sharing is
+    enabled, account visibility becomes the boundary instead: main can see every
+    account-managed session, while non-main accounts can see sessions they own or
+    sessions explicitly shared with them, even when the session belongs to a
+    different Hermes profile.
     """
+    if _account_session_sharing_enabled() and not isinstance(session_profile, str):
+        return _session_account_visible(session_profile, handler=handler)
     if handler is None:
         return True
     active_profile = _get_active_profile_name()
     if not isinstance(session_profile, str):
-        session_profile = None
+        session_profile = _session_field(session_profile, "profile", None)
     return _profiles_match(session_profile, active_profile)
+
+
+def _normalize_webui_account(value) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", text):
+        return None
+    return text
+
+
+def _normalize_webui_account_list(values) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw_values = [values]
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        account = _normalize_webui_account(raw)
+        if not account or account in seen:
+            continue
+        seen.add(account)
+        out.append(account)
+    return out
+
+
+def _account_session_sharing_enabled() -> bool:
+    raw = os.getenv("HERMES_WEBUI_ACCOUNT_SHARING", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    try:
+        from api.auth import accounts_configured
+
+        return accounts_configured()
+    except Exception:
+        logger.debug("Failed to inspect WebUI account config", exc_info=True)
+        return False
+
+
+def _current_webui_account(handler=None) -> str | None:
+    if not _account_session_sharing_enabled():
+        return None
+    try:
+        from api.auth import is_auth_enabled, parse_cookie, session_account
+
+        if is_auth_enabled():
+            return _normalize_webui_account(session_account(parse_cookie(handler)))
+    except Exception:
+        logger.debug("Failed to resolve WebUI account from auth session", exc_info=True)
+    return "main"
+
+
+def _session_owner_account(session) -> str:
+    return _normalize_webui_account(_session_field(session, "owner_account", None)) or "main"
+
+
+def _session_shared_with_accounts(session) -> list[str]:
+    return _normalize_webui_account_list(_session_field(session, "shared_with_accounts", None))
+
+
+def _is_main_webui_account(account: str | None) -> bool:
+    return (_normalize_webui_account(account) or "") == "main"
+
+
+def _session_account_visible(session, *, handler=None, account: str | None = None) -> bool:
+    if not _account_session_sharing_enabled():
+        return True
+    current = _normalize_webui_account(account) or _current_webui_account(handler)
+    if not current:
+        return False
+    if _is_main_webui_account(current):
+        return True
+    if _session_owner_account(session) == current:
+        return True
+    return current in _session_shared_with_accounts(session)
 
 
 def _active_skills_dir() -> Path:
@@ -1671,6 +1756,7 @@ def _session_list_cache_key(
     show_cli_sessions: bool,
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
+    account: str | None = None,
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
@@ -1679,6 +1765,7 @@ def _session_list_cache_key(
 ) -> tuple:
     return (
         _session_list_cache_profile_scope(active_profile),
+        _normalize_webui_account(account) if _account_session_sharing_enabled() else None,
         bool(all_profiles),
         bool(show_cli_sessions),
         bool(show_previous_messaging_sessions),
@@ -2014,6 +2101,7 @@ def _build_session_list_cache_payload(
     show_cli_sessions: bool,
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
+    account: str | None = None,
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
@@ -2187,7 +2275,11 @@ def _build_session_list_cache_payload(
     # source. Filter first so the dedupe operates only within the active
     # profile's rows.
     diag_stage("profile_scope")
-    if all_profiles:
+    if _account_session_sharing_enabled():
+        current_account = _normalize_webui_account(account) or _current_webui_account()
+        scoped = [s for s in merged if _session_account_visible(s, account=current_account)]
+        other_profile_count = 0
+    elif all_profiles:
         scoped = merged
         other_profile_count = 0
     else:
@@ -3909,7 +4001,7 @@ def _handle_session_anchor_scene(handler, body):
     # this an authenticated request under profile A could persist anchor scenes
     # onto a session owned by profile B (cross-profile write). Reject as 404 —
     # same shape the read path uses — and leave anchor_activity_scenes untouched.
-    if not _session_visible_to_active_profile(getattr(s, "profile", None) or None, handler):
+    if not _session_visible_to_active_profile(s, handler):
         return bad(handler, "Session not found", 404)
     with _get_session_agent_lock(sid):
         idx, message = _find_anchor_scene_message(
@@ -6934,6 +7026,8 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "archived",
     "project_id",
     "profile",
+    "owner_account",
+    "shared_with_accounts",
     "input_tokens",
     "output_tokens",
     "estimated_cost",
@@ -7200,7 +7294,8 @@ button:hover{background:rgba(124,185,255,.25)}
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
+    {{LOGIN_ACCOUNT_FIELD}}
+    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" {{LOGIN_PASSWORD_AUTOFOCUS}}>
     <button type="submit">{{LOGIN_BTN}}</button>
     <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
   </form>
@@ -9108,8 +9203,14 @@ def handle_get(handler, parsed) -> bool:
             _resolve_login_locale_key(_lang)
         ]
         from urllib.parse import quote
+        from api.auth import accounts_configured
         from api.updates import WEBUI_VERSION
         version_token = quote(WEBUI_VERSION, safe="")
+        _accounts_enabled = accounts_configured()
+        _account_field = (
+            '<input type="text" id="username" placeholder="Account" autocomplete="username" autofocus>'
+            if _accounts_enabled else ""
+        )
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
@@ -9117,6 +9218,8 @@ def handle_get(handler, parsed) -> bool:
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
             .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
+            .replace("{{LOGIN_ACCOUNT_FIELD}}", _account_field)
+            .replace("{{LOGIN_PASSWORD_AUTOFOCUS}}", "" if _accounts_enabled else "autofocus")
             .replace(
                 "{{LOGIN_PLACEHOLDER}}", _html.escape(_login_strings["placeholder"])
             )
@@ -9129,20 +9232,25 @@ def handle_get(handler, parsed) -> bool:
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/status":
-        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, parse_cookie, verify_session
+        from api.auth import _passkey_feature_flag_enabled, accounts_configured, get_password_hash, is_auth_enabled, parse_cookie, session_account, verify_session
         from api.passkeys import registered_credentials
 
         logged_in = False
+        current_account = None
         auth_enabled = is_auth_enabled()
         if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
+            if logged_in:
+                current_account = session_account(cv)
         passkey_flag = _passkey_feature_flag_enabled()
         passkeys = registered_credentials() if passkey_flag else []
         password_auth_enabled = get_password_hash() is not None
         return j(handler, {
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
+            "accounts_enabled": accounts_configured(),
+            "account": current_account,
             "password_auth_enabled": password_auth_enabled,
             "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
             "passkeys_enabled": bool(passkeys),
@@ -9532,7 +9640,7 @@ def handle_get(handler, parsed) -> bool:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
             _session_profile = getattr(s, 'profile', None) or None
-            if not _session_visible_to_active_profile(_session_profile, handler):
+            if not _session_visible_to_active_profile(s, handler):
                 return bad(handler, "Session not found", 404)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
@@ -9871,7 +9979,7 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "Session not found", 404)
             cli_meta = _lookup_cli_session_metadata(sid)
             _session_profile = (cli_meta or {}).get("profile") or None
-            if not _session_visible_to_active_profile(_session_profile, handler):
+            if not _session_visible_to_active_profile(cli_meta or {"profile": _session_profile}, handler):
                 return bad(handler, "Session not found", 404)
             msgs = get_cli_session_messages(sid)
             if msgs:
@@ -9965,6 +10073,7 @@ def handle_get(handler, parsed) -> bool:
             agent_session_source_filter = settings.get("agent_session_source_filter")
             active_profile = get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
+            current_account = _current_webui_account(handler)
             include_archived = _query_flag(parsed, "include_archived")
             exclude_hidden = _query_flag(parsed, "exclude_hidden")
             sidebar_source = parse_qs(parsed.query).get("sidebar_source", [""])[0].strip().lower() or None
@@ -9978,6 +10087,7 @@ def handle_get(handler, parsed) -> bool:
                 show_cli_sessions=show_cli_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
+                account=current_account,
                 include_archived=include_archived,
                 exclude_hidden=exclude_hidden,
                 visible_only=True,
@@ -9996,6 +10106,7 @@ def handle_get(handler, parsed) -> bool:
                     show_cli_sessions=show_cli_sessions,
                     show_previous_messaging_sessions=show_previous_messaging_sessions,
                     show_cron_sessions=show_cron_sessions,
+                    account=current_account,
                     include_archived=include_archived,
                     exclude_hidden=exclude_hidden,
                     visible_only=True,
@@ -10899,6 +11010,7 @@ def handle_post(handler, parsed) -> bool:
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
+            owner_account=_current_webui_account(handler),
         )
         if worktree_info:
             publish_session_list_changed(
@@ -11660,6 +11772,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/handoff-summary":
         return _handle_handoff_summary(handler, body)
+
+    if parsed.path == "/api/session/share":
+        return _handle_session_share(handler, body)
 
     if parsed.path == "/api/session/retry":
         try:
@@ -12726,7 +12841,7 @@ def handle_post(handler, parsed) -> bool:
     # ── Auth endpoints (POST) ──
     if parsed.path == "/api/auth/login":
         from api.auth import (
-            verify_password,
+            verify_account_credentials,
             create_session,
             set_auth_cookie,
             is_auth_enabled,
@@ -12743,11 +12858,12 @@ def handle_post(handler, parsed) -> bool:
                 status=429,
             )
         password = body.get("password", "")
-        if not verify_password(password):
+        account = verify_account_credentials(body.get("username") or body.get("account"), password)
+        if not account:
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
         _clear_login_attempts(client_ip)
-        cookie_val = create_session()
+        cookie_val = create_session(account=account)
         body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
@@ -17115,6 +17231,8 @@ def _handle_chat_start(handler, body, diag=None):
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+        if not _session_account_visible(s, handler=handler):
+            return bad(handler, "Session not found", 404)
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         if requested_profile:
@@ -17273,7 +17391,7 @@ def _handle_chat_sync(handler, body):
         os.environ["TERMINAL_CWD"] = str(workspace)
         old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
         old_session_key = os.environ.get("HERMES_SESSION_KEY")
-        os.environ["HERMES_EXEC_ASK"] = "1"
+        os.environ["HERMES_EXEC_ASK"] = "1" if os.environ.get("HERMES_WEBUI_EXEC_ASK", "1") != "0" else "0"
         os.environ["HERMES_SESSION_KEY"] = s.session_id
     try:
         from run_agent import AIAgent
@@ -17434,6 +17552,59 @@ def _handle_chat_sync(handler, body):
             "result": {k: v for k, v in result.items() if k != "messages"},
         },
     )
+
+
+def _handle_session_share(handler, body):
+    """Share or unshare one session with another WebUI account.
+
+    Only the main account can grant/revoke shares. Sharing affects account-level
+    WebUI visibility and continuation rights; it deliberately does not mutate the
+    session's Hermes profile, so replies still execute in the original session
+    profile/environment.
+    """
+    if not _account_session_sharing_enabled():
+        return bad(handler, "Account session sharing is not enabled", 400)
+    current_account = _current_webui_account(handler)
+    if not _is_main_webui_account(current_account):
+        return bad(handler, "Only main can share sessions", 403)
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required", 400)
+    raw_accounts = body.get("accounts") if "accounts" in body else body.get("account")
+    accounts = _normalize_webui_account_list(raw_accounts)
+    if not accounts:
+        return bad(handler, "account is required", 400)
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    share = body.get("shared") is not False
+    with _get_session_agent_lock(sid):
+        s = _ensure_full_session_before_mutation(sid, s)
+        if not getattr(s, "owner_account", None):
+            s.owner_account = "main"
+        shared = _normalize_webui_account_list(getattr(s, "shared_with_accounts", None))
+        shared_set = set(shared)
+        owner = _session_owner_account(s)
+        for account in accounts:
+            if account == owner:
+                continue
+            if share:
+                shared_set.add(account)
+            else:
+                shared_set.discard(account)
+        s.shared_with_accounts = [account for account in shared if account in shared_set]
+        for account in accounts:
+            if account in shared_set and account not in s.shared_with_accounts and account != owner:
+                s.shared_with_accounts.append(account)
+        s.save()
+    _publish_session_list_changed(
+        "session_share",
+        profile=getattr(s, "profile", None),
+        session_id=getattr(s, "session_id", None),
+    )
+    return j(handler, {"ok": True, "session": s.compact()})
+
 
 
 def _handle_cron_create(handler, body):
@@ -20242,7 +20413,7 @@ def _handle_session_import_cli(handler, body):
         if allow_all_profiles:
             if requested_profile and not _profiles_match(existing_profile, requested_profile):
                 return bad(handler, "Session not found in CLI store", 404)
-        elif not _session_visible_to_active_profile(existing_profile, handler):
+        elif not _session_visible_to_active_profile({"profile": existing_profile}, handler):
             return bad(handler, "Session not found in CLI store", 404)
         refresh_profile = requested_profile or existing_profile
         cli_meta = _resolve_cli_import_metadata(

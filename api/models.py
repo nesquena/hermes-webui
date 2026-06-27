@@ -680,6 +680,37 @@ def _parse_nonnegative_int(value):
     return parsed if parsed >= 0 else None
 
 
+def _normalize_account_name(value) -> str | None:
+    text = str(value or '').strip()
+    if not text:
+        return None
+    # Account ids are internal WebUI identifiers, not display names. Keep the
+    # shape conservative so they are safe in JSON metadata and future cookies.
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', text):
+        return None
+    return text
+
+
+def _normalize_account_list(values) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw_values = [values]
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        name = _normalize_account_name(raw)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        normalized.append(name)
+    return normalized
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
@@ -715,12 +746,14 @@ class Session:
                 parent_session_id: str=None,
                 worktree_path=None,
                 worktree_branch=None,
-                 worktree_repo_root=None,
-                 worktree_created_at=None,
-                 enabled_toolsets=None,
-                 composer_draft=None,
-                 anchor_activity_scenes=None,
-                 **kwargs):
+                worktree_repo_root=None,
+                worktree_created_at=None,
+                owner_account: str | None=None,
+                shared_with_accounts=None,
+                enabled_toolsets=None,
+                composer_draft=None,
+                anchor_activity_scenes=None,
+                **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
@@ -769,6 +802,8 @@ class Session:
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
         self.worktree_created_at = worktree_created_at
+        self.owner_account = _normalize_account_name(owner_account)
+        self.shared_with_accounts = _normalize_account_list(shared_with_accounts)
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
         self.source_tag = kwargs.get('source_tag')
         self.raw_source = kwargs.get('raw_source')
@@ -833,6 +868,7 @@ class Session:
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
+            'owner_account', 'shared_with_accounts',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft', 'anchor_activity_scenes',
         ]
@@ -1063,6 +1099,8 @@ class Session:
                 'worktree_repo_root': self.worktree_repo_root,
                 'worktree_created_at': self.worktree_created_at,
             } if self.worktree_path else {}),
+            'owner_account': self.owner_account,
+            'shared_with_accounts': list(self.shared_with_accounts or []),
             'user_message_count': sum(
                 1 for message in self.messages if _message_role(message) == 'user'
             ) if isinstance(self.messages, list) else 0,
@@ -2605,7 +2643,7 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None, owner_account=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -2658,6 +2696,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_branch=wt.get('branch') if wt else None,
         worktree_repo_root=wt.get('repo_root') if wt else None,
         worktree_created_at=wt.get('created_at') if wt else None,
+        owner_account=owner_account,
         enabled_toolsets=enabled_toolsets,
     )
     with LOCK:

@@ -799,6 +799,7 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
         return FakeResponse()
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr("api.config.get_config", lambda: {"agent": {"image_input_mode": "native"}})
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [{"role": "user", "content": "webui session context"}])
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
@@ -823,8 +824,12 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     assert "Final visible assistant replies" in captured["body"]["messages"][0]["content"]
     image_payload = captured["body"]["messages"][1]
     assert image_payload["role"] == "user"
-    assert image_payload["content"][0] == {"type": "text", "text": "What is in this image?"}
-    assert content[0] == {"type": "text", "text": "What is in this image?"}
+    assert image_payload["content"][0]["type"] == "text"
+    assert image_payload["content"][0]["text"].startswith("What is in this image?")
+    assert f"[Image attached at: {image_path}]" in image_payload["content"][0]["text"]
+    assert content[0]["type"] == "text"
+    assert content[0]["text"].startswith("What is in this image?")
+    assert f"vision_analyze with image_url: {image_path}" in content[0]["text"]
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
