@@ -17,6 +17,7 @@ The scenario this test pins down:
 """
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import time
 
 import pytest
 
@@ -976,5 +977,68 @@ def test_sync_persists_recovered_state_db_tail_when_stream_dead(monkeypatch):
     reloaded = Session.load(sid)
     assert reloaded.active_stream_id is None
     assert reloaded.messages[-1]["content"] == "recovered tail"
+
+
+def test_sync_skips_during_registration_window_recent_pending(monkeypatch):
+    """Registration-window race: a just-submitted, not-yet-registered stream
+    must NOT be cleared by the self-heal.
+
+    The request handler persists active_stream_id + pending_started_at to the
+    sidecar a moment BEFORE the worker thread registers the stream in
+    STREAMS/ACTIVE_RUNS. In that window the stream is absent from the registries
+    but the turn is legitimately starting. A *recent* pending_started_at must
+    keep the self-heal off so it can't drop a turn that is about to run.
+    (maintainer-requested regression)
+    """
+    sid = "state_registration_window_sid"
+    stream_id = "stream_just_submitted_not_registered"
+    s = Session(
+        session_id=sid,
+        title="Registration window",
+        messages=[
+            {"role": "user", "content": "old question", "timestamp": 100.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        # Submitted just now: inside the registration grace window.
+        pending_started_at=time.time(),
+    )
+    s.save()
+
+    # state.db is ahead (the new turn's worker has started writing rows), which
+    # would otherwise satisfy the "newer transcript" gate.
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 100.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": time.time()},
+        {"role": "assistant", "content": "first streamed token", "timestamp": time.time()},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": len(state_messages), "last_message_at": time.time()},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+    # The stream is NOT in STREAMS/ACTIVE_RUNS yet (registration not done).
+    config.STREAMS.pop(stream_id, None)
+    config.ACTIVE_RUNS.pop(stream_id, None)
+
+    result = models._sync_sidecar_from_state_db_if_newer(s)
+
+    # Self-heal must back off: the turn is still starting up.
+    assert result is False
+    assert s.active_stream_id == stream_id
+    assert s.pending_user_message == "new request"
+    assert [m["content"] for m in s.messages] == ["old question", "old answer"]
+
+    reloaded = Session.load(sid)
+    assert reloaded.active_stream_id == stream_id
+    assert reloaded.pending_user_message == "new request"
+
 
 

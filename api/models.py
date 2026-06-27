@@ -2311,6 +2311,15 @@ def _repair_stale_pending(session) -> bool:
         return False
 
 
+# Grace window (seconds) for the state.db->sidecar read-side self-heal. A turn's
+# active_stream_id + pending_started_at are persisted to the sidecar a moment
+# BEFORE the worker registers the stream in STREAMS/ACTIVE_RUNS. Within this
+# window an in-flight, not-yet-registered stream must not be mistaken for a dead
+# one and cleared. Streams that genuinely lost their terminal event are far
+# older than this, so they still self-heal.
+_STATE_DB_SYNC_REGISTRATION_GRACE_SECONDS = 30.0
+
+
 def _sync_sidecar_from_state_db_if_newer(session) -> bool:
     """Read-side self-heal when WebUI sidecar lags Hermes state.db.
 
@@ -2346,6 +2355,22 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
     active_stream_id = getattr(session, 'active_stream_id', None)
     if active_stream_id and active_stream_id in _active_stream_ids():
         return False
+    # Registration-window race guard. A turn is registered in STREAMS/ACTIVE_RUNS
+    # by the worker thread a moment AFTER the request handler persists
+    # active_stream_id + pending_started_at to the sidecar. In that brief window
+    # the stream is legitimately in flight yet not yet visible in the registries,
+    # so the check above would mis-classify it as a dead stream and clear it.
+    # Treat a *recent* pending_started_at as "still starting up" and refuse to
+    # self-heal it; a stream that genuinely lost its terminal event will have a
+    # pending_started_at well older than this window.
+    if active_stream_id:
+        pending_started_at = getattr(session, 'pending_started_at', None)
+        try:
+            pending_age = time.time() - float(pending_started_at)
+        except (TypeError, ValueError):
+            pending_age = None
+        if pending_age is not None and pending_age < _STATE_DB_SYNC_REGISTRATION_GRACE_SECONDS:
+            return False
     try:
         state_summary = get_state_db_session_summary(
             sid,
@@ -2356,6 +2381,7 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
     except Exception:
         logger.debug("state.db summary check failed for session %s", sid, exc_info=True)
         return False
+
     if state_count <= 0:
         return False
 
