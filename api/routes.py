@@ -9974,6 +9974,13 @@ def handle_get(handler, parsed) -> bool:
         from api.commands import list_command_bundles
         return j(handler, {"bundles": list_command_bundles()})
 
+    if parsed.path == "/api/commands/moa/resolve":
+        from api.commands import resolve_moa_config
+        try:
+            return j(handler, resolve_moa_config())
+        except RuntimeError as e:
+            return bad(handler, str(e), 503)
+
     if parsed.path == "/api/updates/check":
         settings = load_settings()
         if not settings.get("check_for_updates", True):
@@ -16348,6 +16355,7 @@ def _start_chat_stream_for_session(
     diag=None,
     goal_related: bool = False,
     source: str = "webui",
+    moa_config=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -16472,6 +16480,8 @@ def _start_chat_stream_for_session(
     worker_kwargs = {"model_provider": model_provider}
     if not backend_is_gateway:
         worker_kwargs["goal_related"] = goal_related
+    if moa_config and not backend_is_gateway:
+        worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(
         target=worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
@@ -16557,6 +16567,7 @@ def _start_run(
     source: str,
     route: str,
     diag=None,
+    moa_config=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -16635,6 +16646,7 @@ def _start_run(
         normalized_model=normalized_model,
         diag=diag,
         source=source,
+        moa_config=moa_config,
     )
 
 
@@ -17004,6 +17016,7 @@ def _handle_chat_start(handler, body, diag=None):
         )
         _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
         explicit_model_pick = bool(body.get("explicit_model_pick"))
+        moa_config = body.get("moa_config") or None
         diag.stage("resolve_model_provider") if diag else None
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
@@ -17027,6 +17040,7 @@ def _handle_chat_start(handler, body, diag=None):
             source="webui",
             route="/api/chat/start",
             diag=diag,
+            moa_config=moa_config,
         )
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically

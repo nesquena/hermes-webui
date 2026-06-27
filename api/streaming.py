@@ -5864,6 +5864,7 @@ def _run_agent_streaming(
     ephemeral=False,
     model_provider=None,
     goal_related=False,
+    moa_config=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -7619,6 +7620,7 @@ def _run_agent_streaming(
                 conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                 task_id=session_id,
                 persist_user_message=msg_text,
+                moa_config=moa_config,
             )
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on

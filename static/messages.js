@@ -1321,6 +1321,7 @@ async function send(){
     return;
   }
   let _slashDisplayTextOverride=null;
+  let _pendingMoaConfig=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1390,6 +1391,27 @@ async function send(){
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
+      if(_agentCmdName==='moa'){
+        const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
+        if(!S.session){await newSession();await renderSessionList();}
+        if(!_moaArgs){
+          let _moaUsage='/moa <prompt>';
+          try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:_moaUsage,_ts:Date.now()/1000});
+          renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
+        }
+        try{
+          const _moaCfg=await api('/api/commands/moa/resolve');
+          _slashDisplayTextOverride=text;
+          text=_moaArgs;
+          _pendingMoaConfig=_moaCfg;
+        }catch(_e){
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:'MoA unavailable: '+(_e&&_e.message||_e),_ts:Date.now()/1000});
+          renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
+        }
       }
       const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
         ? await getBundleCommandMetadata(_parsedCmd.name)
@@ -1576,8 +1598,10 @@ async function send(){
       model_provider:_modelState.model_provider,
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
-      attachments:uploaded.length?uploaded:undefined
+      attachments:uploaded.length?uploaded:undefined,
+      moa_config:_pendingMoaConfig||undefined
     })});
+    _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
