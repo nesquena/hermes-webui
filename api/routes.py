@@ -17018,6 +17018,8 @@ def _handle_chat_start(handler, body, diag=None):
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
         if body.get("moa_config"):
+            if webui_gateway_chat_enabled(get_config()):
+                return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
             from api.commands import resolve_moa_config
 
             try:

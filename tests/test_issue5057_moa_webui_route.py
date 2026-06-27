@@ -116,6 +116,7 @@ def test_moa_config_is_per_turn_not_persisted():
     routes_source = routes_path.read_text(encoding="utf-8")
     assert re.search(r"if body\.get\(\"moa_config\"\):[\s\S]*?moa_config = resolve_moa_config\(\)", routes_source), \
         "chat-start must re-resolve MoA config server-side instead of trusting the browser payload"
+    assert "MoA override is unavailable on gateway-backed sessions" in routes_source
     js_path = Path(__file__).resolve().parent.parent / "static" / "messages.js"
     js_source = js_path.read_text(encoding="utf-8")
     assert "moa_config:_pendingMoaConfig?true:undefined" in js_source
