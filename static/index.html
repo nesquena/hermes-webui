@@ -704,6 +704,11 @@
           <div id="savedPromptsPopup" class="saved-prompts-popup" style="display:none" role="menu" aria-label="Saved prompts"></div>
           <div class="composer-right">
             <span class="composer-status" id="composerStatus" style="display:none"></span>
+            <div id="busyActionPicker" class="busy-action-picker" role="group" aria-label="Action while Hermes is working" aria-hidden="true">
+              <button type="button" class="busy-action-option" data-busy-action="queue">Queue</button>
+              <button type="button" class="busy-action-option" data-busy-action="steer">Steer</button>
+              <button type="button" class="busy-action-option" data-busy-action="interrupt">Interrupt</button>
+            </div>
             <div class="ctx-indicator-wrap" id="ctxIndicatorWrap" style="display:none">
               <button class="ctx-indicator" id="ctxIndicator" type="button" aria-label="Context window usage" aria-describedby="ctxTooltip">
                 <span class="ctx-ring">
@@ -726,9 +731,16 @@
               </div>
             </div>
             <span class="bg-badge" id="bgBadge" style="display:none" title="Background tasks running">0</span>
-            <button class="send-btn has-tooltip has-tooltip--left" id="btnSend" data-tooltip="Send message" disabled>
+            <button class="send-btn has-tooltip has-tooltip--left" id="btnSend" data-tooltip="Send message" disabled aria-haspopup="menu" aria-controls="sendActionMenu" aria-expanded="false">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
             </button>
+            <div id="sendActionMenu" class="send-action-menu" role="menu" aria-label="Send action menu" aria-hidden="true">
+              <button type="button" class="send-action-menu-item" role="menuitem" data-send-action="send">Send now</button>
+              <button type="button" class="send-action-menu-item" role="menuitem" data-send-action="queue">Queue</button>
+              <button type="button" class="send-action-menu-item" role="menuitem" data-send-action="steer">Steer</button>
+              <button type="button" class="send-action-menu-item danger" role="menuitem" data-send-action="interrupt">Interrupt + queue</button>
+              <button type="button" class="send-action-menu-item danger" role="menuitem" data-send-action="stop">Stop</button>
+            </div>
           </div>
           <div class="composer-mobile-config-panel" id="composerMobileConfigPanel" aria-label="Workspace, model, reasoning, and context settings">
             <button class="composer-mobile-config-action" id="composerMobileWorkspaceAction" type="button" onclick="toggleComposerWsDropdown()" title="Switch workspace">

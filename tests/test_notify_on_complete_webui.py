@@ -17,7 +17,9 @@ def test_webui_injects_process_notifications_without_persisting_them_as_user_tex
 
     assert "_process_notifications = _drain_webui_process_notifications(session_id)" in src
     assert "[*_process_notifications, msg_text]" in src
-    assert "_build_native_multimodal_message(workspace_ctx, _agent_msg_text" in src
+    assert "_build_native_multimodal_message(" in src
+    assert "provider=resolved_provider" in src
+    assert "model=resolved_model" in src
     assert "persist_user_message=msg_text" in src
 
 

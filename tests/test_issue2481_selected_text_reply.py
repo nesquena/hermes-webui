@@ -180,6 +180,23 @@ def test_selected_text_reply_queue_path_includes_pending_selection_context():
     assert "_flushSelectionBlocksToComposer();\n  text=$('msg').value.trim();" in js
 
 
+def test_reply_with_selection_refocuses_composer_after_adding_context_chip():
+    js = read("static/messages.js")
+
+    assert "function _focusComposerAfterSelectedTextReply" in js
+    assert "composer.focus({preventScroll:true})" in js
+    assert "composer.setSelectionRange(composer.value.length, composer.value.length)" in js
+    click_start = js.index("btn.addEventListener('click', e=>{")
+    click_end = js.index("  });", click_start)
+    click_body = js[click_start:click_end]
+    assert "_addNamedContextBlock(_selectedTextReplyText)" in click_body
+    assert "selection.removeAllRanges()" in click_body
+    assert "_focusComposerAfterSelectedTextReply();" in click_body
+    assert click_body.index("selection.removeAllRanges()") < click_body.index("_focusComposerAfterSelectedTextReply();"), (
+        "focus must be restored after clearing the chat selection, otherwise the composer loses the next keystroke"
+    )
+
+
 def test_selection_only_reply_enables_primary_send_button():
     """#4380 (Codex gate): selected context moved out of the textarea into
     _pendingSelections, so the primary Send button's content check must also

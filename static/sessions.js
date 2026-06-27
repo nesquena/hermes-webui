@@ -185,6 +185,8 @@ let _sessionObservedStreaming = null;
 const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
 const _sessionListSourceById = new Map();
+const _IDLE_SESSION_SWITCH_CACHE_MAX = 12;
+const _idleSessionSwitchCache = new Map();
 let _sessionListPointerActive = false;
 let _sessionListLastScrollAt = 0;
 let _pendingSessionListPayload = null;
@@ -201,6 +203,164 @@ const SESSION_LONG_PRESS_DELAY_MS = 400;
 const SESSION_ARCHIVE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_DELETE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_SWIPE_CANCEL_RATIO = 0.75;
+
+function _cloneSessionSwitchCacheValue(value){
+  if(value == null) return value;
+  if(typeof structuredClone === 'function'){
+    try{return structuredClone(value);}catch(_){}
+  }
+  try{return JSON.parse(JSON.stringify(value));}
+  catch(_){return value;}
+}
+
+function _sessionSwitchCacheFingerprint(session){
+  const s=session||{};
+  const messageCount=Number(s.message_count || 0);
+  const lastMessageAt=Number(s.last_message_at || s.updated_at || 0);
+  const activeStreamId=s.active_stream_id || null;
+  const pendingUserMessage=s.pending_user_message || null;
+  const hasPendingUserMessage=!!s.has_pending_user_message;
+  const isStreaming=!!(s.is_streaming || activeStreamId || pendingUserMessage || hasPendingUserMessage || s.pending_started_at);
+  return {
+    message_count: Number.isFinite(messageCount) ? messageCount : 0,
+    last_message_at: Number.isFinite(lastMessageAt) ? lastMessageAt : 0,
+    active_stream_id: activeStreamId,
+    pending_user_message: pendingUserMessage,
+    has_pending_user_message: hasPendingUserMessage,
+    is_streaming: isStreaming,
+  };
+}
+
+function _sessionSwitchCacheRowForSid(sid){
+  if(!sid) return null;
+  try{
+    if(Array.isArray(_allSessions)){
+      const row=_allSessions.find(s=>s&&s.session_id===sid);
+      if(row) return row;
+    }
+  }catch(_){}
+  try{
+    const snapshot=_sessionListSnapshotById.get(sid);
+    if(snapshot) return snapshot;
+  }catch(_){}
+  return null;
+}
+
+function _sessionSwitchCacheFingerprintMatches(cache,row){
+  if(!cache||!cache.fingerprint||!row) return false;
+  const expected=cache.fingerprint;
+  const current=_sessionSwitchCacheFingerprint(row);
+  if(current.is_streaming || current.active_stream_id || current.pending_user_message || current.has_pending_user_message) return false;
+  if(Number(expected.message_count||0)!==Number(current.message_count||0)) return false;
+  const expectedLast=Number(expected.last_message_at||0);
+  const currentLast=Number(current.last_message_at||0);
+  if(expectedLast&&currentLast&&expectedLast!==currentLast) return false;
+  return true;
+}
+
+function _rememberIdleSessionSwitchCache(currentSid){
+  if(!currentSid || !S || !S.session || S.session.session_id!==currentSid) return false;
+  if(S.busy || S.activeStreamId) return false;
+  if(typeof INFLIGHT==='object' && INFLIGHT && INFLIGHT[currentSid]) return false;
+  const fingerprint=_sessionSwitchCacheFingerprint(S.session);
+  if(fingerprint.is_streaming) return false;
+  const messages=Array.isArray(S.messages)?S.messages:[];
+  if(!messages.length && Number(S.session.message_count||0)>0) return false;
+  const entry={
+    session:_cloneSessionSwitchCacheValue(S.session),
+    messages:_cloneSessionSwitchCacheValue(messages),
+    toolCalls:_cloneSessionSwitchCacheValue(Array.isArray(S.toolCalls)?S.toolCalls:[]),
+    lastUsage:_cloneSessionSwitchCacheValue(S.lastUsage||{}),
+    messagesTruncated:!!_messagesTruncated,
+    oldestIdx:Number(_oldestIdx||0)||0,
+    fingerprint,
+    savedAt:Date.now(),
+  };
+  _idleSessionSwitchCache.delete(currentSid);
+  _idleSessionSwitchCache.set(currentSid,entry);
+  while(_idleSessionSwitchCache.size>_IDLE_SESSION_SWITCH_CACHE_MAX){
+    const first=_idleSessionSwitchCache.keys().next().value;
+    if(first===undefined) break;
+    _idleSessionSwitchCache.delete(first);
+  }
+  return true;
+}
+
+function _restoreIdleSessionSwitchCache(sid,opts={}){
+  const forceReload=!!(opts&&opts.forceReload);
+  if(forceReload || !sid) return false;
+  const cache=_idleSessionSwitchCache.get(sid);
+  if(!cache) return false;
+  const row=_sessionSwitchCacheRowForSid(sid);
+  if(!_sessionSwitchCacheFingerprintMatches(cache,row)){
+    _idleSessionSwitchCache.delete(sid);
+    return false;
+  }
+  _idleSessionSwitchCache.delete(sid);
+  _idleSessionSwitchCache.set(sid,cache);
+  const cachedSession=_cloneSessionSwitchCacheValue(cache.session)||{};
+  const rowMeta=row?{...row}:{};
+  delete rowMeta.messages;
+  delete rowMeta.tool_calls;
+  S.session={...cachedSession,...rowMeta,session_id:sid,active_stream_id:null,pending_user_message:null,has_pending_user_message:false,is_streaming:false};
+  if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
+  S._pendingSessionToolsets=null;
+  if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
+  S.messages=_cloneSessionSwitchCacheValue(cache.messages)||[];
+  S.toolCalls=_cloneSessionSwitchCacheValue(cache.toolCalls)||[];
+  S.lastUsage=_cloneSessionSwitchCacheValue(cache.lastUsage||S.session.last_usage||{});
+  _messagesTruncated=!!cache.messagesTruncated;
+  _oldestIdx=Number(cache.oldestIdx||0)||0;
+  _pendingCarryForwardSnapshot=null;
+  _clearSameSessionForceReloadHint(sid);
+  if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
+  if(typeof clearLiveToolCards==='function') clearLiveToolCards();
+  S.activeStreamId=null;
+  S.busy=false;
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(typeof setStatus==='function') setStatus('');
+  if(typeof setComposerStatus==='function') setComposerStatus('');
+  if(typeof _setSessionViewedCount==='function') _setSessionViewedCount(sid, Number(S.session.message_count || S.messages.length || 0));
+  if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(sid);
+  try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
+  if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
+  if(typeof startSessionStream==='function') startSessionStream(sid);
+  if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
+  if(typeof syncTopbar==='function') syncTopbar();
+  if(typeof renderMessages==='function') renderMessages();
+  if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
+  if(typeof loadDir==='function'){
+    const _dirP=loadDir('.');
+    if(_dirP&&typeof _dirP.catch==='function') _dirP.catch(()=>{});
+  }
+  if(S.session&&typeof _syncCtxIndicator==='function'){
+    const u=S.lastUsage||{};
+    const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
+    const _pickPositive=(latest,stored,dflt=0)=>Number(latest)>0?latest:(Number(stored)>0?stored:dflt);
+    _syncCtxIndicator({
+      input_tokens:_pick(u.input_tokens,S.session.input_tokens),
+      output_tokens:_pick(u.output_tokens,S.session.output_tokens),
+      estimated_cost:_pick(u.estimated_cost,S.session.estimated_cost),
+      cache_read_tokens:_pick(u.cache_read_tokens,S.session.cache_read_tokens),
+      cache_write_tokens:_pick(u.cache_write_tokens,S.session.cache_write_tokens),
+      cache_hit_percent:_pick(u.cache_hit_percent,S.session.cache_hit_percent,null),
+      context_length:_pickPositive(u.context_length,S.session.context_length),
+      last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
+      threshold_tokens:_pick(S.session.threshold_tokens,u.threshold_tokens),
+    });
+  }
+  if(typeof _renderPendingPromptsForActiveSession==='function') _renderPendingPromptsForActiveSession();
+  const draft=S.session&&S.session.composer_draft;
+  if(draft&&typeof _restoreComposerDraft==='function') _restoreComposerDraft(draft,sid,{preserveActiveInput:false});
+  if(_loadingSessionId===sid) _loadingSessionId=null;
+  if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+  if(S.session && typeof _isMessagingSession==='function' && _isMessagingSession(S.session)){
+    if(typeof _checkAndShowHandoffHint==='function') _checkAndShowHandoffHint(sid);
+  }else if(typeof _hideHandoffHint==='function'){
+    _hideHandoffHint();
+  }
+  return true;
+}
 
 function _formatSessionModelWithGateway(s){
   if(!s||!s.model)return'';
@@ -1109,7 +1269,13 @@ async function loadSession(sid){
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
-    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    const _switchDraftText = ($('msg') || {}).value || '';
+    const _switchDraftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
+    await _saveComposerDraftNow(currentSid, _switchDraftText, _switchDraftFiles);
+    if (S.session && S.session.session_id === currentSid) {
+      S.session.composer_draft = {text:_switchDraftText, files:_switchDraftFiles};
+    }
+    _rememberIdleSessionSwitchCache(currentSid);
     // The awaited draft save above yields the event loop. If another
     // loadSession() started for a different session while we were waiting
     // (rapid switch B→C), _loadingSessionId now points at that newer load —
@@ -1135,6 +1301,7 @@ async function loadSession(sid){
       snapshotLiveTurnHtmlForSession(currentSid);
     }
   }
+  if(_restoreIdleSessionSwitchCache(sid,{previousSid:currentSid,forceReload})) return;
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we

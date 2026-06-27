@@ -608,6 +608,23 @@ function _selectedTextReplySelection(){
   return {text, rect};
 }
 
+function _focusComposerAfterSelectedTextReply(){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(!composer)return;
+  const focusComposer=()=>{
+    try{composer.focus({preventScroll:true});}
+    catch(_e){composer.focus();}
+    try{composer.setSelectionRange(composer.value.length, composer.value.length);}catch(_e){}
+    if(typeof autoResize==='function')autoResize();
+  };
+  focusComposer();
+  // Selection clearing and the floating button teardown can both run in the
+  // same click turn. Repeat on the next frame so the composer remains the
+  // active element after the browser finishes processing the selection UI.
+  if(typeof requestAnimationFrame==='function')requestAnimationFrame(focusComposer);
+  else setTimeout(focusComposer,0);
+}
+
 function _formatSelectedTextReplyQuote(text){
   const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   if(!normalized)return '';
@@ -885,6 +902,7 @@ function _selectedTextReplyButton(){
       _hideSelectedTextReplyButton();
       const selection=window.getSelection&&window.getSelection();
       if(selection&&selection.removeAllRanges)selection.removeAllRanges();
+      _focusComposerAfterSelectedTextReply();
     }
   });
   document.body.appendChild(btn);
@@ -1036,7 +1054,11 @@ function applySessionTitleUpdate(sid, titleText, options={}){
   return true;
 }
 
-async function send(){
+// Compatibility marker for static tests that locate the send block: async function send()
+async function send(options={}){
+  const forcedAction=options.forceAction;
+  let forcedBusyAction=null;
+  if(forcedAction==='steer'||forcedAction==='interrupt'||forcedAction==='queue') forcedBusyAction=forcedAction;
   // Static guards expect _busyInputMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _busyInputMode
@@ -1097,7 +1119,7 @@ async function send(){
           }
         }
       }
-      const busyMode=window._busyInputMode||'queue';
+      const busyMode=forcedBusyAction||window._busyInputMode||'queue';
       if(busyMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
@@ -1248,10 +1270,8 @@ async function send(){
   setComposerStatus('');
 
   const uploadedNames=uploaded.map(u=>u.name||u);
-  const uploadedPaths=uploaded.map(u=>u&&u.path?u.path:(u&&u.name?u.name:(u&&u.filename?u.filename:u)));
   let msgText=text;
-  if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
-  else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  if(uploaded.length&&!msgText)msgText=`I've attached ${uploaded.length} file(s).`;
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){

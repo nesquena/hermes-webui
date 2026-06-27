@@ -5673,6 +5673,7 @@ function updateSendBtn(){
   }
   btn.title=_btnTitle;
   btn.setAttribute('aria-label',_btnTitle);
+  btn.setAttribute('aria-expanded',$('sendActionMenu')?.classList.contains('open')?'true':'false');
   _setComposerPrimaryButtonIcon(btn,action);
   // Single primary action button: while busy/no-draft it becomes the red Stop
   // action; while busy with a draft it reflects queue/interrupt/steer.
@@ -5684,6 +5685,145 @@ function updateSendBtn(){
   } else if(action==='disabled'){
     btn.classList.remove('visible');
   }
+  if($('sendActionMenu')?.classList.contains('open')) _updateSendActionMenuItems();
+  updateBusyActionPicker(action);
+}
+
+function updateBusyActionPicker(currentAction){
+  const picker=$('busyActionPicker');
+  if(!picker) return;
+  const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  const isBusy=!!S.busy||compressionRunning;
+  const shouldShow=!!isBusy;
+  picker.classList.toggle('visible',shouldShow);
+  picker.setAttribute('aria-hidden',shouldShow?'false':'true');
+  if(!shouldShow) return;
+  picker.querySelectorAll('[data-busy-action]').forEach(btn=>{
+    const action=btn.dataset.busyAction;
+    const enabled=_sendActionAvailability(action);
+    btn.disabled=!enabled;
+    btn.classList.toggle('active',action===currentAction);
+    btn.setAttribute('aria-disabled',enabled?'false':'true');
+  });
+}
+
+async function handleBusyActionPickerPick(action){
+  if(!action||!_sendActionAvailability(action)) return;
+  await executeComposerAction(action);
+}
+
+document.addEventListener('click',e=>{
+  const btn=e.target.closest&&e.target.closest('#busyActionPicker [data-busy-action]');
+  if(!btn||btn.disabled) return;
+  e.preventDefault();
+  handleBusyActionPickerPick(btn.dataset.busyAction);
+});
+
+function _sendActionAvailability(action){
+  const hasContent=_composerHasContent();
+  const msg=$('msg');
+  if(msg&&msg.disabled) return false;
+  const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  const isBusy=!!S.busy||compressionRunning;
+  if(action==='send') return hasContent&&!isBusy;
+  if(action==='queue') return hasContent;
+  if(action==='steer') return hasContent&&!!S.activeStreamId&&typeof _trySteer==='function';
+  if(action==='interrupt') return hasContent&&(!!S.activeStreamId||compressionRunning||!!S.busy);
+  if(action==='stop') return !!S.activeStreamId&&typeof cancelStream==='function';
+  return false;
+}
+
+function _updateSendActionMenuItems(){
+  const menu=$('sendActionMenu');
+  if(!menu) return;
+  menu.querySelectorAll('[data-send-action]').forEach(item=>{
+    const action=item.dataset.sendAction;
+    const enabled=_sendActionAvailability(action);
+    item.disabled=!enabled;
+    item.setAttribute('aria-disabled',enabled?'false':'true');
+  });
+}
+
+function openSendActionMenu(opts={}){
+  const menu=$('sendActionMenu');
+  const btn=$('btnSend');
+  if(!menu||!btn) return false;
+  _updateSendActionMenuItems();
+  menu.classList.add('open');
+  menu.setAttribute('aria-hidden','false');
+  btn.setAttribute('aria-expanded','true');
+  const first=menu.querySelector('[data-send-action]:not([disabled])');
+  if(opts.source==='keyboard'&&first) first.focus();
+  setTimeout(()=>{
+    document.addEventListener('pointerdown',_sendActionMenuOutsidePointer,{capture:true});
+    document.addEventListener('keydown',_sendActionMenuKeydown,true);
+  },0);
+  return true;
+}
+
+function closeSendActionMenu(){
+  const menu=$('sendActionMenu');
+  const btn=$('btnSend');
+  if(!menu) return;
+  menu.classList.remove('open');
+  menu.setAttribute('aria-hidden','true');
+  if(btn) btn.setAttribute('aria-expanded','false');
+  document.removeEventListener('pointerdown',_sendActionMenuOutsidePointer,{capture:true});
+  document.removeEventListener('keydown',_sendActionMenuKeydown,true);
+}
+
+function _sendActionMenuOutsidePointer(e){
+  const menu=$('sendActionMenu');
+  const btn=$('btnSend');
+  if(!menu||!menu.classList.contains('open')) return;
+  if(menu.contains(e.target)||(btn&&btn.contains(e.target))) return;
+  closeSendActionMenu();
+}
+
+function _sendActionMenuKeydown(e){
+  const menu=$('sendActionMenu');
+  if(!menu||!menu.classList.contains('open')) return;
+  if(e.key==='Escape'){
+    e.preventDefault();
+    closeSendActionMenu();
+    $('btnSend')?.focus();
+    return;
+  }
+  const items=Array.from(menu.querySelectorAll('[data-send-action]:not([disabled])'));
+  if(!items.length) return;
+  const idx=items.indexOf(document.activeElement);
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    e.preventDefault();
+    const next=e.key==='ArrowDown' ? (idx+1+items.length)%items.length : (idx-1+items.length)%items.length;
+    items[next].focus();
+  }else if(e.key==='Enter'||e.key===' '){
+    if(document.activeElement&&document.activeElement.closest('#sendActionMenu')){
+      e.preventDefault();
+      handleSendActionMenuPick(document.activeElement.dataset.sendAction);
+    }
+  }
+}
+
+async function handleSendActionMenuPick(action){
+  if(!action||!_sendActionAvailability(action)) return;
+  closeSendActionMenu();
+  await executeComposerAction(action);
+}
+
+document.addEventListener('click',e=>{
+  const item=e.target.closest&&e.target.closest('#sendActionMenu [data-send-action]');
+  if(!item) return;
+  e.preventDefault();
+  handleSendActionMenuPick(item.dataset.sendAction);
+});
+
+async function executeComposerAction(action){
+  if(action==='disabled') return;
+  if(action==='stop'){
+    if(typeof cancelStream==='function') await cancelStream();
+    return;
+  }
+  return send({forceAction:action});
 }
 
 async function handleComposerPrimaryAction(){
@@ -5693,12 +5833,7 @@ async function handleComposerPrimaryAction(){
     return;
   }
   const action=typeof getComposerPrimaryAction==='function'?getComposerPrimaryAction():'send';
-  if(action==='disabled') return;
-  if(action==='stop'){
-    if(typeof cancelStream==='function') await cancelStream();
-    return;
-  }
-  await send();
+  await executeComposerAction(action);
 }
 
 function setBusy(v){

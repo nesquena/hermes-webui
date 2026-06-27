@@ -3,6 +3,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **The compact send button now exposes Queue / Steer / Interrupt / Stop from a long-press menu, and shows Queue / Steer / Interrupt inline while Hermes is working.** During a running turn, the composer displays visible action buttons so users can send the current draft as queue, steer, or interrupt without typing slash commands; long-press/right-click/keyboard menu remains available for the full action list.
+
+### Fixed
+
+- **Reply with Selection now returns keyboard focus to the composer immediately after adding a selected-context chip.** After clicking the floating selection action, WebUI clears the chat text selection, focuses `#msg` with `preventScroll`, moves the caret to the end, and repeats once on the next animation frame so the next keystroke goes straight into the message box.
+- **Switching between idle, unchanged sessions no longer reloads the transcript every time.** WebUI now snapshots the fully-rendered idle session state in browser memory before switching away, then restores it immediately on A → B → A navigation when the sidebar fingerprint (`message_count` / `last_message_at` and idle flags) still matches. Force refreshes, streaming sessions, pending turns, and changed sessions still fall back to the authoritative `/api/session` load.
+- **Screenshot paste now works from the wider WebUI, not only when the composer textarea is focused.** Ctrl/Cmd+V with image clipboard data attaches the screenshot to the composer from the chat surface, while normal form fields are ignored so settings/login inputs keep their native paste behavior.
+- **Uploaded attachments no longer leak internal server paths into the user's message text.** The browser now sends files only as structured `attachments`; the backend adds agent-only hints for image/non-image files so the assistant can inspect them without exposing `/opt/.../attachments/...` paths as visible user prose.
+
 ## [v0.51.668] — 2026-06-26 — Release XX (WebUI stays in sync after the Desktop app continues a session)
 
 ### Fixed

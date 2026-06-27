@@ -477,21 +477,66 @@ function mobileSwitchPanel(name){
   }
 }
 
-$('btnSend').onclick=()=>{
-  if(typeof handleComposerPrimaryAction==='function') return handleComposerPrimaryAction();
-  if(window._micActive){
-    window._micPendingSend=true;
-    _stopMic();
-    return;
-  }
-  // Turn-based voice mode: let the voice mode system handle the send flow
-  if(typeof window._voiceModeActive==='function'&&window._voiceModeActive()){
-    // Immediately send whatever is in the textarea
-    if(typeof window._voiceModeImmediateSend==='function') window._voiceModeImmediateSend();
-    return;
-  }
-  send();
-};
+(function(){
+  const btn=$('btnSend');
+  if(!btn) return;
+  const SEND_ACTION_LONG_PRESS_MS=520;
+  let longPressTimer=null;
+  let longPressOpened=false;
+  const clearLongPress=()=>{
+    if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+  };
+  btn.onclick=(e)=>{
+    if(longPressOpened){
+      if(e&&e.preventDefault)e.preventDefault();
+      longPressOpened=false;
+      return;
+    }
+    if($('sendActionMenu')?.classList.contains('open')){
+      if(e&&e.preventDefault)e.preventDefault();
+      if(typeof closeSendActionMenu==='function') closeSendActionMenu();
+      return;
+    }
+    if(typeof handleComposerPrimaryAction==='function') return handleComposerPrimaryAction();
+    if(window._micActive){
+      window._micPendingSend=true;
+      _stopMic();
+      return;
+    }
+    // Turn-based voice mode: let the voice mode system handle the send flow
+    if(typeof window._voiceModeActive==='function'&&window._voiceModeActive()){
+      // Immediately send whatever is in the textarea
+      if(typeof window._voiceModeImmediateSend==='function') window._voiceModeImmediateSend();
+      return;
+    }
+    send();
+  };
+  btn.addEventListener('pointerdown',e=>{
+    if(e&&e.button!==undefined&&e.button!==0) return;
+    if(btn.disabled) return;
+    clearLongPress();
+    longPressOpened=false;
+    longPressTimer=setTimeout(()=>{
+      longPressTimer=null;
+      longPressOpened=true;
+      if(typeof openSendActionMenu==='function') openSendActionMenu({source:'longpress'});
+    },SEND_ACTION_LONG_PRESS_MS);
+  });
+  ['pointerup','pointercancel','pointerleave','lostpointercapture'].forEach(type=>btn.addEventListener(type,clearLongPress));
+  btn.addEventListener('contextmenu',e=>{
+    if(e&&e.preventDefault)e.preventDefault();
+    clearLongPress();
+    longPressOpened=false;
+    if(typeof openSendActionMenu==='function') openSendActionMenu({source:'contextmenu'});
+  });
+  btn.addEventListener('keydown',e=>{
+    if(e.key==='ArrowDown'||e.key==='ContextMenu'||(e.key==='F10'&&e.shiftKey)){
+      e.preventDefault();
+      clearLongPress();
+      if(typeof openSendActionMenu==='function') openSendActionMenu({source:'keyboard'});
+    }
+  });
+})();
 $('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
 $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
 
@@ -1710,6 +1755,36 @@ $('msg').addEventListener('paste',e=>{
   if(!_largeTextPasteFitsUploadLimit(pastedTextFile))return;
   e.preventDefault();
   _attachLargePastedText(pastedTextFile);
+});
+function _isDocumentPasteEditableTarget(target){
+  if(!target||!target.closest)return false;
+  const editable=target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"]');
+  return !!editable&&editable.id!=='msg';
+}
+document.addEventListener('paste',e=>{
+  if(e.defaultPrevented)return;
+  const target=e.target;
+  if(target&&target.closest&&target.closest('#msg'))return;
+  if(_isDocumentPasteEditableTarget(target))return;
+  const items=Array.from(e.clipboardData?.items||[]);
+  const imageItems=items.filter(i=>i.kind==='file'&&i.type.startsWith('image/'));
+  if(!imageItems.length)return;
+  const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
+  if(!hasText)e.preventDefault();
+  const pasteTs=Date.now();
+  const files=imageItems.map((i,idx)=>{
+    const blob=i.getAsFile();
+    const ext=i.type.split('/')[1]||'png';
+    const suffix=imageItems.length>1?`-${idx+1}`:'';
+    return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
+  });
+  addFiles(files);
+  setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
+  const msg=$('msg');
+  if(msg&&typeof msg.focus==='function'){
+    try{msg.focus({preventScroll:true});}
+    catch(_){msg.focus();}
+  }
 });
 document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};

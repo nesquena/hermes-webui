@@ -1585,7 +1585,7 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
     env = dict(profile_runtime_env or {})
     env.update({
         'TERMINAL_CWD': str(workspace),
-        'HERMES_EXEC_ASK': '1',
+        'HERMES_EXEC_ASK': '1' if os.environ.get('HERMES_WEBUI_EXEC_ASK', '1') != '0' else '0',
         'HERMES_SESSION_KEY': session_id,
         'HERMES_SESSION_ID': session_id,
         'HERMES_SESSION_PLATFORM': 'webui',
@@ -1868,7 +1868,7 @@ def _is_valid_image(path: Path, mime: str) -> bool:
     return False
 
 
-def _resolve_image_input_mode(cfg: dict) -> str:
+def _resolve_image_input_mode(cfg: dict | None, *, provider: str = '', model: str = '') -> str:
     """Return ``"native"`` or ``"text"`` based on config, mirroring
     ``agent/image_routing.py:decide_image_input_mode``.
 
@@ -1877,6 +1877,7 @@ def _resolve_image_input_mode(cfg: dict) -> str:
     bypassing ``image_input_mode``.  This caused silent failures when the main model
     does not support images and the fallback model is also text-only (#21160-related).
     """
+    cfg = cfg if isinstance(cfg, dict) else {}
     agent_cfg = cfg.get("agent") or {}
     mode = str(agent_cfg.get("image_input_mode", "auto") or "auto").strip().lower()
     if mode not in ("auto", "native", "text"):
@@ -1897,13 +1898,160 @@ def _resolve_image_input_mode(cfg: dict) -> str:
     if provider not in ("", "auto") or model_name or base_url:
         return "text"
 
-    # No explicit vision config, no model-capability lookup available in WebUI.
-    # Default to native — the agent's ``_strip_images_from_messages`` guard will
-    # strip images on rejection and retry as text.
-    return "native"
+    # Mirror Hermes Agent/Gateway routing when the package is available.  The
+    # old WebUI-local fallback defaulted unknown models to native image_url
+    # parts, which meant text-only routes could silently strip the image and the
+    # agent would never actually inspect the pasted screenshot.
+    try:
+        from importlib import import_module
+        decide_image_input_mode = import_module('agent.image_routing').decide_image_input_mode
+        decided = decide_image_input_mode(str(provider or ''), str(model or ''), cfg)
+        if decided in ("native", "text"):
+            return decided
+    except Exception:
+        pass
+
+    # Safe fallback matches agent.image_routing: in auto mode, unknown/non-vision
+    # models use text/tool routing so the agent still gets a vision_analyze path.
+    return "text"
 
 
-def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None):
+def _dedupe_attachment_paths(paths) -> list[str]:
+    result = []
+    seen = set()
+    for raw in paths or []:
+        path = str(raw[0] if isinstance(raw, tuple) else raw or '').strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
+    return result
+
+
+def _image_attachment_hint_text(image_paths) -> str:
+    paths = _dedupe_attachment_paths(image_paths)
+    if not paths:
+        return ''
+    lines = []
+    for path in paths:
+        lines.append(f"[Image attached at: {path}]")
+        lines.append(f"[If you need to see image details, use vision_analyze with image_url: {path}]")
+    return "\n".join(lines)
+
+
+def _file_attachment_hint_text(file_paths) -> str:
+    paths = _dedupe_attachment_paths(file_paths)
+    if not paths:
+        return ''
+    lines = []
+    for path in paths:
+        lines.append(f"[Attached file available at: {path}]")
+    lines.append("[Use file tools such as read_file, search_files, or terminal as appropriate to inspect attached files.]")
+    return "\n".join(lines)
+
+
+def _append_attachment_hints(text: str, image_paths=None, file_paths=None) -> str:
+    hints = [
+        _image_attachment_hint_text(image_paths),
+        _file_attachment_hint_text(file_paths),
+    ]
+    hint = "\n".join(h for h in hints if h)
+    if not hint:
+        return text
+    base = str(text or '').strip()
+    if hint in base:
+        return base
+    return f"{base}\n\n{hint}" if base else hint
+
+
+# Backwards-compatible wrapper for older tests/imports inside this repo.
+def _append_image_attachment_hints(text: str, image_paths) -> str:
+    return _append_attachment_hints(text, image_paths=image_paths)
+
+
+def _attachment_allowed_roots(workspace: str):
+    workspace_root = Path(workspace).expanduser().resolve()
+    try:
+        from api.upload import _attachment_root
+        attachment_root = _attachment_root()
+        return (workspace_root, attachment_root)
+    except Exception:
+        return (workspace_root,)
+
+
+def _valid_image_attachment_paths(attachments, workspace: str):
+    if not attachments:
+        return []
+    allowed_roots = _attachment_allowed_roots(workspace)
+    image_paths = []
+    for att in attachments or []:
+        if not isinstance(att, dict):
+            continue
+        raw_path = str(att.get('path') or '').strip()
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path).expanduser().resolve()
+            # Uploads should live inside the selected workspace OR the session
+            # attachment inbox (#2319). Do not read or advertise arbitrary
+            # client-provided paths.
+            if not any(path.is_relative_to(r) for r in allowed_roots):
+                continue
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if size <= 0 or size > _NATIVE_IMAGE_MAX_BYTES:
+                continue
+            mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
+            if not mime.startswith('image/') or not _is_valid_image(path, mime):
+                continue
+        except Exception:
+            continue
+        image_paths.append((str(path), mime.split(';', 1)[0]))
+    return image_paths
+
+
+def _valid_file_attachment_paths(attachments, workspace: str):
+    """Return safe non-image attachment paths for agent-only file hints."""
+    if not attachments:
+        return []
+    allowed_roots = _attachment_allowed_roots(workspace)
+    image_path_set = {path for path, _mime in _valid_image_attachment_paths(attachments, workspace)}
+    file_paths = []
+    for att in attachments or []:
+        if not isinstance(att, dict):
+            continue
+        raw_path = str(att.get('path') or '').strip()
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path).expanduser().resolve()
+            path_str = str(path)
+            if path_str in image_path_set:
+                continue
+            if not any(path.is_relative_to(r) for r in allowed_roots):
+                continue
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if size <= 0:
+                continue
+        except Exception:
+            continue
+        file_paths.append(path_str)
+    return file_paths
+
+
+def _build_native_multimodal_message(
+    workspace_ctx: str,
+    msg_text: str,
+    attachments,
+    workspace: str,
+    *,
+    cfg: dict = None,
+    provider: str = '',
+    model: str = '',
+):
     """Build native multimodal content parts for current-turn image uploads.
 
     WebUI uploads files into the active workspace. For image files, pass the
@@ -1918,49 +2066,21 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     if not attachments:
         return workspace_ctx + msg_text
 
-    # ── Check image_input_mode before embedding anything ──
-    if cfg is not None and _resolve_image_input_mode(cfg) == "text":
-        return workspace_ctx + msg_text
+    image_paths = _valid_image_attachment_paths(attachments, workspace)
+    file_paths = _valid_file_attachment_paths(attachments, workspace)
 
-    parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
-    workspace_root = Path(workspace).expanduser().resolve()
-    # Stage-361 maintainer fix (Opus SHOULD-FIX): chat uploads from #2319 now
-    # land in ~/.hermes/webui/attachments/<sid>/ (outside workspace_root by
-    # design). The pre-existing `path.relative_to(workspace_root)` guard would
-    # silently reject every image upload for vision-capable models. Allow the
-    # configured attachment root in addition to workspace_root so native
-    # multimodal embeds still build the base64 image_url part. The
-    # _attachment_root() helper applies expanduser+resolve and is also reused
-    # by _upload_destination — single source of truth for the inbox root.
-    try:
-        from api.upload import _attachment_root
-        attachment_root = _attachment_root()
-        _allowed_roots = (workspace_root, attachment_root)
-    except Exception:
-        _allowed_roots = (workspace_root,)
+    # ── Check image_input_mode before embedding anything ──
+    if cfg is not None and _resolve_image_input_mode(cfg, provider=provider, model=model) == "text":
+        return _append_attachment_hints(workspace_ctx + msg_text, image_paths=image_paths, file_paths=file_paths)
+
+    parts = [{'type': 'text', 'text': _append_attachment_hints(workspace_ctx + msg_text, image_paths=image_paths, file_paths=file_paths)}]
     image_count = 0
 
-    for att in attachments or []:
-        if not isinstance(att, dict):
-            continue
-        raw_path = str(att.get('path') or '').strip()
-        if not raw_path:
-            continue
+    for item in image_paths:
         try:
+            raw_path, mime = item if isinstance(item, tuple) else (item, '')
             path = Path(raw_path).expanduser().resolve()
-            # Uploads should live inside the selected workspace OR the
-            # session attachment inbox (#2319). Do not read arbitrary paths
-            # from client-provided attachment metadata.
-            if not any(path.is_relative_to(r) for r in _allowed_roots):
-                continue
-            if not path.is_file():
-                continue
-            size = path.stat().st_size
-            if size <= 0 or size > _NATIVE_IMAGE_MAX_BYTES:
-                continue
-            mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
-            if not mime.startswith('image/') or not _is_valid_image(path, mime):
-                continue
+            mime = str(mime or '').strip() or (mimetypes.guess_type(path.name)[0] or 'image/jpeg')
             data = base64.b64encode(path.read_bytes()).decode('ascii')
         except Exception:
             continue
@@ -1970,7 +2090,11 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
         })
         image_count += 1
 
-    return parts if image_count else workspace_ctx + msg_text
+    return parts if image_count else _append_attachment_hints(
+        workspace_ctx + msg_text,
+        image_paths=image_paths,
+        file_paths=file_paths,
+    )
 
 
 _INLINE_THINKING_TAG_PAIRS = (
@@ -6334,7 +6458,7 @@ def _run_agent_streaming(
             old_hermes_home = os.environ.get('HERMES_HOME')
             os.environ.update(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
-            os.environ['HERMES_EXEC_ASK'] = '1'
+            os.environ['HERMES_EXEC_ASK'] = '1' if os.environ.get('HERMES_WEBUI_EXEC_ASK', '1') != '0' else '0'
             os.environ['HERMES_SESSION_KEY'] = session_id
             os.environ['HERMES_SESSION_ID'] = session_id
             os.environ['HERMES_SESSION_PLATFORM'] = 'webui'
@@ -7544,7 +7668,15 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
+            user_message = _build_native_multimodal_message(
+                workspace_ctx,
+                _agent_msg_text,
+                attachments,
+                workspace,
+                cfg=_cfg,
+                provider=resolved_provider,
+                model=resolved_model,
+            )
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             result = agent.run_conversation(
                 user_message=user_message,

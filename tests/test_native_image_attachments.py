@@ -17,6 +17,7 @@ from api.streaming import (
     _attachment_name,
     _build_native_multimodal_message,
     _NATIVE_IMAGE_MAX_BYTES,
+    _resolve_image_input_mode,
     _sanitize_messages_for_api,
 )
 from api.routes import _normalize_chat_attachments
@@ -140,7 +141,10 @@ class TestBuildNativeMultimodalMessage:
             }])
             result = _build_native_multimodal_message('[WS]\n', 'look', atts, str(root))
             assert isinstance(result, list)
-            assert result[0] == {'type': 'text', 'text': '[WS]\nlook'}
+            assert result[0]['type'] == 'text'
+            assert result[0]['text'].startswith('[WS]\nlook')
+            assert f'[Image attached at: {img}]' in result[0]['text']
+            assert f'vision_analyze with image_url: {img}' in result[0]['text']
             assert len(result) == 2
             assert result[1]['type'] == 'image_url'
             url = result[1]['image_url']['url']
@@ -353,6 +357,37 @@ class TestBuildNativeMultimodalMessage:
         sanitized = _sanitize_messages_for_api([{'role': 'user', 'content': content}], cfg=cfg)
 
         assert sanitized == [{'role': 'user', 'content': content}]
+
+    def test_text_image_mode_current_turn_includes_vision_tool_hint(self):
+        """Text-mode current turns must still give the agent an inspectable image path."""
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            img = root / 'pasted.png'
+            _make_png(img)
+            atts = _normalize_chat_attachments([{
+                'name': 'pasted.png',
+                'path': str(img),
+                'mime': 'image/png',
+                'size': img.stat().st_size,
+                'is_image': True,
+            }])
+
+            result = _build_native_multimodal_message(
+                '[WS]\n',
+                f'これのこと？\n\n[Attached files: {img}]',
+                atts,
+                str(root),
+                cfg={'agent': {'image_input_mode': 'text'}},
+            )
+
+            assert isinstance(result, str)
+            assert 'これのこと？' in result
+            assert f'[Image attached at: {img}]' in result
+            assert f'vision_analyze with image_url: {img}' in result
+
+    def test_auto_unknown_model_falls_back_to_text_mode(self):
+        """WebUI auto mode should match Hermes Agent: unknown/non-vision => text."""
+        assert _resolve_image_input_mode({}, provider='openai-codex', model='text-only-test') == 'text'
 
     def test_sync_chat_history_sanitizer_receives_config(self):
         """#2398: fallback POST /api/chat must use the text-mode history sanitizer too."""
