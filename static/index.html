@@ -1251,6 +1251,11 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_token_usage">Displays input/output token count below each assistant reply. Also toggled with <code>/usage</code>.</div>
             </div>
             <div class="settings-field">
+              <label for="settingsMaxTokens" data-i18n="settings_label_max_tokens">Max output tokens</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_max_tokens">Optional hard cap for assistant output tokens. Leave blank to let streaming use the effective fallback from config.</div>
+              <input type="number" id="settingsMaxTokens" min="1" step="1" data-i18n-placeholder="settings_placeholder_max_tokens_none" placeholder="No override" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowQuotaChip" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_quota_chip">Show provider quota chip in composer</span>

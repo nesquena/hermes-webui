@@ -6616,6 +6616,34 @@ function _orderedSidebarPanels(order){
   return out;
 }
 
+function _dashboardPanelMode(){
+  var modeEl=$('settingsDashboardMode');
+  var mode=modeEl&&modeEl.value;
+  return mode==='never'||mode==='always'||mode==='auto'?mode:'auto';
+}
+
+function _isDashboardChipOn(){
+  return _dashboardPanelMode()!=='never';
+}
+
+function _renderDashboardVisibilityChip(container){
+  if(!container)return null;
+  var chip=document.createElement('button');
+  chip.type='button';
+  chip.className='tab-visibility-chip';
+  chip.setAttribute('data-tab-panel','__hermes_dashboard__');
+  chip.setAttribute('role','switch');
+  var isOn=_isDashboardChipOn();
+  chip.setAttribute('aria-checked',isOn?'true':'false');
+  if(!isOn) chip.classList.add('chip-off');
+  chip.textContent=typeof t==='function'?t('tab_dashboard'):'Dashboard';
+  chip.onclick=function(){
+    if(Date.now()<_tabVisibilityDragSuppressUntil)return;
+    _toggleDashboardVisibilityChip();
+  };
+  return chip;
+}
+
 function _applyTabOrder(order){
   var ordered=_orderedSidebarPanels(order);
   ['.rail','.sidebar-nav'].forEach(function(selector){
@@ -6688,6 +6716,8 @@ function _renderTabVisibilityChips(){
     _wireTabChipDrag(chip,panel);
     container.appendChild(chip);
   });
+  var dashboardChip=_renderDashboardVisibilityChip(container);
+  if(dashboardChip) container.appendChild(dashboardChip);
 }
 
 function _wireTabChipDrag(chip,panel){
@@ -6740,6 +6770,21 @@ function _toggleTabVisibilityChip(panel){
   _applyTabVisibility(hidden);
   _renderTabVisibilityChips();
   _scheduleAppearanceAutosave();
+}
+
+function _toggleDashboardVisibilityChip(){
+  var modeEl=$('settingsDashboardMode');
+  if(!modeEl||typeof saveDashboardSettings!=='function') return;
+  var currentMode=_dashboardPanelMode();
+  var nextMode=currentMode==='never'
+    ? (typeof _getDashboardChipRestoreMode==='function' ? _getDashboardChipRestoreMode() : 'auto')
+    : 'never';
+  var previousMode=currentMode;
+  modeEl.value=nextMode;
+  Promise.resolve(saveDashboardSettings({raiseOnError:true})).catch(function(){
+    modeEl.value=previousMode;
+    if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
+  });
 }
 
 function _ensureComposerControlVisibilityState(settings){
@@ -7470,9 +7515,16 @@ async function _autosavePreferencesSettings(payload){
       )
     );
     if(!pwDirty&&!modelDirty){
-      _settingsDirty=false;
-      const bar=$('settingsUnsavedBar');
-      if(bar) bar.style.display='none';
+      const maxTokensField=$('settingsMaxTokens');
+      const maxTokensDirty=!!(
+        maxTokensField&&
+        String(maxTokensField.value||'')!==String(maxTokensField.dataset.initialValue||'')
+      );
+      if(!maxTokensDirty){
+        _settingsDirty=false;
+        const bar=$('settingsUnsavedBar');
+        if(bar) bar.style.display='none';
+      }
     }
   }catch(e){
     console.warn('[settings] preferences autosave failed', e);
@@ -7484,6 +7536,18 @@ function _retryPreferencesAutosave(){
   const payload=_settingsPreferencesAutosaveRetryPayload||_preferencesPayloadFromUi();
   _setPreferencesAutosaveStatus('saving');
   _autosavePreferencesSettings(payload);
+}
+
+function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
+  if(!field) return;
+  const parsedFallback=parseInt(fallbackValue,10);
+  if(Number.isFinite(parsedFallback)&&parsedFallback>0&&typeof t==='function'){
+    field.placeholder=t('settings_placeholder_max_tokens_fallback', parsedFallback);
+    return;
+  }
+  field.placeholder=(typeof t==='function')
+    ? t('settings_placeholder_max_tokens_none')
+    : 'No override';
 }
 
 async function loadSettingsPanel(){
@@ -7724,6 +7788,18 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const maxTokensField=$('settingsMaxTokens');
+    if(maxTokensField){
+      const rawMaxTokens=settings.max_tokens;
+      const parsedMaxTokens=parseInt(rawMaxTokens,10);
+      const hasRootOverride=Number.isFinite(parsedMaxTokens)&&parsedMaxTokens>0;
+      maxTokensField.value=hasRootOverride
+        ? String(parsedMaxTokens)
+        : '';
+      _syncSettingsMaxTokensPlaceholder(maxTokensField,settings.max_tokens_fallback);
+      maxTokensField.dataset.initialValue=maxTokensField.value;
+      maxTokensField.addEventListener('input',_markSettingsDirty,{once:false});
+    }
     // Ambient provider quota chip toggle — default off; only shows at ≥1400px viewport
     // when enabled (see style.css @media (max-width:1399.98px) rule).
     const showQuotaChipCb=$('settingsShowQuotaChip');
@@ -9628,6 +9704,16 @@ function _applySavedSettingsUi(saved, body, opts){
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  const maxTokensField=$('settingsMaxTokens');
+  if(maxTokensField){
+    const savedRawMaxTokens=saved&&saved.max_tokens;
+    const parsedSavedMaxTokens=parseInt(savedRawMaxTokens,10);
+    maxTokensField.value=(Number.isFinite(parsedSavedMaxTokens)&&parsedSavedMaxTokens>0)
+      ? String(parsedSavedMaxTokens)
+      : '';
+    _syncSettingsMaxTokensPlaceholder(maxTokensField,saved&&saved.max_tokens_fallback);
+    maxTokensField.dataset.initialValue=maxTokensField.value;
+  }
   if(typeof startGatewaySSE==='function'){
     if(showCliSessions) startGatewaySSE();
     else if(typeof stopGatewaySSE==='function') stopGatewaySSE();
@@ -10180,6 +10266,14 @@ async function saveSettings(andClose){
   Object.assign(body,_structuredCodeViewFromUi());
   body.language=language;
   body.show_token_usage=showTokenUsage;
+  const maxTokensField=$('settingsMaxTokens');
+  if(maxTokensField){
+    const maxTokensRaw=String(maxTokensField.value||'').trim();
+    const initialMaxTokens=String(maxTokensField.dataset.initialValue||'').trim();
+    if(maxTokensRaw!==initialMaxTokens){
+      body.max_tokens=maxTokensRaw===''?null:maxTokensRaw;
+    }
+  }
   body.show_quota_chip=showQuotaChip===true;
   body.show_conversation_outline=showConversationOutline===true;
   body.show_tps=showTps;
