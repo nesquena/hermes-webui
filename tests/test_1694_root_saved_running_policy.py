@@ -45,7 +45,7 @@ def test_root_saved_running_session_is_checked_before_load_session_projection():
     block = _boot_saved_session_block()
     guard = "!urlSession&&savedLocal"
     guard_pos = block.replace(" ", "").find(guard)
-    load_pos = block.find("await loadSession(saved)")
+    load_pos = block.find("await loadSession(saved, {preserveActiveInput:true})")
     assert guard_pos >= 0, (
         "root `/` boot must have a !urlSession && savedLocal guard for saved "
         "running sessions before projecting them into the active pane"

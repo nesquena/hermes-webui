@@ -2484,7 +2484,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
         await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
-      await loadSession(saved);
+      await loadSession(saved, {preserveActiveInput:true});
       // Hard refresh starts from the static HTML model list. Hydrate the live
       // catalog after the saved session is known, then re-apply that session's
       // model before S._bootReady lets syncModelChip reveal the composer label.
