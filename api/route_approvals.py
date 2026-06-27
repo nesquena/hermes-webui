@@ -184,6 +184,31 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
     return head, total, changed
 
 
+def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str | None:
+    """Return the mirrored gateway approval run_id for a matching pending card.
+
+    Reconciles the mirror first so a live gateway head still survives a lost
+    `active_stream_id` pointer.
+    """
+    approval_id = str(approval_id or "").strip()
+    if not approval_id:
+        return None
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(session_key)
+        queue = _pending.get(session_key)
+        if isinstance(queue, list):
+            entries = queue
+        elif queue:
+            entries = [queue]
+        else:
+            return None
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("approval_id") == approval_id and entry.get(_GATEWAY_MIRROR_FLAG):
+                run_id = str(entry.get("run_id") or "").strip()
+                return run_id or None
+    return None
+
+
 def submit_gateway_pending_mirror(session_key: str, approval: dict) -> None:
     """Mirror the live gateway head into WebUI polling state under a typed tag."""
     del approval  # mirror from the live gateway head under `_lock`, not from callback input
