@@ -328,20 +328,25 @@ def test_load_session_schedules_async_session_visit_model_refresh_after_metadata
     body = _extract_function_body(_read_static("sessions.js"), "async function loadSession(")
 
     assign_idx = body.index("S.session=data.session")
-    promise_idx = body.index("const modelRefreshPromise=Promise.resolve().then(")
+    boot_guard_idx = body.index("if(!S._bootReady&&typeof window!=='undefined'&&typeof window._startBootModelDropdown==='function'){")
+    boot_promise_idx = body.index("Promise.resolve().then(()=>{", boot_guard_idx)
+    boot_refresh_idx = body.index("return window._startBootModelDropdown();")
+    else_idx = body.index("}else{", boot_refresh_idx)
+    promise_idx = body.index("const modelRefreshPromise=Promise.resolve().then(", else_idx)
     ready_idx = body.index("window._modelDropdownReady=modelRefreshPromise")
     refresh_idx = body.index("populateModelDropdown({freshness:'session_visit'})")
     stale_guard_idx = body.index("_loadingSessionId!==modelRefreshSid")
 
-    assert assign_idx < promise_idx < refresh_idx < ready_idx
-    assert promise_idx < stale_guard_idx < refresh_idx
+    assert assign_idx < boot_guard_idx < boot_promise_idx < boot_refresh_idx < else_idx < promise_idx < refresh_idx < ready_idx
+    assert boot_promise_idx < stale_guard_idx < boot_refresh_idx
+    assert promise_idx < body.index("_loadingSessionId!==modelRefreshSid", promise_idx) < refresh_idx
 
 
-def test_boot_model_dropdown_reuses_inflight_session_visit_refresh():
-    body = _extract_function_body(_read_static("boot.js"), "const _startBootModelDropdown=()=>")
+def test_boot_model_dropdown_clears_cached_ready_on_401():
+    body = _extract_function_body(_read_static("boot.js"), "const _redirectBootModelDropdownIfUnauth=(res)=>")
 
-    ready_idx = body.index("const ready=window._modelDropdownReady;")
-    reuse_idx = body.index("if(ready&&typeof ready.then==='function') return ready;")
-    hydrate_idx = body.index("const next=_hydrateBootModelDropdown();")
+    status_idx = body.index("if(!res||res.status!==401) return false;")
+    clear_idx = body.index("window._modelDropdownReady=null;")
+    consumed_idx = body.index("if(_bootActiveProfileUnauthRedirectBudget.isConsumed()) return true;")
 
-    assert ready_idx < reuse_idx < hydrate_idx
+    assert status_idx < clear_idx < consumed_idx
