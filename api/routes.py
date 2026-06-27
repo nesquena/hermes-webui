@@ -6673,6 +6673,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _approval_sse_notify_locked,
     _approval_sse_notify,
     _GATEWAY_MIRROR_FLAG,
+    _gateway_mirrored_pending_run_id,
     reconcile_gateway_pending_mirror_locked,
     submit_gateway_pending_mirror,
     submit_pending,
@@ -18553,7 +18554,9 @@ def _handle_approval_respond(handler, body):
         return bad(handler, f"Invalid choice: {choice}")
     approval_id = body.get("approval_id", "")
 
-    # Gateway relay: forward choice to the runs API when session has an active run.
+    # Gateway relay: forward choice to the runs API when session has an active run,
+    # or recover the run_id from the mirrored gateway approval entry if the
+    # stream pointer has already been cleared.
     try:
         from api.gateway_chat import (
             _STREAM_RUN_IDS,
@@ -18568,6 +18571,8 @@ def _handle_approval_respond(handler, body):
             active_sid = getattr(s, "active_stream_id", None)
             if active_sid:
                 _run_id = _STREAM_RUN_IDS.get(active_sid)
+            if not _run_id and approval_id:
+                _run_id = _gateway_mirrored_pending_run_id(sid, approval_id)
         if _run_id:
             if not approval_id:
                 return bad(handler, "approval_id is required for gateway approvals")
@@ -18579,21 +18584,13 @@ def _handle_approval_respond(handler, body):
                 HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(_run_id, approval_id, choice)
             except (RunnerClientError, ValueError) as exc:
                 return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
+            # The outbound relay only resumes the remote run; the local mirror
+            # still needs the same cleanup path so the parked entry, mirrored
+            # card, and agent signal all settle here too.
+            _resolve_approval_legacy(sid, approval_id, choice)
             return j(handler, {"ok": True, "choice": choice, "relayed": True})
-        # #4771 surfaces an explicit relay-failure 409 when a gateway approval
-        # is pending but its run is gone (so the card stays actionable instead
-        # of silently failing). That signal is ONLY meaningful on a
-        # gateway-backed deployment. On the default local in-process backend,
-        # every guarded command parks an entry in tools.approval._gateway_queues
-        # (via _await_gateway_decision), which the WebUI mirrors into _pending
-        # with _GATEWAY_MIRROR_FLAG set — but there is no gateway run and no
-        # _STREAM_RUN_IDS entry by design. Without the backend-mode gate below,
-        # _gateway_pending_approval_without_run_id() returns True for that purely
-        # local approval and the handler 409s ("active run unavailable"),
-        # refusing to resolve an approval that resolves perfectly well locally.
-        # Gate on gateway mode so local approvals fall through to the local
-        # resolution path; gateway behaviour is unchanged. (#4771 regression;
-        # also reported as #4948)
+        # Only a still-mirrored gateway approval with a missing run should 409;
+        # stale or empty gateway clicks fall through to local resolution.
         if webui_gateway_chat_enabled(_get_config()) and _gateway_pending_approval_without_run_id(
             sid, approval_id
         ):
