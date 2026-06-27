@@ -3622,9 +3622,7 @@ def _anchor_scene_matching_content_tool_row_index(
             rows[index],
             incoming_row,
         ) and (
-            not existing_id
-            or not incoming_id
-            or existing_id == incoming_id
+            (existing_id and incoming_id and existing_id == incoming_id)
             or (id_flexible and _anchor_scene_tool_rows_have_same_started_at(rows[index], incoming_row))
         ) and _anchor_scene_tool_rows_have_compatible_invocation(rows[index], incoming_row):
             return index

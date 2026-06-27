@@ -2899,7 +2899,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       reusableRows.length===1&&
       Number(incomingTotal)===1&&
       (
-        _anchorSceneToolRowsHaveNonConflictingIds(reusableRows[0],incomingRow)||
+        (
+          _anchorSceneToolRowId(reusableRows[0])&&
+          _anchorSceneToolRowId(incomingRow)&&
+          _anchorSceneToolRowId(reusableRows[0])===_anchorSceneToolRowId(incomingRow)
+        )||
         (
           idFlexibleRows&&
           idFlexibleRows.has(reusableRows[0])&&

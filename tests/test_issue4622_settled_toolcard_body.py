@@ -888,6 +888,55 @@ def test_consumed_singleton_same_command_live_tool_stays_distinct(driver_path):
     assert len([card for card in cards if card["name"] == "terminal"]) == 2
 
 
+def test_consumed_singleton_anonymous_live_tool_stays_distinct(driver_path):
+    """A consumed content row must not absorb a later anonymous live call."""
+    messages = [
+        {"role": "user", "content": "inspect twice"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {"id": "content-a", "name": "terminal", "args": {"cmd": "ls"}, "snippet": "OUTPUT A"}
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "S": {
+                "toolCalls": [
+                    {
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "args": {"cmd": "ls"},
+                        "snippet": "OUTPUT B",
+                    }
+                ]
+            },
+        },
+    )
+
+    terminal_cards = [card for card in cards if card["name"] == "terminal"]
+    snippets = sorted(card["snippet"] for card in terminal_cards)
+
+    assert len(terminal_cards) == 2
+    assert snippets == ["OUTPUT A", "OUTPUT B"]
+
+
 def test_consumed_singleton_body_only_live_tool_stays_distinct(driver_path):
     """A body-only live row has no proof that it is the consumed content tool."""
     messages = [

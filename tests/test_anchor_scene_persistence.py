@@ -1555,6 +1555,68 @@ def test_anchor_scene_hydration_keeps_same_command_used_singleton_tool_distinct(
     assert len(tools) == 2
 
 
+def test_anchor_scene_hydration_keeps_anonymous_used_singleton_tool_distinct():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "content-a",
+                    "name": "terminal",
+                    "input": {"cmd": "ls"},
+                    "snippet": "OUTPUT A",
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {
+                "assistant_msg_idx": 1,
+                "name": "terminal",
+                "input": {"cmd": "ls"},
+                "snippet": "OUTPUT B",
+            }
+        ],
+    )
+
+    rows = hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+    tools = [row for row in rows if row.get("role") == "tool"]
+    snippets = sorted(row["tool"]["snippet"] for row in tools)
+
+    assert len(tools) == 2
+    assert snippets == ["OUTPUT A", "OUTPUT B"]
+
+
 def test_anchor_scene_hydration_keeps_body_only_distinct_used_singleton_tool_call():
     from api import routes
 
