@@ -175,6 +175,7 @@ function installGlobals(select, redirects, fetchQueue, jsonCalls) {
   };
   globalThis.location = windowObj.location;
   globalThis.sessionStorage = new FakeStorage();
+  globalThis.localStorage = new FakeStorage();
   globalThis.document = {
     baseURI: 'http://localhost/session/abc?workspace=test',
     createElement(tag) {
@@ -340,6 +341,18 @@ async function runBootAttempt(attempt, redirects, storage, fetchQueue, jsonCalls
       ],
       jsonCalls,
     ));
+  } else if (scenario.kind === 'post-boot-refresh') {
+    const select = buildSelect();
+    installGlobals(select, redirects, [], jsonCalls);
+    globalThis.sessionStorage = storage;
+    globalThis.S = {session: null, activeProfile: 'default', activeProfileIsDefault: true};
+    globalThis._bootActiveProfileUnauthRedirectBudget.spendOnFallback(storage);
+    globalThis.fetch = async () => ({
+      status: 401,
+      ok: false,
+      json: async () => ({active_provider: 'openai', default_model: 'gpt-4o', configured_model_badges: {}, groups: []}),
+    });
+    await populateModelDropdown({preferProfileDefaultOnFreshBoot: true});
   } else {
     throw new Error(`unknown scenario: ${scenario.kind}`);
   }
@@ -419,3 +432,15 @@ def test_boot_model_success_still_stores_active_provider(driver_path):
     assert payload["activeProvider"] == "anthropic"
     assert payload["defaultModel"] == "claude-sonnet-4"
     assert payload["jsonCalls"] == 1
+
+
+def test_post_boot_model_refresh_keeps_normal_401_redirect(driver_path):
+    payload = _run(
+        driver_path,
+        {
+            "kind": "post-boot-refresh",
+        },
+    )
+
+    assert payload["jsonCalls"] == 0
+    assert "window._ensureModelDropdownReady=_startModelDropdown;" in BOOT_JS.read_text(encoding="utf-8")
