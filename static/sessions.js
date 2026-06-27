@@ -12,6 +12,7 @@ const ICONS={
   edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
   spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
+  share:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="8" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.8 7.1l4.4-2.2M5.8 8.9l4.4 2.2"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -3620,6 +3621,74 @@ function _appendSessionCopyLinkAction(menu, session){
   ));
 }
 
+function _parseSessionShareAccounts(value){
+  return Array.from(new Set(String(value||'')
+    .split(/[\n,]/)
+    .map(part=>part.trim().toLowerCase())
+    .filter(Boolean)));
+}
+
+function _sessionSharedAccounts(session){
+  const raw=session&&session.shared_with_accounts;
+  return _parseSessionShareAccounts(Array.isArray(raw)?raw.join(','):raw);
+}
+
+function _setSessionSharedAccountsLocal(session,nextAccounts){
+  const normalized=_parseSessionShareAccounts(Array.isArray(nextAccounts)?nextAccounts.join(','):nextAccounts);
+  if(session) session.shared_with_accounts=normalized;
+  const cached=(_allSessions||[]).find(item=>item&&session&&item.session_id===session.session_id);
+  if(cached) cached.shared_with_accounts=normalized;
+  if(S.session&&session&&S.session.session_id===session.session_id) S.session.shared_with_accounts=normalized;
+}
+
+async function _shareSessionWithAccounts(session){
+  if(!session||!session.session_id) return false;
+  const currentAccounts=_sessionSharedAccounts(session);
+  const value=await showPromptDialog({
+    title:t('session_share_prompt_title'),
+    message:t('session_share_prompt_message'),
+    value:currentAccounts.join(', '),
+    placeholder:t('session_share_prompt_placeholder'),
+    confirmLabel:t('session_share_save')||t('dialog_confirm_btn')
+  });
+  if(value===null||value===undefined) return false;
+  const nextAccounts=_parseSessionShareAccounts(value);
+  const nextSet=new Set(nextAccounts);
+  const toRemove=currentAccounts.filter(account=>!nextSet.has(account));
+  try{
+    if(toRemove.length){
+      await api('/api/session/share',{method:'POST',body:JSON.stringify({session_id:session.session_id,accounts:toRemove,shared:false})});
+    }
+    if(nextAccounts.length){
+      await api('/api/session/share',{method:'POST',body:JSON.stringify({session_id:session.session_id,accounts:nextAccounts,shared:true})});
+    }
+    session.shared_with_accounts=nextAccounts;
+    const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
+    if(cached) cached.shared_with_accounts=nextAccounts;
+    if(S.session&&S.session.session_id===session.session_id) S.session.shared_with_accounts=nextAccounts;
+    _setSessionSharedAccountsLocal(session,nextAccounts);
+    renderSessionListFromCache();
+    void renderSessionList();
+    showToast(t('session_share_saved'));
+    return true;
+  }catch(err){
+    showToast(t('session_share_failed')+(err&&err.message?err.message:String(err)));
+    return false;
+  }
+}
+
+function _appendSessionShareAction(menu, session){
+  menu.appendChild(_buildSessionAction(
+    t('session_share'),
+    t('session_share_desc'),
+    ICONS.share,
+    async()=>{
+      closeSessionActionMenu();
+      await _shareSessionWithAccounts(session);
+    }
+  ));
+}
+
 function _appendSessionDuplicateAction(menu, session){
   menu.appendChild(_buildSessionAction(
     t('session_duplicate'),
@@ -3696,6 +3765,7 @@ function _openSessionActionMenu(session, anchorEl){
     _mountSessionActionMenu(menu, session, anchorEl);
     return;
   }
+  _appendSessionShareAction(menu, session);
   // Rename — first menu item by request (#1764). Double-click rename is
   // timing-sensitive: the first click frequently registers as "open the
   // chat" before the second click arrives, so users open the conversation

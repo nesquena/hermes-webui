@@ -59,6 +59,43 @@ def test_delete_action_repaints_sidebar_before_loading_remaining_sessions():
     assert body.index(api_call) < body.index(optimistic) < body.index(full_refresh)
     assert body.index(optimistic) < body.index(remaining_fetch)
 
+def test_session_action_menu_includes_share_action_for_writable_sessions():
+    """Writable WebUI sessions should expose account sharing from the row menu."""
+    menu_body = _function_block(SESSIONS_JS, "_openSessionActionMenu")
+
+    assert "_appendSessionShareAction(menu, session);" in menu_body
+    assert menu_body.index("if(isReadOnly){") > menu_body.index("_appendSessionCopyLinkAction(menu, session);")
+    assert menu_body.index("_appendSessionShareAction(menu, session);") > menu_body.index("if(isReadOnly){")
+
+
+def test_session_share_action_prompts_and_calls_share_api():
+    """Share action should edit comma-separated accounts through /api/session/share."""
+    body = _function_block(SESSIONS_JS, "_shareSessionWithAccounts")
+
+    assert "showPromptDialog({" in body
+    assert "t('session_share_prompt_title')" in body
+    assert "_parseSessionShareAccounts(value)" in body
+    assert "api('/api/session/share'" in body
+    assert "body:JSON.stringify({session_id:session.session_id,accounts:toRemove,shared:false})" in body
+    assert "body:JSON.stringify({session_id:session.session_id,accounts:nextAccounts,shared:true})" in body
+    assert "session.shared_with_accounts=nextAccounts" in body
+    assert "if(cached) cached.shared_with_accounts=nextAccounts" in body
+
+
+def test_session_share_i18n_keys_exist():
+    i18n = (Path(__file__).resolve().parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+    for key in [
+        "session_share",
+        "session_share_desc",
+        "session_share_prompt_title",
+        "session_share_prompt_message",
+        "session_share_prompt_placeholder",
+        "session_share_saved",
+        "session_share_failed",
+    ]:
+        assert key in i18n
+
+
 def test_batch_delete_remaining_session_fetch_uses_sidebar_query_string():
     """Batch delete must reload the default sidebar through the same query builder."""
     assert SESSIONS_JS.count("const remaining=await api('/api/sessions'+_sessionListQueryString());") >= 2
