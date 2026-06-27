@@ -1041,4 +1041,123 @@ def test_sync_skips_during_registration_window_recent_pending(monkeypatch):
     assert reloaded.pending_user_message == "new request"
 
 
+def test_sync_backs_off_when_session_lock_is_held(monkeypatch):
+    """Lock contention: self-heal must not write while another writer holds the
+    per-session lock.
+
+    The reconcile + sidecar write happen under the per-session agent lock so a
+    concurrent worker/checkpoint save can't be clobbered. If the lock is already
+    held (the worker is mid-writeback), the self-heal must back off entirely and
+    leave the sidecar untouched rather than racing a full-record overwrite.
+    """
+    sid = "state_lock_contended_sid"
+    stream_id = "stream_dead_but_locked"
+    s = Session(
+        session_id=sid,
+        title="Lock contended",
+        messages=[
+            {"role": "user", "content": "old question", "timestamp": 100.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=102.0,  # old → past grace window
+    )
+    s.save()
+
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 100.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "recovered tail", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": len(state_messages), "last_message_at": 103.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    # Simulate a concurrent holder of the per-session lock (e.g. the worker's own
+    # finalize path) so the non-blocking acquire fails.
+    lock = models._get_session_agent_lock(sid)
+    assert lock.acquire(blocking=False)
+    try:
+        result = models._sync_sidecar_from_state_db_if_newer(s)
+    finally:
+        lock.release()
+
+    # Self-heal backed off; nothing was written and the live object is untouched.
+    assert result is False
+    assert s.active_stream_id == stream_id
+    assert s.pending_user_message == "new request"
+    assert [m["content"] for m in s.messages] == ["old question", "old answer"]
+
+    reloaded = Session.load(sid)
+    assert reloaded.active_stream_id == stream_id
+    assert [m["content"] for m in reloaded.messages] == ["old question", "old answer"]
+
+
+def test_sync_revalidates_against_concurrent_disk_write_under_lock(monkeypatch):
+    """Under-lock reload: a newer concurrent sidecar write is not clobbered.
+
+    The self-heal reloads the session under the lock and writes back the
+    reconciled result based on that fresh load, not a snapshot captured before
+    the lock. If a concurrent writer rotated the stream / cleared pending on disk
+    after our pre-lock read, the under-lock recheck must observe it and back off
+    rather than overwriting the whole record with our stale view.
+    """
+    sid = "state_concurrent_disk_write_sid"
+    stream_id = "stream_pre_lock"
+    s = Session(
+        session_id=sid,
+        title="Concurrent disk write",
+        messages=[
+            {"role": "user", "content": "old question", "timestamp": 100.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=102.0,
+    )
+    s.save()
+
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 100.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "recovered tail", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": len(state_messages), "last_message_at": 103.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    # Between the caller's pre-lock view (s, still pointing at stream_id) and the
+    # under-lock reload, a concurrent worker finalized the turn on disk: the
+    # sidecar now has a DIFFERENT active_stream_id. The under-lock recheck must
+    # detect the mismatch and refuse to clobber.
+    disk = Session.load(sid)
+    disk.active_stream_id = "rotated_stream_after_compression"
+    disk.save(touch_updated_at=False)
+
+    result = models._sync_sidecar_from_state_db_if_newer(s)
+
+    assert result is False
+    # On-disk record keeps the concurrent writer's value — not overwritten.
+    reloaded = Session.load(sid)
+    assert reloaded.active_stream_id == "rotated_stream_after_compression"
+
+
+
 
