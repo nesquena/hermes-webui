@@ -92,7 +92,8 @@ def test_profile_background_worker_uses_gateway_parity_runtime_env_filter():
     assert "os.environ.update(runtime_env)" not in src
 
 
-def test_streaming_thread_env_allows_profile_terminal_cwd_override():
+def test_streaming_thread_env_allows_profile_terminal_cwd_override(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_EXEC_ASK", "0")
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 
     assert "def _build_agent_thread_env" in src
@@ -106,7 +107,7 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
         re.DOTALL,
     )
     assert match, "_build_agent_thread_env not found in api/streaming.py"
-    ns: dict = {}
+    ns: dict = {"os": os}
     exec(compile(match.group(1), "<streaming_extract>", "exec"), ns)
 
     env = ns["_build_agent_thread_env"](
@@ -125,7 +126,7 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
     )
 
     assert env["TERMINAL_CWD"] == "/active/workspace"
-    assert env["HERMES_EXEC_ASK"] == "1"
+    assert env["HERMES_EXEC_ASK"] == "0"
     assert env["HERMES_SESSION_KEY"] == "active-session"
     assert env["HERMES_SESSION_ID"] == "active-session"
     assert env["HERMES_SESSION_PLATFORM"] == "webui"

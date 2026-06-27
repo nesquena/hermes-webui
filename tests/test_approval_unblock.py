@@ -6,6 +6,8 @@ need to prevent the UI getting stuck in "Thinking…" during dangerous commands.
 """
 
 import json
+import os
+import sys
 import threading
 import uuid
 import urllib.request
@@ -15,6 +17,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+AGENT_DIR = Path(os.environ.get("HERMES_WEBUI_AGENT_DIR", "/opt/hermes"))
+if (AGENT_DIR / "tools" / "approval.py").exists():
+    sys.path.insert(0, str(AGENT_DIR))
 
 # Import approval internals — shared module-level state within this process.
 # The HTTP tests use the test server (port 8788, separate process).
@@ -29,6 +35,10 @@ try:
         _lock,
         _ApprovalEntry,
         submit_pending,
+        check_all_command_guards,
+        set_current_session_key,
+        reset_current_session_key,
+        clear_session,
     )
     # has_pending and pop_pending were removed from tools.approval when the
     # agent renamed has_pending -> has_blocking_approval (gateway queue check)
@@ -194,6 +204,28 @@ class TestGatewayApprovalUnblocking:
 
         # Cleanup
         unregister_gateway_notify(sid)
+
+    def test_webui_exec_ask_zero_bypasses_dangerous_command_approval(self, monkeypatch):
+        """HERMES_WEBUI_EXEC_ASK=0 must make WebUI turns unattended even though
+        WebUI still sets HERMES_SESSION_PLATFORM for background routing.
+        """
+        sid = f"unit-webui-yolo-{uuid.uuid4().hex[:8]}"
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webui")
+        monkeypatch.setenv("HERMES_EXEC_ASK", "0")
+        token = set_current_session_key(sid)
+        try:
+            result = check_all_command_guards(
+                "sqlite3 /tmp/hermes-webui-approval-test.db 'DROP TABLE IF EXISTS probe;'",
+                "local",
+            )
+        finally:
+            reset_current_session_key(token)
+            clear_session(sid)
+
+        assert result["approved"] is True
+        assert result.get("approval_pending") is not True
 
 
 # ── Symbol existence tests ───────────────────────────────────────────────────
