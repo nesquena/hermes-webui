@@ -1452,6 +1452,8 @@ from api.workspace import set_last_workspace
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
 # metadata added by the webui and must be stripped before the API call.
+# `reasoning_content` is provider-facing for reasoning-capable models. Display
+# metadata such as `reasoning`, `thinking`, and `_reasoning` stays omitted here.
 _API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content'}
 
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
@@ -3560,6 +3562,32 @@ def _strip_native_image_parts_from_content(content):
     return clean_parts
 
 
+_OOB_USER_MESSAGE_BLOCK_RE = re.compile(
+    r'\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)\s*.*?)?\]\s*?.*?\[/OUT-OF-BAND\s+USER\s+MESSAGE\]',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_oob_blocks(content):
+    """Remove consumed [OUT-OF-BAND USER MESSAGE ...] blocks from content.
+
+    These markers are internal control data that should never reach the model.
+    They can appear as plain strings or inside list-based content parts.
+    """
+    if isinstance(content, str):
+        return _OOB_USER_MESSAGE_BLOCK_RE.sub('', content)
+    if isinstance(content, list):
+        return [_strip_oob_blocks(part) for part in content]
+    if isinstance(content, dict):
+        return {
+            key: _strip_oob_blocks(value)
+            if isinstance(value, (str, list, dict))
+            else copy.deepcopy(value)
+            for key, value in content.items()
+        }
+    return content
+
+
 def _content_has_reasoning_only_parts(content) -> bool:
     if not isinstance(content, list) or not content:
         return False
@@ -3667,6 +3695,8 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
+        if 'content' in sanitized:
+            sanitized['content'] = _strip_oob_blocks(sanitized['content'])
         if strip_native_images and 'content' in sanitized:
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):
@@ -3764,6 +3794,8 @@ def _api_safe_message_positions(messages):
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
+        if 'content' in sanitized:
+            sanitized['content'] = _strip_oob_blocks(sanitized['content'])
         if sanitized.get('role'):
             out.append((idx, sanitized))
 
@@ -3898,7 +3930,10 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     def _safe_projection(msg):
         if not isinstance(msg, dict):
             return None
-        return {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+        projected = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+        if 'content' in projected:
+            projected['content'] = _strip_oob_blocks(projected['content'])
+        return projected
 
     safe_pos = 0
     while safe_pos < len(prev_safe):
