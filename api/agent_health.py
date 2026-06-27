@@ -217,17 +217,18 @@ def _read_gateway_runtime_status(gateway_status: Any, pid_path: Path | None) -> 
         try:
             return read_runtime_status(pid_path=pid_path)
         except TypeError:
+            runtime_status_file = str(
+                getattr(gateway_status, "_RUNTIME_STATUS_FILE", _GATEWAY_RUNTIME_STATUS_FILE)
+            )
+            runtime_status_path = pid_path.with_name(runtime_status_file)
             try:
-                return read_runtime_status(pid_path)
+                return read_runtime_status(runtime_status_path)
             except TypeError:
                 if getattr(gateway_status, "__name__", "") == "gateway.status" or hasattr(
                     gateway_status,
                     "_read_json_file",
                 ):
-                    runtime_status_file = str(
-                        getattr(gateway_status, "_RUNTIME_STATUS_FILE", _GATEWAY_RUNTIME_STATUS_FILE)
-                    )
-                    runtime_status = _read_runtime_status_path(pid_path.with_name(runtime_status_file))
+                    runtime_status = _read_runtime_status_path(runtime_status_path)
                     if runtime_status is not None:
                         return runtime_status
     return read_runtime_status()
