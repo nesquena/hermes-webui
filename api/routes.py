@@ -3101,7 +3101,30 @@ def _anchor_scene_content_text(part) -> str:
         return part
     if not isinstance(part, dict):
         return str(part or "")
-    return str(part.get("text") or part.get("content") or part.get("input_text") or part.get("output_text") or "")
+    return str(
+        part.get("text")
+        or part.get("content")
+        or part.get("input_text")
+        or part.get("output_text")
+        or part.get("thinking")
+        or part.get("reasoning")
+        or part.get("summary")
+        or ""
+    )
+
+
+def _anchor_scene_content_visible_text(part) -> str:
+    if part is None:
+        return ""
+    if isinstance(part, str):
+        return part
+    if not isinstance(part, dict):
+        return str(part or "")
+    part_type = str(part.get("type") or "")
+    if part_type in ("thinking", "reasoning"):
+        return ""
+    content_text = part.get("content") if part_type == "text" else ""
+    return str(part.get("text") or part.get("input_text") or part.get("output_text") or content_text or "")
 
 
 def _anchor_scene_message_has_content_tool_use(message) -> bool:
@@ -3121,7 +3144,7 @@ def _anchor_scene_final_answer_text(message) -> str:
             last_tool_index = idx
     tail_text = "\n".join(
         text
-        for text in (_anchor_scene_content_text(part) for part in content[last_tool_index + 1 :])
+        for text in (_anchor_scene_content_visible_text(part) for part in content[last_tool_index + 1 :])
         if _anchor_scene_clean_text(text)
     )
     return tail_text if _anchor_scene_clean_text(tail_text) else ""
@@ -3633,15 +3656,13 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
             continue
         part_type = part.get("type")
         if part_type in ("text", "input_text", "output_text"):
-            if is_final_message and idx > last_tool_index:
+            if is_final_message and idx > last_tool_index and _anchor_scene_content_visible_text(part):
                 continue
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
                 rows.append(_anchor_scene_prose_row(text, order_index + len(rows), message_index, stream_id))
             continue
         if part_type in ("thinking", "reasoning"):
-            if is_final_message and idx > last_tool_index:
-                continue
             text = _anchor_scene_content_text(part)
             if _anchor_scene_clean_text(text):
                 rows.append(_anchor_scene_thinking_row(text, order_index + len(rows), message_index, stream_id))

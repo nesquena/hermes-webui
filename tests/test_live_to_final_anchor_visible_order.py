@@ -842,6 +842,8 @@ def test_settled_anchor_scene_promotes_final_content_array_to_ordered_activity_r
     rows_by_message = _function_body(MESSAGES_JS, "_anchorSceneRowsByMessageIndex")
     content_rows = _function_body(MESSAGES_JS, "_anchorSceneRowsFromContentParts")
     final_answer = _function_body(MESSAGES_JS, "_anchorSceneFinalAnswerText")
+    content_text = _function_body(MESSAGES_JS, "_anchorSceneContentText")
+    visible_text = _function_body(MESSAGES_JS, "_anchorSceneContentVisibleText")
 
     assert "const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);" in complete
     assert "const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)" in complete
@@ -854,10 +856,18 @@ def test_settled_anchor_scene_promotes_final_content_array_to_ordered_activity_r
     assert "const isFinalMessage=!!options.isFinalMessage;" in content_rows
     assert "if(!part||typeof part!=='object'){" in content_rows
     assert "if(isFinalMessage&&i>lastToolIndex) continue;" in content_rows
+    assert "if(isFinalMessage&&i>lastToolIndex&&_anchorSceneContentVisibleText(part)) continue;" in content_rows
     assert "_anchorSceneProseRow(text,rows.length,messageIndex)" in content_rows
     assert "_anchorSceneToolRowFromCall(_anchorSceneContentTool(part),rows.length,messageIndex)" in content_rows
     assert "lastToolIndex+1" in final_answer
-    assert "if(typeof part==='string') return part;" in _function_body(MESSAGES_JS, "_anchorSceneContentText")
+    assert "_anchorSceneContentVisibleText(part)" in final_answer
+    assert "if(typeof part==='string') return part;" in content_text
+    assert "part.thinking||part.reasoning||part.summary" in content_text
+    assert "partType==='thinking'||partType==='reasoning'" in visible_text
+    assert "part.text||part.input_text||part.output_text" in visible_text
+    assert "_fromContent:true" in rows_by_message
+    assert "if(!a._fromContent&&!b._fromContent)" in rows_by_message
+    assert "const {_phase,_encounter,_fromContent,...clean}=row;" in rows_by_message
     content_tool = _function_body(MESSAGES_JS, "_anchorSceneContentTool")
     assert "part.id||part.tid||part.tool_call_id||part.tool_use_id||part.call_id" in content_tool
     assert "part.name||part.tool_name||fn.name||'tool'" in content_tool

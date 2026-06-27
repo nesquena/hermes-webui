@@ -61,9 +61,10 @@ function extractFunc(src, name) {
   return src.slice(start, i);
 }
 const messagesFns = [
-	  '_anchorSceneMessageText','_anchorSceneCleanText','_anchorSceneTextKey',
-	  '_anchorSceneContentText','_anchorSceneMessageHasContentToolUse',
-	  '_anchorSceneSafePayload','_anchorSceneToolId','_anchorSceneToolName',
+		  '_anchorSceneMessageText','_anchorSceneCleanText','_anchorSceneTextKey',
+		  '_anchorSceneContentText','_anchorSceneContentVisibleText','_anchorSceneMessageHasContentToolUse',
+          '_anchorSceneFinalAnswerText',
+		  '_anchorSceneSafePayload','_anchorSceneToolId','_anchorSceneToolName',
 	  '_anchorSceneToolArgs','_anchorSceneContentTool','_anchorSceneStringPayload','_anchorSceneRowBase',
 	  '_anchorSceneProseRow','_anchorSceneThinkingRow','_anchorSceneToolRowFromCall',
 	  '_anchorSceneToolRowName','_anchorSceneToolRowId',
@@ -89,12 +90,13 @@ process.stdin.on('data',c=>buf+=c);
 process.stdin.on('end',()=>{
   var p=JSON.parse(buf||'{}');
   S=p.S||{toolCalls:[]};
-  var messages=p.messages||[];
-  var turnStart=p.turnStart!==undefined?p.turnStart:0;
-  var lastAsstIndex=p.lastAsstIndex!==undefined?p.lastAsstIndex:messages.length-1;
-  var byIdx=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex);
-  var cards=[];
-  var rows=[];
+	  var messages=p.messages||[];
+	  var turnStart=p.turnStart!==undefined?p.turnStart:0;
+	  var lastAsstIndex=p.lastAsstIndex!==undefined?p.lastAsstIndex:messages.length-1;
+	  var byIdx=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,p.includeFinal?{includeFinal:true}:undefined);
+      var finalAnswer=_anchorSceneFinalAnswerText(messages[lastAsstIndex]||{});
+	  var cards=[];
+	  var rows=[];
   byIdx.forEach(function(bucket,idx){
     bucket.forEach(function(row){
       rows.push({
@@ -115,9 +117,9 @@ process.stdin.on('end',()=>{
       });
     });
   });
-  if(p.returnRows) process.stdout.write(JSON.stringify({cards:cards,rows:rows}));
-  else process.stdout.write(JSON.stringify(cards));
-});
+	  if(p.returnRows) process.stdout.write(JSON.stringify({cards:cards,rows:rows,finalAnswer:finalAnswer}));
+	  else process.stdout.write(JSON.stringify(cards));
+	});
 })();
 `;
 process.stdout.write(code);
@@ -345,6 +347,58 @@ def test_content_tool_use_enriched_from_matching_message_tool_call(driver_path):
     assert matching[0]["snippet"] == _TERM_OUTPUT
     assert matching[0]["args"] == {"cmd": "ls -la"}
     assert matching[0]["rendersOutputBody"] is True
+
+
+def test_final_content_tail_thinking_stays_activity_and_content_order_wins_started_at(driver_path):
+    """Fresh settlement keeps final content order and does not fold thinking into the answer."""
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me check first."},
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "term-content",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                {"type": "thinking", "text": "Tail thinking must stay activity."},
+                {"type": "reasoning", "reasoning": "Tail reasoning key must stay activity."},
+                {"type": "text", "text": "Final visible answer."},
+            ],
+            "tool_calls": [
+                {
+                    "id": "term-message",
+                    "name": "terminal",
+                    "args": {"cmd": "ls"},
+                    "snippet": "OUTPUT",
+                    "started_at": 100,
+                }
+            ],
+        },
+    ]
+
+    result = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 1,
+            "includeFinal": True,
+            "returnRows": True,
+            "S": {"toolCalls": []},
+        },
+    )
+
+    rows = [row for row in result["rows"] if row["idx"] == 1]
+    assert result["finalAnswer"] == "Final visible answer."
+    assert [(row["role"], row["text"] or row["tool_call_id"]) for row in rows] == [
+        ("prose", "Let me check first."),
+        ("tool", "term-content"),
+        ("thinking", "Tail thinking must stay activity."),
+        ("thinking", "Tail reasoning key must stay activity."),
+    ]
 
 
 def test_content_tool_use_partial_args_enriched_from_matching_live_tool_call(driver_path):

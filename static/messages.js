@@ -2588,7 +2588,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(part===undefined||part===null) return '';
     if(typeof part==='string') return part;
     if(typeof part!=='object') return String(part||'');
-    return String(part.text||part.content||part.input_text||part.output_text||'');
+    return String(part.text||part.content||part.input_text||part.output_text||part.thinking||part.reasoning||part.summary||'');
+  }
+  function _anchorSceneContentVisibleText(part){
+    if(part===undefined||part===null) return '';
+    if(typeof part==='string') return part;
+    if(typeof part!=='object') return String(part||'');
+    const partType=String(part.type||'');
+    if(partType==='thinking'||partType==='reasoning') return '';
+    return String(part.text||part.input_text||part.output_text||(partType==='text'?part.content:'')||'');
   }
   function _anchorSceneMessageHasContentToolUse(message){
     return !!(message&&Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use'));
@@ -2602,7 +2610,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(part&&typeof part==='object'&&part.type==='tool_use') lastToolIndex=i;
     }
     const tailText=content.slice(lastToolIndex+1)
-      .map(part=>_anchorSceneContentText(part))
+      .map(part=>_anchorSceneContentVisibleText(part))
       .filter(text=>_anchorSceneCleanText(text))
       .join('\n');
     return _anchorSceneCleanText(tailText)?tailText:'';
@@ -2932,13 +2940,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         continue;
       }
       if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
-        if(isFinalMessage&&i>lastToolIndex) continue;
+        if(isFinalMessage&&i>lastToolIndex&&_anchorSceneContentVisibleText(part)) continue;
         const text=_anchorSceneContentText(part);
         if(_anchorSceneCleanText(text)) rows.push(_anchorSceneProseRow(text,rows.length,messageIndex));
         continue;
       }
       if(part.type==='thinking'||part.type==='reasoning'){
-        if(isFinalMessage&&i>lastToolIndex) continue;
         const text=_anchorSceneContentText(part);
         if(_anchorSceneCleanText(text)) rows.push(_anchorSceneThinkingRow(text,rows.length,messageIndex));
         continue;
@@ -3047,7 +3054,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const rowByToolId=new Map();
       if(hasOrderedContentRows){
         for(const row of contentRows){
-          pool.push({...row,_phase:1,_encounter:encounter++});
+          pool.push({...row,_phase:1,_encounter:encounter++,_fromContent:true});
           const tid=row.tool_call_id||(row.tool&&row.tool.id);
           if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
           if(row.role==='tool') contentToolRows.push(row);
@@ -3126,9 +3133,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Stable sort by (phase, started_at, encounter)
       pool.sort((a,b)=>{
         if(a._phase!==b._phase) return a._phase-b._phase;
-        const aTime=(a.tool&&a.tool.started_at!=null)?a.tool.started_at:Infinity;
-        const bTime=(b.tool&&b.tool.started_at!=null)?b.tool.started_at:Infinity;
-        if(aTime!==bTime) return aTime-bTime;
+        if(!a._fromContent&&!b._fromContent){
+          const aTime=(a.tool&&a.tool.started_at!=null)?a.tool.started_at:Infinity;
+          const bTime=(b.tool&&b.tool.started_at!=null)?b.tool.started_at:Infinity;
+          if(aTime!==bTime) return aTime-bTime;
+        }
         return a._encounter-b._encounter;
       });
       // Emit with sequential order_index values, strip temp props.
@@ -3138,7 +3147,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // (no tool id) at the same message index don't collide on the same row_id
       // and get silently deduped by _completeSettledAnchorSceneForTurn().
       for(const row of pool){
-        const {_phase,_encounter,...clean}=row;
+        const {_phase,_encounter,_fromContent,...clean}=row;
         const oi=byIdx.has(idx)?byIdx.get(idx).length:0;
         clean.order_index=oi;
         clean.seq=oi;
