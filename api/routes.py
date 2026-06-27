@@ -555,16 +555,65 @@ def _current_webui_account(handler=None) -> str | None:
     return "main"
 
 
+def _session_owner_account_or_none(session) -> str | None:
+    return _normalize_webui_account(_session_field(session, "owner_account", None))
+
+
 def _session_owner_account(session) -> str:
-    return _normalize_webui_account(_session_field(session, "owner_account", None)) or "main"
+    return _session_owner_account_or_none(session) or "main"
 
 
 def _session_shared_with_accounts(session) -> list[str]:
     return _normalize_webui_account_list(_session_field(session, "shared_with_accounts", None))
 
 
+def _main_equivalent_webui_accounts() -> set[str]:
+    """Accounts that should have the same WebUI visibility/management rights as main.
+
+    The VPS default-profile owner account is `tomoki`; treat it as the operator
+    account rather than a restricted sub-account so legacy/default sessions do
+    not disappear behind account-sharing filters.
+    """
+    return {"main", "tomoki"}
+
+
 def _is_main_webui_account(account: str | None) -> bool:
-    return (_normalize_webui_account(account) or "") == "main"
+    return (_normalize_webui_account(account) or "") in _main_equivalent_webui_accounts()
+
+
+def _configured_profile_for_webui_account(account: str | None) -> str | None:
+    normalized = _normalize_webui_account(account)
+    if not normalized:
+        return None
+    try:
+        from api.auth import _load_accounts_config
+
+        entry = (_load_accounts_config() or {}).get(normalized)
+    except Exception:
+        logger.debug("Failed to load WebUI account profile for %s", normalized, exc_info=True)
+        return None
+    if not isinstance(entry, dict):
+        return None
+    profile = str(entry.get("profile") or "").strip()
+    return profile or None
+
+
+def _legacy_unowned_session_visible_to_account_profile(session, account: str | None) -> bool:
+    """Let profile-bound accounts see pre-account-sharing sessions for their profile.
+
+    Account sharing made `main` the fallback owner for rows with no explicit
+    `owner_account`. That is correct for truly private rows, but legacy sessions
+    created before account ownership existed have no owner metadata at all. If a
+    non-main login account is configured for the same Hermes profile as such a
+    legacy row, keep the historical profile visibility rather than making the
+    sidebar look empty after enabling accounts.
+    """
+    if _session_owner_account_or_none(session) is not None:
+        return False
+    profile = _configured_profile_for_webui_account(account)
+    if not profile:
+        return False
+    return _profiles_match(_session_field(session, "profile", None), profile)
 
 
 def _session_account_visible(session, *, handler=None, account: str | None = None) -> bool:
@@ -577,7 +626,9 @@ def _session_account_visible(session, *, handler=None, account: str | None = Non
         return True
     if _session_owner_account(session) == current:
         return True
-    return current in _session_shared_with_accounts(session)
+    if current in _session_shared_with_accounts(session):
+        return True
+    return _legacy_unowned_session_visible_to_account_profile(session, current)
 
 
 def _active_skills_dir() -> Path:

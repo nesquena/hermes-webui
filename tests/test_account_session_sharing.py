@@ -105,6 +105,57 @@ def test_account_scoped_sidebar_shows_shared_cross_profile_sessions(monkeypatch)
     assert payload["other_profile_count"] == 0
 
 
+def test_profile_bound_account_sees_legacy_unowned_sessions(monkeypatch):
+    rows = [
+        _row("legacy-default", profile="default", owner=None),
+        _row("legacy-other", profile="other", owner=None),
+        _row("main-private", profile="default", owner="main"),
+    ]
+    monkeypatch.setattr(routes, "all_sessions", lambda **_kwargs: list(rows))
+    monkeypatch.setattr(routes, "_current_webui_account", lambda _handler=None: "default-user", raising=False)
+    monkeypatch.setattr(routes, "_account_session_sharing_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(
+        auth,
+        "_load_accounts_config",
+        lambda: {
+            "main": {"profile": "default"},
+            "default-user": {"profile": "default"},
+            "other-user": {"profile": "other"},
+        },
+    )
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        visible_only=True,
+    )
+
+    assert [row["session_id"] for row in payload["sessions"]] == ["legacy-default"]
+    assert payload["other_profile_count"] == 0
+
+
+def test_legacy_profile_fallback_does_not_share_explicit_main_private_session(monkeypatch):
+    session = Session(
+        session_id="private-session",
+        title="Private",
+        messages=[{"role": "user", "content": "hello"}],
+        profile="default",
+        owner_account="main",
+        shared_with_accounts=[],
+    )
+    monkeypatch.setattr(routes, "_account_session_sharing_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(
+        auth,
+        "_load_accounts_config",
+        lambda: {"default-user": {"profile": "default"}},
+    )
+
+    assert routes._session_account_visible(session, account="default-user") is False
+
+
 def test_main_account_sidebar_sees_all_account_managed_sessions(monkeypatch):
     rows = [
         _row("main-private", profile="default", owner="main"),
@@ -114,6 +165,35 @@ def test_main_account_sidebar_sees_all_account_managed_sessions(monkeypatch):
     ]
     monkeypatch.setattr(routes, "all_sessions", lambda **_kwargs: list(rows))
     monkeypatch.setattr(routes, "_current_webui_account", lambda _handler=None: "main", raising=False)
+    monkeypatch.setattr(routes, "_account_session_sharing_enabled", lambda: True, raising=False)
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        visible_only=True,
+    )
+
+    assert [row["session_id"] for row in payload["sessions"]] == [
+        "main-private",
+        "sub-owned",
+        "shared-default",
+        "other-owned",
+    ]
+    assert payload["other_profile_count"] == 0
+
+
+def test_tomoki_account_sidebar_sees_all_main_visible_sessions(monkeypatch):
+    rows = [
+        _row("main-private", profile="default", owner="main"),
+        _row("sub-owned", profile="sub", owner="sub"),
+        _row("shared-default", profile="default", owner="main", shared=["sub"]),
+        _row("other-owned", profile="other", owner="other"),
+    ]
+    monkeypatch.setattr(routes, "all_sessions", lambda **_kwargs: list(rows))
+    monkeypatch.setattr(routes, "_current_webui_account", lambda _handler=None: "tomoki", raising=False)
     monkeypatch.setattr(routes, "_account_session_sharing_enabled", lambda: True, raising=False)
 
     payload = routes._build_session_list_cache_payload(
