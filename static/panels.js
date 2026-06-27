@@ -4624,6 +4624,15 @@ function _memorySectionMtime(key) {
   return _memoryData.memory_mtime || 0;
 }
 
+function _memorySectionPath(key) {
+  if (!_memoryData) return '';
+  if (key === 'user') return _memoryData.user_path || '';
+  if (key === 'soul') return _memoryData.soul_path || '';
+  if (key === 'project_context') return _memoryData.project_context_path || '';
+  // Intentional default: the primary "memory" section remains the fallback.
+  return _memoryData.memory_path || '';
+}
+
 function _setMemoryHeaderButtons(mode) {
   const header = $('mainMemory') && $('mainMemory').querySelector('.main-view-header');
   const show = b => b && (b.style.display = '');
@@ -4727,8 +4736,10 @@ function _renderMemoryDetail(section) {
   const mtime = _memorySectionMtime(section);
   const mtimeStr = mtime ? new Date(mtime * 1000).toLocaleString() : '';
   const mtimeHtml = mtimeStr ? `<div class="memory-detail-mtime">${esc(mtimeStr)}</div>` : '';
-  const path = section === 'project_context' && _memoryData ? (_memoryData.project_context_path || '') : '';
-  const fileName = section === 'project_context' && _memoryData ? (_memoryData.project_context_name || (path.split(/[\\/]/).pop() || '')) : '';
+  const path = _memorySectionPath(section);
+  const fileName = section === 'project_context' && _memoryData
+    ? (_memoryData.project_context_name || (path.split(/[\\/]/).pop() || ''))
+    : (path.split(/[\\/]/).pop() || '');
   const pathHtml = path ? `<div class="memory-detail-mtime">${esc(fileName)} · ${esc(path)}</div>` : '';
   const shadowed = section === 'project_context' && _memoryData && Array.isArray(_memoryData.project_context_shadowed)
     ? _memoryData.project_context_shadowed

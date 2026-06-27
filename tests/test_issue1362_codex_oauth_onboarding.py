@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
+import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -12,6 +15,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
+UI_JS = REPO / "static" / "ui.js"
+NODE = shutil.which("node")
 
 
 def test_onboarding_codex_oauth_routes_use_post_start_cancel_and_get_poll():
@@ -595,3 +600,362 @@ def test_frontend_has_anthropic_oauth_support():
     assert "window.open(" not in js[js.find("startAnthropicOAuth"):]
     assert "accessToken" not in js[js.find("startAnthropicOAuth"):]
     assert "refreshToken" not in js[js.find("startAnthropicOAuth"):]
+
+
+def test_onboarding_non_custom_provider_mounts_searchable_model_picker():
+    js = (REPO / "static" / "onboarding.js").read_text(encoding="utf-8")
+    assert "onboardingModelPickerRoot" in js
+    assert "_mountSearchableModelSelect" in js
+    assert "choices:_getOnboardingProviderModelChoices()" in js
+    assert "selectId:'onboardingModelSelect'" in js
+    assert "customInputId:'onboardingModelInput'" in js
+
+
+def test_onboarding_plain_select_fallback_rehydrates_saved_model():
+    """When the searchable picker helper is unavailable, the plain <select>
+    fallback must still rehydrate ONBOARDING.form.model so a saved/default
+    model that isn't the first option isn't silently replaced by option[0]."""
+    js = (REPO / "static" / "onboarding.js").read_text(encoding="utf-8")
+    # The mount block must have an else branch that restores the plain select value.
+    mount_idx = js.find("if(modelPickerRoot && typeof _mountSearchableModelSelect")
+    assert mount_idx != -1
+    after_mount = js[mount_idx:mount_idx + 900]
+    assert "}else{" in after_mount or "} else {" in after_mount
+    assert "const modelSel=$('onboardingModelSelect')" in after_mount
+    assert "modelSel.value=ONBOARDING.form.model" in after_mount
+
+
+def test_onboarding_custom_provider_text_input_branch_stays_intact():
+    js = (REPO / "static" / "onboarding.js").read_text(encoding="utf-8")
+    assert "ONBOARDING.form.provider==='custom'" in js
+    assert 'id="onboardingModelInput"' in js
+    assert "onboarding_custom_model_placeholder" in js
+    assert "onboarding_custom_model_help" in js
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required")
+def test_onboarding_searchable_picker_runtime_and_submit_fallback():
+    driver = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+
+function extractFunc(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  const parenStart = src.indexOf('(', start);
+  let parenDepth = 0;
+  let inString = null;
+  let escaped = false;
+  let bodyStart = -1;
+  for (let i = parenStart; i < src.length; i++) {
+    const ch = src[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      inString = ch;
+      continue;
+    }
+    if (ch === '(') parenDepth++;
+    else if (ch === ')') {
+      parenDepth--;
+      if (parenDepth === 0) {
+        bodyStart = src.indexOf('{', i);
+        break;
+      }
+    }
+  }
+  if (bodyStart < 0) throw new Error(name + ' body not found');
+  let depth = 0;
+  inString = null;
+  escaped = false;
+  for (let i = bodyStart; i < src.length; i++) {
+    const ch = src[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      inString = ch;
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  throw new Error(name + ' brace scan failed');
+}
+
+const elementsById = new Map();
+
+class FakeElement {
+  constructor(tagName) {
+    this.tagName = tagName.toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.className = '';
+    this.id = '';
+    this.hidden = false;
+    this.disabled = false;
+    this.textContent = '';
+    this._value = '';
+    this._selectedIndex = -1;
+    this._listeners = {};
+  }
+
+  appendChild(child) {
+    child.parentNode = this;
+    this.children.push(child);
+    if (child.id) elementsById.set(child.id, child);
+    if (this.tagName === 'SELECT' && child.tagName === 'OPTION' && this._selectedIndex < 0 && !child.disabled) {
+      this.selectedIndex = this.children.length - 1;
+    }
+    return child;
+  }
+
+  addEventListener(type, handler) {
+    this._listeners[type] = handler;
+  }
+
+  dispatch(type, extra = {}) {
+    const handler = this._listeners[type];
+    if (!handler) return;
+    handler({
+      type,
+      target: this,
+      key: extra.key,
+      preventDefault() {},
+    });
+  }
+
+  focus() {}
+
+  querySelector(selector) {
+    const queue = [...this.children];
+    while (queue.length) {
+      const node = queue.shift();
+      if (selector.startsWith('.')) {
+        const cls = selector.slice(1);
+        if ((node.className || '').split(/\s+/).includes(cls)) return node;
+      } else if (selector.startsWith('#')) {
+        if (node.id === selector.slice(1)) return node;
+      } else if (node.tagName === selector.toUpperCase()) {
+        return node;
+      }
+      queue.push(...node.children);
+    }
+    return null;
+  }
+
+  set innerHTML(html) {
+    this.children = [];
+    const selectId = (html.match(/<select id="([^"]+)"/) || [])[1] || '';
+    const customInputId = (html.match(/<input id="([^"]+)" class="model-custom-input"/) || [])[1] || '';
+
+    const searchRow = new FakeElement('div');
+    searchRow.className = 'model-search-row';
+    const searchInput = new FakeElement('input');
+    searchInput.className = 'model-search-input';
+    const clearBtn = new FakeElement('button');
+    clearBtn.className = 'model-search-clear';
+    searchRow.appendChild(searchInput);
+    searchRow.appendChild(clearBtn);
+
+    const selectEl = new FakeElement('select');
+    selectEl.id = selectId;
+
+    const sep = new FakeElement('div');
+    sep.className = 'model-group model-custom-sep';
+
+    const customRow = new FakeElement('div');
+    customRow.className = 'model-custom-row';
+    const customInput = new FakeElement('input');
+    customInput.className = 'model-custom-input';
+    customInput.id = customInputId;
+    const customBtn = new FakeElement('button');
+    customBtn.className = 'model-custom-btn';
+    customRow.appendChild(customInput);
+    customRow.appendChild(customBtn);
+
+    this.appendChild(searchRow);
+    this.appendChild(selectEl);
+    this.appendChild(sep);
+    this.appendChild(customRow);
+  }
+
+  get options() {
+    return this.children;
+  }
+
+  set value(value) {
+    this._value = String(value);
+    if (this.tagName === 'SELECT') {
+      const idx = this.children.findIndex((child) => child.value === this._value);
+      this._selectedIndex = idx;
+    }
+  }
+
+  get value() {
+    if (this.tagName === 'SELECT') {
+      if (this._selectedIndex >= 0 && this.children[this._selectedIndex]) {
+        return this.children[this._selectedIndex].value;
+      }
+    }
+    return this._value || '';
+  }
+
+  set selectedIndex(index) {
+    this._selectedIndex = index;
+    if (this.tagName === 'SELECT') {
+      this._value = index >= 0 && this.children[index] ? this.children[index].value : '';
+    }
+  }
+
+  get selectedIndex() {
+    return this._selectedIndex;
+  }
+}
+
+const document = {
+  createElement(tagName) {
+    return new FakeElement(tagName);
+  },
+  getElementById(id) {
+    return elementsById.get(id) || null;
+  },
+};
+
+global.document = document;
+global.window = {};
+global.esc = (value) => String(value);
+global.t = (key) => key === 'model_search_placeholder'
+  ? 'Search models…'
+  : key === 'model_custom_label'
+    ? 'Custom model ID'
+    : key === 'model_custom_placeholder'
+      ? 'e.g. openai/gpt-5.4'
+      : key;
+global.li = () => '+';
+
+eval(extractFunc('_mountSearchableModelSelect'));
+
+const ONBOARDING = { form: { model: '' } };
+const $ = (id) => document.getElementById(id);
+const root = new FakeElement('div');
+
+_mountSearchableModelSelect({
+  root,
+  selectId: 'onboardingModelSelect',
+  customInputId: 'onboardingModelInput',
+  choices: [
+    { id: 'openrouter/alpha', label: 'OpenRouter Alpha' },
+    { id: 'openrouter/beta', label: 'OpenRouter Beta' },
+  ],
+  selectedValue: ONBOARDING.form.model,
+  onModelChange: (value) => { ONBOARDING.form.model = value; },
+});
+
+const selectEl = $('onboardingModelSelect');
+const customInput = $('onboardingModelInput');
+const searchInput = root.querySelector('.model-search-input');
+
+const initial = {
+  model: ONBOARDING.form.model,
+  selectValue: selectEl.value,
+  selectedIndex: selectEl.selectedIndex,
+};
+
+searchInput.value = 'beta';
+searchInput.dispatch('input');
+const hiddenStates = selectEl.options.map((option) => ({
+  value: option.value,
+  hidden: option.hidden,
+}));
+
+customInput.value = 'vendor/custom-model';
+customInput.dispatch('input');
+const afterCustom = {
+  model: ONBOARDING.form.model,
+  selectedIndex: selectEl.selectedIndex,
+  selectValue: selectEl.value,
+};
+
+selectEl.value = 'openrouter/beta';
+selectEl.dispatch('change');
+const afterSelect = {
+  model: ONBOARDING.form.model,
+  customValue: customInput.value,
+  selectValue: selectEl.value,
+};
+
+customInput.value = 'vendor/final-model';
+customInput.dispatch('input');
+const submitValue = (($('onboardingModelInput') || {}).value || ($('onboardingModelSelect') || {}).value || ONBOARDING.form.model || '').trim();
+
+customInput.value = '   ';
+customInput.dispatch('input');
+const afterWhitespaceClear = {
+  model: ONBOARDING.form.model,
+  selectedIndex: selectEl.selectedIndex,
+  selectValue: selectEl.value,
+};
+const whitespaceSubmitValue = (($('onboardingModelInput') || {}).value || ($('onboardingModelSelect') || {}).value || ONBOARDING.form.model || '').trim();
+
+console.log(JSON.stringify({ initial, hiddenStates, afterCustom, afterSelect, submitValue, afterWhitespaceClear, whitespaceSubmitValue, whitespaceCustomValue: customInput.value }));
+"""
+
+    with tempfile.NamedTemporaryFile("w", suffix=".cjs", encoding="utf-8", dir=REPO, delete=False) as handle:
+        handle.write(driver)
+        script = Path(handle.name)
+
+    try:
+        result = subprocess.run(
+            [NODE, str(script), str(UI_JS)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(REPO),
+        )
+    finally:
+        script.unlink(missing_ok=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr)
+
+    out = json.loads(result.stdout.strip())
+    assert out["initial"] == {
+        "model": "openrouter/alpha",
+        "selectValue": "openrouter/alpha",
+        "selectedIndex": 1,
+    }
+    assert out["hiddenStates"] == [
+        {"value": "", "hidden": True},
+        {"value": "openrouter/alpha", "hidden": True},
+        {"value": "openrouter/beta", "hidden": False},
+    ]
+    assert out["afterCustom"] == {
+        "model": "vendor/custom-model",
+        "selectedIndex": -1,
+        "selectValue": "",
+    }
+    assert out["afterSelect"] == {
+        "model": "openrouter/beta",
+        "customValue": "",
+        "selectValue": "openrouter/beta",
+    }
+    assert out["submitValue"] == "vendor/final-model"
+    assert out["afterWhitespaceClear"] == {
+        "model": "openrouter/beta",
+        "selectedIndex": 2,
+        "selectValue": "openrouter/beta",
+    }
+    assert out["whitespaceSubmitValue"] == "openrouter/beta"
+    assert out["whitespaceCustomValue"] == ""

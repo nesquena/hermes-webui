@@ -68,3 +68,30 @@ def test_dashboard_frontend_uses_browser_url_without_requiring_probe_port():
     assert "status.browser_url||status.url" in helper
     assert "!status.port" in helper
     assert helper.index("status.browser_url||status.url") < helper.index("!status.port")
+
+
+def test_mobile_dashboard_link_is_scoped_hidden_in_narrow_viewport_css():
+    match = re.search(
+        r"@media\(max-width:640px\)\{([\s\S]*?)\n\s*}\s*\n\s*@media \(hover:none\)",
+        STYLE_CSS,
+        re.DOTALL,
+    )
+    assert match is not None
+    mobile_css = match.group(1)
+    assert re.search(
+        r"\.sidebar-nav\s+\.dashboard-link,\s*\.sidebar-nav\s+\.dashboard-link\.dashboard-link-visible\s*\{\s*display\s*:\s*none\s*!important\s*;\s*}",
+        mobile_css,
+        re.DOTALL,
+    )
+
+
+def test_desktop_dashboard_link_button_stays_in_desktop_nav():
+    rail_nav = re.search(r'<nav class="rail".*?</nav>', INDEX_HTML, re.DOTALL).group(0)
+    assert 'id="dashboardRailBtn"' in rail_nav
+    mobile_nav_match = re.search(
+        r'<div class="sidebar-nav">([\s\S]*?)</div>\s*(?=<!--)',
+        INDEX_HTML,
+    )
+    assert mobile_nav_match is not None
+    mobile_nav = mobile_nav_match.group(0)
+    assert 'id="dashboardMobileBtn"' in mobile_nav

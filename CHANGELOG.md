@@ -7,6 +7,32 @@
 
 - **Extension gallery post-install guidance now stays localized in non-English UI languages.** The new next-step card labels, local-component fallback, requirement chips, setup-guide link text, restart-required toast, and install follow-up toast no longer appear as English placeholders in translated locale bundles. (#4964)
 
+- **Onboarding now has the same searchable model picker as Settings.** A fresh install (e.g. an OpenRouter-only first run) previously showed only a small default model list in the onboarding step — no search box and no way to enter a custom model ID — so picking a model not in the short list meant finishing setup and fixing it later. Onboarding now reuses the same searchable picker (with custom-model-ID entry) that Settings uses, instead of a separate onboarding-only dropdown that could drift. The custom-provider free-text branch is unchanged, and the plain-`<select>` fallback (when the shared picker is unavailable) correctly preserves a saved/default model instead of resetting to the first option. Thanks @rodboev. (#5031, fixes #4706)
+
+- **French localization is complete again — 40 missing UI strings now have French translations.** The `fr` locale was missing ~40 keys that exist in English (goal status messages, profile management, session metadata, upload/checkpoint messages, "Open in VS Code", and more), so those strings fell back to English for French users. All 40 are now translated, idiomatic-French wording fixes from the contributor are applied (including correcting a machine-mistranslation of "Steer" → "Bœuf"/beef), and the `theme_usage` non-breaking space before the colon is preserved per French typography. Thanks @Pichatu. (#4876)
+
+- **The Settings → Appearance tab-visibility chips are legible in the Graphite light theme again.** The `.tab-visibility-chip` painted hardcoded near-black text (`#1a1a1a`) on `background:var(--accent)`, which resolves to a dark gray (`#303030`) in the Graphite light skin — making the chip labels invisible. The chip now uses the theme-aware token pattern shared by the other chips (`background:var(--accent-bg)` light tint + `border:var(--accent-bg-strong)` + `color:var(--accent-text)`), so labels stay readable across every skin and theme. Thanks @luandnh. (#4888)
+- **The Memory panel now shows the on-disk file path for every memory section, not just project context.** The detail header already rendered the `FILE.md · /full/path` row for the project-context section; it now generalizes the path lookup so the Memory, User, and Soul sections each surface their existing backend `*_path` field too. Thanks @rodboev. (#5025, fixes #4999)
+- **The dashboard rail link no longer shows in the mobile sidebar nav.** A desktop-oriented dashboard entry was appearing in the narrow-viewport vertical `.sidebar-nav` rail; a CSS-only narrow-viewport override hides it inside `.sidebar-nav` while leaving the desktop rail button untouched. Thanks @rodboev. (#4997, closes #4712)
+
+## [v0.51.692] — 2026-06-27 — Release YV (the post-upgrade 401 recovery now also covers the boot model fetch)
+
+### Fixed
+
+- **The post-upgrade boot no longer loops on a `/api/models` 401 either.** #5018 bounded the active-profile boot 401 loop, but boot then continued into the model-dropdown fetch (`/api/models`), whose 401 still routed through the shared `_redirectIfUnauth()` helper — re-opening the same redirect loop the earlier fix closed. The boot path now bounds the `/api/models` 401 redirect through the **same shared boot budget** as the active-profile read, so a single boot redirects to login at most once and then proceeds/falls back instead of looping. The shared `_redirectIfUnauth()` helper is unchanged for non-boot callers (session-visit refreshes, uploads still redirect normally on a 401), a genuinely logged-out user still reaches login, and the budget resets on a successful/fresh boot. Thanks @rodboev. (#5026, fixes #5021)
+
+## [v0.51.691] — 2026-06-27 — Release YU (auth-persistence failures are surfaced, never silently brick or degrade)
+
+### Fixed
+
+- **A corrupt or unreadable auth session store / signing key no longer silently degrades — or bricks — WebUI.** Session-verification survival depends on `.sessions.json` and `.signing_key` under `STATE_DIR`; previously read/write failures were hidden behind debug-only logs, so after a restart/upgrade a user could land in a dead-session state with no actionable signal. These failures are now promoted to warnings (with the artifact path + `STATE_DIR` + consequence, never any key or token material). The session loader is fully fail-open: a missing, unreadable, malformed-UTF-8, malformed-JSON, deeply-nested (RecursionError), or wrong-shape sessions file now warns and starts with an empty session table instead of letting the exception escape and block startup. Thanks @rodboev. (#5023, fixes #5022)
+
+## [v0.51.690] — 2026-06-27 — Release YT (a fresh blank boot binds the profile's default workspace)
+
+### Fixed
+
+- **Opening WebUI on a fresh/blank boot now binds the profile's default workspace**, so the first session starts in the right workspace instead of an unbound/empty one. The bind helper now runs at **both** empty-state boot entry points — the ephemeral-scratch path (after the active-profile bootstrap resolves) and the no-saved-session path — so neither fresh-boot route is left without a workspace. It's a no-op when a real saved session or explicit workspace already exists (returning users are unaffected), and it runs after the post-upgrade 401 recovery (#5018) so the two boot paths don't interact. Thanks @rodboev. (#4971, fixes #4877)
+
 ## [v0.51.689] — 2026-06-26 — Release YS (WebUI no longer gets stuck in a 401 loop after an upgrade)
 
 ### Fixed
