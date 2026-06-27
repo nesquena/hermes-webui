@@ -69,8 +69,6 @@ const messagesFns = [
 	  '_anchorSceneToolRowName','_anchorSceneToolRowId',
 	  '_anchorSceneToolRowsHaveNonConflictingIds','_anchorSceneToolRowsHaveDifferentExplicitIds',
 	  '_anchorSceneToolRowStartedAt','_anchorSceneToolRowsHaveSameStartedAt',
-	  '_anchorSceneToolRowBodyEvidence','_anchorSceneToolRowsHaveSameBodyEvidence',
-	  '_anchorSceneToolRowsHaveSameInvocationEvidence',
 	  '_anchorSceneToolRowsHaveCompatibleNames',
 	  '_anchorSceneToolRowArgs','_anchorSceneObjectContainsSubset',
 	  '_anchorSceneToolRowsHaveCompatibleInvocation',
@@ -461,6 +459,61 @@ def test_id_flexible_content_tool_does_not_absorb_third_same_command_id(driver_p
     assert by_tid["content-a"]["snippet"] == "OUTPUT A"
     assert "message-a" not in by_tid
     assert by_tid["live-b"]["snippet"] == "OUTPUT B"
+    assert len([card for card in cards if card["name"] == "terminal"]) == 2
+
+
+def test_id_flexible_content_tool_keeps_identical_output_repeat_distinct(driver_path):
+    """Identical output is not identity proof for repeated same-command calls."""
+    messages = [
+        {"role": "user", "content": "inspect twice"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "message-a",
+                    "name": "terminal",
+                    "args": {"cmd": "ls"},
+                    "snippet": "SAME OUTPUT",
+                }
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "S": {
+                "toolCalls": [
+                    {
+                        "id": "live-b",
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "args": {"cmd": "ls"},
+                        "snippet": "SAME OUTPUT",
+                    }
+                ]
+            },
+        },
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["snippet"] == "SAME OUTPUT"
+    assert "message-a" not in by_tid
+    assert by_tid["live-b"]["snippet"] == "SAME OUTPUT"
     assert len([card for card in cards if card["name"] == "terminal"]) == 2
 
 

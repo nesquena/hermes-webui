@@ -3550,38 +3550,6 @@ def _anchor_scene_tool_rows_have_same_started_at(existing, incoming) -> bool:
     return bool(existing_started_at and incoming_started_at and existing_started_at == incoming_started_at)
 
 
-def _anchor_scene_tool_row_body_evidence(row) -> str:
-    if not isinstance(row, dict):
-        return ""
-    tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
-    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-    for value in (
-        tool.get("snippet"),
-        payload.get("snippet"),
-        tool.get("result"),
-        payload.get("result"),
-        tool.get("output"),
-        payload.get("output"),
-    ):
-        text = _anchor_scene_string_payload(value).strip()
-        if text:
-            return text
-    return ""
-
-
-def _anchor_scene_tool_rows_have_same_body_evidence(existing, incoming) -> bool:
-    existing_body = _anchor_scene_tool_row_body_evidence(existing)
-    incoming_body = _anchor_scene_tool_row_body_evidence(incoming)
-    return bool(existing_body and incoming_body and existing_body == incoming_body)
-
-
-def _anchor_scene_tool_rows_have_same_invocation_evidence(existing, incoming) -> bool:
-    return _anchor_scene_tool_rows_have_same_started_at(
-        existing,
-        incoming,
-    ) or _anchor_scene_tool_rows_have_same_body_evidence(existing, incoming)
-
-
 def _anchor_scene_matching_content_tool_row_index(
     rows,
     content_tool_indexes,
@@ -3634,7 +3602,7 @@ def _anchor_scene_matching_content_tool_row_index(
             not existing_id
             or not incoming_id
             or existing_id == incoming_id
-            or (id_flexible and _anchor_scene_tool_rows_have_same_invocation_evidence(rows[index], incoming_row))
+            or (id_flexible and _anchor_scene_tool_rows_have_same_started_at(rows[index], incoming_row))
         ) and _anchor_scene_tool_rows_have_compatible_invocation(rows[index], incoming_row):
             return index
     for index in content_tool_indexes:

@@ -2810,24 +2810,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const incomingStartedAt=_anchorSceneToolRowStartedAt(incoming);
     return !!existingStartedAt&&!!incomingStartedAt&&existingStartedAt===incomingStartedAt;
   }
-  function _anchorSceneToolRowBodyEvidence(row){
-    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
-    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
-    const candidates=[tool.snippet,payload.snippet,tool.result,payload.result,tool.output,payload.output];
-    for(const candidate of candidates){
-      const text=_anchorSceneStringPayload(candidate).trim();
-      if(text) return text;
-    }
-    return '';
-  }
-  function _anchorSceneToolRowsHaveSameBodyEvidence(existing, incoming){
-    const existingBody=_anchorSceneToolRowBodyEvidence(existing);
-    const incomingBody=_anchorSceneToolRowBodyEvidence(incoming);
-    return !!existingBody&&!!incomingBody&&existingBody===incomingBody;
-  }
-  function _anchorSceneToolRowsHaveSameInvocationEvidence(existing, incoming){
-    return _anchorSceneToolRowsHaveSameStartedAt(existing,incoming)||_anchorSceneToolRowsHaveSameBodyEvidence(existing,incoming);
-  }
   function _anchorSceneToolRowsHaveCompatibleNames(existing, incoming){
     const existingName=_anchorSceneToolRowName(existing);
     const incomingName=_anchorSceneToolRowName(incoming);
@@ -2913,7 +2895,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         (
           idFlexibleRows&&
           idFlexibleRows.has(reusableRows[0])&&
-          _anchorSceneToolRowsHaveSameInvocationEvidence(reusableRows[0],incomingRow)
+          _anchorSceneToolRowsHaveSameStartedAt(reusableRows[0],incomingRow)
         )
       )&&
       _anchorSceneToolRowsHaveCompatibleNames(reusableRows[0],incomingRow)&&
