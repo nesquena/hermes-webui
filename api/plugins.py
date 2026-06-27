@@ -183,3 +183,108 @@ def get_plugin_metadata() -> list[dict]:
             "hooks": [],
         })
     return plugins
+
+
+# ── Dashboard plugin backends (plugin_api.py) ──────────────────────────────
+# A dashboard plugin may declare an optional Python backend via manifest "api"
+# (e.g. "plugin_api.py") that exposes a FastAPI ``APIRouter`` named ``router``.
+# The WebUI serves its GET routes (read-only) under /api/plugins/<name>/<route>
+# so the plugin's built frontend can fetch its own data. Without this, such a
+# dashboard loads its assets but every data fetch 404s (blank panel).
+#
+# Requires FastAPI to be importable so the plugin's ``@router.get(...)`` routes
+# are registered; if it is not installed, plugin backends are skipped gracefully
+# (the panel still loads, just without live data).
+
+# plugin_name -> imported plugin_api module (or None if absent/failed)
+_PLUGIN_API_MODULES: dict[str, object] = {}
+
+
+def _load_plugin_api(plugin_name: str):
+    if plugin_name in _PLUGIN_API_MODULES:
+        return _PLUGIN_API_MODULES[plugin_name]
+    module = None
+    manifest = PLUGIN_MANIFESTS.get(plugin_name)
+    root = _PLUGIN_STATIC_ROOTS.get(plugin_name)
+    api_file = (manifest or {}).get("api")
+    if manifest and root and api_file:
+        try:
+            api_path = (root / api_file).resolve()
+            api_path.relative_to(root)  # reject traversal outside dashboard/
+            if api_path.is_file():
+                import importlib.util
+                import sys
+                spec = importlib.util.spec_from_file_location(f"_hermes_plugin_api_{plugin_name}", api_path)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = module
+                spec.loader.exec_module(module)
+        except Exception:
+            logger.exception("Failed to import plugin_api for plugin %s", plugin_name)
+            module = None
+    _PLUGIN_API_MODULES[plugin_name] = module
+    return module
+
+
+def _coerce_endpoint_kwargs(endpoint, query: dict) -> dict:
+    """Build call kwargs for a router endpoint from the query string.
+
+    Coerces present query values to the parameter's annotation, and unwraps a
+    FastAPI ``Query(...)``/``Param(...)`` default object to its plain default for
+    absent params (so the endpoint isn't called with the marker object).
+    """
+    import inspect
+    kwargs: dict = {}
+    for name, p in inspect.signature(endpoint).parameters.items():
+        if name in query and query[name]:
+            raw = query[name][0]
+            # annotation may be a real type or a string (PEP 563 / from __future__ import annotations)
+            ann = p.annotation
+            ann_name = ann if isinstance(ann, str) else getattr(ann, "__name__", ann)
+            try:
+                if ann_name == "int":
+                    kwargs[name] = int(raw)
+                elif ann_name == "float":
+                    kwargs[name] = float(raw)
+                elif ann_name == "bool":
+                    kwargs[name] = raw.strip().lower() in ("1", "true", "yes", "on")
+                else:
+                    kwargs[name] = raw
+            except (ValueError, TypeError):
+                pass  # uncoercible → fall back to the endpoint's own default
+        else:
+            d = p.default
+            if d is not inspect.Parameter.empty and type(d).__module__.split(".")[0] == "fastapi":
+                inner = getattr(d, "default", inspect.Parameter.empty)
+                if inner is not inspect.Parameter.empty and inner is not Ellipsis:
+                    kwargs[name] = inner
+    return kwargs
+
+
+def dispatch_plugin_api(plugin_name: str, sub_path: str, query: dict):
+    """Dispatch a GET request to a dashboard plugin's plugin_api router.
+
+    Returns (status_code, payload) on a matched route, or None if there is no
+    such plugin/route (caller should 404). Read-only: only GET routes served.
+    """
+    if not _VALID_PLUGIN_NAME.match(plugin_name or ""):
+        return None
+    module = _load_plugin_api(plugin_name)
+    if module is None:
+        return None
+    router = getattr(module, "router", None)
+    routes = getattr(router, "routes", None) or []
+    want = "/" + (sub_path or "").strip("/")
+    for route in routes:
+        if getattr(route, "path", None) != want:
+            continue
+        if "GET" not in (getattr(route, "methods", None) or set()):
+            continue
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        try:
+            return (200, endpoint(**_coerce_endpoint_kwargs(endpoint, query)))
+        except Exception:
+            logger.exception("plugin_api %s %s raised", plugin_name, want)
+            return (500, {"error": "plugin backend error"})
+    return None

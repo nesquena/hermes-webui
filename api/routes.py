@@ -9173,6 +9173,17 @@ def handle_get(handler, parsed) -> bool:
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
+    # Dashboard plugin backends: GET /api/plugins/<name>/<route> → plugin_api router.
+    if parsed.path.startswith("/api/plugins/"):
+        from api.plugins import dispatch_plugin_api
+        name, _, sub = parsed.path[len("/api/plugins/"):].partition("/")
+        result = dispatch_plugin_api(name, sub, parse_qs(parsed.query))
+        if result is None:
+            return bad(handler, "Unknown plugin API route", 404)
+        status, payload = result
+        if status != 200:
+            return bad(handler, (payload or {}).get("error", "plugin backend error"), status)
+        return j(handler, payload)
     if parsed.path == "/api/provider/quota":
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
