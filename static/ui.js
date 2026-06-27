@@ -10100,7 +10100,10 @@ function _anchorSceneWorklogGroup(blocks, opts){
   let group=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
   if(!group){
     group=ensureActivityGroup(blocks,{
-      collapsed:!live,
+      // Respect callers that need the settled activity group open. Round 6:
+      // pinned followers keep the just-settled worklog open so STREAM_DONE does
+      // not collapse hundreds of px of live worklog and visibly clamp the pane.
+      collapsed:(opts&&opts.collapsed!==undefined)?opts.collapsed:!live,
       live,
       activityKey,
       beforeAnchor:!!(opts&&opts.beforeAnchor),
@@ -10365,6 +10368,21 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   }
   return wrote;
 }
+function _shouldKeepSettledWorklogOpenForPinnedFollow(){
+  // Round 6 scroll-jump guard: while the reader is pinned at the live tail,
+  // collapsing the live worklog into a compact settled summary can shrink the
+  // transcript by hundreds of px at STREAM_DONE. The browser clamps scrollTop to
+  // the new max, which looks like a large backward jump even though pinned state
+  // is correct. Keep the just-settled worklog open for pinned followers so the
+  // live->settled DOM swap is height-stable; unpinned readers still get compact
+  // settled worklogs and preserve their viewport normally.
+  // Use the sticky pin state as the authority. During live DOM rebuilds the raw
+  // bottom distance can transiently exceed a threshold even for a pinned follower
+  // (the assistant body/worklog grows before follow writes land), so a near-bottom
+  // check here would incorrectly collapse the settled worklog and reintroduce the
+  // STREAM_DONE shrink jump.
+  return !!(_scrollPinned && !_messageUserUnpinned);
+}
 function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
@@ -10373,6 +10391,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
+  const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForPinnedFollow();
   const scene=message._anchor_activity_scene;
   const rows=_anchorSceneRowsForRendering(scene,{settled:true});
   if(!rows.length) return false;
@@ -10392,7 +10411,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   }
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
-    collapsed:true,
+    collapsed:!keepSettledWorklogOpen,
     beforeAnchor:true,
     anchor:segment,
     activityKey,
