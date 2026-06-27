@@ -2467,6 +2467,7 @@
     .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
     .app-titlebar-new-chat{display:inline-flex;}
+    .app-titlebar-reload{display:inline-flex;}
     .app-titlebar-inner{flex:1 1 auto;}
     .system-health-panel.insights-card{gap:10px;padding:12px;}
     .system-health-head{align-items:flex-start;}
@@ -2575,6 +2576,8 @@
     .sidebar-nav .nav-tab svg{width:20px;height:20px;}
     .sidebar-nav .nav-tab.active{background:var(--accent-bg);}
     .sidebar-nav .nav-tab.active::before{left:-4px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;border-radius:0 2px 2px 0;}
+    .sidebar-nav .dashboard-link,
+    .sidebar-nav .dashboard-link.dashboard-link-visible{display:none!important;}
     .sidebar .panel-view{height:100%;margin-left:52px;}
     .sidebar .panel-head{padding-right:52px;}
     .mobile-sidebar-close{display:inline-flex!important;position:absolute;right:10px;top:calc(8px + var(--app-titlebar-safe-top));width:32px;height:32px;z-index:4;background:var(--surface);border:1px solid var(--border);}
@@ -4344,7 +4347,7 @@ main.main > #mainPlugin{display:none;}
 
 /* Tab visibility chips in Settings > Appearance */
 .tab-visibility-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;}
-.tab-visibility-chip{font-size:12px;line-height:1;padding:5px 10px;border-radius:var(--radius-pill,999px);border:1px solid var(--accent,var(--link));background:var(--accent,var(--link));color:#1a1a1a;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s,transform .15s;white-space:nowrap;user-select:none;}
+.tab-visibility-chip{font-size:12px;line-height:1;padding:5px 10px;border-radius:var(--radius-pill,999px);border:1px solid var(--accent-bg-strong);background:var(--accent-bg);color:var(--accent-text);font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s,transform .15s;white-space:nowrap;user-select:none;}
 .tab-visibility-chip[draggable="true"]{cursor:grab;}
 .tab-visibility-chip.dragging{opacity:.55;cursor:grabbing;transform:scale(.96);}
 .tab-visibility-chip.drag-over{outline:2px solid var(--link,var(--accent));outline-offset:2px;}
@@ -5586,6 +5589,8 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-run-body{display:none;margin-top:6px;font-size:12px;color:var(--muted);white-space:pre-wrap;line-height:1.5;max-height:260px;overflow-y:auto;background:var(--sidebar);border:1px solid var(--border);border-radius:6px;padding:8px 10px;}
 .detail-run-item.open .detail-run-body{display:block;}
 .detail-run-body.expanded{max-height:none;overflow-y:visible;}
+.detail-run-body .cron-run-pre{margin:0;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;}
+.detail-run-body .cron-run-pre code{background:transparent;padding:0;font-family:var(--font-mono);}
 .workspace-panel-tabs{display:flex;gap:4px;padding:6px 8px;border-bottom:1px solid var(--border);}
 .workspace-panel-tab{flex:1;border:1px solid transparent;background:transparent;color:var(--muted);border-radius:7px;padding:5px 8px;font-size:12px;cursor:pointer;}
 .workspace-panel-tab.active{background:var(--surface-subtle);color:var(--text);border-color:var(--border2);}

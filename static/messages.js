@@ -464,6 +464,185 @@ function enhanceMarkdownTables(root){
   });
 }
 
+function _sanitizeMarkdownTableCellText(cell){
+  if(!cell) return '';
+  const sortButton=cell.querySelector?cell.querySelector('.markdown-table-sort'):null;
+  if(sortButton){
+    const sortLabel=sortButton.querySelector?sortButton.querySelector('.markdown-table-sort-label'):null;
+    if(sortLabel) return _markdownTableCellText(sortLabel);
+    return _markdownTableCellText(sortButton);
+  }
+  return _markdownTableCellText(cell);
+}
+
+function _markdownTableCopyHtmlEscape(value){
+  return String(value||'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+
+function _markdownTableCopyPayloadForTable(table){
+  if(!table||!table.rows) return null;
+  const rows=Array.from(table.rows||[]);
+  if(!rows.length) return null;
+  let headerRowCount=0;
+  while(headerRowCount<rows.length){
+    const cells=Array.from(rows[headerRowCount].cells||[]);
+    if(!cells.length||!cells.every((cell)=>cell&&cell.tagName==='TH')) break;
+    headerRowCount++;
+  }
+
+  const renderRows=(rowSet)=>rowSet.map((row)=>{
+    const cellTag=(cell)=>String(cell&&cell.tagName?cell.tagName.toLowerCase():'td');
+    const cells=Array.from(row.cells||[])
+      .filter((cell)=>cell&&cell.nodeType===1)
+      .map((cell)=>{
+        const tag=cellTag(cell);
+        const text=_sanitizeMarkdownTableCellText(cell);
+        return `<${tag}>${_markdownTableCopyHtmlEscape(text)}</${tag}>`;
+      })
+      .join('');
+    return `<tr>${cells}</tr>`;
+  }).join('');
+  const headerRows=headerRowCount?renderRows(rows.slice(0, headerRowCount)):'';
+  const bodyRows=renderRows(rows.slice(headerRowCount));
+  const tableSections=[
+    headerRows?`<thead>${headerRows}</thead>`:'',
+    bodyRows?`<tbody>${bodyRows}</tbody>`:'',
+  ].join('');
+
+  const plainRows=rows.map((row)=>{
+    return Array.from(row.cells||[])
+      .map(_sanitizeMarkdownTableCellText)
+      .join('\t');
+  }).join('\n');
+
+  return {html:`<table>${tableSections}</table>`, plain:plainRows};
+}
+
+function _findEnhancedMarkdownTable(node){
+  let current=node&&node.nodeType===3?node.parentElement:node;
+  while(current){
+    if(current.matches&&current.matches('table[data-markdown-table-enhanced]')) return current;
+    current=current.parentElement||current.parentNode;
+  }
+  return null;
+}
+
+function _findMarkdownTableCell(node){
+  let current=node&&node.nodeType===3?node.parentElement:node;
+  while(current){
+    if(current.matches&&current.matches('th,td')) return current;
+    current=current.parentElement||current.parentNode;
+  }
+  return null;
+}
+
+function _markdownTableNodeChildren(node){
+  if(!node) return [];
+  if(node.childNodes&&typeof node.childNodes.length==='number') return Array.from(node.childNodes);
+  if(node.children&&typeof node.children.length==='number') return Array.from(node.children);
+  return [];
+}
+
+function _markdownTableNodeBoundaryLength(node){
+  if(!node) return 0;
+  if(node.nodeType===3) return String(node.textContent||'').length;
+  return _markdownTableNodeChildren(node).length;
+}
+
+function _markdownTableBoundaryWithinCell(container, offset, cell, edge){
+  if(!container||!cell||typeof offset!=='number') return false;
+  const atStart=edge==='start';
+  let current=container;
+  let currentOffset=offset;
+  while(current){
+    const boundaryLength=_markdownTableNodeBoundaryLength(current);
+    if(atStart){
+      if(currentOffset!==0) return false;
+    }else if(currentOffset!==boundaryLength){
+      return false;
+    }
+    if(current===cell) return true;
+    const parent=current.parentElement||current.parentNode;
+    if(!parent) return false;
+    const siblings=_markdownTableNodeChildren(parent);
+    const index=siblings.indexOf(current);
+    if(index===-1) return false;
+    currentOffset=atStart?index:index+1;
+    current=parent;
+  }
+  return false;
+}
+
+function _markdownTableEdgeCell(table, edge){
+  const rows=Array.from(table&&table.rows||[]);
+  if(!rows.length) return null;
+  const row=edge==='start'?rows[0]:rows[rows.length-1];
+  const cells=Array.from(row&&row.cells||[]);
+  if(!cells.length) return null;
+  return edge==='start'?cells[0]:cells[cells.length-1];
+}
+
+function _isFullEnhancedMarkdownTableSelection(range, table){
+  if(!range||!table) return false;
+  const firstCell=_markdownTableEdgeCell(table,'start');
+  const lastCell=_markdownTableEdgeCell(table,'end');
+  if(!firstCell||!lastCell) return false;
+  const startCell=_findMarkdownTableCell(range.startContainer);
+  const endCell=_findMarkdownTableCell(range.endContainer);
+  if(startCell!==firstCell||endCell!==lastCell) return false;
+  return _markdownTableBoundaryWithinCell(range.startContainer, range.startOffset, firstCell, 'start')
+    && _markdownTableBoundaryWithinCell(range.endContainer, range.endOffset, lastCell, 'end');
+}
+
+function _findEnhancedMarkdownTableFromRange(range){
+  if(!range) return null;
+  const found=_findEnhancedMarkdownTable(range.startContainer)
+    || _findEnhancedMarkdownTable(range.endContainer)
+    || _findEnhancedMarkdownTable(range.commonAncestorContainer);
+  if(found) return found;
+  const container=range.commonAncestorContainer&&range.commonAncestorContainer.nodeType===3
+    ? range.commonAncestorContainer.parentElement
+    : range.commonAncestorContainer;
+  if(!container||!container.querySelectorAll||typeof range.intersectsNode!=='function') return null;
+  for(const table of container.querySelectorAll('table[data-markdown-table-enhanced]')){
+    try{
+      if(range.intersectsNode(table)) return table;
+    }catch(_){}
+  }
+  return null;
+}
+
+function _handleMarkdownTableCopy(event){
+  if(!event) return;
+  if(!window.getSelection)return;
+  const selection=window.getSelection();
+  if(!selection||selection.isCollapsed||!selection.rangeCount) return;
+  const range=selection.getRangeAt(0);
+  if(!range) return;
+  const startCell=_findMarkdownTableCell(range.startContainer);
+  const endCell=_findMarkdownTableCell(range.endContainer);
+  if(startCell&&endCell&&startCell===endCell) return;
+  const table=_findEnhancedMarkdownTableFromRange(range);
+  if(!table||!table.matches||!table.matches('table[data-markdown-table-enhanced]')) return;
+  if(!_isFullEnhancedMarkdownTableSelection(range, table)) return;
+  const payload=_markdownTableCopyPayloadForTable(table);
+  if(!payload) return;
+  const clipboardData=event.clipboardData||event.originalEvent&&event.originalEvent.clipboardData;
+  if(!clipboardData||typeof clipboardData.setData!=='function') return;
+  if(typeof event.preventDefault==='function') event.preventDefault();
+  clipboardData.setData('text/html', payload.html);
+  clipboardData.setData('text/plain', payload.plain);
+}
+
+function _wireMarkdownTableCopyHandler(root){
+  if(!root||!root.addEventListener||root.__markdownTableCopyHandlerInstalled) return;
+  root.addEventListener('copy', _handleMarkdownTableCopy);
+  root.__markdownTableCopyHandlerInstalled=true;
+}
+
 function _markdownTableText(value){
   return String(value||'').replace(/\s+/g,' ').trim();
 }
@@ -481,6 +660,7 @@ window.enhanceMarkdownTables=enhanceMarkdownTables;
     const result=baseRenderMessages.apply(this,args);
     const inner=typeof $==='function'?$('msgInner'):document.getElementById('msgInner');
     enhanceMarkdownTables(inner);
+    _wireMarkdownTableCopyHandler(inner);
     return result;
   };
   window.renderMessages._markdownTablesEnhanced=true;
@@ -2741,6 +2921,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(lastAsst&&lastAsst._turnDuration!==undefined&&lastAsst._turnDuration!==null) return lastAsst._turnDuration;
     if(base&&base.turn_duration!==undefined&&base.turn_duration!==null) return base.turn_duration;
     const session=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
+    // The `pending_started_at` fallback below is the START of an IN-FLIGHT turn.
+    // For a SETTLED turn that recorded no live duration, computing
+    // `now - pending_started_at` is wrong: pending_started_at is either stale
+    // (left over from an earlier turn / a session that sat idle) or belongs to a
+    // different, still-pending turn — which rendered a bogus "Processed 15h 32m"
+    // on fresh conversations (#4930). Only use it while a turn is actually in
+    // flight; otherwise show no duration rather than a fabricated one.
+    const turnInFlight=!!(session&&(session.active_stream_id||session.pending_user_message));
+    if(!turnInFlight) return undefined;
     const candidates=[
       session&&session.pending_started_at,
       session&&session.active_started_at,
@@ -4463,6 +4652,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession){
           S.activeStreamId=null;
         }
+        let lastAsst=null;
         if(isActiveSession){
           // Capture previous session totals BEFORE overwriting S.session with the new
           // cumulative values from the done event. prevIn/prevOut are the totals as of
@@ -4492,7 +4682,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
-          const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
+          lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
           // Persist reasoning trace for Worklog Thinking Cards; normal transcript
           // rendering keeps provider reasoning out of the final answer.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
@@ -4616,6 +4806,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // TTS auto-read: speak the last assistant response if enabled (#499)
           if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
         }
+        if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
+          lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
+        }
         if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
           const _goalNext=_pendingGoalContinuation;
           _pendingGoalContinuation=null;
@@ -4638,7 +4831,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // If the user watched the whole stream, _wasEverHidden stays false and
         // the notification is suppressed (matches Slack/Discord/Gmail/Claude).
         const _wasEverBackgrounded=_shouldForceCompletionNotification(activeSid, streamId);
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        const _completionPreview=_completionNotificationPreviewText(lastAsst,{
+          sessionId:completedSid,
+          liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
+        });
+        sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -5616,12 +5813,35 @@ async function respondApproval(choice) {
       _approvalResponding = null;
       const pendingEntry = _approvalPendingBySession.get(sid);
       const samePending = !!(pendingEntry && pendingEntry.pending && (pendingEntry.pending.approval_id || null) === (approvalId || null));
-      if (_approvalSessionId === sid && _approvalCurrentId === approvalId) {
+      // `stale_cleared` means the server found nothing pending for this session
+      // (the approval already resolved or its stream ended while the card was
+      // up). The orphan card must be cleared unconditionally so it can never
+      // get stuck — even if the displayed id has since drifted. (#4948 local
+      // variant: previously surfaced as a stuck "Approval response not
+      // accepted." toast.)
+      if (result.stale_cleared || (_approvalSessionId === sid && _approvalCurrentId === approvalId)) {
         _approvalSessionId = null;
         _approvalCurrentId = null;
         hideApprovalCard(true);
       }
-      if (samePending) _clearApprovalPendingForSession(sid);
+      if (samePending || result.stale_cleared) _clearApprovalPendingForSession(sid);
+      // Hardening for the narrow stale-clear race: a brand-new approval could
+      // have been parked server-side after the server's empty-check but before
+      // we processed this stale response. The unconditional clear above would
+      // hide that fresh card. Re-query the authoritative server pending state
+      // (same endpoint the fallback poll uses) so any approval that arrived in
+      // the window re-surfaces immediately instead of waiting for the next
+      // SSE/poll tick. Best-effort; poll/SSE remain the backstop. (Opus review
+      // nit on the #4948 fix.)
+      if (result.stale_cleared) {
+        api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast: false})
+          .then(data => {
+            if (data && data.pending && _approvalPromptBelongsToActiveSession(sid)) {
+              showApprovalForSession(sid, data.pending, data.pending_count || 1);
+            }
+          })
+          .catch(() => {});
+      }
       return;
     }
     const errMsg = (result && result.error) || "Approval response not accepted.";
@@ -6511,6 +6731,36 @@ function stopClarifyPolling() {
 }
 
 // ── Notifications and Sound ──────────────────────────────────────────────────
+
+function _completionNotificationPreviewText(lastAssistantMessage, options){
+  const opts=(options&&typeof options==='object')?options:{};
+  const sessionId=String(opts.sessionId||'').trim();
+  let text='';
+  if(lastAssistantMessage&&typeof lastAssistantMessage==='object'){
+    if(typeof _assistantTurnAnchorSettledFinalAnswer==='function'){
+      const anchorFinal=_assistantTurnAnchorSettledFinalAnswer(
+        lastAssistantMessage,
+        lastAssistantMessage.content,
+        {session_id:sessionId||undefined}
+      );
+      if(anchorFinal!==null&&anchorFinal!==undefined) text=String(anchorFinal||'').trim();
+    }
+    if(!text&&typeof msgContent==='function') text=String(msgContent(lastAssistantMessage)||'').trim();
+    if(!text){
+      let raw=lastAssistantMessage.content||'';
+      if(Array.isArray(raw)) raw=raw.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('').trim();
+      text=String(raw||'').trim();
+    }
+    if(text&&typeof _extractInlineThinkingFromContent==='function'){
+      const split=_extractInlineThinkingFromContent(text, lastAssistantMessage.reasoning, {streaming:false});
+      if(split&&typeof split.content==='string') text=split.content.trim();
+    }
+  }
+  if(!text&&typeof opts.liveDisplayText==='string') text=opts.liveDisplayText.trim();
+  if(!text) return '';
+  const normalized=text.replace(/\s+/g,' ').trim();
+  return normalized.length>100?`${normalized.slice(0,100)}…`:normalized;
+}
 
 function playNotificationSound(){
   if(!window._soundEnabled) return;

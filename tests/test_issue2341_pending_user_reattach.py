@@ -64,7 +64,14 @@ def test_pending_user_message_dedup_checks_current_message_array():
         "Pending-message dedup must inspect the current S.messages/INFLIGHT "
         "array, not only session.messages from the metadata response"
     )
-    assert "lastText===text" in helper, (
-        "Pending-message merge must suppress duplicates when the last user row "
-        "already matches pending_user_message"
+    assert "_pendingCurrentTailUserMessage(messages)" in helper, (
+        "Pending-message dedup must inspect only the current tail user row, "
+        "not a historical same-text row"
+    )
+    assert "sameCurrentTurn" in helper and "return null;" in helper, (
+        "Pending-message merge must still suppress duplicates when the current "
+        "tail user row already matches pending_user_message"
+    )
+    assert "[...messages].reverse().find" not in helper, (
+        "Pending-message dedup must not reverse-scan historical user rows"
     )

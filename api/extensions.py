@@ -126,30 +126,85 @@ _EXTENSION_MIME = {
 _TEXT_MIME_TYPES = {"text/css", "application/javascript", "text/html", "image/svg+xml", "text/plain"}
 
 
-def _extension_root() -> Optional[Path]:
-    """Return the configured extension directory, or None when disabled.
+def _default_extension_root() -> Path:
+    """WebUI-managed default extension directory under the state dir.
 
-    A missing or non-directory path disables extensions instead of failing open.
-    The startup docs encourage users to point this at a directory they control.
+    Used when ``HERMES_WEBUI_EXTENSION_DIR`` is unset so one-click gallery
+    install works out of the box on a single-user self-hosted instance with no
+    environment setup. It lives alongside sessions/settings in the WebUI-owned
+    state dir, which is a different trust domain from "a user-writable directory
+    on a shared box" — the loaded code still runs with full session authority,
+    so the trust model is unchanged (see docs/EXTENSIONS.md).
+    """
+    return _extension_state_dir() / "extensions"
+
+
+def _extension_root() -> Optional[Path]:
+    """Return the active extension directory, or None when none is available.
+
+    Resolution order:
+    1. ``HERMES_WEBUI_EXTENSION_DIR`` when set — must be an existing directory,
+       otherwise None (the admin owns that path; we never auto-create it).
+    2. Otherwise the WebUI-managed default (``STATE_DIR/extensions``) when it
+       already exists. The first gallery install creates it on demand
+       (see ``_writable_extension_root``); until then this stays None and the
+       UI reports the same "nothing installed yet" state as before.
     """
     raw = os.getenv(_EXTENSION_DIR_ENV, "").strip()
-    if not raw:
+    if raw:
+        root = Path(raw).expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            return None
+        return root
+    default_root = _default_extension_root()
+    try:
+        if default_root.is_dir() and not default_root.is_symlink():
+            return default_root.resolve()
+    except OSError:
         return None
-    root = Path(raw).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
+    return None
+
+
+def _writable_extension_root() -> Optional[Path]:
+    """Resolve the extension root for writes, bootstrapping the managed default.
+
+    When ``HERMES_WEBUI_EXTENSION_DIR`` is set we use it as-is (the admin owns
+    it; it must already exist). When unset we create and return the
+    WebUI-managed default so a fresh install can install an extension with zero
+    configuration — plug and play.
+    """
+    raw = os.getenv(_EXTENSION_DIR_ENV, "").strip()
+    if raw:
+        return _extension_root()
+    default_root = _default_extension_root()
+    try:
+        default_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
         return None
-    return root
+    try:
+        if default_root.is_symlink() or not default_root.is_dir():
+            return None
+        return default_root.resolve()
+    except OSError:
+        return None
 
 
 def _extension_root_status() -> Tuple[Optional[Path], bool, bool]:
-    """Return (root, configured, valid) without exposing the configured path."""
+    """Return (root, configured, valid) without exposing the configured path.
+
+    With no ``HERMES_WEBUI_EXTENSION_DIR`` the WebUI-managed default is always
+    available as an install target, so ``configured`` is True (extensions are
+    no longer "not configured" out of the box). ``valid`` reflects whether that
+    managed directory currently exists — it is created on the first install.
+    """
     raw = os.getenv(_EXTENSION_DIR_ENV, "").strip()
-    if not raw:
-        return None, False, False
-    root = Path(raw).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        return None, True, False
-    return root, True, True
+    if raw:
+        root = Path(raw).expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            return None, True, False
+        return root, True, True
+    root = _extension_root()
+    return root, True, root is not None
 
 
 def _new_diagnostics() -> Dict[str, Any]:
@@ -924,7 +979,12 @@ def get_extension_status() -> Dict[str, Any]:
         "stylesheet_count": 0,
         "sidecar_count": 0,
     }
-    if dir_configured and not dir_valid:
+    # Only warn about an unavailable directory when the admin explicitly set
+    # HERMES_WEBUI_EXTENSION_DIR to a path that is missing/not-a-dir. The
+    # WebUI-managed default simply not existing yet (pre-first-install) is the
+    # normal opt-in state, not a misconfiguration worth surfacing.
+    env_dir_set = bool(os.getenv(_EXTENSION_DIR_ENV, "").strip())
+    if env_dir_set and dir_configured and not dir_valid:
         _add_diagnostic_warning(diagnostics, "extension_dir_unavailable", "extension_dir")
 
     if root is None:
@@ -1107,7 +1167,7 @@ def install_extension(id: object, download_url: object, sha256: object) -> Dict[
         raise ExtensionInstallError("Invalid download URL")
     if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
         raise ExtensionInstallError("Invalid sha256")
-    root = _extension_root()
+    root = _writable_extension_root()
     if root is None:
         raise ExtensionInstallError("Extensions not configured", 404)
     try:

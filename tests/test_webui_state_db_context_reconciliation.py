@@ -1,4 +1,3 @@
-import json
 import queue
 import sqlite3
 from collections import OrderedDict
@@ -130,6 +129,19 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
         "external gateway user",
         "external gateway assistant",
     ]
+
+    reloaded = models.Session.load(sid)
+    saved_contents = [m.get("content") for m in (reloaded.messages if reloaded else [])]
+    assert saved_contents == [
+        "old user",
+        "old assistant",
+        "external gateway user",
+        "external gateway assistant",
+        "new webui turn",
+        "ok",
+    ]
+    assert saved_contents.count("old user") == 1
+    assert saved_contents.count("external gateway user") == 1
 
 
 def test_state_db_delta_after_context_allows_recovered_turn_prefix():

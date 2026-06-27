@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sys
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -102,6 +103,115 @@ def test_system_health_payload_partial_and_unavailable_are_graceful(monkeypatch)
     assert "/home/user" not in repr(unavailable)
 
 
+def test_system_health_falls_back_to_psutil_when_procfs_is_unavailable(monkeypatch):
+    from api import system_health
+
+    class _MissingProcPath:
+        def open(self, *args, **kwargs):
+            raise FileNotFoundError("/private/proc/path")
+
+    class _FakeMemory:
+        total = 1000
+        available = 250
+        percent = 75.0
+
+    fake_psutil = SimpleNamespace(
+        cpu_percent=lambda interval=0.0: 42.25,
+        virtual_memory=lambda: _FakeMemory(),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(system_health, "_PROC_STAT", _MissingProcPath())
+    monkeypatch.setattr(system_health, "_PROC_MEMINFO", _MissingProcPath())
+
+    assert system_health._cpu_percent() == 42.2
+    assert system_health._memory_usage() == {
+        "used_bytes": 750,
+        "total_bytes": 1000,
+        "percent": 75.0,
+    }
+
+
+def test_system_health_missing_optional_psutil_is_safe_unavailable(monkeypatch):
+    from api import system_health
+
+    class _MissingProcPath:
+        def open(self, *args, **kwargs):
+            raise FileNotFoundError("/private/proc/path")
+
+    def missing_psutil(name):
+        if name == "psutil":
+            raise ModuleNotFoundError("No module named 'psutil'")
+        raise AssertionError(f"unexpected import: {name}")
+
+    monkeypatch.setattr(system_health, "_PROC_STAT", _MissingProcPath())
+    monkeypatch.setattr(system_health, "_PROC_MEMINFO", _MissingProcPath())
+    monkeypatch.setattr(system_health, "import_module", missing_psutil)
+
+    for collect in (system_health._cpu_percent, system_health._memory_usage):
+        try:
+            collect()
+        except RuntimeError as exc:
+            assert str(exc) == "psutil_unavailable"
+        else:  # pragma: no cover - defensive regression clarity
+            raise AssertionError("missing optional psutil should surface a safe unavailable error")
+
+
+def test_system_health_procfs_parse_errors_remain_visible(monkeypatch):
+    from api import system_health
+
+    fake_psutil = SimpleNamespace(
+        cpu_percent=lambda interval=0.0: 42.25,
+        virtual_memory=lambda: SimpleNamespace(total=1000, available=250),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(
+        system_health,
+        "_read_proc_stat_cpu",
+        lambda: (_ for _ in ()).throw(RuntimeError("proc_stat_unavailable")),
+    )
+    monkeypatch.setattr(system_health, "_read_meminfo_kib", lambda: {})
+
+    try:
+        system_health._cpu_percent()
+    except RuntimeError as exc:
+        assert str(exc) == "proc_stat_unavailable"
+    else:  # pragma: no cover - defensive regression clarity
+        raise AssertionError("procfs parse RuntimeError should not fall back to psutil")
+
+    try:
+        system_health._memory_usage()
+    except RuntimeError as exc:
+        assert str(exc) == "meminfo_unavailable"
+    else:  # pragma: no cover - defensive regression clarity
+        raise AssertionError("meminfo invariant RuntimeError should not fall back to psutil")
+
+
+def test_system_health_cpu_second_procfs_read_fallback_does_not_sleep_twice(monkeypatch):
+    from api import system_health
+
+    calls = []
+
+    def fake_read_proc_stat_cpu():
+        calls.append("proc")
+        if len(calls) == 1:
+            return (10, 100)
+        raise FileNotFoundError("/proc/stat disappeared")
+
+    def fake_sleep(seconds):
+        calls.append(("sleep", seconds))
+
+    def fake_cpu_percent(interval=0.0):
+        calls.append(("psutil", interval))
+        return 12.34
+
+    monkeypatch.setattr(system_health, "_read_proc_stat_cpu", fake_read_proc_stat_cpu)
+    monkeypatch.setattr(system_health.time, "sleep", fake_sleep)
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(cpu_percent=fake_cpu_percent))
+
+    assert system_health._cpu_percent() == 12.3
+    assert calls == ["proc", ("sleep", system_health._CPU_SAMPLE_SECONDS), "proc", ("psutil", 0.0)]
+
+
 def test_system_health_route_registered_and_auth_gated(monkeypatch):
     assert 'parsed.path == "/api/system/health"' in ROUTES_PY
     assert "build_system_health_payload()" in ROUTES_PY
@@ -187,7 +297,6 @@ def test_system_health_frontend_polls_visible_and_renders_progress_labels():
 def test_system_health_backend_uses_no_shell_or_private_process_sources():
     src = (REPO_ROOT / "api" / "system_health.py").read_text(encoding="utf-8")
     assert "import subprocess" not in src
-    assert "import psutil" not in src
     assert "os.environ" not in src
     assert "ps aux" not in src
     assert "/proc/self/environ" not in src

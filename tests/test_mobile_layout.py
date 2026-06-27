@@ -914,6 +914,46 @@ def test_titlebar_new_chat_button_mobile_visibility_css():
     )
 
 
+def test_titlebar_reload_button_visibility_css_contract():
+    """Keep reload hidden by default, keep standalone visibility, and expose it on mobile width."""
+    base_rule = _declarations(_rule_body(CSS, ".app-titlebar-reload"))
+    assert _display_hidden(base_rule), "app-titlebar reload button should stay hidden by default"
+
+    standalone_mode_pattern = re.compile(
+        r"@media\s*\(\s*display-mode:\s*standalone\s*\)\s*,\s*"
+        r"\(\s*display-mode:\s*fullscreen\s*\)\s*\{"
+    )
+    standalone_rule_body = None
+    for match in standalone_mode_pattern.finditer(CSS):
+        open_brace = match.end() - 1
+        depth = 0
+        for idx in range(open_brace, len(CSS)):
+            if CSS[idx] == "{":
+                depth += 1
+            elif CSS[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    block = CSS[open_brace + 1 : idx]
+                    if ".app-titlebar-reload" in block:
+                        standalone_rule_body = block
+                    break
+        if standalone_rule_body is not None:
+            break
+    assert standalone_rule_body is not None, (
+        "standalone/fullscreen media block for titlebar reload could not be parsed"
+    )
+    standalone_rule = _declarations(_rule_body(standalone_rule_body, ".app-titlebar-reload"))
+    assert standalone_rule.get("display") == "inline-flex", (
+        "titlebar reload should remain inline-flex in standalone/fullscreen"
+    )
+
+    mobile_blocks = "".join(_max_width_media_blocks(640))
+    mobile_rule = _declarations(_rule_body(mobile_blocks, ".app-titlebar-reload"))
+    assert _display_inline_flex(mobile_rule), (
+        "app-titlebar reload button should be visible in phone-width titlebar rules"
+    )
+
+
 # ── Viewport and scroll safety ────────────────────────────────────────────────
 
 def test_body_overflow_hidden():

@@ -36,8 +36,9 @@ def test_streaming_persists_context_fields_on_session_before_save():
     assert block_start != -1, "Reasoning-trace marker not found in streaming.py"
 
     # Save call follows shortly after
-    save_call = src.find("\n                s.save()", block_start)
-    assert save_call != -1, "s.save() not found after the post-merge marker"
+    save_match = re.search(r"\n[ \t]+s\.save\(\)", src[block_start:])
+    assert save_match is not None, "s.save() not found after the post-merge marker"
+    save_call = block_start + save_match.start()
     # Limit bumped to 16000 by #3455 (server-side <think> split added to the
     # pre-save reasoning-persist block, + the anchor moved to the comment marker
     # which sits a few lines above the former `if` anchor). The pre-save block

@@ -145,6 +145,20 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 >
 > `./ctl.sh stop` cannot stop a server launched by `bootstrap.py` or `start.sh` directly — it only manages processes it started itself.
 
+> **How chat runs by default.** WebUI runs the Hermes agent in-process, reading
+> your `HERMES_HOME` config directly. It does not connect to an external
+> Hermes/agent OpenAI-compatible API server to run chat. `HERMES_API_URL` is only
+> read by the Tasks/cron health probe and does not route chat.
+>
+> Two options if you run an external endpoint:
+>
+> 1. **Use its models as a chat provider** (supported today): add it in
+>    **Settings → Providers** as a custom OpenAI-compatible provider with
+>    `base_url = http://127.0.0.1:8642/v1` and your bearer token.
+> 2. **Route chat through a Hermes Gateway API server** (supported today via
+>    `HERMES_WEBUI_CHAT_BACKEND=gateway`): see [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md).
+>    Full agent-loop delegation is not yet shipped; tracked in [#1925](https://github.com/nesquena/hermes-webui/issues/1925).
+
 ### Advanced: dynamic recall prefill & Gateway-backed chat
 
 Two optional, self-hosted-deployment features — attaching dynamic **session-recall prefill** to browser turns (Joplin/Obsidian/Notion/llm-wiki routers), and routing browser chat through a running **Hermes Gateway** — are documented in [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md). Most users need neither.

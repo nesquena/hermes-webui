@@ -6,5 +6,9 @@
 # needs `edge-tts`. It is intentionally NOT a hard dependency — the /api/tts
 # endpoint returns 503 with an install hint when it's absent. Install it only if
 # you want server-side Microsoft neural voices:  pip install edge-tts
+#
+# OPTIONAL: macOS/non-procfs CPU/RAM system-health metrics need `psutil`.
+# Linux uses procfs without this dependency; install only if you want aggregate
+# CPU/RAM metrics on platforms without /proc:  pip install psutil>=5.9
 pyyaml>=6.0
 cryptography>=42.0
