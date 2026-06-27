@@ -252,10 +252,23 @@ function _sessionSwitchCacheFingerprintMatches(cache,row){
   const expected=cache.fingerprint;
   const current=_sessionSwitchCacheFingerprint(row);
   if(current.is_streaming || current.active_stream_id || current.pending_user_message || current.has_pending_user_message) return false;
-  if(Number(expected.message_count||0)!==Number(current.message_count||0)) return false;
+  const expectedCount=Number(expected.message_count||0);
+  const currentCount=Number(current.message_count||0);
+  const rowHasCount=row&&row.message_count!=null&&Number.isFinite(Number(row.message_count));
   const expectedLast=Number(expected.last_message_at||0);
   const currentLast=Number(current.last_message_at||0);
-  if(expectedLast&&currentLast&&expectedLast!==currentLast) return false;
+  const rowHasLast=row&&(row.last_message_at!=null||row.updated_at!=null)&&Number.isFinite(currentLast)&&currentLast>0;
+  if(expectedLast&&rowHasLast){
+    // Loaded session metadata can use updated_at while sidebar rows use
+    // last_message_at. They may differ by a few milliseconds for the same
+    // latest turn. On truncated long transcripts the list-side count can also
+    // be a different projection from the loaded tail width. Treat the latest
+    // timestamp as authoritative; count drift alone should not force Loading.
+    if(Math.abs(expectedLast-currentLast)>1) return false;
+    if(rowHasCount&&expectedCount!==currentCount&&!cache.messagesTruncated) return false;
+    return true;
+  }
+  if(rowHasCount&&expectedCount!==currentCount) return false;
   return true;
 }
 

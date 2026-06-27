@@ -6,9 +6,12 @@ full rendered state for A in memory; reuse it until the sidebar fingerprint says
 A changed.
 """
 from pathlib import Path
+import shutil
+import subprocess
 
 REPO = Path(__file__).resolve().parent.parent
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 def _idx(text: str) -> int:
@@ -99,3 +102,113 @@ def test_restore_path_does_not_call_api_session():
     body = _function_body("function _restoreIdleSessionSwitchCache")
     assert "/api/session" not in body
     assert "api(" not in body
+
+
+def _extract_function(name: str) -> str:
+    return _function_body(f"function {name}")
+
+
+def _run_node(source: str) -> str:
+    assert NODE, "node not on PATH"
+    result = subprocess.run(
+        [NODE],
+        input=source,
+        cwd=str(REPO),
+        capture_output=True,
+        encoding="utf-8",
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    return result.stdout.strip()
+
+
+def test_restore_treats_missing_sidebar_counts_as_unknown_not_mismatch():
+    """A lightweight sidebar row must not invalidate a hot transcript cache.
+
+    Some list projections omit counts/timestamps while the full session already
+    has them. Treating those missing fields as zero makes A→B→A miss the idle
+    cache and show `Loading conversation...` again.
+    """
+    source = "\n".join([
+        "var _idleSessionSwitchCache = new Map();",
+        "var _IDLE_SESSION_SWITCH_CACHE_MAX = 12;",
+        "var _allSessions = [{session_id:'a', title:'A'}];",
+        "var _sessionListSnapshotById = new Map();",
+        "var INFLIGHT = {};",
+        "var _messagesTruncated = false;",
+        "var _oldestIdx = 0;",
+        "var _pendingCarryForwardSnapshot = null;",
+        "var _loadingSessionId = 'a';",
+        "var S = {busy:false, activeStreamId:null, session:{session_id:'a', message_count:42, last_message_at:100}, messages:[{role:'user', content:'hi'}], toolCalls:[], lastUsage:{}};",
+        "var localStorage = {setItem(){}};",
+        "function _clearSameSessionForceReloadHint(){}",
+        "function updateSendBtn(){}",
+        "function setStatus(){}",
+        "function setComposerStatus(){}",
+        "function _setSessionViewedCount(){}",
+        "function _clearSessionCompletionUnread(){}",
+        "function _setActiveSessionUrl(){}",
+        "function startSessionStream(){}",
+        "function updateQueueBadge(){}",
+        "function syncTopbar(){}",
+        "function renderMessages(){}",
+        _extract_function("_cloneSessionSwitchCacheValue"),
+        _extract_function("_sessionSwitchCacheFingerprint"),
+        _extract_function("_sessionSwitchCacheRowForSid"),
+        _extract_function("_sessionSwitchCacheFingerprintMatches"),
+        _extract_function("_rememberIdleSessionSwitchCache"),
+        _extract_function("_restoreIdleSessionSwitchCache"),
+        "if(!_rememberIdleSessionSwitchCache('a')) throw new Error('remember failed');",
+        "S.session = {session_id:'b'}; S.messages = [{role:'user', content:'other'}];",
+        "const restored = _restoreIdleSessionSwitchCache('a');",
+        "console.log(JSON.stringify({restored, sid:S.session&&S.session.session_id, messages:S.messages.length}));",
+    ])
+    assert _run_node(source) == '{"restored":true,"sid":"a","messages":1}'
+
+
+def test_restore_allows_truncated_long_session_count_drift_when_latest_timestamp_matches():
+    """Long sessions can expose different count projections for the same latest turn.
+
+    The loaded session metadata may use `updated_at` while the sidebar row uses
+    `last_message_at`; both can differ by milliseconds/rounding while pointing
+    at the same latest message. For truncated long transcripts, a count drift
+    alone must not force a reload when the latest timestamp is effectively the
+    same.
+    """
+    source = "\n".join([
+        "var _idleSessionSwitchCache = new Map();",
+        "var _IDLE_SESSION_SWITCH_CACHE_MAX = 12;",
+        "var _allSessions = [{session_id:'a', title:'A', message_count:3412, last_message_at:1782591337.688856, updated_at:1782591337.732746, is_streaming:false, active_stream_id:null}];",
+        "var _sessionListSnapshotById = new Map();",
+        "var INFLIGHT = {};",
+        "var _messagesTruncated = true;",
+        "var _oldestIdx = 3340;",
+        "var _pendingCarryForwardSnapshot = null;",
+        "var _loadingSessionId = 'a';",
+        "var S = {busy:false, activeStreamId:null, session:{session_id:'a', message_count:3166, updated_at:1782591337.732746}, messages:[{role:'user', content:'tail'}], toolCalls:[], lastUsage:{}};",
+        "var localStorage = {setItem(){}};",
+        "function _clearSameSessionForceReloadHint(){}",
+        "function updateSendBtn(){}",
+        "function setStatus(){}",
+        "function setComposerStatus(){}",
+        "function _setSessionViewedCount(){}",
+        "function _clearSessionCompletionUnread(){}",
+        "function _setActiveSessionUrl(){}",
+        "function startSessionStream(){}",
+        "function updateQueueBadge(){}",
+        "function syncTopbar(){}",
+        "function renderMessages(){}",
+        _extract_function("_cloneSessionSwitchCacheValue"),
+        _extract_function("_sessionSwitchCacheFingerprint"),
+        _extract_function("_sessionSwitchCacheRowForSid"),
+        _extract_function("_sessionSwitchCacheFingerprintMatches"),
+        _extract_function("_rememberIdleSessionSwitchCache"),
+        _extract_function("_restoreIdleSessionSwitchCache"),
+        "if(!_rememberIdleSessionSwitchCache('a')) throw new Error('remember failed');",
+        "S.session = {session_id:'b'}; S.messages = [{role:'user', content:'other'}];",
+        "const restored = _restoreIdleSessionSwitchCache('a');",
+        "console.log(JSON.stringify({restored, sid:S.session&&S.session.session_id, messages:S.messages.length, truncated:_messagesTruncated}));",
+    ])
+    assert _run_node(source) == '{"restored":true,"sid":"a","messages":1,"truncated":true}'
