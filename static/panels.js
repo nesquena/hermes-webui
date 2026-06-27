@@ -7491,6 +7491,18 @@ function _retryPreferencesAutosave(){
   _autosavePreferencesSettings(payload);
 }
 
+function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
+  if(!field) return;
+  const parsedFallback=parseInt(fallbackValue,10);
+  if(Number.isFinite(parsedFallback)&&parsedFallback>0&&typeof t==='function'){
+    field.placeholder=t('settings_placeholder_max_tokens_fallback', parsedFallback);
+    return;
+  }
+  field.placeholder=(typeof t==='function')
+    ? t('settings_placeholder_max_tokens_none')
+    : 'No override';
+}
+
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
@@ -7737,6 +7749,7 @@ async function loadSettingsPanel(){
       maxTokensField.value=hasRootOverride
         ? String(parsedMaxTokens)
         : '';
+      _syncSettingsMaxTokensPlaceholder(maxTokensField,settings.max_tokens_fallback);
       maxTokensField.dataset.initialValue=maxTokensField.value;
       maxTokensField.addEventListener('input',_markSettingsDirty,{once:false});
     }
@@ -9602,6 +9615,7 @@ function _applySavedSettingsUi(saved, body, opts){
     maxTokensField.value=(Number.isFinite(parsedSavedMaxTokens)&&parsedSavedMaxTokens>0)
       ? String(parsedSavedMaxTokens)
       : '';
+    _syncSettingsMaxTokensPlaceholder(maxTokensField,saved&&saved.max_tokens_fallback);
     maxTokensField.dataset.initialValue=maxTokensField.value;
   }
   if(typeof startGatewaySSE==='function'){

@@ -401,12 +401,14 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
     assert load_idx != -1
     load_window = load_block[load_idx:load_idx + 420]
     assert "settings.max_tokens" in load_window
+    assert "_syncSettingsMaxTokensPlaceholder(maxTokensField,settings.max_tokens_fallback)" in load_block.replace(" ", "")
     assert "maxTokensField.dataset.initialValue=maxTokensField.value" in load_block.replace(" ", "")
     assert "maxTokensField.addEventListener('input',_markSettingsDirty" in load_block.replace(" ", "")
     assert "_schedulePreferencesAutosave" not in load_window
 
     apply_saved_block = _function_block(panels_js, "_applySavedSettingsUi")
     assert "saved&&saved.max_tokens" in apply_saved_block
+    assert "_syncSettingsMaxTokensPlaceholder(maxTokensField,saved&&saved.max_tokens_fallback)" in apply_saved_block.replace(" ", "")
     assert "maxTokensField.dataset.initialValue=maxTokensField.value" in apply_saved_block.replace(" ", "")
 
     autosave_block = _function_block(panels_js, "_autosavePreferencesSettings")
@@ -429,5 +431,8 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
     assert "body.max_tokens=maxTokensRaw===''?null:maxTokensRaw" in save_block.replace(" ", "")
 
     assert 'id="settingsMaxTokens"' in index_html
+    assert 'data-i18n-placeholder="settings_placeholder_max_tokens_none"' in index_html
     assert "settings_label_max_tokens" in i18n_js
     assert "settings_desc_max_tokens" in i18n_js
+    assert "settings_placeholder_max_tokens_none" in i18n_js
+    assert "settings_placeholder_max_tokens_fallback" in i18n_js
