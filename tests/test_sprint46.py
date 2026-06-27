@@ -172,14 +172,24 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
     loaded = get_session(sid)
     persisted = Session.load(sid)
     assert loaded.messages == original_messages
-    assert loaded.context_messages == compressed_messages
+    assert [m.get("role") for m in loaded.context_messages] == [m.get("role") for m in compressed_messages]
+    assert [m.get("content") for m in loaded.context_messages] == [m.get("content") for m in compressed_messages]
     assert loaded.tool_calls == settled_tool_calls
     assert persisted.messages == original_messages
-    assert persisted.context_messages == compressed_messages
+    assert [m.get("role") for m in persisted.context_messages] == [m.get("role") for m in compressed_messages]
+    assert [m.get("content") for m in persisted.context_messages] == [m.get("content") for m in compressed_messages]
     assert persisted.tool_calls == settled_tool_calls
     assert loaded.compression_anchor_summary == payload["session"]["compression_anchor_summary"]
     assert loaded.compression_anchor_visible_idx == payload["session"]["compression_anchor_visible_idx"]
     assert loaded.compression_anchor_message_key == payload["session"]["compression_anchor_message_key"]
+    assert loaded.compression_anchor_mode == "manual"
+    assert loaded.truncation_watermark is not None
+    assert loaded.truncation_boundary == loaded.truncation_watermark
+    assert loaded.last_prompt_tokens is not None
+    assert persisted.compression_anchor_mode == "manual"
+    assert persisted.truncation_watermark == loaded.truncation_watermark
+    assert persisted.truncation_boundary == loaded.truncation_boundary
+    assert not (SESSION_DIR / f"{sid}.json.bak").exists()
     assert persisted.compression_anchor_visible_idx == 3
     assert persisted.compression_anchor_message_key == payload["session"]["compression_anchor_message_key"]
     assert _FakeAgent.last_instance is not None
@@ -269,10 +279,10 @@ def test_session_compress_start_is_async_and_reuses_running_job(monkeypatch, cle
     assert done_payload["session"]["tool_calls"] == settled_tool_calls
     persisted = Session.load(sid)
     assert persisted.tool_calls == settled_tool_calls
-    assert persisted.context_messages == [
-        {"role": "user", "content": "one"},
-        {"role": "assistant", "content": "four"},
-    ]
+    # /compress now stamps missing message timestamps, so compare role/content
+    # rather than full-dict equality (mirrors test_session_compress_roundtrip).
+    assert [m.get("role") for m in persisted.context_messages] == ["user", "assistant"]
+    assert [m.get("content") for m in persisted.context_messages] == ["one", "four"]
 
 
 def test_session_compress_status_reports_worker_error_without_raw_paths(monkeypatch, cleanup_test_sessions):
