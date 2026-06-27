@@ -75,6 +75,19 @@ def test_display_cache_restores_before_metadata_fetch_but_still_fetches_metadata
     assert "!_restoredSessionDisplayBeforeFetch" in body
 
 
+def test_same_session_metadata_count_increase_forces_message_reload():
+    body = _load_session_body()
+    ensure_body = _function_body("async function _ensureMessagesLoaded")
+    prev_idx = body.index("_previousActiveMessageCount")
+    server_idx = body.index("_serverMessageCount")
+    ahead_idx = body.index("_sameSessionServerAhead")
+    ensure_idx = body.index("_ensureMessagesLoaded(sid,{force:_sameSessionServerAhead})")
+    assert prev_idx < server_idx < ahead_idx < ensure_idx
+    assert "_serverMessageCount > Math.max(0, _previousActiveMessageCount)" in body
+    assert "const forceReloadMessages = !!(opts && opts.force);" in ensure_body
+    assert "if (!forceReloadMessages && S.messages" in ensure_body
+
+
 def test_cached_idle_switch_restores_before_blocking_draft_flush():
     """A hot A→B→A switch should not wait on draft persistence before repainting.
 

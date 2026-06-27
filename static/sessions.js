@@ -1323,6 +1323,9 @@ async function loadSession(sid){
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
+  const _previousActiveMessageCount = (currentSid===sid && S.session)
+    ? Number(S.session.message_count || 0)
+    : 0;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -1559,6 +1562,12 @@ async function loadSession(sid){
     _loadingSessionId=null;
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true});
   }
+  const _serverMessageCount = Number((data.session && data.session.message_count) || 0);
+  const _sameSessionServerAhead = !!(
+    sameSessionForceReload &&
+    Number.isFinite(_serverMessageCount) &&
+    _serverMessageCount > Math.max(0, _previousActiveMessageCount)
+  );
   S.session=data.session;
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
@@ -1686,7 +1695,7 @@ async function loadSession(sid){
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
     try {
-      await _ensureMessagesLoaded(sid);
+      await _ensureMessagesLoaded(sid,{force:_sameSessionServerAhead});
     } catch(e) {
       S.messages=inflightMessages;
     }
@@ -1780,7 +1789,7 @@ async function loadSession(sid){
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
     try {
-      await _ensureMessagesLoaded(sid);
+      await _ensureMessagesLoaded(sid,{force:_sameSessionServerAhead});
     } catch (e) {
       // Network errors, server failures, or SSE drops (Chrome error codes 4/5)
       // can cause _ensureMessagesLoaded to throw. Without a try/catch here the
@@ -2498,9 +2507,14 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   }
 }
 
-async function _ensureMessagesLoaded(sid) {
-  // Already have messages? (e.g. from INFLIGHT restore path, already set)
-  if (S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
+async function _ensureMessagesLoaded(sid, opts={}) {
+  const forceReloadMessages = !!(opts && opts.force);
+  // Already have messages? (e.g. from INFLIGHT restore path, already set).
+  // A same-session metadata refresh can discover state.db rows newer than the
+  // local transcript after process restart/interruption repair. In that case
+  // the caller passes force so the old tab fetches the tail instead of
+  // continuing to render a shorter cached S.messages array.
+  if (!forceReloadMessages && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     _clearSameSessionForceReloadHint(sid);
     return;
   }

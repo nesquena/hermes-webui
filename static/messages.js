@@ -1881,6 +1881,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof setStatus==='function') setStatus('');
     }
   }
+  function _schedulePostDoneCanonicalReload(completedSid){
+    const sid=String(completedSid||activeSid||'').trim();
+    if(!sid||typeof loadSession!=='function') return;
+    setTimeout(()=>{
+      if(!S.session||S.session.session_id!==sid) return;
+      if(S.busy||S.activeStreamId) return;
+      try{ loadSession(sid,{force:true,reason:'post-done-canonical'}); }
+      catch(_){}
+    },500);
+  }
   function persistInflightState(){
     const inflight=INFLIGHT[activeSid];
     if(!inflight||typeof saveInflightState!=='function') return;
@@ -4668,6 +4678,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // the notification is suppressed (matches Slack/Discord/Gmail/Claude).
         const _wasEverBackgrounded=_shouldForceCompletionNotification(activeSid, streamId);
         sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        _schedulePostDoneCanonicalReload(completedSid);
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();

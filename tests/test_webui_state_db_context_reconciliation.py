@@ -131,6 +131,7 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
     ]
 
     reloaded = models.Session.load(sid)
+    assert reloaded is not None
     saved_contents = [m.get("content") for m in (reloaded.messages if reloaded else [])]
     assert saved_contents == [
         "old user",
@@ -142,6 +143,8 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
     ]
     assert saved_contents.count("old user") == 1
     assert saved_contents.count("external gateway user") == 1
+    assert reloaded.compact()["message_count"] == len(saved_contents)
+    assert getattr(reloaded, "_metadata_message_count", None) == len(saved_contents)
 
 
 def test_state_db_delta_after_context_allows_recovered_turn_prefix():
