@@ -2361,9 +2361,9 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     }
     return true;
   };
-  const _hydrateBootModelDropdown=()=>populateModelDropdown({
+  const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({
     preferProfileDefaultOnFreshBoot:true,
-    redirectIfUnauth:_redirectBootModelDropdownIfUnauth,
+    ...(redirectIfUnauth?{redirectIfUnauth}:{}),
   }).then(()=>{
     const sessionModelState=S.session&&S.session.model
       ? {model:S.session.model,model_provider:S.session.model_provider||null}
@@ -2402,15 +2402,22 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._modelDropdownReady=null;
     throw e;
   });
+  const _startModelDropdown=()=>{
+    const ready=window._modelDropdownReady;
+    if(ready&&typeof ready.then==='function') return ready;
+    const next=_hydrateModelDropdown();
+    window._modelDropdownReady=next;
+    return next;
+  };
   const _startBootModelDropdown=()=>{
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateBootModelDropdown();
+    const next=_hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth});
     window._modelDropdownReady=next;
     return next;
   };
   window._modelDropdownReady=null;
-  window._ensureModelDropdownReady=_startBootModelDropdown;
+  window._ensureModelDropdownReady=_startModelDropdown;
   setTimeout(()=>{
     try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
   },0);
