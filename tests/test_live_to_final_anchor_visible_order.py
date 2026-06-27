@@ -866,7 +866,8 @@ def test_settled_anchor_scene_promotes_final_content_array_to_ordered_activity_r
     assert "partType==='thinking'||partType==='reasoning'" in visible_text
     assert "part.text||part.input_text||part.output_text" in visible_text
     assert "_fromContent:true" in rows_by_message
-    assert "if(!a._fromContent&&!b._fromContent)" in rows_by_message
+    assert "const useStartedAt=!hasOrderedContentRows;" in rows_by_message
+    assert "if(useStartedAt){" in rows_by_message
     assert "const {_phase,_encounter,_fromContent,...clean}=row;" in rows_by_message
     content_tool = _function_body(MESSAGES_JS, "_anchorSceneContentTool")
     assert "part.id||part.tid||part.tool_call_id||part.tool_use_id||part.call_id" in content_tool
