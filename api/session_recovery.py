@@ -65,6 +65,52 @@ def _msg_count(p: Path) -> int:
     return len(msgs) if isinstance(msgs, list) else -1
 
 
+def _rebuild_recovery_session_index(session_dir: Path) -> None:
+    """Rebuild ``session_dir/_index.json`` from persisted sidecars only.
+
+    Recovery repair/audit operates on a concrete sidecar directory. Unlike the
+    live sidebar path, its rebuilt index must not include unrelated in-memory
+    ``Session`` cache entries whose backing JSON files are absent from this
+    directory; those would immediately audit as ``index_missing_file`` rows.
+    """
+    from api.models import _load_session_from_path
+
+    entry_map: dict[str, dict] = {}
+    for path in sorted(session_dir.glob('*.json')):
+        if path.name.startswith('_'):
+            continue
+        session = _load_session_from_path(path)
+        if not session:
+            continue
+        entry = session.compact()
+        session_id = entry.get('session_id')
+        if not session_id:
+            continue
+        existing = entry_map.get(session_id)
+        if existing is None or entry.get('message_count', 0) > existing.get('message_count', 0):
+            entry_map[session_id] = entry
+
+    entries = sorted(
+        entry_map.values(),
+        key=lambda entry: entry.get('updated_at', 0),
+        reverse=True,
+    )
+    index_path = session_dir / '_index.json'
+    tmp = index_path.with_suffix(f'.tmp.recovery.{os.getpid()}.{threading.current_thread().ident}')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            fh.write(json.dumps(entries, ensure_ascii=False, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, index_path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
 def _session_records_intentional_compress_shrink(session_path: Path) -> bool:
     """Return True when the live sidecar records an intentional context shrink.
 
@@ -669,8 +715,7 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     sidecar_repair = recover_missing_sidecars_from_state_db(session_dir, state_db_path)
     if sidecar_repair.get('materialized'):
         try:
-            from api.models import _write_session_index
-            _write_session_index(updates=None)
+            _rebuild_recovery_session_index(session_dir)
         except Exception as exc:
             logger.warning("repair_safe_session_recovery: index rebuild after state.db reconciliation failed: %s", exc)
     after = audit_session_recovery(session_dir, state_db_path=state_db_path)
@@ -734,9 +779,8 @@ def recover_all_sessions_on_startup(
         )
     if rebuild_index:
         try:
-            from api.models import SESSION_INDEX_FILE, _write_session_index
-            if restored or not SESSION_INDEX_FILE.exists():
-                _write_session_index(updates=None)
+            if restored or not (session_dir / '_index.json').exists():
+                _rebuild_recovery_session_index(session_dir)
         except Exception as exc:
             logger.warning("recover_all_sessions_on_startup: index rebuild failed: %s", exc)
     return {
