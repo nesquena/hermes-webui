@@ -11419,6 +11419,46 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   return true;
 }
 
+function _isConversationLoadingPlaceholderNode(node){
+  if(!node||node.nodeType!==1) return false;
+  const text=String(node.textContent||'').replace(/\s+/g,' ').trim();
+  if(text!=='Loading conversation...') return false;
+  if(node.classList&&node.classList.contains('session-loading-placeholder')) return true;
+  const style=String(node.getAttribute&&node.getAttribute('style')||'');
+  return style.includes('height:100%')&&style.includes('text-align:center');
+}
+
+function _removeConversationLoadingPlaceholders(root){
+  if(!root||!root.children) return false;
+  let removed=false;
+  const candidates=[];
+  for(const child of Array.from(root.children)){
+    if(_isConversationLoadingPlaceholderNode(child)) candidates.push(child);
+  }
+  try{
+    root.querySelectorAll('.session-loading-placeholder').forEach(node=>{
+      if(!candidates.includes(node)) candidates.push(node);
+    });
+  }catch(_){}
+  for(const node of candidates){
+    if(node&&node.parentNode){node.parentNode.removeChild(node);removed=true;}
+  }
+  return removed;
+}
+
+function _stripConversationLoadingPlaceholderHtml(html){
+  const raw=String(html||'');
+  if(!raw||!raw.includes('Loading conversation')) return raw;
+  try{
+    const template=document.createElement('template');
+    template.innerHTML=raw;
+    _removeConversationLoadingPlaceholders(template.content);
+    return template.innerHTML;
+  }catch(_){
+    return raw;
+  }
+}
+
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
@@ -11433,6 +11473,7 @@ function renderMessages(options){
   // message fetch is still in flight. Other async updates can still call
   // renderMessages() in this window. Keep the existing loading placeholder.
   if(_loadingSessionId===sid&&msgCount===0&&inner) return;
+  if(msgCount>0&&inner) _removeConversationLoadingPlaceholders(inner);
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
@@ -11474,7 +11515,9 @@ function renderMessages(options){
     cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
-      inner.innerHTML=cached.html;
+      const cachedHtml=_stripConversationLoadingPlaceholderHtml(cached.html);
+      if(cachedHtml!==cached.html) cached.html=cachedHtml;
+      inner.innerHTML=cachedHtml;
       _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
@@ -12846,7 +12889,7 @@ function renderMessages(options){
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
-    const _html=inner.innerHTML;
+    const _html=_stripConversationLoadingPlaceholderHtml(inner.innerHTML);
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
       const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;

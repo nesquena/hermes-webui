@@ -791,6 +791,39 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
     ), "Session-load empty-state guard must run before render-window/state resets."
 
 
+def test_renderMessages_removes_stale_loading_placeholder_before_real_transcript_render(cleanup_test_sessions):
+    """Once messages exist, the session-switch placeholder must not survive.
+
+    The load placeholder is intentionally preserved while S.messages is empty.
+    After messages arrive, renderMessages must remove both new classed placeholders
+    and older bare style/text placeholders before restoring/storing HTML caches;
+    otherwise A->B->A keeps rendering "Loading conversation..." as transcript DOM.
+    """
+    ui_src = (REPO_ROOT / "static/ui.js").read_text()
+    fn_start = ui_src.find("function renderMessages")
+    assert fn_start >= 0, "renderMessages() not found in ui.js"
+    fn_body = ui_src[fn_start:fn_start + 6000]
+    compact = re.sub(r"\s+", "", fn_body)
+
+    assert "function _removeConversationLoadingPlaceholders" in ui_src
+    assert "function _stripConversationLoadingPlaceholderHtml" in ui_src
+    guard = "if(_loadingSessionId===sid&&msgCount===0&&inner)return;"
+    cleanup = "if(msgCount>0&&inner)_removeConversationLoadingPlaceholders(inner);"
+    assert guard in compact
+    assert cleanup in compact
+    assert compact.index(guard) < compact.index(cleanup)
+    assert compact.index(cleanup) < compact.index("consthasTransientTranscriptUi=")
+    assert "_stripConversationLoadingPlaceholderHtml(cached.html)" in fn_body
+    assert "_stripConversationLoadingPlaceholderHtml(inner.innerHTML)" in ui_src
+
+
+def test_session_loading_placeholder_uses_stable_class_and_display_cache_sanitizes(cleanup_test_sessions):
+    sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
+    assert "session-loading-placeholder" in sessions_src
+    assert "_stripConversationLoadingPlaceholderHtml(rawHtml)" in sessions_src
+    assert "_stripConversationLoadingPlaceholderHtml(cache.html)" in sessions_src
+
+
 def test_browser_session_url_accepts_api_session_id_param(cleanup_test_sessions):
     """External links using ?session_id=... should open that session in the browser.
 

@@ -383,7 +383,8 @@ function _rememberSessionSwitchDisplayCache(currentSid){
   if(!currentSid || !S || !S.session || S.session.session_id!==currentSid) return false;
   const messages=Array.isArray(S.messages)?S.messages:[];
   const inner=$('msgInner');
-  const html=inner?String(inner.innerHTML||''):'';
+  const rawHtml=inner?String(inner.innerHTML||''):'';
+  const html=(typeof _stripConversationLoadingPlaceholderHtml==='function')?_stripConversationLoadingPlaceholderHtml(rawHtml):rawHtml;
   if(!messages.length&&!html) return false;
   const activeStreamId=S.activeStreamId||S.session.active_stream_id||null;
   const entry={
@@ -440,7 +441,9 @@ function _restoreSessionSwitchDisplayCache(sid,opts={}){
   if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
   if(typeof syncTopbar==='function') syncTopbar();
   const inner=$('msgInner');
-  if(inner&&cache.html) inner.innerHTML=cache.html;
+  if(inner&&cache.html){
+    inner.innerHTML=(typeof _stripConversationLoadingPlaceholderHtml==='function')?_stripConversationLoadingPlaceholderHtml(cache.html):cache.html;
+  }
   else if(typeof renderMessages==='function') renderMessages();
   if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
   if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
@@ -1346,12 +1349,19 @@ async function loadSession(sid){
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
-  // Show loading indicator immediately for responsiveness.
-  // Cleared by renderMessages() once full session data arrives.
+  // On cross-session clicks, keep the previous transcript visible until the
+  // destination transcript is ready or a display cache restores it. Replacing
+  // the pane with `Loading conversation...` makes every switch feel like a hard
+  // reload and can poison transcript HTML caches. Only boot/no-current-session
+  // loads use the placeholder because there is no prior pane to preserve.
   // Persist the current composer draft before switching away so it can be
   // restored when the user switches back (#1060). Save to server now so the
   // draft survives page refresh and syncs across clients.
   if (currentSid && currentSid !== sid) {
+    const _preSwitchMsgInner = $('msgInner');
+    if (_preSwitchMsgInner && typeof _removeConversationLoadingPlaceholders === 'function') {
+      _removeConversationLoadingPlaceholders(_preSwitchMsgInner);
+    }
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     const _switchDraftText = ($('msg') || {}).value || '';
@@ -1430,7 +1440,7 @@ async function loadSession(sid){
     }
     _loadingOlder = false;
     const _msgInner = $('msgInner');
-    if (_msgInner && currentSid !== sid && !_restoredSessionDisplayBeforeFetch) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+    if (_msgInner && !currentSid && !_restoredSessionDisplayBeforeFetch) _msgInner.innerHTML = '<div class="session-loading-placeholder" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
   // Phase 1: Load metadata only (~1KB) for fast session switching. Keep model
   // resolution out of the first-paint path; old provider-shaped model IDs are

@@ -49,17 +49,16 @@ def test_loadSession_clears_busy_before_async_message_load_when_server_idle():
     )
 
 
-def test_loadSession_snapshots_live_turn_before_wiping_message_pane():
+def test_loadSession_snapshots_live_turn_before_destructive_state_clear():
     body = _function_body(SESSIONS_SRC, "async function loadSession(")
 
     snap_pos = body.find("snapshotLiveTurnHtmlForSession(currentSid)")
-    # Anchor on the actual loading-placeholder marker (unique), not the
-    # whitespace-sensitive innerHTML literal which also matches the
-    # "Session not available" error handler. (Maintainer review.)
-    wipe_pos = body.find("Loading conversation...")
+    clear_pos = body.find("S.messages = []")
+    placeholder_pos = body.find("!currentSid && !_restoredSessionDisplayBeforeFetch")
     assert snap_pos != -1, "loadSession must snapshot the outgoing live turn before switching"
-    assert wipe_pos != -1, "loadSession must still show the loading placeholder on switch"
-    assert snap_pos < wipe_pos, "snapshot must run before msgInner is replaced with the loading placeholder"
+    assert clear_pos != -1, "loadSession must still clear message state before authoritative fetch"
+    assert snap_pos < clear_pos, "snapshot must run before S.messages is cleared"
+    assert placeholder_pos != -1, "cross-session switches must not replace the pane with Loading conversation"
 
 
 def test_loadSession_restores_live_turn_on_active_stream_return_path():

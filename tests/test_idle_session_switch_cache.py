@@ -50,30 +50,28 @@ def test_switching_away_snapshots_idle_session_before_messages_are_cleared():
 
 def test_switching_away_snapshots_display_cache_before_messages_are_cleared():
     body = _load_session_body()
+    cleanup_idx = body.index("_removeConversationLoadingPlaceholders(_preSwitchMsgInner)")
     remember_idx = body.index("_rememberSessionSwitchDisplayCache(currentSid")
     clear_idx = body.index("S.messages = []")
-    assert remember_idx < clear_idx, (
-        "The visible transcript/display state must be cached before loadSession "
-        "clears S.messages for the next session, including active/pending turns."
+    assert cleanup_idx < remember_idx < clear_idx, (
+        "The visible transcript/display state must be cleaned and cached before "
+        "loadSession clears S.messages for the next session, including active/pending turns."
     )
 
 
-def test_cached_idle_switch_restores_before_metadata_fetch_and_loading_placeholder():
+def test_cached_idle_switch_restores_before_metadata_fetch():
     body = _load_session_body()
     restore_idx = body.index("_restoreIdleSessionSwitchCache(sid")
-    loading_idx = body.index("Loading conversation...")
     metadata_fetch_idx = body.index("messages=0&resolve_model=0")
-    assert restore_idx < loading_idx
     assert restore_idx < metadata_fetch_idx
 
 
-def test_display_cache_restores_before_loading_placeholder_but_still_fetches_metadata():
+def test_display_cache_restores_before_metadata_fetch_but_still_fetches_metadata():
     body = _load_session_body()
     restore_idx = body.index("_restoreSessionSwitchDisplayCache(sid")
-    loading_idx = body.index("Loading conversation...")
     metadata_fetch_idx = body.index("messages=0&resolve_model=0")
-    assert restore_idx < loading_idx
     assert restore_idx < metadata_fetch_idx
+    assert "!currentSid && !_restoredSessionDisplayBeforeFetch" in body
     assert "!_restoredSessionDisplayBeforeFetch" in body
 
 
