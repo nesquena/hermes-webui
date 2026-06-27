@@ -834,6 +834,74 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
+def test_gateway_chat_worker_text_mode_auto_analyzes_image_before_request(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    image_path = tmp_path / "photo.png"
+    image_path.write_bytes(image_bytes)
+    captured = {}
+    calls = []
+
+    async def fake_vision_analyze_tool(*, image_url, user_prompt):
+        calls.append((image_url, user_prompt))
+        return json.dumps({
+            "success": True,
+            "analysis": "The screenshot shows a modal saying session already has an active stream.",
+        })
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"saw it"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr("api.config.get_config", lambda: {"agent": {"image_input_mode": "text"}})
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("tools.vision_tools.vision_analyze_tool", fake_vision_analyze_tool)
+
+    s = new_session()
+    stream_id = "stream-gateway-image-text-test"
+    s.active_stream_id = stream_id
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "What is in this image?",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [{"path": str(image_path), "mime": "image/png", "is_image": True}],
+    )
+
+    assert calls and calls[0][0] == str(image_path)
+    content = captured["body"]["messages"][-1]["content"]
+    assert isinstance(content, str)
+    assert "The user sent an image" in content
+    assert "session already has an active stream" in content
+    assert content.index("session already has an active stream") < content.index("What is in this image?")
+    assert f"vision_analyze with image_url: {image_path}" in content
+
+
 def test_gateway_use_runs_api_is_default_off():
     for env in ({}, {"HERMES_WEBUI_GATEWAY_USE_RUNS_API": ""}):
         assert _gateway_use_runs_api_enabled({}, env) is False

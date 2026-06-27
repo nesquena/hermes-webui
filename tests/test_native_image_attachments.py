@@ -6,6 +6,7 @@ across the workspace-path safety, size ceiling, multi-image, MIME, and
 fallback cases the maintainer asked about.
 """
 import base64
+import json
 import os
 import struct
 from pathlib import Path
@@ -191,6 +192,45 @@ class TestBuildNativeMultimodalMessage:
             result = _build_native_multimodal_message('[WS]\n', 'read', atts, str(root))
             assert isinstance(result, str)
             assert 'read' in result
+
+    def test_text_mode_auto_analyzes_image_before_agent_input(self, monkeypatch):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            img = root / 'screenshot.png'
+            _make_png(img)
+            atts = _normalize_chat_attachments([{
+                'name': 'screenshot.png',
+                'path': str(img),
+                'mime': 'image/png',
+                'size': img.stat().st_size,
+                'is_image': True,
+            }])
+            calls = []
+
+            async def fake_vision_analyze_tool(*, image_url, user_prompt):
+                calls.append((image_url, user_prompt))
+                return json.dumps({
+                    'success': True,
+                    'analysis': 'The screenshot shows a red error banner saying Tool iteration limit reached.',
+                })
+
+            monkeypatch.setattr('tools.vision_tools.vision_analyze_tool', fake_vision_analyze_tool)
+
+            result = _build_native_multimodal_message(
+                '',
+                'これどうにかならん？',
+                atts,
+                str(root),
+                cfg={'agent': {'image_input_mode': 'text'}},
+                auto_analyze_text_mode_images=True,
+            )
+
+            assert isinstance(result, str)
+            assert calls and calls[0][0] == str(img)
+            assert 'The user sent an image' in result
+            assert 'Tool iteration limit reached' in result
+            assert result.index('Tool iteration limit reached') < result.index('これどうにかならん？')
+            assert f'vision_analyze with image_url: {img}' in result
 
     def test_outside_workspace_path_rejected(self):
         with TemporaryDirectory() as d:

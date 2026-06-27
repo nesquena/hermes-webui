@@ -1969,6 +1969,87 @@ def _append_image_attachment_hints(text: str, image_paths) -> str:
     return _append_attachment_hints(text, image_paths=image_paths)
 
 
+def _run_coro_sync(coro):
+    """Run a coroutine from WebUI worker code, even if a loop is already active."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result_box = {}
+
+    def _runner():
+        try:
+            result_box['value'] = asyncio.run(coro)
+        except BaseException as exc:  # propagate to caller after the helper thread exits
+            result_box['error'] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+    if 'error' in result_box:
+        raise result_box['error']
+    return result_box.get('value')
+
+
+def _text_mode_image_analysis_prompt() -> str:
+    return (
+        "Describe everything visible in this image in thorough detail. "
+        "Include any text, code, UI, data, objects, people, layout, colors, "
+        "and any other notable visual information."
+    )
+
+
+def _text_mode_image_analysis_note(path: str) -> str:
+    """Return an agent-only text summary for a user image attachment."""
+    try:
+        import importlib
+
+        vision_analyze_tool = importlib.import_module('tools.vision_tools').vision_analyze_tool
+        try:
+            sanitize_context = importlib.import_module('agent.memory_manager').sanitize_context
+        except Exception:
+            sanitize_context = lambda value: str(value or '')
+
+        result_json = _run_coro_sync(
+            vision_analyze_tool(
+                image_url=path,
+                user_prompt=_text_mode_image_analysis_prompt(),
+            )
+        )
+        result = json.loads(result_json) if isinstance(result_json, str) else result_json
+        description = ''
+        if isinstance(result, dict):
+            description = str(result.get('analysis') or '').strip()
+        if description:
+            description = sanitize_context(description)
+            return (
+                f"[The user sent an image at: {path}. Here's what it contains:\n"
+                f"{description}]\n"
+                f"[If you need a closer look, use vision_analyze with image_url: {path}]"
+            )
+    except Exception:
+        logger.debug("Failed to auto-analyze WebUI image attachment %s", path, exc_info=True)
+    return (
+        f"[The user sent an image at: {path}, but automatic image analysis failed. "
+        f"Use vision_analyze with image_url: {path} before answering if the request depends on the image.]"
+    )
+
+
+def _prepend_text_mode_image_analysis(text: str, image_paths) -> str:
+    paths = _dedupe_attachment_paths(image_paths)
+    if not paths:
+        return text
+    notes = [_text_mode_image_analysis_note(path) for path in paths]
+    base = str(text or '').strip()
+    prefix = "\n\n".join(note for note in notes if note)
+    if prefix and base:
+        return f"{prefix}\n\n{base}"
+    return prefix or base
+
+
 def _attachment_allowed_roots(workspace: str):
     workspace_root = Path(workspace).expanduser().resolve()
     try:
@@ -2051,6 +2132,7 @@ def _build_native_multimodal_message(
     cfg: dict = None,
     provider: str = '',
     model: str = '',
+    auto_analyze_text_mode_images: bool = False,
 ):
     """Build native multimodal content parts for current-turn image uploads.
 
@@ -2059,9 +2141,11 @@ def _build_native_multimodal_message(
     models can consume them in the same request. Non-image files intentionally
     stay as text path attachments so the agent can inspect them with file tools.
 
-    When *cfg* is provided, respects ``agent.image_input_mode`` — if the resolved
-    mode is ``"text"``, returns a plain string (attachments are not embedded) so
-    the agent's text-mode pipeline (``vision_analyze``) handles images.
+    When *cfg* is provided, respects ``agent.image_input_mode``. If the resolved
+    mode is ``"text"`` and ``auto_analyze_text_mode_images`` is true, WebUI
+    pre-analyzes image attachments with ``vision_analyze`` and prepends the
+    description to the agent-only input. Without that flag, the legacy text hint
+    fallback is returned.
     """
     if not attachments:
         return workspace_ctx + msg_text
@@ -2071,7 +2155,11 @@ def _build_native_multimodal_message(
 
     # ── Check image_input_mode before embedding anything ──
     if cfg is not None and _resolve_image_input_mode(cfg, provider=provider, model=model) == "text":
-        return _append_attachment_hints(workspace_ctx + msg_text, image_paths=image_paths, file_paths=file_paths)
+        text = workspace_ctx + msg_text
+        if auto_analyze_text_mode_images:
+            text = _prepend_text_mode_image_analysis(text, image_paths)
+            return _append_attachment_hints(text, image_paths=[], file_paths=file_paths)
+        return _append_attachment_hints(text, image_paths=image_paths, file_paths=file_paths)
 
     parts = [{'type': 'text', 'text': _append_attachment_hints(workspace_ctx + msg_text, image_paths=image_paths, file_paths=file_paths)}]
     image_count = 0
@@ -7676,6 +7764,7 @@ def _run_agent_streaming(
                 cfg=_cfg,
                 provider=resolved_provider,
                 model=resolved_model,
+                auto_analyze_text_mode_images=True,
             )
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             result = agent.run_conversation(

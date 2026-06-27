@@ -295,7 +295,16 @@ def _run_gateway_runs_api_streaming(
         try:
             from api.streaming import _build_native_multimodal_message
 
-            message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+            message_content = _build_native_multimodal_message(
+                "",
+                str(msg_text or ""),
+                attachments,
+                str(workspace),
+                cfg=cfg or {},
+                provider=str((body_extras or {}).get("provider") or ''),
+                model=model or '',
+                auto_analyze_text_mode_images=True,
+            )
         except Exception:
             logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
             message_content = str(msg_text or "")
@@ -648,7 +657,16 @@ def _run_gateway_chat_streaming(
                 try:
                     from api.streaming import _build_native_multimodal_message
 
-                    message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+                    message_content = _build_native_multimodal_message(
+                        "",
+                        str(msg_text or ""),
+                        attachments,
+                        str(workspace),
+                        cfg=cfg or {},
+                        provider=model_provider or '',
+                        model=model or '',
+                        auto_analyze_text_mode_images=True,
+                    )
                 except Exception:
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
                     message_content = str(msg_text or "")
