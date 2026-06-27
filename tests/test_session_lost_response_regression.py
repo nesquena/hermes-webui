@@ -870,3 +870,111 @@ def test_get_session_does_not_sync_while_stream_is_still_live(monkeypatch):
     assert loaded.active_stream_id == stream_id
     assert loaded.pending_user_message == "new request"
     assert [m["content"] for m in loaded.messages] == ["old question", "old answer"]
+
+
+def test_sync_save_failure_does_not_mutate_session(monkeypatch):
+    """If the durable snapshot save raises, the live object must stay untouched.
+
+    The sync mutates the shared/cached Session only AFTER persisting a private
+    snapshot. A failing save must leave active_stream_id/pending fields intact
+    so later reads still see the unfinished stream that is still on disk.
+    Tests the helper directly to isolate it from _repair_stale_pending, which
+    has its own (separate) dead-stream pending cleanup. (greptile P1)
+    """
+    sid = "state_sync_save_fail_sid"
+    stream_id = "stream_save_fail_no_done"
+    s = Session(
+        session_id=sid,
+        title="Save failure",
+        messages=[
+            {"role": "user", "content": "old question", "timestamp": 100.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=102.0,
+    )
+    s.save()
+
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 100.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "recovered text", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": len(state_messages), "last_message_at": 103.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    # Force the snapshot save to fail.
+    def boom(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Session, "save", boom)
+
+    result = models._sync_sidecar_from_state_db_if_newer(s)
+
+    # Sync reports failure and the live object is NOT mutated.
+    assert result is False
+    assert s.active_stream_id == stream_id
+    assert s.pending_user_message == "new request"
+    assert [m["content"] for m in s.messages] == ["old question", "old answer"]
+
+
+def test_sync_persists_recovered_state_db_tail_when_stream_dead(monkeypatch):
+    """Happy path: dead stream + newer state.db tail is written back durably.
+
+    Mutates the live object only after the snapshot save succeeds, and the
+    reconciled transcript reaches both memory and disk.
+    """
+    sid = "state_sync_ok_sid"
+    stream_id = "stream_dead_no_done"
+    s = Session(
+        session_id=sid,
+        title="Recover tail",
+        messages=[
+            {"role": "user", "content": "old question", "timestamp": 100.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=102.0,
+    )
+    s.save()
+
+    state_messages = [
+        {"role": "user", "content": "old question", "timestamp": 100.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "recovered tail", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": len(state_messages), "last_message_at": 103.0},
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    result = models._sync_sidecar_from_state_db_if_newer(s)
+
+    assert result is True
+    assert s.active_stream_id is None
+    assert s.pending_user_message is None
+    assert [m["content"] for m in s.messages] == [m["content"] for m in state_messages]
+
+    reloaded = Session.load(sid)
+    assert reloaded.active_stream_id is None
+    assert reloaded.messages[-1]["content"] == "recovered tail"
+
+

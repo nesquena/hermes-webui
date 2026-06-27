@@ -2379,30 +2379,56 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         session,
         state_messages=state_messages,
     )
+    # The reconciler is append-only: when state.db genuinely advances the
+    # transcript (new assistant/tool output that the lost stream never wrote
+    # back), that shows up as MORE rows than the sidecar. A merged length that
+    # is not greater than the sidecar means there is nothing new to recover, so
+    # leave the sidecar untouched rather than rewriting it in place.
     if len(merged_messages) <= sidecar_count:
         return False
-
-    # Avoid claiming a stream is still active after we have incorporated rows
-    # from state.db that are newer than the pending turn. The stream may still
-    # lack a journal terminal event, but the durable transcript is no longer the
-    # stale sidecar; clearing pending state lets refresh/loadSession render the
-    # reconciled conversation instead of treating it as an unfinished run forever.
-    session.messages = merged_messages
-    session.context_messages = reconciled_state_db_messages_for_session(
+    merged_context = reconciled_state_db_messages_for_session(
         session,
         prefer_context=True,
         state_messages=state_messages,
     )
+
+    # Persist FIRST on a private snapshot so a failed write never mutates the
+    # shared (and cached) Session object. Mutating ``session`` before the save
+    # succeeds means a raising ``save()`` would leave the in-memory object with
+    # cleared active_stream_id/pending fields while the on-disk sidecar still
+    # holds the unfinished stream — later get_session() reads in this process
+    # would then skip recovery state that still exists durably. (greptile P1:
+    # save failure mutates cache) Only after the durable write succeeds do we
+    # copy the reconciled state back onto the live object.
+    try:
+        snapshot = Session.load(sid)
+    except Exception:
+        snapshot = None
+    if snapshot is None:
+        logger.debug("state.db newer-sidecar sync: snapshot load failed for session %s", sid, exc_info=True)
+        return False
+    snapshot.messages = merged_messages
+    snapshot.context_messages = merged_context
+    snapshot.active_stream_id = None
+    snapshot.pending_user_message = None
+    snapshot.pending_attachments = []
+    snapshot.pending_started_at = None
+    snapshot.pending_user_source = None
+    try:
+        snapshot.save(touch_updated_at=True)
+    except Exception:
+        logger.debug("state.db newer-sidecar sync save failed for session %s", sid, exc_info=True)
+        return False
+
+    # Durable write succeeded — now it is safe to reflect the reconciled state
+    # on the shared/cached object the caller is holding.
+    session.messages = merged_messages
+    session.context_messages = merged_context
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
-    try:
-        session.save(touch_updated_at=True)
-    except Exception:
-        logger.debug("state.db newer-sidecar sync save failed for session %s", sid, exc_info=True)
-        return False
     logger.info(
         "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
         sid,
