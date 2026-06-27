@@ -4629,8 +4629,8 @@ function _memorySectionPath(key) {
   if (key === 'user') return _memoryData.user_path || '';
   if (key === 'soul') return _memoryData.soul_path || '';
   if (key === 'project_context') return _memoryData.project_context_path || '';
-  // Intentional default: the primary "memory" section remains the fallback.
-  return _memoryData.memory_path || '';
+  if (key === 'memory') return _memoryData.memory_path || '';
+  return '';
 }
 
 function _setMemoryHeaderButtons(mode) {
@@ -6483,6 +6483,8 @@ async function loadMemory(force) {
         el.className = 'side-menu-item';
         if (_currentMemorySection === s.key) el.classList.add('active');
         el.innerHTML = `${li(s.iconKey,16)}<span>${esc(_memorySectionLabel(s))}</span>`;
+        const sectionPath = _memorySectionPath(s.key);
+        if (sectionPath) el.title = sectionPath;
         el.onclick = () => openMemorySection(s.key, el);
         panel.appendChild(el);
       }
