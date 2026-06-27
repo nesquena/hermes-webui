@@ -50,6 +50,21 @@ def test_cached_idle_switch_restores_before_metadata_fetch_and_loading_placehold
     assert restore_idx < metadata_fetch_idx
 
 
+def test_cached_idle_switch_restores_before_blocking_draft_flush():
+    """A hot A→B→A switch should not wait on draft persistence before repainting.
+
+    The outgoing idle session can be snapshotted synchronously, then the target
+    idle cache should restore before the awaited /api/session/draft call. Draft
+    persistence may still happen, but it must not be on the visible cache-hit
+    path that should avoid `Loading conversation...` entirely.
+    """
+    body = _load_session_body()
+    remember_idx = body.index("_rememberIdleSessionSwitchCache(currentSid")
+    restore_idx = body.index("_restoreIdleSessionSwitchCache(sid")
+    await_draft_idx = body.index("await _saveComposerDraftNow(currentSid")
+    assert remember_idx < restore_idx < await_draft_idx
+
+
 def _function_body(marker: str) -> str:
     start = _idx(marker)
     paren = SESSIONS_JS.index(")", start)

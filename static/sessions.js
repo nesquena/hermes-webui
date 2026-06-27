@@ -1272,11 +1272,19 @@ async function loadSession(sid){
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     const _switchDraftText = ($('msg') || {}).value || '';
     const _switchDraftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
-    await _saveComposerDraftNow(currentSid, _switchDraftText, _switchDraftFiles);
     if (S.session && S.session.session_id === currentSid) {
       S.session.composer_draft = {text:_switchDraftText, files:_switchDraftFiles};
     }
-    _rememberIdleSessionSwitchCache(currentSid);
+    const _rememberedIdleSwitchCache = _rememberIdleSessionSwitchCache(currentSid);
+    // Hot idle A→B→A switches should repaint from browser memory immediately.
+    // Persist the outgoing draft in the background on cache hits; blocking on
+    // /api/session/draft before this restore makes long threads flash the
+    // loading placeholder despite having an unchanged transcript in memory.
+    if (_rememberedIdleSwitchCache && _restoreIdleSessionSwitchCache(sid,{previousSid:currentSid,forceReload})) {
+      _saveComposerDraftNow(currentSid, _switchDraftText, _switchDraftFiles);
+      return;
+    }
+    await _saveComposerDraftNow(currentSid, _switchDraftText, _switchDraftFiles);
     // The awaited draft save above yields the event loop. If another
     // loadSession() started for a different session while we were waiting
     // (rapid switch B→C), _loadingSessionId now points at that newer load —
