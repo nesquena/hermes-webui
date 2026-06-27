@@ -4652,6 +4652,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession){
           S.activeStreamId=null;
         }
+        let lastAsst=null;
         if(isActiveSession){
           // Capture previous session totals BEFORE overwriting S.session with the new
           // cumulative values from the done event. prevIn/prevOut are the totals as of
@@ -4681,7 +4682,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
-          const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
+          lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
           // Persist reasoning trace for Worklog Thinking Cards; normal transcript
           // rendering keeps provider reasoning out of the final answer.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
@@ -4805,6 +4806,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // TTS auto-read: speak the last assistant response if enabled (#499)
           if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
         }
+        if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
+          lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
+        }
         if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
           const _goalNext=_pendingGoalContinuation;
           _pendingGoalContinuation=null;
@@ -4827,7 +4831,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // If the user watched the whole stream, _wasEverHidden stays false and
         // the notification is suppressed (matches Slack/Discord/Gmail/Claude).
         const _wasEverBackgrounded=_shouldForceCompletionNotification(activeSid, streamId);
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        const _completionPreview=_completionNotificationPreviewText(lastAsst,{
+          sessionId:completedSid,
+          liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
+        });
+        sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -6723,6 +6731,36 @@ function stopClarifyPolling() {
 }
 
 // ── Notifications and Sound ──────────────────────────────────────────────────
+
+function _completionNotificationPreviewText(lastAssistantMessage, options){
+  const opts=(options&&typeof options==='object')?options:{};
+  const sessionId=String(opts.sessionId||'').trim();
+  let text='';
+  if(lastAssistantMessage&&typeof lastAssistantMessage==='object'){
+    if(typeof _assistantTurnAnchorSettledFinalAnswer==='function'){
+      const anchorFinal=_assistantTurnAnchorSettledFinalAnswer(
+        lastAssistantMessage,
+        lastAssistantMessage.content,
+        {session_id:sessionId||undefined}
+      );
+      if(anchorFinal!==null&&anchorFinal!==undefined) text=String(anchorFinal||'').trim();
+    }
+    if(!text&&typeof msgContent==='function') text=String(msgContent(lastAssistantMessage)||'').trim();
+    if(!text){
+      let raw=lastAssistantMessage.content||'';
+      if(Array.isArray(raw)) raw=raw.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('').trim();
+      text=String(raw||'').trim();
+    }
+    if(text&&typeof _extractInlineThinkingFromContent==='function'){
+      const split=_extractInlineThinkingFromContent(text, lastAssistantMessage.reasoning, {streaming:false});
+      if(split&&typeof split.content==='string') text=split.content.trim();
+    }
+  }
+  if(!text&&typeof opts.liveDisplayText==='string') text=opts.liveDisplayText.trim();
+  if(!text) return '';
+  const normalized=text.replace(/\s+/g,' ').trim();
+  return normalized.length>100?`${normalized.slice(0,100)}…`:normalized;
+}
 
 function playNotificationSound(){
   if(!window._soundEnabled) return;
