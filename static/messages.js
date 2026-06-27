@@ -3130,10 +3130,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         pool.push({...row,_phase:1,_encounter:encounter++});
         liveToolOrdinal+=1;
       }
-      // Stable sort by (phase, started_at, encounter)
+      // Stable sort by (phase, started_at, encounter). Once a message has an
+      // ordered content[] scene, preserve that content bucket order exactly.
+      const useStartedAt=!hasOrderedContentRows;
       pool.sort((a,b)=>{
         if(a._phase!==b._phase) return a._phase-b._phase;
-        if(!a._fromContent&&!b._fromContent){
+        if(useStartedAt){
           const aTime=(a.tool&&a.tool.started_at!=null)?a.tool.started_at:Infinity;
           const bTime=(b.tool&&b.tool.started_at!=null)?b.tool.started_at:Infinity;
           if(aTime!==bTime) return aTime-bTime;

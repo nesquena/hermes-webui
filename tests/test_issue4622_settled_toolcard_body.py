@@ -401,6 +401,64 @@ def test_final_content_tail_thinking_stays_activity_and_content_order_wins_start
     ]
 
 
+def test_ordered_content_bucket_ignores_unmatched_live_started_at(driver_path):
+    """When content[] owns row order, unmatched live rows keep encounter order."""
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "First content row."},
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-tool",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "first"},
+                },
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    result = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "returnRows": True,
+            "S": {
+                "toolCalls": [
+                    {
+                        "id": "live-late",
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "args": {"cmd": "late"},
+                        "snippet": "late",
+                        "started_at": 300,
+                    },
+                    {
+                        "id": "live-early",
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "args": {"cmd": "early"},
+                        "snippet": "early",
+                        "started_at": 100,
+                    },
+                ]
+            },
+        },
+    )
+
+    rows = [row for row in result["rows"] if row["idx"] == 1]
+    assert [(row["role"], row["text"] or row["tool_call_id"]) for row in rows] == [
+        ("prose", "First content row."),
+        ("tool", "content-tool"),
+        ("tool", "live-late"),
+        ("tool", "live-early"),
+    ]
+
+
 def test_content_tool_use_partial_args_enriched_from_matching_live_tool_call(driver_path):
     """Matched live tool args fill missing invocation details without clobbering content args."""
     messages = [
