@@ -6907,6 +6907,36 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if force_refresh_started_at is not None and _available_models_cache_ts >= force_refresh_started_at:
                 return cached
 
+        # A concurrent forced refresh may have started after this caller sampled
+        # should_wait but before it acquired the lock. Reuse that in-flight build
+        # instead of launching another one, and preserve this caller's budget.
+        if (
+            force_refresh
+            and force_refresh_started_at is not None
+            and _cache_build_in_progress
+        ):
+            remaining_budget = 60.0
+            if _LIVE_REBUILD_BUDGET_SECONDS > 0:
+                remaining_budget = max(
+                    0.0,
+                    _LIVE_REBUILD_BUDGET_SECONDS - (time.monotonic() - force_refresh_started_at),
+                )
+            if remaining_budget > 0:
+                _cache_build_cv.wait_for(
+                    lambda: not _cache_build_in_progress,
+                    timeout=remaining_budget,
+                )
+                cached = _get_fresh_memory_models_cache(time.monotonic())
+                if (
+                    cached is not None
+                    and _available_models_cache_ts >= force_refresh_started_at
+                ):
+                    return cached
+            if _cache_build_in_progress and _LIVE_REBUILD_BUDGET_SECONDS > 0:
+                if stale_disk_groups is not None:
+                    return copy.deepcopy(stale_disk_groups)
+                return copy.deepcopy(_static_models_catalog_without_live_probes())
+
         # Cold path: disk cache hit — use it (fast, no lock contention)
         if disk_groups is not None and not force_refresh:
             _available_models_cache = disk_groups
