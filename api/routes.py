@@ -3573,6 +3573,41 @@ def _anchor_scene_tool_rows_have_same_started_at(existing, incoming) -> bool:
     return bool(existing_started_at and incoming_started_at and existing_started_at == incoming_started_at)
 
 
+def _anchor_scene_tool_row_body_text(row) -> str:
+    if not isinstance(row, dict):
+        return ""
+    tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    for value in (
+        tool.get("snippet"),
+        payload.get("snippet"),
+        tool.get("output"),
+        payload.get("output"),
+        tool.get("result"),
+        payload.get("result"),
+        tool.get("preview"),
+        payload.get("preview"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _anchor_scene_tool_rows_have_compatible_body(existing, incoming) -> bool:
+    existing_body = _anchor_scene_tool_row_body_text(existing)
+    incoming_body = _anchor_scene_tool_row_body_text(incoming)
+    return bool(
+        existing_body
+        and incoming_body
+        and (
+            existing_body == incoming_body
+            or existing_body.startswith(incoming_body)
+            or incoming_body.startswith(existing_body)
+        )
+    )
+
+
 def _anchor_scene_matching_content_tool_row_index(
     rows,
     content_tool_indexes,
@@ -3623,7 +3658,11 @@ def _anchor_scene_matching_content_tool_row_index(
             incoming_row,
         ) and (
             (existing_id and incoming_id and existing_id == incoming_id)
-            or (id_flexible and _anchor_scene_tool_rows_have_same_started_at(rows[index], incoming_row))
+            or (
+                id_flexible
+                and _anchor_scene_tool_rows_have_same_started_at(rows[index], incoming_row)
+                and _anchor_scene_tool_rows_have_compatible_body(rows[index], incoming_row)
+            )
         ) and _anchor_scene_tool_rows_have_compatible_invocation(rows[index], incoming_row):
             return index
     for index in content_tool_indexes:

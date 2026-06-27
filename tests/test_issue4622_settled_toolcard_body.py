@@ -70,6 +70,7 @@ const messagesFns = [
 	  '_anchorSceneToolRowName','_anchorSceneToolRowId',
 	  '_anchorSceneToolRowsHaveNonConflictingIds','_anchorSceneToolRowsHaveDifferentExplicitIds',
 	  '_anchorSceneToolRowStartedAt','_anchorSceneToolRowsHaveSameStartedAt',
+	  '_anchorSceneToolRowBodyText','_anchorSceneToolRowsHaveCompatibleBody',
 	  '_anchorSceneToolRowsHaveCompatibleNames',
 	  '_anchorSceneToolRowArgs','_anchorSceneObjectContainsSubset',
 	  '_anchorSceneToolRowsHaveCompatibleInvocation',
@@ -609,6 +610,63 @@ def test_id_flexible_content_tool_does_not_absorb_third_same_command_id(driver_p
                         "args": {"cmd": "ls"},
                         "snippet": "OUTPUT B",
                         "started_at": 200,
+                    }
+                ]
+            },
+        },
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["snippet"] == "OUTPUT A"
+    assert "message-a" not in by_tid
+    assert by_tid["live-b"]["snippet"] == "OUTPUT B"
+    assert len([card for card in cards if card["name"] == "terminal"]) == 2
+
+
+def test_id_flexible_content_tool_keeps_same_started_at_repeat_distinct(driver_path):
+    """Same started_at is not enough to reuse a consumed different-id content row."""
+    messages = [
+        {"role": "user", "content": "inspect twice"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "message-a",
+                    "name": "terminal",
+                    "args": {"cmd": "ls"},
+                    "snippet": "OUTPUT A",
+                    "started_at": 100,
+                }
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "S": {
+                "toolCalls": [
+                    {
+                        "id": "live-b",
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "args": {"cmd": "ls"},
+                        "snippet": "OUTPUT B",
+                        "started_at": 100,
                     }
                 ]
             },

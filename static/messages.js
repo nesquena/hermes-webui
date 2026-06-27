@@ -2819,6 +2819,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const incomingStartedAt=_anchorSceneToolRowStartedAt(incoming);
     return !!existingStartedAt&&!!incomingStartedAt&&existingStartedAt===incomingStartedAt;
   }
+  function _anchorSceneToolRowBodyText(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    for(const value of [tool.snippet,payload.snippet,tool.output,payload.output,tool.result,payload.result,tool.preview,payload.preview]){
+      const text=_anchorSceneStringPayload(value).trim();
+      if(text) return text;
+    }
+    return '';
+  }
+  function _anchorSceneToolRowsHaveCompatibleBody(existing, incoming){
+    const existingBody=_anchorSceneToolRowBodyText(existing);
+    const incomingBody=_anchorSceneToolRowBodyText(incoming);
+    return !!existingBody&&!!incomingBody&&(
+      existingBody===incomingBody||
+      existingBody.startsWith(incomingBody)||
+      incomingBody.startsWith(existingBody)
+    );
+  }
   function _anchorSceneToolRowsHaveCompatibleNames(existing, incoming){
     const existingName=_anchorSceneToolRowName(existing);
     const incomingName=_anchorSceneToolRowName(incoming);
@@ -2908,7 +2926,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         (
           idFlexibleRows&&
           idFlexibleRows.has(reusableRows[0])&&
-          _anchorSceneToolRowsHaveSameStartedAt(reusableRows[0],incomingRow)
+          _anchorSceneToolRowsHaveSameStartedAt(reusableRows[0],incomingRow)&&
+          _anchorSceneToolRowsHaveCompatibleBody(reusableRows[0],incomingRow)
         )
       )&&
       _anchorSceneToolRowsHaveCompatibleNames(reusableRows[0],incomingRow)&&

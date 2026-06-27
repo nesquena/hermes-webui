@@ -1139,6 +1139,72 @@ def test_anchor_scene_hydration_keeps_identical_output_repeat_distinct_after_alt
     assert len(tools) == 2
 
 
+def test_anchor_scene_hydration_keeps_same_started_at_repeat_distinct_after_alt_id_match():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "message-a",
+                    "name": "terminal",
+                    "input": {"cmd": "ls"},
+                    "snippet": "OUTPUT A",
+                    "started_at": 100,
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {
+                "assistant_msg_idx": 1,
+                "tid": "durable-b",
+                "name": "terminal",
+                "input": {"cmd": "ls"},
+                "snippet": "OUTPUT B",
+                "started_at": 100,
+            }
+        ],
+    )
+
+    tools = [row for row in hydrated[1]["_anchor_activity_scene"]["activity_rows"] if row.get("role") == "tool"]
+    by_id = {row.get("tool_call_id"): row for row in tools}
+
+    assert by_id["content-a"]["tool"]["snippet"] == "OUTPUT A"
+    assert "message-a" not in by_id
+    assert by_id["durable-b"]["tool"]["snippet"] == "OUTPUT B"
+    assert len(tools) == 2
+
+
 def test_anchor_scene_hydration_keeps_short_persisted_body_after_durable_merge():
     from api import routes
 
