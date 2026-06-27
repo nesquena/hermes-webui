@@ -96,6 +96,13 @@ def test_extensions_panel_fetches_status_endpoint_without_mutating_settings():
     assert "extensions-error" in load_block
 
 
+def test_extensions_diagnostics_tab_refreshes_runtime_status():
+    tab_block = _function_block("switchExtensionsTab", extra=900)
+
+    assert "if(tab==='diagnostics') loadExtensionsPanel({preserveExisting:true});" in tab_block
+    assert "if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();" in tab_block
+
+
 def test_extensions_panel_renders_sanitized_status_payload():
     render_block = _between("function _renderExtensionsPanel", "async function loadExtensionsPanel")
     warning_block = _function_block("_extensionWarningList", extra=900)
@@ -128,10 +135,13 @@ def test_extensions_panel_renders_sanitized_status_payload():
 
 
 def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
+    runtime_block = _between("function _extensionRuntimeStatusValue", "function _extensionSidecarCard")
     sidecar_block = _between("function _extensionSidecarCard", "function _setExtensionSidecarHealth")
+    runtime_setter_block = _between("function _setExtensionSidecarRuntime", "async function _checkExtensionSidecarHealth")
     monitor_block = _between("async function _checkExtensionSidecarHealth", "function _renderExtensionsPanel")
     render_block = _between("function _renderExtensionsPanel", "async function loadExtensionsPanel")
     load_block = _between("async function loadExtensionsPanel", "async function copyExtensionsDiagnostics")
+    load_catch_block = load_block[load_block.index("}catch(e){"):]
 
     assert "Loopback sidecars" in sidecar_block
     assert "No loopback sidecars declared." in sidecar_block
@@ -140,17 +150,37 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     assert "esc(origin)" in sidecar_block
     assert "esc(healthPath)" in sidecar_block
     assert "esc(healthUrl)" in sidecar_block
+    assert 'data-sidecar-runtime-index="${index}"' in sidecar_block
     assert "fetch(healthUrl,{credentials:'omit',cache:'no-store'" in monitor_block
     assert "function _monitorExtensionSidecars(sidecars,seq)" in monitor_block
     assert "const seq=_extensionsSidecarMonitorSeq" not in monitor_block
     assert "_monitorExtensionSidecars(sidecars,seq)" in render_block
     assert "function _renderExtensionsPanel(data,seq)" in render_block
     assert "const seq=++_extensionsSidecarMonitorSeq" in load_block
+    assert "opts&&opts.preserveExisting&&target.innerHTML.trim()" in load_block
+    # A failed refresh must NOT be preserved as "existing content": the Loading/
+    # error placeholders are excluded so a fetch error always renders the error
+    # instead of leaving the panel stuck on "Loading extension diagnostics…".
+    assert "!target.querySelector('.extensions-loading,.extensions-error')" in load_block
+    assert "if(!preserveExisting) target.innerHTML" in load_block
+    assert "loadExtensionsPanel({preserveExisting:true})" in load_block
     assert "if(seq!==_extensionsSidecarMonitorSeq) return;" in load_block
+    assert "if(seq!==_extensionsSidecarMonitorSeq) return;" in load_catch_block
+    assert "if(preserveExisting&&target.innerHTML.trim()) return;" in load_catch_block
     assert "_renderExtensionsPanel(data,seq)" in load_block
     assert "res.ok" in monitor_block
     assert "res.text" not in monitor_block
-    assert "res.json" not in monitor_block
+    assert "body=await res.json()" in monitor_block
+    assert "_setExtensionSidecarRuntime(index,body&&typeof body==='object'?body.runtime:null)" in monitor_block
+    assert "String(value??'').trim()" in runtime_block
+    assert r"/^\d+(?:\.\d+)?$/.test(text)" in runtime_block
+    assert "seconds>now+300" in runtime_block
+    assert "runtime.sidecar" in runtime_block
+    assert "runtime.native_host" in runtime_block
+    assert "runtime.bridge" in runtime_block
+    assert "runtime.last_seen_at" in runtime_block
+    assert "runtime.webui_origin" in runtime_block
+    assert "el.innerHTML=details" in runtime_setter_block
     assert "api('/api/settings'" not in monitor_block
     assert "api('/extensions/" not in monitor_block
     assert "sidecar/*" not in monitor_block
@@ -196,6 +226,7 @@ def test_extensions_styles_are_scoped_to_extensions_panel():
     assert ".extension-installed-list" in STYLE_CSS
     assert ".extension-toggle-btn" in STYLE_CSS
     assert ".extension-sidecar-list" in STYLE_CSS
+    assert ".extension-sidecar-runtime" in STYLE_CSS
     assert ".extension-sidecar-status-badge" in STYLE_CSS
 
 
@@ -222,6 +253,8 @@ def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims
     assert "sanitized loopback sidecars" in diagnostics_section
     assert "credentials: 'omit'" in diagnostics_section
     assert "does **not** proxy sidecar requests" in diagnostics_section
+    assert "optional top-level `runtime` object" in diagnostics_section
+    assert "allowlisted scalar fields" in diagnostics_section
     assert "do **not**" in diagnostics_section
     assert "return `HERMES_WEBUI_EXTENSION_DIR`" in diagnostics_section
     assert "override state-file path" in diagnostics_section

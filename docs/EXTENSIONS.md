@@ -414,4 +414,9 @@ directly with `fetch(..., { credentials: 'omit', cache: 'no-store' })` and a
 short timeout. WebUI does **not** proxy sidecar requests and does not send WebUI
 cookies to sidecars. A successful HTTP response is shown as healthy, a non-OK
 HTTP response as unhealthy, and CORS/network/timeouts as unreachable or blocked;
-health response bodies are never rendered.
+raw health response bodies are never rendered. If a healthy response includes an
+optional top-level `runtime` object, the panel may parse it and render only
+allowlisted scalar fields such as `sidecar`, `native_host`, `bridge`,
+`last_seen_at`, and `webui_origin`. This keeps sidecar-specific diagnostics
+machine-readable without making WebUI depend on any one extension's private
+payload shape.
