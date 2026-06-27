@@ -173,6 +173,19 @@ class TestLiveModelsProviderNormalization:
         assert c._resolve_provider_alias(None) is None
 
 
+def test_shared_searchable_model_picker_helper_has_search_and_custom_controls():
+    src = read("static/ui.js")
+    m = re.search(r"function _mountSearchableModelSelect\(opts=\{\}\)\{.*?\n\}", src, re.DOTALL)
+    assert m, "_mountSearchableModelSelect helper not found in static/ui.js"
+    fn = m.group(0)
+    assert "model-search-input" in fn
+    assert "model-custom-input" in fn
+    assert "model-custom-btn" in fn
+    assert "onModelChange" in fn
+    assert "selectEl.selectedIndex=-1;" in fn
+    assert "onModelChange(lastListedValue);" in fn
+
+
 # ── api/routes.py — /api/models/live custom_providers fallback ────────────────
 
 class TestLiveModelsCustomProviderFallback:

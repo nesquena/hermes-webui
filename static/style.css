@@ -2571,6 +2571,8 @@
     .sidebar-nav .nav-tab svg{width:20px;height:20px;}
     .sidebar-nav .nav-tab.active{background:var(--accent-bg);}
     .sidebar-nav .nav-tab.active::before{left:-4px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;border-radius:0 2px 2px 0;}
+    .sidebar-nav .dashboard-link,
+    .sidebar-nav .dashboard-link.dashboard-link-visible{display:none!important;}
     .sidebar .panel-view{height:100%;margin-left:52px;}
     .sidebar .panel-head{padding-right:52px;}
     .mobile-sidebar-close{display:inline-flex!important;position:absolute;right:10px;top:calc(8px + var(--app-titlebar-safe-top));width:32px;height:32px;z-index:4;background:var(--surface);border:1px solid var(--border);}
@@ -4340,7 +4342,7 @@ main.main > #mainPlugin{display:none;}
 
 /* Tab visibility chips in Settings > Appearance */
 .tab-visibility-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;}
-.tab-visibility-chip{font-size:12px;line-height:1;padding:5px 10px;border-radius:var(--radius-pill,999px);border:1px solid var(--accent,var(--link));background:var(--accent,var(--link));color:#1a1a1a;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s,transform .15s;white-space:nowrap;user-select:none;}
+.tab-visibility-chip{font-size:12px;line-height:1;padding:5px 10px;border-radius:var(--radius-pill,999px);border:1px solid var(--accent-bg-strong);background:var(--accent-bg);color:var(--accent-text);font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s,transform .15s;white-space:nowrap;user-select:none;}
 .tab-visibility-chip[draggable="true"]{cursor:grab;}
 .tab-visibility-chip.dragging{opacity:.55;cursor:grabbing;transform:scale(.96);}
 .tab-visibility-chip.drag-over{outline:2px solid var(--link,var(--accent));outline-offset:2px;}
