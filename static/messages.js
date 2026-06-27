@@ -6745,7 +6745,7 @@ function _completionNotificationPreviewText(lastAssistantMessage, options){
       );
       if(anchorFinal!==null&&anchorFinal!==undefined) text=String(anchorFinal||'').trim();
     }
-    if(!text&&typeof msgContent==='function') text=msgContent(lastAssistantMessage);
+    if(!text&&typeof msgContent==='function') text=String(msgContent(lastAssistantMessage)||'').trim();
     if(!text){
       let raw=lastAssistantMessage.content||'';
       if(Array.isArray(raw)) raw=raw.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('').trim();

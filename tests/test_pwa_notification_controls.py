@@ -48,6 +48,7 @@ def test_notification_payload_uses_completion_session_when_provided():
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():
     """Background completion preview must not slice the live-stream accumulator."""
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
+    assert "String(msgContent(lastAssistantMessage)||'').trim()" in MESSAGES_JS
     assert "_assistantTurnAnchorSettledFinalAnswer" in MESSAGES_JS
     done_block = _source_between("source.addEventListener('done'", "source.addEventListener('stream_end'")
     assert "let lastAsst=null;" in done_block
