@@ -232,6 +232,39 @@ class TestBuildNativeMultimodalMessage:
             assert result.index('Tool iteration limit reached') < result.index('これどうにかならん？')
             assert f'vision_analyze with image_url: {img}' in result
 
+    def test_text_mode_failed_auto_analysis_requires_vision_before_answer(self, monkeypatch):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            img = root / 'screenshot.png'
+            _make_png(img)
+            atts = _normalize_chat_attachments([{
+                'name': 'screenshot.png',
+                'path': str(img),
+                'mime': 'image/png',
+                'size': img.stat().st_size,
+                'is_image': True,
+            }])
+
+            async def failing_vision_analyze_tool(*, image_url, user_prompt):
+                raise RuntimeError('vision provider unavailable')
+
+            monkeypatch.setattr('tools.vision_tools.vision_analyze_tool', failing_vision_analyze_tool)
+
+            result = _build_native_multimodal_message(
+                '',
+                'このスクショ見て',
+                atts,
+                str(root),
+                cfg={'agent': {'image_input_mode': 'text'}},
+                auto_analyze_text_mode_images=True,
+            )
+
+            assert isinstance(result, str)
+            assert 'automatic image analysis failed' in result
+            assert 'MUST call vision_analyze' in result
+            assert f'image_url: {img}' in result
+            assert result.index('MUST call vision_analyze') < result.index('このスクショ見て')
+
     def test_outside_workspace_path_rejected(self):
         with TemporaryDirectory() as d:
             root = Path(d)

@@ -2034,7 +2034,8 @@ def _text_mode_image_analysis_note(path: str) -> str:
         logger.debug("Failed to auto-analyze WebUI image attachment %s", path, exc_info=True)
     return (
         f"[The user sent an image at: {path}, but automatic image analysis failed. "
-        f"Use vision_analyze with image_url: {path} before answering if the request depends on the image.]"
+        f"You MUST call vision_analyze with image_url: {path} before answering. "
+        f"Do not say the screenshot/image was not provided unless that tool call also cannot load it.]"
     )
 
 
