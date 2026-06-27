@@ -4363,8 +4363,26 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     if(S.busy || S.activeStreamId) return;
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
-    if(remoteCount > localCount || remoteLast > localLast){
+    // Only force-reload the whole transcript when the visible conversation
+    // actually grew (more messages). A bump in last_message_at WITHOUT a higher
+    // message_count means a non-transcript write touched the session — most
+    // commonly the post-turn background skill/memory review, which rewrites
+    // memory/skills and advances updated_at but adds no chat messages. Reloading
+    // on that bump tears down and re-fetches the transcript: loadSession(force)
+    // clears S.messages and awaits a round-trip before re-rendering, so the whole
+    // conversation visibly disappears and "reappears a moment later" with no new
+    // content. Skip the destructive reload in that case and just refresh the
+    // lightweight sidebar list metadata. A real new message (remoteCount higher)
+    // still force-reloads as before. Also keep the local last-seen marker current
+    // so the same metadata bump doesn't re-trigger on every subsequent poll.
+    if(remoteCount > localCount){
       await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});
+      if(typeof renderSessionList==='function') void renderSessionList();
+    }else if(remoteLast > localLast){
+      if(S.session && S.session.session_id === sid){
+        S.session.last_message_at = remoteLast;
+        if(data.session.updated_at) S.session.updated_at = data.session.updated_at;
+      }
       if(typeof renderSessionList==='function') void renderSessionList();
     }
   }catch(e){
