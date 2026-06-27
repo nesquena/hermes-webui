@@ -188,6 +188,9 @@ const _sessionListSnapshotById = new Map();
 const _sessionListSourceById = new Map();
 const _IDLE_SESSION_SWITCH_CACHE_MAX = 12;
 const _idleSessionSwitchCache = new Map();
+const _SESSION_DISPLAY_SWITCH_CACHE_MAX = 12;
+const _SESSION_DISPLAY_SWITCH_CACHE_MAX_HTML = 300_000;
+const _sessionDisplaySwitchCache = new Map();
 let _sessionListPointerActive = false;
 let _sessionListLastScrollAt = 0;
 let _pendingSessionListPayload = null;
@@ -373,6 +376,74 @@ function _restoreIdleSessionSwitchCache(sid,opts={}){
   }else if(typeof _hideHandoffHint==='function'){
     _hideHandoffHint();
   }
+  return true;
+}
+
+function _rememberSessionSwitchDisplayCache(currentSid){
+  if(!currentSid || !S || !S.session || S.session.session_id!==currentSid) return false;
+  const messages=Array.isArray(S.messages)?S.messages:[];
+  const inner=$('msgInner');
+  const html=inner?String(inner.innerHTML||''):'';
+  if(!messages.length&&!html) return false;
+  const activeStreamId=S.activeStreamId||S.session.active_stream_id||null;
+  const entry={
+    session:_cloneSessionSwitchCacheValue(S.session),
+    messages:_cloneSessionSwitchCacheValue(messages),
+    toolCalls:_cloneSessionSwitchCacheValue(Array.isArray(S.toolCalls)?S.toolCalls:[]),
+    lastUsage:_cloneSessionSwitchCacheValue(S.lastUsage||{}),
+    messagesTruncated:!!_messagesTruncated,
+    oldestIdx:Number(_oldestIdx||0)||0,
+    activeStreamId,
+    busy:!!(S.busy||activeStreamId||S.session.pending_user_message||S.session.has_pending_user_message||S.session.pending_started_at),
+    html:html&&html.length<_SESSION_DISPLAY_SWITCH_CACHE_MAX_HTML?html:'',
+    savedAt:Date.now(),
+  };
+  _sessionDisplaySwitchCache.delete(currentSid);
+  _sessionDisplaySwitchCache.set(currentSid,entry);
+  while(_sessionDisplaySwitchCache.size>_SESSION_DISPLAY_SWITCH_CACHE_MAX){
+    const first=_sessionDisplaySwitchCache.keys().next().value;
+    if(first===undefined) break;
+    _sessionDisplaySwitchCache.delete(first);
+  }
+  return true;
+}
+
+function _restoreSessionSwitchDisplayCache(sid,opts={}){
+  const forceReload=!!(opts&&opts.forceReload);
+  if(forceReload||!sid) return false;
+  const cache=_sessionDisplaySwitchCache.get(sid);
+  if(!cache) return false;
+  _sessionDisplaySwitchCache.delete(sid);
+  _sessionDisplaySwitchCache.set(sid,cache);
+  const cachedSession=_cloneSessionSwitchCacheValue(cache.session)||{};
+  const row=_sessionSwitchCacheRowForSid(sid);
+  const rowMeta=row?{...row}:{};
+  delete rowMeta.messages;
+  delete rowMeta.tool_calls;
+  S.session={...cachedSession,...rowMeta,session_id:sid};
+  S._pendingSessionToolsets=null;
+  if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
+  S.messages=_cloneSessionSwitchCacheValue(cache.messages)||[];
+  S.toolCalls=_cloneSessionSwitchCacheValue(cache.toolCalls)||[];
+  S.lastUsage=_cloneSessionSwitchCacheValue(cache.lastUsage||S.session.last_usage||{});
+  _messagesTruncated=!!cache.messagesTruncated;
+  _oldestIdx=Number(cache.oldestIdx||0)||0;
+  S.activeStreamId=cache.activeStreamId||S.session.active_stream_id||null;
+  S.busy=!!(cache.busy||S.activeStreamId||S.session.pending_user_message||S.session.has_pending_user_message||S.session.pending_started_at);
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(typeof setStatus==='function') setStatus('');
+  if(typeof setComposerStatus==='function') setComposerStatus('');
+  if(typeof _setSessionViewedCount==='function') _setSessionViewedCount(sid, Number(S.session.message_count || S.messages.length || 0));
+  if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(sid);
+  try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
+  if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
+  if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
+  if(typeof syncTopbar==='function') syncTopbar();
+  const inner=$('msgInner');
+  if(inner&&cache.html) inner.innerHTML=cache.html;
+  else if(typeof renderMessages==='function') renderMessages();
+  if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
+  if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
   return true;
 }
 
@@ -1288,6 +1359,7 @@ async function loadSession(sid){
     if (S.session && S.session.session_id === currentSid) {
       S.session.composer_draft = {text:_switchDraftText, files:_switchDraftFiles};
     }
+    _rememberSessionSwitchDisplayCache(currentSid);
     const _rememberedIdleSwitchCache = _rememberIdleSessionSwitchCache(currentSid);
     // Hot idle A→B→A switches should repaint from browser memory immediately.
     // Persist the outgoing draft in the background on cache hits; blocking on
@@ -1324,6 +1396,7 @@ async function loadSession(sid){
     }
   }
   if(_restoreIdleSessionSwitchCache(sid,{previousSid:currentSid,forceReload})) return;
+  const _restoredSessionDisplayBeforeFetch = _restoreSessionSwitchDisplayCache(sid,{previousSid:currentSid,forceReload});
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we
@@ -1342,10 +1415,12 @@ async function loadSession(sid){
     // instead of collapsing a long session back to the default tail window.
     if (sameSessionForceReload) _captureSameSessionForceReloadHint(sid);
     else _clearSameSessionForceReloadHint();
-    S.messages = [];
-    S.toolCalls = [];
-    _messagesTruncated = false;
-    _oldestIdx = 0;
+    if(!_restoredSessionDisplayBeforeFetch){
+      S.messages = [];
+      S.toolCalls = [];
+      _messagesTruncated = false;
+      _oldestIdx = 0;
+    }
     // Close live SSE streams from the session we're leaving. The error
     // handler checks _isSessionActivelyViewed() and won't auto-reconnect
     // for a backgrounded session, preventing leaked connections that would
@@ -1355,7 +1430,7 @@ async function loadSession(sid){
     }
     _loadingOlder = false;
     const _msgInner = $('msgInner');
-    if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+    if (_msgInner && currentSid !== sid && !_restoredSessionDisplayBeforeFetch) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
   // Phase 1: Load metadata only (~1KB) for fast session switching. Keep model
   // resolution out of the first-paint path; old provider-shaped model IDs are
