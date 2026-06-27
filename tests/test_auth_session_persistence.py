@@ -12,8 +12,8 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 # Isolate state dir so tests never touch real sessions
 _TEST_STATE = Path(tempfile.mkdtemp())
@@ -42,37 +42,41 @@ class TestSessionPersistence(unittest.TestCase):
         api.auth does `from api.config import STATE_DIR` at module level, so
         `_SESSIONS_FILE` is computed from api.config.STATE_DIR at reload time.
         We temporarily override api.config.STATE_DIR so the reload uses the
-        test state dir without reloading api.config itself (which would
-        invalidate imported references like STREAM_PARTIAL_TEXT in other tests).
+        test state dir without reloading api.config itself, which would
+        invalidate imported references like STREAM_PARTIAL_TEXT in other tests.
         """
         import api.config as _config
-        _saved = _config.STATE_DIR
+
+        saved_state_dir = _config.STATE_DIR
         _config.STATE_DIR = _TEST_STATE
         try:
             importlib.reload(auth)
         finally:
-            _config.STATE_DIR = _saved
+            _config.STATE_DIR = saved_state_dir
 
     def test_session_survives_restart(self) -> None:
         """A session created before restart should still verify after reload."""
         cookie = auth.create_session()
         self.assertTrue(auth.verify_session(cookie))
         self._simulate_restart()
-        self.assertTrue(auth.verify_session(cookie),
-                        "Session must survive process restart via persisted .sessions.json")
+        self.assertTrue(
+            auth.verify_session(cookie),
+            "Session must survive process restart via persisted .sessions.json",
+        )
 
     def test_invalidated_session_does_not_survive_restart(self) -> None:
         """Invalidating a session must be reflected after reload."""
         cookie = auth.create_session()
         auth.invalidate_session(cookie)
         self._simulate_restart()
-        self.assertFalse(auth.verify_session(cookie),
-                         "Invalidated session must not be reinstated after restart")
+        self.assertFalse(
+            auth.verify_session(cookie),
+            "Invalidated session must not be reinstated after restart",
+        )
 
     def test_expired_sessions_pruned_on_load(self) -> None:
         """Sessions that expire between restarts must not be loaded."""
         sessions_file = _TEST_STATE / '.sessions.json'
-        # Write a sessions file with one expired and one valid entry
         now = time.time()
         sessions_file.write_text(json.dumps({
             "expired_token": now - 10,
@@ -85,27 +89,29 @@ class TestSessionPersistence(unittest.TestCase):
     def test_sessions_file_permissions(self) -> None:
         """Sessions file must stay strict on POSIX and still be created on Windows."""
         auth.create_session()
-        # Check the path auth actually writes to (auth._SESSIONS_FILE is computed
-        # from api.config.STATE_DIR at import time). Asserting against a local
-        # _TEST_STATE assumption is fragile under sharded / reordered runs where
-        # this module may import before api.config.STATE_DIR resolves to _TEST_STATE.
         sessions_file = auth._SESSIONS_FILE
         self.assertTrue(sessions_file.exists(), ".sessions.json was not created")
         if os.name == "nt":
             self.assertTrue(sessions_file.is_file(), ".sessions.json was not written as a file")
             return
         mode = oct(sessions_file.stat().st_mode & 0o777)
-        self.assertEqual(mode, oct(0o600),
-                         f".sessions.json permissions {mode} — expected 0o600")
+        self.assertEqual(
+            mode,
+            oct(0o600),
+            f".sessions.json permissions {mode} - expected 0o600",
+        )
 
     def test_malformed_sessions_file_starts_fresh(self) -> None:
-        """A corrupt sessions file must not crash auth — start with empty dict."""
+        """A corrupt sessions file must not crash auth, start with an empty dict."""
         sessions_file = _TEST_STATE / '.sessions.json'
         sessions_file.write_text("not valid json {{{{")
         with self.assertLogs('api.auth', level='WARNING') as captured:
             self._simulate_restart()
-        self.assertEqual(auth._sessions, {},
-                         "Corrupt sessions file must result in empty session dict")
+        self.assertEqual(
+            auth._sessions,
+            {},
+            "Corrupt sessions file must result in empty session dict",
+        )
         warning = '\n'.join(captured.output)
         self.assertIn('Ignoring malformed auth session store', warning)
         self.assertIn(str(sessions_file), warning)
@@ -128,31 +134,48 @@ class TestSessionPersistence(unittest.TestCase):
         """Invalid UTF-8 in the sessions file must warn and start with an empty dict."""
         sessions_file = _TEST_STATE / '.sessions.json'
         sessions_file.write_bytes(b'\xff')
-        decode_error = UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid start byte')
-        with mock.patch.object(Path, 'read_text', side_effect=decode_error):
-            with self.assertLogs('api.auth', level='WARNING') as captured:
-                self._simulate_restart()
+        with self.assertLogs('api.auth', level='WARNING') as captured:
+            self._simulate_restart()
         self.assertEqual(auth._sessions, {})
         warning = '\n'.join(captured.output)
         self.assertIn('Ignoring malformed auth session store', warning)
         self.assertIn(str(sessions_file), warning)
         self.assertIn(str(_TEST_STATE), warning)
 
+    def test_session_recursion_failure_warns_with_state_dir_and_starts_fresh(self) -> None:
+        """Deeply nested JSON must warn and fall back to an empty session table."""
+        sessions_file = _TEST_STATE / '.sessions.json'
+        depth = 50000
+        sessions_file.write_text('{"token":' * depth + '0' + '}' * depth)
+        with self.assertLogs('api.auth', level='WARNING') as captured:
+            self._simulate_restart()
+        self.assertEqual(auth._sessions, {})
+        warning = '\n'.join(captured.output)
+        self.assertIn('Ignoring malformed auth session store', warning)
+        self.assertIn('RecursionError', warning)
+        self.assertIn(str(sessions_file), warning)
+        self.assertIn(str(_TEST_STATE), warning)
+
     def test_session_save_failure_warns_with_state_dir_and_keeps_in_process_session(self) -> None:
         """Write failures must warn but keep the live session usable in-process."""
-        with mock.patch.object(auth.os, 'replace', side_effect=OSError('replace failed')):
-            with self.assertLogs('api.auth', level='WARNING') as captured:
-                cookie = auth.create_session()
+        sentinel_token = 'deadbeef' * 8
+        with mock.patch.object(auth.secrets, 'token_hex', return_value=sentinel_token):
+            with mock.patch.object(auth.os, 'replace', side_effect=OSError('replace failed')):
+                with self.assertLogs('api.auth', level='WARNING') as captured:
+                    cookie = auth.create_session()
         self.assertTrue(auth.verify_session(cookie))
         warning = '\n'.join(captured.output)
         self.assertIn('Auth session persistence failed', warning)
         self.assertIn('.sessions.json', warning)
         self.assertIn(str(_TEST_STATE), warning)
+        self.assertNotIn(sentinel_token, warning)
+        self.assertNotIn(cookie, warning)
 
-    def test_signing_key_read_failure_warns_with_state_dir_and_generates_key(self) -> None:
+    def test_signing_key_read_failure_warns_with_state_dir(self) -> None:
         """Unreadable signing keys must warn and fall back to a fresh key."""
         key_file = _TEST_STATE / '.signing_key'
-        key_file.write_text('stub')
+        sentinel_key = 'secret-key-material'
+        key_file.write_text(sentinel_key)
         with mock.patch.object(Path, 'read_bytes', side_effect=OSError('read failed')):
             with self.assertLogs('api.auth', level='WARNING') as captured:
                 key = auth._load_key('.signing_key')
@@ -162,6 +185,7 @@ class TestSessionPersistence(unittest.TestCase):
         self.assertIn('Auth key read failed', warning)
         self.assertIn('.signing_key', warning)
         self.assertIn(str(_TEST_STATE), warning)
+        self.assertNotIn(sentinel_key, warning)
 
     def test_signing_key_persist_failure_warns_with_state_dir(self) -> None:
         """Key write failures must warn and still return a generated key."""

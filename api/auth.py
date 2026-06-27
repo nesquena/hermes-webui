@@ -111,6 +111,9 @@ def _load_sessions() -> dict[str, float]:
         if not _SESSIONS_FILE.exists():
             return {}
         raw = _SESSIONS_FILE.read_text(encoding='utf-8')
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError('malformed sessions file: expected dict')
     except OSError as e:
         _warn_auth_persistence_failure(
             'Auth session store read failed',
@@ -119,7 +122,7 @@ def _load_sessions() -> dict[str, float]:
             'starting fresh with an empty session table',
         )
         return {}
-    except UnicodeDecodeError as e:
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
         _warn_auth_persistence_failure(
             'Ignoring malformed auth session store',
             _SESSIONS_FILE,
@@ -127,21 +130,11 @@ def _load_sessions() -> dict[str, float]:
             'starting fresh with an empty session table',
         )
         return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
+    except Exception as e:
         _warn_auth_persistence_failure(
             'Ignoring malformed auth session store',
             _SESSIONS_FILE,
             e,
-            'starting fresh with an empty session table',
-        )
-        return {}
-    if not isinstance(data, dict):
-        _warn_auth_persistence_failure(
-            'Ignoring malformed auth session store',
-            _SESSIONS_FILE,
-            ValueError('malformed sessions file: expected dict'),
             'starting fresh with an empty session table',
         )
         return {}
@@ -286,12 +279,26 @@ def _load_key(filename: str) -> bytes:
             e,
             'generating a new key and continuing',
         )
+    except Exception as e:
+        _warn_auth_persistence_failure(
+            'Auth key read failed',
+            key_file,
+            e,
+            'generating a new key and continuing',
+        )
     key = secrets.token_bytes(32)
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         key_file.write_bytes(key)
         key_file.chmod(0o600)
     except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth key persistence failed',
+            key_file,
+            e,
+            'returning the generated key so startup can continue',
+        )
+    except Exception as e:
         _warn_auth_persistence_failure(
             'Auth key persistence failed',
             key_file,
