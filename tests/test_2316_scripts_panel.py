@@ -418,3 +418,118 @@ eval(extractFunc('_renderScriptsList'));
     assert result["cachedSource"] == "#!/bin/bash\necho test\n"
     assert result["rerenderedSource"] == "#!/bin/bash\necho test\n"
     assert result["loaded"] is True
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_scripts_panel_keeps_source_hidden_if_card_collapses_before_fetch_settles():
+    """Late async source loads must honor the card's current expansion state."""
+    js = PANELS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""{_extract_func_script(js)}
+function escapeHtml(value) {{
+  return String(value == null ? '' : value).replace(/[&<>\"']/g, ch => (
+    {{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}}[ch]
+  ));
+}}
+function unescapeHtml(value) {{
+  return String(value)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '\"')
+    .replace(/&#39;/g, \"'\")
+    .replace(/&amp;/g, '&');
+}}
+class FakeClassList {{
+  constructor() {{ this.items = new Set(); }}
+  add(name) {{ this.items.add(name); }}
+  remove(name) {{ this.items.delete(name); }}
+  toggle(name) {{
+    if (this.items.has(name)) {{ this.items.delete(name); return false; }}
+    this.items.add(name);
+    return true;
+  }}
+  contains(name) {{ return this.items.has(name); }}
+}}
+class FakeElement {{
+  constructor(kind='div') {{
+    this.kind = kind;
+    this.children = [];
+    this.style = {{}};
+    this.listeners = {{}};
+    this.classList = new FakeClassList();
+    this._innerHTML = '';
+    this._textContent = '';
+  }}
+  appendChild(child) {{
+    this.children.push(child);
+    return child;
+  }}
+  addEventListener(type, handler) {{
+    this.listeners[type] = handler;
+  }}
+  querySelector(selector) {{
+    if (selector === '.script-header') return this.header || null;
+    if (selector === '.script-source') return this.source || null;
+    if (selector === 'code') return this.code || null;
+    return null;
+  }}
+  set innerHTML(html) {{
+    this._innerHTML = html;
+    this.children = [];
+    this.header = null;
+    this.source = null;
+    this.code = null;
+    if (!html) return;
+    if (html.includes('script-header')) {{
+      const header = new FakeElement('header');
+      const source = new FakeElement('source');
+      const code = new FakeElement('code');
+      const match = html.match(/<code class="[^"]*">([\\s\\S]*)<\\/code>/);
+      code.textContent = match ? unescapeHtml(match[1]) : '';
+      source.style.display = 'none';
+      source.querySelector = selector => selector === 'code' ? code : null;
+      this.header = header;
+      this.source = source;
+      this.code = code;
+    }}
+  }}
+  get innerHTML() {{ return this._innerHTML; }}
+  set textContent(value) {{ this._textContent = String(value); }}
+  get textContent() {{ return this._textContent; }}
+}}
+const box = new FakeElement('box');
+const document = {{ createElement(){{ return new FakeElement(); }} }};
+const window = {{ Prism: null }};
+function $(id){{ return id === 'scriptsList' ? box : null; }}
+function esc(value){{ return escapeHtml(value); }}
+function t(key){{
+  if (key === 'scripts_no_scripts') return 'No scripts';
+  if (key === 'scripts_load_error') return 'Failed to load source.';
+  return key;
+}}
+let resolver = null;
+async function api(url) {{
+  if (url !== '/api/scripts/raw?path=test.sh') throw new Error('unexpected url: ' + url);
+  return new Promise(resolve => {{
+    resolver = resolve;
+  }});
+}}
+eval(extractFunc('_renderScriptsList'));
+(async () => {{
+  const scripts = [{{ name: 'test.sh', description: '' }}];
+  _renderScriptsList(scripts);
+  const card = box.children[0];
+  card.classList.toggle('expanded');
+  const clickPromise = card.querySelector('.script-header').listeners.click();
+  card.classList.toggle('expanded');
+  resolver({{ source: '#!/bin/bash\\necho test\\n' }});
+  await clickPromise;
+  console.log(JSON.stringify({{
+    display: card.querySelector('.script-source').style.display,
+    cachedSource: scripts[0].source,
+    loaded: scripts[0]._loaded,
+  }}));
+}})().catch(err => {{ console.error(err); process.exit(1); }});
+"""
+    result = json.loads(_run_node(source))
+    assert result["display"] == "none"
+    assert result["cachedSource"] == "#!/bin/bash\necho test\n"
+    assert result["loaded"] is True
