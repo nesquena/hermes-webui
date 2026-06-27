@@ -4363,8 +4363,31 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     if(S.busy || S.activeStreamId) return;
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
-    if(remoteCount > localCount || remoteLast > localLast){
+    // Force-reload the whole transcript whenever the visible conversation's
+    // message count CHANGED in either direction. A higher count means new
+    // messages; a LOWER count means another tab/client truncated, undid,
+    // retried, or regenerated the transcript (/api/session/truncate, /retry,
+    // /undo all shrink s.messages and write a lower message_count) — both must
+    // re-sync or this tab silently keeps a stale transcript.
+    //
+    // A bump in last_message_at WITHOUT a count change means a non-transcript
+    // write touched the session — most commonly the post-turn background
+    // skill/memory review, which rewrites memory/skills and advances updated_at
+    // but adds no chat messages. Reloading on that bump tears down and re-fetches
+    // the transcript: loadSession(force) clears S.messages and awaits a
+    // round-trip before re-rendering, so the whole conversation visibly
+    // disappears and "reappears a moment later" with no new content. Skip the
+    // destructive reload in that case and just refresh the lightweight sidebar
+    // list metadata, advancing the local last-seen marker so the same metadata
+    // bump doesn't re-trigger on every subsequent poll.
+    if(remoteCount !== localCount){
       await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});
+      if(typeof renderSessionList==='function') void renderSessionList();
+    }else if(remoteLast > localLast){
+      if(S.session && S.session.session_id === sid){
+        S.session.last_message_at = remoteLast;
+        if(data.session.updated_at) S.session.updated_at = data.session.updated_at;
+      }
       if(typeof renderSessionList==='function') void renderSessionList();
     }
   }catch(e){

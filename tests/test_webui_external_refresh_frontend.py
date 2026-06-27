@@ -19,10 +19,49 @@ def test_active_session_external_refresh_uses_metadata_then_force_reload():
     assert "function ensureActiveSessionExternalRefreshPoll()" in SESSIONS_JS
     assert "async function refreshActiveSessionIfExternallyUpdated(reason)" in SESSIONS_JS
     assert "messages=0&resolve_model=0" in SESSIONS_JS
-    assert "remoteCount > localCount || remoteLast > localLast" in SESSIONS_JS
+    assert "if(remoteCount !== localCount)" in SESSIONS_JS
+    assert "else if(remoteLast > localLast)" in SESSIONS_JS
     assert "if(S.busy || S.activeStreamId) return;" in SESSIONS_JS
     assert "document.hidden" in SESSIONS_JS
     assert "externalRefreshReason:reason||'poll'" in SESSIONS_JS
+
+
+def test_active_session_external_refresh_skips_destructive_reload_on_metadata_only_bump():
+    """A timestamp-only active-session update should not blank the transcript.
+
+    Background skill/memory review can update session timestamps without adding
+    chat messages. The old `remoteCount > localCount || remoteLast > localLast`
+    condition called `loadSession(..., {force:true})` for that metadata-only
+    bump; `loadSession(force)` clears S.messages before async message fetches,
+    so the whole transcript visibly disappeared and reappeared with no new
+    content. Only a message_count CHANGE should force-reload the transcript;
+    timestamp-only bumps update local metadata and refresh the lightweight
+    sidebar list.
+    """
+    assert "remoteCount > localCount || remoteLast > localLast" not in SESSIONS_JS
+    assert "if(remoteCount !== localCount){" in SESSIONS_JS
+    assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});" in SESSIONS_JS
+    assert "}else if(remoteLast > localLast){" in SESSIONS_JS
+    assert "S.session.last_message_at = remoteLast" in SESSIONS_JS
+    assert "if(data.session.updated_at) S.session.updated_at = data.session.updated_at;" in SESSIONS_JS
+
+
+def test_active_session_external_refresh_force_reloads_on_count_decrease():
+    """A LOWER remote message_count must still force-reload the transcript.
+
+    Another tab/client can shrink the active transcript via /api/session/truncate,
+    /retry, /undo, or regenerate — all reduce message_count while advancing
+    updated_at. A `remoteCount > localCount` gate would treat that as a
+    metadata-only bump and silently keep the stale (longer) transcript forever.
+    The condition is `remoteCount !== localCount` precisely so a decrease also
+    re-syncs.
+    """
+    # The force-reload branch must trigger on ANY count change, not just growth.
+    assert "if(remoteCount !== localCount){" in SESSIONS_JS
+    assert "if(remoteCount > localCount){" not in SESSIONS_JS
+    # The metadata-only branch must be gated on an unchanged count (the else of
+    # the count-change check), never reachable when the count differs.
+    assert "}else if(remoteLast > localLast){" in SESSIONS_JS
 
 
 def test_webui_source_never_counts_as_external_session():
