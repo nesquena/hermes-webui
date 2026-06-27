@@ -1535,7 +1535,7 @@ function _renderScriptsList(scripts) {
           sourceEl.querySelector('code').textContent = t('scripts_load_error') || 'Failed to load source.';
         }
       }
-      sourceEl.style.display = expanded ? '' : 'none';
+      sourceEl.style.display = el.classList.contains('expanded') ? '' : 'none';
     });
     box.appendChild(el);
   }
