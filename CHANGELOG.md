@@ -7,6 +7,60 @@
 
 - **Anchor-owned settled assistant turns now preserve mixed text/tool ordering in Transparent Stream.** When a settled assistant message stores interleaved `content[]` text and `tool_use` parts, settlement and reload hydration now promote those parts into the `_anchor_activity_scene` instead of relying on the raw Transparent Stream fallback. The final answer stays distinct as the text after the last tool use on the final assistant message, while earlier prose, non-final post-tool process text, thinking rows, and tool rows render chronologically in both Compact Worklog and Transparent Stream.
 
+## [v0.51.689] — 2026-06-26 — Release YS (WebUI no longer gets stuck in a 401 loop after an upgrade)
+
+### Fixed
+
+- **WebUI no longer hangs in a repeating `401` loop on `GET /api/profile/active` after an upgrade.** The boot path inherited the shared `api()` helper's automatic 401→login redirect and kept retrying the active-profile bootstrap read without a bounded decision, so a post-upgrade session-not-re-established state could spin indefinitely and leave the app unresponsive. The bootstrap read now opts out of the automatic redirect (`redirect401: false`, scoped to this one call) and a dedicated `_resolveActiveProfileBootstrapState()` makes a one-shot recovery decision: on the first 401 it redirects to login once; if that's already been attempted it falls back to the default profile for display. The one-shot marker is cleared on both success and fallback, so a recovered/re-logged-in user re-establishes their real profile normally — and a genuinely logged-out user still gets the normal login redirect (server auth/profile cookies remain authoritative; the fallback is display-state only). Reported by the community. Thanks @rodboev. (#5018, fixes #5001)
+
+## [v0.51.688] — 2026-06-26 — Release YR (docs: clarify how WebUI chat runs by default)
+
+### Changed
+
+- **README: clarified that WebUI runs the Hermes agent in-process by default** (reading `HERMES_HOME` directly) rather than connecting to an external Hermes/agent OpenAI-compatible API server, and that `HERMES_API_URL` is only read by the Tasks/cron health probe — it does not route chat. Documents the two supported options for an external endpoint (add it as a custom OpenAI-compatible chat provider, or route chat through a Hermes Gateway via `HERMES_WEBUI_CHAT_BACKEND=gateway`, see `docs/advanced-chat-setup.md`). Addresses a recurring user confusion (#3873). Thanks @sr-dotcom. (#5015)
+
+## [v0.51.687] — 2026-06-26 — Release YQ (system-health CPU/RAM metrics work on macOS and other non-procfs platforms)
+
+### Fixed
+
+- **The system-health panel now reports CPU/RAM on macOS and other platforms without `/proc`.** The aggregate CPU/RAM collectors only read Linux procfs, so on macOS those metrics failed. They now fall back to `psutil` when procfs is unavailable. `psutil` is kept **optional** (listed only as a comment in `requirements.txt`, matching the `edge-tts` opt-in pattern — base installs stay lean): on Linux procfs is always hit first and `psutil` is never imported; on a non-procfs platform with `psutil` installed the fallback works; without it, the affected metric degrades to "unavailable" with no crash. Thanks @jkobject. (#4616)
+
+## [v0.51.686] — 2026-06-26 — Release YP (internal: enhanced-table copy boundary-case test coverage)
+
+### Changed
+
+- **Internal (tests only): added regression coverage for two enhanced-table copy boundary cases** flagged as optional follow-ups when the #4945 fix shipped — a selection anchored on the `<table>` element itself, and a selection that starts in a table cell and ends in surrounding prose. Both must fall through to native copy, and the shipped guard already handles them correctly (verified, no production change). Closes the coverage gap so a future refactor of the copy interceptor can't silently regress these paths. Thanks @rodboev. (#5013, follow-up to #4945/#4994)
+
+## [v0.51.685] — 2026-06-26 — Release YO (internal: session-list cache extracted to its own module)
+
+### Changed
+
+- **Internal refactor (no behavior change): the session-list cache cluster moved out of `api/routes.py` into a dedicated `api/route_session_list_cache.py` module**, re-exported from `api.routes` so every caller, test, and import keeps working. This continues the incremental router-slimming (#1907 / the #3575 pattern) on a hot merge surface — every HTTP entrypoint stays in `routes.py`, and the cache state, locks, single-flight/inflight events, rebuild-thread ownership, and invalidation/stamp logic are preserved exactly (cross-module invalidation verified: the shared objects are accessed live via module attribute, never stale-imported). Thanks @rodboev. (#5004, #1907)
+
+## [v0.51.684] — 2026-06-26 — Release YN (copying a rendered table no longer drags its sort/filter chrome — or eats surrounding text)
+
+### Fixed
+
+- **Copying a rendered markdown table now produces clean table text instead of the enhanced sort/filter chrome and dark styling — without clobbering other selected content.** After WebUI enhances a table (header cells wrapped in sort buttons, filter UI inserted), a full-table copy carried that markup and dropped the header row. A copy interceptor now reconstructs clean table markup (header preserved, chrome stripped, dark inline styling removed, cell content HTML-escaped) — but only for a *full* enhanced-table selection. A partial selection (a few cells, one row/column), or a selection that merely crosses the table (text before → table → text after), falls through to native copy unchanged, so neither the surrounding prose nor a sub-selection is lost. Thanks @rodboev. (#4994, fixes #4945)
+
+## [v0.51.683] — 2026-06-26 — Release YM (WebUI finds the agent for pip-style installs — no more cron.jobs import error)
+
+### Fixed
+
+- **WebUI now locates the agent on pip-style installs, fixing a `ModuleNotFoundError: No module named 'cron.jobs'`.** Agent-directory discovery only accepted a source checkout containing `run_agent.py`, so a pip-style layout that ships the cron jobs module without that entrypoint left the agent dir unset and the cron import unrepaired. Discovery now also recognizes a pip-style root (the cron jobs module plus a real `hermes_cli` package signal), in an ordered search that always prefers a genuine `run_agent.py` checkout before any pip-style candidate — so a real checkout can never be preempted by a lookalike — and the pip-style marker is strict enough (requires `hermes_cli`, not a bare generic directory) that a non-agent folder can't false-match. Thanks @rodboev. (#4998, fixes #4700)
+
+## [v0.51.682] — 2026-06-26 — Release YL (faster long-session open — indexed compression-continuation lookup)
+
+### Fixed
+
+- **Opening a session with a compression snapshot is faster, and still resolves to the correct live continuation.** The pre-compression snapshot continuation lookup scanned and JSON-parsed every session sidecar to find the live child; it now uses the session index as a fast path (one directory listing + one index read, no per-sidecar parse). Correctness is preserved by a membership-completeness guard: if any persisted continuation sidecar is missing from the index, the lookup falls back to the full sidecar scan — so a stale index can't silently drop a continuation and surface the archived snapshot instead of the live conversation. The index parse no longer mutates the shared ancestor set, and ties on `updated_at` resolve deterministically by `session_id` so the fast path and the scan path are byte-identical. Thanks @franksong2702. (#4991, fixes #4990)
+
+## [v0.51.681] — 2026-06-26 — Release YK (Anthropic shows in the model picker when configured via OAuth token)
+
+### Fixed
+
+- **The model picker now detects Anthropic when it's configured through an OAuth token instead of `ANTHROPIC_API_KEY`.** WebUI's env-fallback provider detection only looked for `ANTHROPIC_API_KEY`, so an Anthropic setup using OAuth token env vars (`ANTHROPIC_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`, which the shared agent already accepts) fell out of parity and the provider didn't surface. The fallback now derives the Anthropic env-var set from the shared agent provider registry (with a built-in fallback list), and env values are stripped before the availability check so a whitespace-only token can't false-positive the provider. Thanks @rodboev. (#4995, fixes #4770)
+
 ## [v0.51.680] — 2026-06-26 — Release YJ (session-index rebuild can't be clobbered by a late worker)
 
 ### Fixed

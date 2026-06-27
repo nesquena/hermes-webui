@@ -68,6 +68,9 @@ const messagesFns = [
 	  '_anchorSceneProseRow','_anchorSceneThinkingRow','_anchorSceneToolRowFromCall',
 	  '_anchorSceneToolRowName','_anchorSceneToolRowId',
 	  '_anchorSceneToolRowsHaveNonConflictingIds','_anchorSceneToolRowsHaveDifferentExplicitIds',
+	  '_anchorSceneToolRowStartedAt','_anchorSceneToolRowsHaveSameStartedAt',
+	  '_anchorSceneToolRowBodyEvidence','_anchorSceneToolRowsHaveSameBodyEvidence',
+	  '_anchorSceneToolRowsHaveSameInvocationEvidence',
 	  '_anchorSceneToolRowsHaveCompatibleNames',
 	  '_anchorSceneToolRowArgs','_anchorSceneObjectContainsSubset',
 	  '_anchorSceneToolRowsHaveCompatibleInvocation',
@@ -310,6 +313,7 @@ def test_content_tool_use_enriched_from_matching_message_tool_call(driver_path):
                     "id": "term-message",
                     "function": {"name": "terminal", "arguments": '{"cmd":"ls -la"}'},
                     "snippet": _TERM_OUTPUT,
+                    "started_at": 100,
                 }
             ],
         },
@@ -330,6 +334,7 @@ def test_content_tool_use_enriched_from_matching_message_tool_call(driver_path):
                         "assistant_msg_idx": 1,
                         "args": {"cmd": "ls -la"},
                         "snippet": _TERM_OUTPUT,
+                        "started_at": 100,
                     }
                 ]
             },
@@ -361,7 +366,7 @@ def test_content_tool_use_partial_args_enriched_from_matching_live_tool_call(dri
                 "Done.",
             ],
             "tool_calls": [
-                {"id": "patch-message", "name": "edit_file", "snippet": _DIFF}
+                {"id": "patch-message", "name": "edit_file", "snippet": _DIFF, "started_at": 100}
             ],
         },
         {"role": "assistant", "content": "final answer"},
@@ -385,6 +390,7 @@ def test_content_tool_use_partial_args_enriched_from_matching_live_tool_call(dri
                             "new_string": "new",
                         },
                         "snippet": _DIFF,
+                        "started_at": 100,
                     }
                 ]
             },
@@ -399,6 +405,63 @@ def test_content_tool_use_partial_args_enriched_from_matching_live_tool_call(dri
         "new_string": "new",
     }
     assert matching[0]["rendersDiff"] is True
+
+
+def test_id_flexible_content_tool_does_not_absorb_third_same_command_id(driver_path):
+    """A content row matched to one alternate id must not hide a later repeated call."""
+    messages = [
+        {"role": "user", "content": "inspect twice"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "message-a",
+                    "name": "terminal",
+                    "args": {"cmd": "ls"},
+                    "snippet": "OUTPUT A",
+                    "started_at": 100,
+                }
+            ],
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+    cards = _run(
+        driver_path,
+        {
+            "messages": messages,
+            "turnStart": 0,
+            "lastAsstIndex": 2,
+            "S": {
+                "toolCalls": [
+                    {
+                        "id": "live-b",
+                        "name": "terminal",
+                        "assistant_msg_idx": 1,
+                        "args": {"cmd": "ls"},
+                        "snippet": "OUTPUT B",
+                        "started_at": 200,
+                    }
+                ]
+            },
+        },
+    )
+    by_tid = {card["tid"]: card for card in cards}
+
+    assert by_tid["content-a"]["snippet"] == "OUTPUT A"
+    assert "message-a" not in by_tid
+    assert by_tid["live-b"]["snippet"] == "OUTPUT B"
+    assert len([card for card in cards if card["name"] == "terminal"]) == 2
 
 
 def test_ambiguous_different_id_content_tools_do_not_merge_by_position(driver_path):

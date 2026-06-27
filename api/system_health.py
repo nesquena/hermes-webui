@@ -1,14 +1,17 @@
-"""Safe aggregate host resource metrics for the WebUI VPS panel (#693).
+"""Safe aggregate host resource metrics for the WebUI system panel (#693).
 
-The browser only needs coarse CPU/RAM/disk usage. Keep this module intentionally
-small and dependency-free: no process lists, command strings, user identities,
-environment variables, or filesystem topology leave the server.
+The browser only needs coarse CPU/RAM/disk usage. Linux uses procfs first;
+platforms without procfs (for example macOS) fall back to psutil for aggregate
+CPU/RAM metrics. Keep the payload intentionally small: no process lists,
+command strings, user identities, environment variables, or filesystem topology
+leave the server.
 """
 
 from __future__ import annotations
 
 import shutil
 import time
+from importlib import import_module
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,13 @@ from typing import Any
 _PROC_STAT = Path("/proc/stat")
 _PROC_MEMINFO = Path("/proc/meminfo")
 _CPU_SAMPLE_SECONDS = 0.05
+
+
+def _load_optional_psutil():
+    try:
+        return import_module("psutil")
+    except ImportError:
+        raise RuntimeError("psutil_unavailable") from None
 
 
 def _checked_at() -> str:
@@ -61,14 +71,24 @@ def _cpu_delta_percent(start: tuple[int, int], end: tuple[int, int]) -> float:
 
 
 def _cpu_percent() -> float:
-    """Sample aggregate CPU usage without psutil.
+    """Sample aggregate CPU usage.
 
     A short local sample avoids storing cross-request state and returns a stable
-    percentage on the first poll. Unsupported platforms raise a safe error code.
+    percentage on the first poll. Linux uses procfs without extra dependencies;
+    platforms without procfs fall back to psutil when it is already available.
+    Unsupported platforms raise a safe error code.
     """
-    start = _read_proc_stat_cpu()
+    try:
+        start = _read_proc_stat_cpu()
+    except OSError:
+        psutil = _load_optional_psutil()
+        return _clamp_percent(psutil.cpu_percent(interval=_CPU_SAMPLE_SECONDS))
     time.sleep(_CPU_SAMPLE_SECONDS)
-    end = _read_proc_stat_cpu()
+    try:
+        end = _read_proc_stat_cpu()
+    except OSError:
+        psutil = _load_optional_psutil()
+        return _clamp_percent(psutil.cpu_percent(interval=0.0))
     return _cpu_delta_percent(start, end)
 
 
@@ -90,20 +110,28 @@ def _read_meminfo_kib() -> dict[str, int]:
 
 
 def _memory_usage() -> dict[str, int | float]:
-    meminfo = _read_meminfo_kib()
-    total = int(meminfo.get("MemTotal") or 0) * 1024
-    if total <= 0:
-        raise RuntimeError("meminfo_unavailable")
-    available_kib = meminfo.get("MemAvailable")
-    if available_kib is None:
-        available_kib = (
-            meminfo.get("MemFree", 0)
-            + meminfo.get("Buffers", 0)
-            + meminfo.get("Cached", 0)
-            + meminfo.get("SReclaimable", 0)
-            - meminfo.get("Shmem", 0)
-        )
-    available = max(0, int(available_kib) * 1024)
+    try:
+        meminfo = _read_meminfo_kib()
+    except OSError:
+        vm = _load_optional_psutil().virtual_memory()
+        total = int(getattr(vm, "total", 0) or 0)
+        if total <= 0:
+            raise RuntimeError("memory_unavailable") from None
+        available = max(0, int(getattr(vm, "available", 0) or 0))
+    else:
+        total = int(meminfo.get("MemTotal") or 0) * 1024
+        if total <= 0:
+            raise RuntimeError("meminfo_unavailable")
+        available_kib = meminfo.get("MemAvailable")
+        if available_kib is None:
+            available_kib = (
+                meminfo.get("MemFree", 0)
+                + meminfo.get("Buffers", 0)
+                + meminfo.get("Cached", 0)
+                + meminfo.get("SReclaimable", 0)
+                - meminfo.get("Shmem", 0)
+            )
+        available = max(0, int(available_kib) * 1024)
     used = max(0, min(total, total - available))
     return {
         "used_bytes": used,

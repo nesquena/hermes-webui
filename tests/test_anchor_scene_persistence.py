@@ -842,6 +842,7 @@ def test_anchor_scene_hydration_restores_durable_body_after_message_tool_merge()
                     "name": "terminal",
                     "input": {"cmd": "long-output"},
                     "snippet": capped_preview,
+                    "started_at": 100,
                 }
             ],
         },
@@ -870,6 +871,7 @@ def test_anchor_scene_hydration_restores_durable_body_after_message_tool_merge()
                 "name": "terminal",
                 "input": {"cmd": "long-output"},
                 "snippet": full_output,
+                "started_at": 100,
             }
         ],
     )
@@ -879,6 +881,72 @@ def test_anchor_scene_hydration_restores_durable_body_after_message_tool_merge()
     assert tools[0]["tool_call_id"] == "toolu_content"
     assert tools[0]["tool"]["snippet"] == full_output
     assert tools[0]["payload"]["snippet"] == full_output
+
+
+def test_anchor_scene_hydration_keeps_third_same_command_id_distinct_after_alt_id_match():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": [
+                "First check.",
+                {
+                    "type": "tool_use",
+                    "tool_use_id": "content-a",
+                    "tool_name": "terminal",
+                    "args": {"cmd": "ls"},
+                },
+                "Second check.",
+            ],
+            "tool_calls": [
+                {
+                    "id": "message-a",
+                    "name": "terminal",
+                    "input": {"cmd": "ls"},
+                    "snippet": "OUTPUT A",
+                    "started_at": 100,
+                }
+            ],
+        },
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "",
+                "activity_rows": [],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        messages,
+        records,
+        tool_calls=[
+            {
+                "assistant_msg_idx": 1,
+                "tid": "durable-b",
+                "name": "terminal",
+                "input": {"cmd": "ls"},
+                "snippet": "OUTPUT B",
+                "started_at": 200,
+            }
+        ],
+    )
+
+    tools = [row for row in hydrated[1]["_anchor_activity_scene"]["activity_rows"] if row.get("role") == "tool"]
+    by_id = {row.get("tool_call_id"): row for row in tools}
+
+    assert by_id["content-a"]["tool"]["snippet"] == "OUTPUT A"
+    assert "message-a" not in by_id
+    assert by_id["durable-b"]["tool"]["snippet"] == "OUTPUT B"
+    assert len(tools) == 2
 
 
 def test_anchor_scene_hydration_keeps_short_persisted_body_after_durable_merge():
@@ -906,6 +974,7 @@ def test_anchor_scene_hydration_keeps_short_persisted_body_after_durable_merge()
                     "name": "terminal",
                     "input": {"cmd": "short-output"},
                     "snippet": short_body,
+                    "started_at": 100,
                 }
             ],
         },
@@ -934,6 +1003,7 @@ def test_anchor_scene_hydration_keeps_short_persisted_body_after_durable_merge()
                 "name": "terminal",
                 "input": {"cmd": "short-output"},
                 "snippet": full_output,
+                "started_at": 100,
             }
         ],
     )
