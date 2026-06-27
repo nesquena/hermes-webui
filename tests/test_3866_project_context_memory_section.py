@@ -1,13 +1,17 @@
 import json
 import pathlib
+import shutil
+import subprocess
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import api.profiles
 import api.routes as routes
+import pytest
 
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
+NODE = shutil.which("node")
 
 
 def project_context_for(workspace):
@@ -127,6 +131,117 @@ def test_memory_panel_defines_read_only_project_context_section():
     assert "readOnly: true" in panels
     assert "project_context_shadowed" in panels
     assert "/api/memory?session_id=" in panels
+
+
+def test_memory_panel_references_all_memory_path_fields():
+    panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+
+    assert "function _memorySectionPath(key)" in panels
+    assert "_memoryData.memory_path" in panels
+    assert "_memoryData.user_path" in panels
+    assert "_memoryData.soul_path" in panels
+    assert "_memoryData.project_context_path" in panels
+
+
+def _memory_render_blocks():
+    panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    helper_start = panels.index("function _memorySectionContent(key)")
+    helper_end = panels.index("function _setMemoryHeaderButtons", helper_start)
+    render_start = panels.index("function _renderMemoryDetail(section)")
+    render_end = panels.index("function _renderMemoryEdit", render_start)
+    return panels[helper_start:helper_end], panels[render_start:render_end]
+
+
+def _run_memory_render_harness():
+    helper_block, render_block = _memory_render_blocks()
+    script = (
+        "const helperBlock = "
+        + json.dumps(helper_block)
+        + ";\nconst renderBlock = "
+        + json.dumps(render_block)
+        + ";\n"
+        + r"""
+let _memoryData = {
+  memory: 'Primary memory body',
+  memory_path: 'C:/Users/Rod/.hermes/memories/MEMORY.md',
+  memory_mtime: 1712345678,
+  user: 'User memory body',
+  user_path: 'C:/Users/Rod/.hermes/memories/USER.md',
+  user_mtime: 1712345678,
+  soul: 'Soul memory body',
+  soul_path: 'C:/Users/Rod/.hermes/SOUL.md',
+  soul_mtime: 1712345678,
+  project_context: 'Project context body',
+  project_context_path: 'D:/Repos/hermes-webui/AGENTS.md',
+  project_context_name: 'AGENTS.md',
+  project_context_mtime: 1712345678,
+  project_context_shadowed: [{name: 'CLAUDE.md', shadowed_by: 'AGENTS.md'}],
+};
+let _memoryMode = '';
+const nodes = {
+  memoryDetailTitle: {textContent: '', style: {}},
+  memoryDetailBody: {innerHTML: '', style: {}},
+  memoryDetailEmpty: {style: {}},
+};
+function $(id) { return nodes[id] || null; }
+function _memorySectionMeta(section) {
+  return {key: section, label: section, emptyKey: section + '_empty'};
+}
+function _memorySectionLabel(meta) { return meta.label; }
+function _memorySectionEmpty(meta) { return meta.emptyKey; }
+function _setMemoryHeaderButtons() {}
+function renderMd(content) { return 'rendered:' + content; }
+function esc(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+eval(helperBlock + "\n" + renderBlock);
+_renderMemoryDetail('memory');
+const memoryHtml = nodes.memoryDetailBody.innerHTML;
+_renderMemoryDetail('user');
+const userHtml = nodes.memoryDetailBody.innerHTML;
+_renderMemoryDetail('soul');
+const soulHtml = nodes.memoryDetailBody.innerHTML;
+_renderMemoryDetail('project_context');
+const projectHtml = nodes.memoryDetailBody.innerHTML;
+console.log(JSON.stringify({memoryHtml, userHtml, soulHtml, projectHtml, memoryMode: _memoryMode}));
+"""
+    )
+    completed = subprocess.run(
+        [NODE, "-e", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_memory_detail_renders_path_for_non_project_sections():
+    """Base-fails/head-passes regression for issue #4999.
+
+    On base, `_renderMemoryDetail('memory')` ignores `memory_path`, so the
+    rendered header omits the path row entirely. On head, the same render must
+    show `MEMORY.md · <path>` using the existing pinned header row pattern.
+    """
+    if NODE is None:
+        pytest.skip("node not on PATH")
+
+    rendered = _run_memory_render_harness()
+
+    assert "MEMORY.md" in rendered["memoryHtml"]
+    assert "C:/Users/Rod/.hermes/memories/MEMORY.md" in rendered["memoryHtml"]
+    assert "USER.md" in rendered["userHtml"]
+    assert "C:/Users/Rod/.hermes/memories/USER.md" in rendered["userHtml"]
+    assert "SOUL.md" in rendered["soulHtml"]
+    assert "C:/Users/Rod/.hermes/SOUL.md" in rendered["soulHtml"]
+    assert "AGENTS.md · D:/Repos/hermes-webui/AGENTS.md" in rendered["projectHtml"]
+    assert "CLAUDE.md present, shadowed by AGENTS.md" in rendered["projectHtml"]
 
 
 def test_blank_session_workspace_does_not_resolve_to_server_cwd(monkeypatch):

@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 BOOT_JS = ROOT / "static" / "boot.js"
 NODE = shutil.which("node")
+BOOT_MARKER_KEY = "hermes-webui-active-profile-bootstrap-401"
 
 
 pytestmark = pytest.mark.skipif(
@@ -144,6 +145,15 @@ function makeApiAttempt(attempt) {
   };
 }
 
+const budgetBlock = extractBlock(
+  bootSrc,
+  '  const _bootActiveProfileUnauthRedirectBudget=(()=>{',
+  '  // Fetch active profile'
+);
+eval(budgetBlock.replace(
+  '  const _bootActiveProfileUnauthRedirectBudget=(()=>{',
+  '  globalThis._bootActiveProfileUnauthRedirectBudget=(()=>{'
+));
 eval(extractFunction(bootSrc, '_resolveActiveProfileBootstrapState'));
 const bootActiveProfileBlock = extractBlock(
   bootSrc,
@@ -297,8 +307,8 @@ def test_active_profile_boot_recovery_is_one_shot_and_bounded(driver_path):
     assert payload["attempts"][1]["applyBotNameCalls"] == 1
     assert payload["loadCalls"] == 2
     assert payload["redirects"] == ["login?next=%2F"]
-    assert payload["storageHistory"][0].get("test-5001-active-profile-recovery") == "1"
-    assert payload["storageHistory"][1].get("test-5001-active-profile-recovery") is None
+    assert payload["storageHistory"][0].get(BOOT_MARKER_KEY) == "1"
+    assert payload["storageHistory"][1].get(BOOT_MARKER_KEY) is None
     assert payload["storageSnapshot"] == {}
 
 
@@ -327,8 +337,8 @@ def test_active_profile_boot_recovery_handles_loader_thrown_401s(driver_path):
     assert payload["attempts"][1]["bootIsDefault"] is True
     assert payload["attempts"][1]["applyBotNameCalls"] == 1
     assert payload["redirects"] == ["login?next=%2F"]
-    assert payload["storageHistory"][0].get("test-5001-active-profile-recovery-throws") == "1"
-    assert payload["storageHistory"][1].get("test-5001-active-profile-recovery-throws") is None
+    assert payload["storageHistory"][0].get(BOOT_MARKER_KEY) == "1"
+    assert payload["storageHistory"][1].get(BOOT_MARKER_KEY) is None
     assert payload["storageSnapshot"] == {}
 
 

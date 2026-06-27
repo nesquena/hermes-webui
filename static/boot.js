@@ -194,6 +194,19 @@ function handleWorkspaceClose(){
   closeWorkspacePanel();
 }
 
+async function _maybeBindFreshDefaultWorkspaceSession(){
+  if(S.session) return false;
+  if(_workspacePanelMode!=='browse') return false;
+  if(!S._profileDefaultWorkspace) return false;
+  try{
+    await newSession(false, {awaitWorkspaceLoad: true});
+    return true;
+  }catch(e){
+    console.warn('[hermes] failed to bind fresh default workspace session', e);
+    return false;
+  }
+}
+
 /**
  * Set a tooltip on a button, preferring the custom CSS tooltip (`data-tooltip`)
  * when the element opts in via the `has-tooltip` class. Falls back to the
@@ -2260,56 +2273,83 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
     api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false})}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
+  const _bootActiveProfileUnauthRedirectBudget=(()=>{
+    const markerKey='hermes-webui-active-profile-bootstrap-401';
+    let consumed=false;
+    const readAttempted=(storage=sessionStorage)=>{
+      try{
+        const attempted=storage&&storage.getItem?storage.getItem(markerKey)==='1':false;
+        if(attempted) consumed=true;
+        return attempted;
+      }catch(_){
+        return false;
+      }
+    };
+    const markAttempted=(storage=sessionStorage)=>{
+      consumed=true;
+      try{
+        if(storage&&storage.setItem) storage.setItem(markerKey,'1');
+      }catch(_){}
+    };
+    const clearAttempted=(storage=sessionStorage)=>{
+      try{
+        if(storage&&storage.removeItem) storage.removeItem(markerKey);
+      }catch(_){}
+    };
+    const spendOnFallback=(storage=sessionStorage)=>{
+      consumed=true;
+      clearAttempted(storage);
+    };
+    const spendOnRedirect=(storage=sessionStorage)=>{
+      if(consumed) return false;
+      markAttempted(storage);
+      return true;
+    };
+    const redirectToLogin=(nextUrl)=>{
+      window.location.href='login?next='+encodeURIComponent(nextUrl);
+    };
+    return {
+      readAttempted,
+      clearAttempted,
+      spendOnFallback,
+      spendOnRedirect,
+      redirectToLogin,
+      isConsumed:()=>consumed,
+    };
+  })();
   async function _resolveActiveProfileBootstrapState({
     loadActiveProfile = () => api('/api/profile/active', {redirect401: false}),
     getNextUrl = () => window.location.pathname + window.location.search,
     redirectToLogin = (nextUrl) => {
-      window.location.href = 'login?next=' + encodeURIComponent(nextUrl);
+      _bootActiveProfileUnauthRedirectBudget.redirectToLogin(nextUrl);
     },
     markerStorage = sessionStorage,
-    markerKey = 'hermes-webui-active-profile-bootstrap-401',
   } = {}) {
-    const getAttempted = () => {
-      try {
-        return markerStorage && markerStorage.getItem
-          ? markerStorage.getItem(markerKey) === '1'
-          : false;
-      } catch (_) {
-        return false;
-      }
-    };
-    const markAttempt = () => {
-      try {
-        if (markerStorage && markerStorage.setItem) markerStorage.setItem(markerKey, '1');
-      } catch (_) {}
-    };
-    const clearAttempt = () => {
-      try {
-        if (markerStorage && markerStorage.removeItem) markerStorage.removeItem(markerKey);
-      } catch (_) {}
-    };
-
-    const alreadyAttempted = getAttempted();
+    const alreadyAttempted = _bootActiveProfileUnauthRedirectBudget.readAttempted(markerStorage);
     try {
       const p = await loadActiveProfile();
       if (p && typeof p === 'object' && typeof p.name === 'string') {
-        clearAttempt();
+        _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
         return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
       }
       if (p === undefined && !alreadyAttempted) {
-        markAttempt();
-        redirectToLogin(getNextUrl());
+        if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
+          redirectToLogin(getNextUrl());
+        }
         return {status: 'recovery-redirect'};
       }
-      clearAttempt();
+      if (p === undefined) _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
+      else _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
       return {status: 'fallback', profile: 'default', isDefault: true};
     } catch (e) {
-      clearAttempt();
+      _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
       if (!alreadyAttempted && e && e.status === 401) {
-        markAttempt();
-        redirectToLogin(getNextUrl());
+        if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
+          redirectToLogin(getNextUrl());
+        }
         return {status: 'recovery-redirect'};
       }
+      if (e && e.status === 401) _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
       return {status: 'fallback', profile: 'default', isDefault: true};
     }
   }
@@ -2328,7 +2368,19 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
-  const _hydrateBootModelDropdown=()=>populateModelDropdown({preferProfileDefaultOnFreshBoot:true}).then(()=>{
+  const _redirectBootModelDropdownIfUnauth=(res)=>{
+    if(!res||res.status!==401) return false;
+    window._modelDropdownReady=null;
+    if(_bootActiveProfileUnauthRedirectBudget.isConsumed()) return true;
+    if(_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(sessionStorage)){
+      _bootActiveProfileUnauthRedirectBudget.redirectToLogin(window.location.pathname+window.location.search);
+    }
+    return true;
+  };
+  const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({
+    preferProfileDefaultOnFreshBoot:true,
+    ...(redirectIfUnauth?{redirectIfUnauth}:{}),
+  }).then(()=>{
     const sessionModelState=S.session&&S.session.model
       ? {model:S.session.model,model_provider:S.session.model_provider||null}
       : null;
@@ -2366,15 +2418,23 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._modelDropdownReady=null;
     throw e;
   });
+  const _startModelDropdown=()=>{
+    const ready=window._modelDropdownReady;
+    if(ready&&typeof ready.then==='function') return ready;
+    const next=_hydrateModelDropdown();
+    window._modelDropdownReady=next;
+    return next;
+  };
   const _startBootModelDropdown=()=>{
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateBootModelDropdown();
+    const next=_hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth});
     window._modelDropdownReady=next;
     return next;
   };
   window._modelDropdownReady=null;
-  window._ensureModelDropdownReady=_startBootModelDropdown;
+  window._startBootModelDropdown=_startBootModelDropdown;
+  window._ensureModelDropdownReady=_startModelDropdown;
   setTimeout(()=>{
     try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
   },0);
@@ -2456,6 +2516,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
+        await _maybeBindFreshDefaultWorkspaceSession();
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -2481,6 +2542,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
+  await _maybeBindFreshDefaultWorkspaceSession();
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();

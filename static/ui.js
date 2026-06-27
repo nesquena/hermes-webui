@@ -2047,18 +2047,18 @@ async function populateModelDropdown(opts={}){
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
     const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
     if(requestSeq!==_modelDropdownRequestSeq) return;
-    if(_redirectIfUnauth(_modelsRes)) return;
+    const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
+    if(customRedirectIfUnauth){
+      if(customRedirectIfUnauth(_modelsRes)) return;
+    }else if(_redirectIfUnauth(_modelsRes)) return;
+    // `_activeProvider` is populated from the /api/models payload below.
     const data=await _modelsRes.json();
     if(requestSeq!==_modelDropdownRequestSeq) return;
-    // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
-    // Store default model so newSession() can apply it (#872).
-    // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
-    // Keep the g.extra_models label hydration path below in this function; tests
-    // assert populateModelDropdown preserves that full-catalog label contract.
     window._modelEndpointErrors={};
+    // Keep g.extra_models label hydration in this function for /model and tail selections.
 
     const _synthGroupsFromConfigured=()=>{
       const badgeMap=window._configuredModelBadges||{};
@@ -2441,6 +2441,119 @@ function _appendOverflowOptionsToGroup(group, extraModels){
     group.dataset.overflowExpanded='1';
   }
   return appended;
+}
+
+function _mountSearchableModelSelect(opts={}){
+  const root=opts.root;
+  if(!root) return null;
+  const choices=Array.isArray(opts.choices)
+    ? opts.choices
+      .map(choice=>choice&&choice.id?{id:String(choice.id),label:String(choice.label||choice.id)}:null)
+      .filter(Boolean)
+    : [];
+  const selectedValue=String(opts.selectedValue||'');
+  const onModelChange=typeof opts.onModelChange==='function' ? opts.onModelChange : ()=>{};
+  const selectId=opts.selectId||'';
+  const customInputId=opts.customInputId||'';
+  const listedChoiceIds=new Set(choices.map(choice=>choice.id));
+  const listedSelection=listedChoiceIds.has(selectedValue) ? selectedValue : '';
+  const customSelection=listedSelection ? '' : selectedValue;
+  let lastListedValue=listedSelection||(choices[0]?choices[0].id:'');
+  root.innerHTML=
+    `<div class="model-search-row">`+
+      `<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off">`+
+      `<button class="model-search-clear" title="Clear search">${li('x',10)}</button>`+
+    `</div>`+
+    `<select ${selectId?`id="${esc(selectId)}"`:''}></select>`+
+    `<div class="model-group model-custom-sep">${esc(t('model_custom_label')||'Custom model ID')}</div>`+
+    `<div class="model-custom-row">`+
+      `<input ${customInputId?`id="${esc(customInputId)}"`:''} class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off">`+
+      `<button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`+
+    `</div>`;
+  const searchInput=root.querySelector('.model-search-input');
+  const clearButton=root.querySelector('.model-search-clear');
+  const selectEl=selectId ? root.querySelector(`#${selectId}`) : root.querySelector('select');
+  const customInput=customInputId ? root.querySelector(`#${customInputId}`) : root.querySelector('.model-custom-input');
+  const customButton=root.querySelector('.model-custom-btn');
+  if(!searchInput||!clearButton||!selectEl||!customInput||!customButton) return null;
+
+  const noMatchesOption=document.createElement('option');
+  noMatchesOption.value='';
+  noMatchesOption.textContent='No matching models';
+  noMatchesOption.disabled=true;
+  noMatchesOption.hidden=true;
+  selectEl.appendChild(noMatchesOption);
+
+  for(const choice of choices){
+    const option=document.createElement('option');
+    option.value=choice.id;
+    option.textContent=choice.label;
+    selectEl.appendChild(option);
+  }
+  if(listedSelection){
+    selectEl.value=listedSelection;
+  }else if(customSelection){
+    selectEl.selectedIndex=-1;
+  }else if(choices.length){
+    selectEl.value=choices[0].id;
+    onModelChange(lastListedValue);
+  }
+  customInput.value=customSelection;
+
+  const applyFilter=()=>{
+    const needle=(searchInput.value||'').trim().toLowerCase();
+    let visibleCount=0;
+    for(const option of Array.from(selectEl.options)){
+      if(option===noMatchesOption) continue;
+      const haystack=`${option.textContent||''} ${option.value||''}`.toLowerCase();
+      const visible=!needle||haystack.includes(needle);
+      option.hidden=!visible;
+      if(visible) visibleCount++;
+    }
+    noMatchesOption.hidden=visibleCount!==0;
+  };
+
+  const applyCustomSelection=()=>{
+    onModelChange((customInput.value||'').trim());
+  };
+
+  searchInput.addEventListener('input', applyFilter);
+  clearButton.addEventListener('click', ()=>{
+    searchInput.value='';
+    applyFilter();
+    searchInput.focus();
+  });
+  selectEl.addEventListener('change', ()=>{
+    customInput.value='';
+    lastListedValue=selectEl.value||lastListedValue;
+    onModelChange(lastListedValue);
+  });
+  customInput.addEventListener('input', ()=>{
+    const value=(customInput.value||'').trim();
+    if(value){
+      selectEl.selectedIndex=-1;
+      onModelChange(value);
+      return;
+    }
+    customInput.value='';
+    if(lastListedValue){
+      selectEl.value=lastListedValue;
+      onModelChange(lastListedValue);
+      return;
+    }
+    onModelChange('');
+  });
+  customInput.addEventListener('keydown', (event)=>{
+    if(event.key!=='Enter') return;
+    event.preventDefault();
+    applyCustomSelection();
+  });
+  customButton.addEventListener('click', (event)=>{
+    event.preventDefault();
+    applyCustomSelection();
+  });
+  applyFilter();
+  return {searchInput,selectEl,customInput,customButton};
 }
 
 function renderModelDropdown(){

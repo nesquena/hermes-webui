@@ -1294,11 +1294,18 @@ async function loadSession(sid){
   S._pendingSessionToolsets=null;
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
-    const modelRefreshPromise=Promise.resolve().then(()=>{
-      if(_loadingSessionId!==modelRefreshSid) return;
-      return populateModelDropdown({freshness:'session_visit'});
-    }).catch(()=>{});
-    if(typeof window!=='undefined') window._modelDropdownReady=modelRefreshPromise;
+    if(!S._bootReady&&typeof window!=='undefined'&&typeof window._startBootModelDropdown==='function'){
+      Promise.resolve().then(()=>{
+        if(_loadingSessionId!==modelRefreshSid) return;
+        return window._startBootModelDropdown();
+      }).catch(()=>{});
+    }else{
+      const modelRefreshPromise=Promise.resolve().then(()=>{
+        if(_loadingSessionId!==modelRefreshSid) return;
+        return populateModelDropdown({freshness:'session_visit'});
+      }).catch(()=>{});
+      if(typeof window!=='undefined') window._modelDropdownReady=modelRefreshPromise;
+    }
   }
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
