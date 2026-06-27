@@ -812,11 +812,13 @@ function _isSessionLocallyStreaming(s) {
 }
 
 function _isSessionEffectivelyStreaming(s) {
-  return Boolean(s && (
+  if (!s) return false;
+  if (_isActiveSessionIdleForSidebar(s)) return false;
+  return Boolean(
     s.is_streaming ||
     _hasPendingUserMessageSignal(s) ||
     _isSessionLocallyStreaming(s)
-  ));
+  );
 }
 
 function _hasPendingUserMessageSignal(s) {
@@ -825,6 +827,17 @@ function _hasPendingUserMessageSignal(s) {
 
 function _isServerIdleSessionRow(s) {
   return Boolean(s && s.session_id && !s.is_streaming && !s.active_stream_id && !s.pending_user_message && !s.has_pending_user_message && !s.pending_started_at);
+}
+
+function _isActiveSessionIdleForSidebar(s) {
+  if (!s || !s.session_id || !S || !S.session || S.session.session_id !== s.session_id) return false;
+  if (!_isServerIdleSessionRow(s)) return false;
+  // During the optimistic /api/chat/start window the server can still report an
+  // idle row while the browser owns the just-submitted turn. Do not clear the
+  // active indicator for that specific start race; otherwise a stale local
+  // S.busy flag must not keep the active sidebar row yellow forever (#856).
+  if (typeof _sendInProgress !== 'undefined' && _sendInProgress && s.session_id === _sendInProgressSid) return false;
+  return true;
 }
 
 function _reconcileActiveSessionIdleStateFromList(serverRows) {
