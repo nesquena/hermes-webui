@@ -68,6 +68,10 @@ def test_extension_settings_runtime_normalizes_persists_resets_and_clears():
         assert.strictEqual(window.hermesExt.settings.forExtension('demo.ext').get('mode'), 'compact');
         assert.deepStrictEqual(settings.setAll({{flag: true, mode: 'compact', count: 2}}).values, {{flag: true, mode: 'compact', count: 2}});
         assert.deepStrictEqual(JSON.parse(store.get('hermes.ext.settings.demo.ext')), {{flag: true}});
+        store.set('hermes.ext.settings.demo.ext', JSON.stringify({{flag: false, unknown: 'kept', bad: 'x'}}));
+        assert.deepStrictEqual(settings.values, {{flag: false, mode: 'compact', count: 2}});
+        assert.deepStrictEqual(settings.overrides, {{}});
+        assert.strictEqual(store.has('hermes.ext.settings.demo.ext'), false);
         assert.strictEqual(settings.set('mode', 'invalid').ok, false);
         assert.deepStrictEqual(settings.reset(), {{flag: false, mode: 'compact', count: 2}});
         assert.strictEqual(store.has('hermes.ext.settings.demo.ext'), false);

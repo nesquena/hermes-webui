@@ -210,6 +210,14 @@
     return overrides;
   }
 
+  function readSettingsState(schema,key){
+    const stored=safeRead(key);
+    const checked=validate(schema,stored);
+    const overrides=overridesFromValues(schema,checked.values);
+    if(JSON.stringify(stored)!==JSON.stringify(overrides)) safeWrite(key,overrides);
+    return {values:checked.values,overrides};
+  }
+
   function supportsSettings(meta){
     return !!(meta&&meta.storage_owned&&Array.isArray(meta.settings_schema)&&meta.settings_schema.length);
   }
@@ -220,7 +228,10 @@
     const schema=supportsSettings(meta)?meta.settings_schema:[];
     const key=settingsKey(clean);
     function current(){
-      return validate(schema,safeRead(key)).values;
+      return supportsSettings(meta)?readSettingsState(schema,key).values:validate(schema,safeRead(key)).values;
+    }
+    function currentOverrides(){
+      return supportsSettings(meta)?readSettingsState(schema,key).overrides:safeRead(key);
     }
     function setAll(values){
       if(!supportsSettings(meta)) return {ok:false,values:current(),errors:{extension:'unsupported'}};
@@ -237,7 +248,7 @@
       schema,
       defaults:defaultsFor(schema),
       get values(){return current();},
-      get overrides(){return safeRead(key);},
+      get overrides(){return currentOverrides();},
       get(name){return current()[name];},
       validate(values){return validate(schema,values);},
       set(name,value){

@@ -857,7 +857,10 @@ def _gallery_installed_runtime_manifest(
             for key in ("name", "enabled", "scripts", "stylesheets", "sidecar", "permissions", "settings_schema"):
                 if key in manifest:
                     top_entry[key] = manifest[key]
-            if any(key in top_entry for key in ("scripts", "stylesheets", "sidecar")):
+            if any(
+                key in top_entry
+                for key in ("scripts", "stylesheets", "sidecar", "permissions", "settings_schema")
+            ):
                 entries.append(_copy_manifest_entry_with_asset_base(top_entry, asset_base))
         for _source, _index, entry in _manifest_extension_entries(manifest):
             copied = _copy_manifest_entry_with_asset_base(entry, asset_base)
