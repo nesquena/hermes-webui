@@ -10978,7 +10978,7 @@ async function saveSettings(andClose){
   const fontSize=($('settingsFontSize')||{}).value||localStorage.getItem('hermes-font-size')||'default';
   const language=($('settingsLanguage')||{}).value||'en';
   const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
-  const busyInputMode=($('settingsBusyInputMode')||{}).value||'queue';
+  const busyInputMode=($('settingsBusyInputMode')||{}).value||'steer';
   const showBusyPlaceholderHint=!!($('settingsShowBusyPlaceholderHint')||{}).checked;
   const body={};
 

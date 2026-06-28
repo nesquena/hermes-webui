@@ -23,6 +23,7 @@ def test_settings_panel_fallbacks_resolve_to_steer():
     assert "String(settings.busy_input_mode||'steer')" in PANELS_JS
     assert "['queue','interrupt','steer'].includes(val)?val:'steer'" in PANELS_JS
     assert "window._busyInputMode=body.busy_input_mode||'steer'" in PANELS_JS
+    assert "const busyInputMode=($('settingsBusyInputMode')||{}).value||'steer'" in PANELS_JS
 
 
 def test_busy_input_label_changes_without_key_or_id_drift():
