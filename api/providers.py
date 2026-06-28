@@ -47,6 +47,7 @@ from api.config import (
     get_config,
     invalidate_models_cache,
     reload_config,
+    resolve_custom_provider_connection,
 )
 from api.plugin_providers import (
     effective_provider_display_name,
@@ -2079,7 +2080,25 @@ def _llm_proxy_quota_stats_query_value(
     return _llm_proxy_quota_stats_token(values[0], field, required=required, max_len=max_len)
 
 
-def _llm_proxy_quota_stats_base_url() -> str | None:
+def _normalize_llm_proxy_quota_stats_base_url(base_url: str | None) -> str | None:
+    if not base_url:
+        return None
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def _llm_proxy_quota_stats_config() -> tuple[str | None, str | None]:
+    custom_api_key, custom_base_url = resolve_custom_provider_connection("custom:llm-proxy")
+    if custom_api_key or custom_base_url:
+        return _normalize_llm_proxy_quota_stats_base_url(custom_base_url), custom_api_key
+
     cfg = get_config()
     providers_cfg = cfg.get("providers") or {}
     provider_cfg: dict[str, Any] = {}
@@ -2095,19 +2114,10 @@ def _llm_proxy_quota_stats_base_url() -> str | None:
             model_provider = str(model_cfg.get("provider") or "").strip().lower()
             if model_provider == _LLM_PROXY_PROVIDER_ID:
                 base_url = str(model_cfg.get("base_url") or "").strip()
-    if not base_url:
-        return None
-
-    parsed = urlsplit(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-    if parsed.username or parsed.password:
-        return None
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
-
-
-def _llm_proxy_quota_stats_config() -> tuple[str | None, str | None]:
-    return _llm_proxy_quota_stats_base_url(), _get_provider_api_key(_LLM_PROXY_PROVIDER_ID)
+    return (
+        _normalize_llm_proxy_quota_stats_base_url(base_url),
+        _get_provider_api_key(_LLM_PROXY_PROVIDER_ID),
+    )
 
 
 def get_llm_proxy_quota_stats(

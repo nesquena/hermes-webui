@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import api.config as config
 import api.providers as providers
 import api.routes as routes
 
@@ -117,6 +118,52 @@ def test_post_quota_stats_forwards_validated_body(monkeypatch):
             "provider": "anthropic",
             "credential": "primary",
         },
+        "timeout": 3.0,
+    }
+
+
+def test_get_quota_stats_uses_custom_provider_authority_and_strips_duplicate_v1(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "llm-proxy",
+                    "base_url": "https://llm-proxy.example.test/v1",
+                    "key_env": "ISSUE_5033_LLM_PROXY_KEY",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        config,
+        "_thread_local_env_value",
+        lambda name: "server-held-secret" if name == "ISSUE_5033_LLM_PROXY_KEY" else "",
+    )
+    seen = {}
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["method"] = req.get_method()
+        seen["authorization"] = req.headers.get("Authorization")
+        seen["accept"] = req.headers.get("Accept")
+        seen["data"] = req.data
+        seen["timeout"] = timeout
+        return _FakeResponse(json.dumps({"ok": True, "quota": {"limit_remaining": 4}}).encode("utf-8"))
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+
+    status, payload = providers.get_llm_proxy_quota_stats(query={"provider": ["anthropic"]})
+
+    assert status == 200
+    assert payload == {"ok": True, "quota": {"limit_remaining": 4}}
+    assert seen == {
+        "url": "https://llm-proxy.example.test/v1/quota-stats?provider=anthropic",
+        "method": "GET",
+        "authorization": "Bearer server-held-secret",
+        "accept": "application/json",
+        "data": None,
         "timeout": 3.0,
     }
 
