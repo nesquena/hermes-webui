@@ -10375,7 +10375,9 @@ function _shouldKeepSettledWorklogOpenForPinnedFollow(){
   // the new max, which looks like a large backward jump even though pinned state
   // is correct. Keep the just-settled worklog open for pinned followers so the
   // live->settled DOM swap is height-stable; unpinned readers still get compact
-  // settled worklogs and preserve their viewport normally.
+  // settled worklogs and preserve their viewport normally. This intentionally
+  // wins over a transient user-collapsed live worklog while the reader remains
+  // pinned: avoiding the visible STREAM_DONE jump takes precedence for followers.
   // Use the sticky pin state as the authority. During live DOM rebuilds the raw
   // bottom distance can transiently exceed a threshold even for a pinned follower
   // (the assistant body/worklog grows before follow writes land), so a near-bottom

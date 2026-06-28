@@ -35,6 +35,7 @@ def test_pinned_follow_keeps_settled_worklog_open_to_avoid_stream_done_shrink():
     assert "_scrollPinned" in helper
     assert "!_messageUserUnpinned" in helper
     assert "bottom distance can transiently exceed" in helper
+    assert "avoiding the visible STREAM_DONE jump takes precedence" in helper
 
     render_fn = _function_body(UI_JS, "_renderSettledAnchorSceneForMessage")
     assert "const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForPinnedFollow();" in render_fn
