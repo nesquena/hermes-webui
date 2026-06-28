@@ -7,8 +7,8 @@ text to the next tool-result message — no interruption.
 
 Falls back to {"accepted": false, "fallback": "<reason>"} when the agent
 isn't running, isn't cached, or doesn't support steer (older agent versions).
-The frontend uses the fallback signal to restore the draft without cancelling
-the active run.
+The frontend uses the fallback signal to queue the text for the next turn
+without cancelling the current stream.
 
 Plus a leftover-delivery flow: if the agent finishes its turn before the
 steer is consumed (no tool-call boundary), _drain_pending_steer is called
@@ -37,9 +37,16 @@ def _restore_auth_sessions():
 
 
 @pytest.fixture
-def _clear_caches():
-    """Snapshot SESSION_AGENT_CACHE and STREAMS so tests don't bleed."""
+def _clear_caches(monkeypatch):
+    """Snapshot SESSION_AGENT_CACHE/STREAMS and keep tests independent of deployment env."""
     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+    for key in (
+        "HERMES_WEBUI_CHAT_BACKEND",
+        "HERMES_WEBUI_GATEWAY_BASE_URL",
+        "HERMES_WEBUI_GATEWAY_API_KEY",
+        "API_SERVER_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
     with SESSION_AGENT_CACHE_LOCK:
         cache_snap = dict(SESSION_AGENT_CACHE)
         SESSION_AGENT_CACHE.clear()
@@ -119,6 +126,23 @@ class TestHandleChatSteerFallbacks:
         body = _captured_response(handler)
         assert body["accepted"] is False
         assert body["fallback"] == "no_cached_agent"
+
+    def test_gateway_backend_without_local_agent_relays_to_gateway_steer(self, _clear_caches):
+        from api.streaming import _handle_chat_steer
+        handler = _make_handler()
+        with (
+            patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=True),
+            patch("api.gateway_chat.gateway_steer_session", return_value={
+                "accepted": False,
+                "fallback": "no_active_agent",
+                "session_id": "sid_gateway",
+            }) as steer,
+        ):
+            _handle_chat_steer(handler, {"session_id": "sid_gateway", "text": "hint"})
+        steer.assert_called_once_with("sid_gateway", "hint")
+        body = _captured_response(handler)
+        assert body["accepted"] is False
+        assert body["fallback"] == "no_active_agent"
 
     def test_agent_lacks_steer_method(self, _clear_caches):
         from api.streaming import _handle_chat_steer
@@ -269,12 +293,20 @@ class TestFrontendWiring:
 
     def test_try_steer_handles_fallback_without_cancelling(self):
         idx = self.cmds.find("async function _trySteer(")
-        body = self.cmds[idx:idx + 1500]
-        # Must check result.accepted and surface fallback without queueing or cancelling.
+        body = self.cmds[idx:idx + 1800]
+        # Must check result.accepted and fall back via queueSessionMessage only.
+        # /steer is specifically non-interrupting; /interrupt owns cancelStream.
         assert "result&&result.accepted" in body or "result.accepted" in body
-        assert "queueSessionMessage" not in body
-        assert "cancelStream" not in body, "fallback path must not cancel the stream"
-        assert "inp.value" in body, "fallback path must restore the composer draft"
+        assert "queueSessionMessage" in body
+        assert "cancelStream" not in body, "fallback path must preserve the active stream"
+
+    def test_try_steer_has_noninterrupting_fallback_toasts(self):
+        idx = self.cmds.find("async function _trySteer(")
+        body = self.cmds[idx:idx + 2200]
+        assert "gateway_backend_unsupported" not in body
+        assert "no_active_agent" in body
+        assert "gateway_steer_http_error" in body
+        assert "cmd_steer_fallback" in body
 
     def test_send_busy_steer_uses_try_steer(self):
         # send() in messages.js: when busyMode === 'steer', should call _trySteer

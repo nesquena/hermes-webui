@@ -100,29 +100,27 @@ class TestSlashCommandHandlers:
         idx = COMMANDS_JS.find("async function cmdSteer(")
         assert idx >= 0
         body = COMMANDS_JS[idx:idx + 800]
-        # cmdSteer delegates to _trySteer; fallback must not queue+cancel.
+        # cmdSteer delegates to _trySteer; fallback must queue without cancelling.
         assert "_trySteer" in body, "cmdSteer must call _trySteer to use the real /api/chat/steer endpoint"
-        # The shared helper must contain the non-destructive fallback path.
+        # The shared helper must contain the non-destructive queue-only fallback path.
         helper_idx = COMMANDS_JS.find("async function _trySteer(")
         assert helper_idx >= 0, "_trySteer helper must exist"
-        helper_body = COMMANDS_JS[helper_idx:helper_idx + 2000]
-        assert "queueSessionMessage" not in helper_body
+        helper_body = COMMANDS_JS[helper_idx:helper_idx + 2200]
+        assert "queueSessionMessage" in helper_body
         assert "cancelStream" not in helper_body
-        assert "inp.value" in helper_body
-        # Toast should differ from interrupt to signal it's the steer path
-        assert "_steerFailureMessageKey" in helper_body or "steer_fail_" in helper_body
+        assert "cmd_steer_fallback" in helper_body or "busy_steer_fallback" in helper_body
 
 
 # ── send() busy branch ───────────────────────────────────────────────────
 
     def test_slash_commands_clear_pending_files(self):
-        """Queue/interrupt clear S.pendingFiles after enqueuing; steer failure
-        preserves staged files so the user can choose the next explicit action.
+        """Queue/interrupt clear S.pendingFiles after enqueuing; steer fallback
+        queues staged files without interrupting the active stream.
 
         cmdQueue and cmdInterrupt call queueSessionMessage themselves and clear
-        S.pendingFiles directly. cmdSteer delegates to _trySteer. _trySteer no
-        longer clears files on failure because it no longer falls back to
-        cancel-and-queue behavior.
+        S.pendingFiles directly. cmdSteer delegates to _trySteer. _trySteer
+        also clears files after queue-only fallback because the files were copied
+        into queueSessionMessage.
         """
         # cmdQueue and cmdInterrupt clear pendingFiles directly
         for fn_name in ("cmdQueue", "cmdInterrupt"):
@@ -135,13 +133,15 @@ class TestSlashCommandHandlers:
             assert "renderTray()" in body, (
                 f"{fn_name} must call renderTray() after clearing pendingFiles"
             )
-        # cmdSteer delegates to _trySteer; the helper must not clear files in
-        # the fallback path because the draft is restored instead of queued.
+        # cmdSteer delegates to _trySteer; the helper clears files after copying
+        # them into the queued next-turn payload.
         idx_try = COMMANDS_JS.find("function _trySteer(")
         assert idx_try >= 0, "_trySteer not found"
-        try_body = COMMANDS_JS[idx_try:idx_try + 1600]
-        assert "S.pendingFiles=[]" not in try_body
+        try_body = COMMANDS_JS[idx_try:idx_try + 1800]
+        assert "queueSessionMessage" in try_body
+        assert "S.pendingFiles=[]" in try_body
         assert "renderTray()" in try_body
+        assert "cancelStream" not in try_body
 
 
 class TestBusySendButton:
@@ -292,20 +292,19 @@ class TestSendBusyBranchDispatch:
         )
 
     def test_send_busy_steer_preserves_files_when_steer_not_delivered(self):
-        """Busy-mode steer must only clear staged files after delivered steer.
+        """Busy-mode steer queues staged files without interrupting on fallback.
 
-        A failed steer restores the draft and leaves the active stream running,
-        so staged files must remain available for the user's next explicit
-        Queue or Interrupt action.
+        A failed steer leaves the active stream running; _trySteer copies staged
+        files into the queue-only fallback payload and clears the tray.
         """
         send_idx = MESSAGES_JS.find("async function send(")
         assert send_idx >= 0, "send() not found"
         steer_idx = MESSAGES_JS.find("busyMode==='steer'", send_idx)
         assert steer_idx >= 0, "busy steer branch not found"
         branch = MESSAGES_JS[steer_idx:steer_idx + 900]
-        assert "const _steerDelivered=await _trySteer" in branch
-        assert "if(_steerDelivered){S.pendingFiles=[];renderTray();}" in branch
-        assert branch.index("const _steerDelivered=await _trySteer") < branch.index("if(_steerDelivered){S.pendingFiles=[];renderTray();}")
+        assert "await _trySteer(text, /*explicitSteer=*/false);" in branch
+        assert "S.pendingFiles=[];renderTray();" in branch
+        assert branch.index("await _trySteer(text, /*explicitSteer=*/false);") < branch.index("S.pendingFiles=[];renderTray();")
 
 
     def test_slash_commands_intercepted_before_busymode_routing(self):

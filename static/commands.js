@@ -1329,10 +1329,9 @@ async function cmdInterrupt(args){
  * steer text to the next tool-result message so the model sees it on its
  * next iteration — same pathway as the CLI's /steer command.
  *
- * Leaves the active stream alone when the agent isn't running, isn't cached,
- * or doesn't support steer (older hermes-agent versions). The failed steer text
- * is restored to the composer so the user can choose Queue or Interrupt
- * explicitly instead of WebUI silently cancelling the current run.
+ * Falls back to queue mode when the agent isn't running, isn't cached,
+ * or doesn't support steer (older hermes-agent versions), preserving the
+ * current stream.
  */
 async function cmdSteer(args){
   const msg=(args||'').trim();
@@ -1406,16 +1405,15 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
  * Shared implementation for /steer and the busy_input_mode='steer' path.
  *
  * Tries the real steer endpoint first. On any non-accept response (no cached
- * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
- * the active stream running. Steer belongs to the active run; a failed Steer
- * must not be silently upgraded into Queue, Interrupt, or Stop-and-send.
+ * agent, agent lacks steer, stream dead, etc.) falls back to queue-only mode:
+ * queues the message for the next turn while preserving the active stream.
  *
  * @param {string} msg - The steer text.
  * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
- *   (vs the busy-mode auto-fallback). Affects draft restore prefix only;
- *   toast wording is determined by the failure reason code.
+ *   (vs the busy-mode auto-fallback). Toast wording is determined by the
+ *   failure reason code.
  * @returns {Promise<boolean>} true when the steer was delivered, false when the
- *   draft was restored and the active stream was left untouched.
+ *   message was queued and the active stream was left untouched.
  */
 async function _trySteer(msg, explicitSteer){
   let result=null;
@@ -1425,7 +1423,7 @@ async function _trySteer(msg, explicitSteer){
       body:JSON.stringify({session_id:S.session.session_id,text:msg}),
     });
   }catch(e){
-    // Network or server error — keep the active stream running and restore the draft.
+    // Network or server error — queue without interrupting the active stream.
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
@@ -1437,18 +1435,22 @@ async function _trySteer(msg, explicitSteer){
     showToast(t('cmd_steer_delivered'),2500);
     return true;
   }
-  // Do not fall back to interrupt: Steer failure is not permission to cancel
-  // the active run. Restore the draft so the user can explicitly Queue or
-  // Interrupt if that is what they want next. Pending files remain staged.
-  const inp=$('msg');
-  if(inp){
-    inp.value=explicitSteer?`/steer ${msg}`:msg;
-    if(typeof autoResize==='function')autoResize();
-  }
+  // Fall back to queue-only mode: preserve the active stream and let
+  // setBusy(false) drain the message after the current turn finishes.
+  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+  updateQueueBadge(S.session.session_id);
+  S.pendingFiles=[];
   if(typeof renderTray==='function')renderTray();
-  const fallbackCode = result && result.fallback;
-  showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
-  _showSteerRecovery(msg, explicitSteer, fallbackCode);
+  // Toast wording differs based on why we're falling back so the user
+  // understands what just happened.
+  const reason=(result&&result.fallback)||'unknown';
+  if(explicitSteer){
+    showToast(t('cmd_steer_fallback'),2500);
+  } else if(reason==='no_cached_agent'||reason==='no_active_agent'||reason==='not_running'||reason==='stream_dead'||reason==='gateway_steer_http_error'||reason==='gateway_steer_error'||reason==='gateway_steer_bad_response'){
+    showToast(t('cmd_steer_fallback'),2500);
+  } else {
+    showToast(t('busy_steer_fallback'),3500);
+  }
   return false;
 }
 

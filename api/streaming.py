@@ -9698,8 +9698,20 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         except Exception:
             logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
     if not cached:
-        # No active agent for this session — caller surfaces a steer failure
-        # without cancelling the active run.
+        try:
+            from api.gateway_chat import gateway_steer_session, webui_gateway_chat_enabled
+
+            if webui_gateway_chat_enabled():
+                result = gateway_steer_session(sid, text)
+                if isinstance(result, dict):
+                    return j(handler, result)
+                return j(handler, {"accepted": False, "fallback": "gateway_steer_bad_response",
+                                   "stream_id": None})
+        except Exception:
+            logger.debug("Failed to forward gateway-backed chat steer", exc_info=True)
+            return j(handler, {"accepted": False, "fallback": "gateway_steer_error",
+                               "stream_id": None})
+        # No active local agent for this session — caller falls back to queue-only mode
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
                            "stream_id": None})
     agent = cached[0]

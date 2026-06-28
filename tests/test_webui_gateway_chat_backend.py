@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 import urllib.error
+from unittest.mock import MagicMock
 
 import api.gateway_chat as gateway_chat
 import api.models as models
@@ -79,6 +80,73 @@ def test_gateway_chat_backend_env_wins_over_config_and_stays_safe():
         {"webui_chat_backend": "gateway"},
         {"HERMES_WEBUI_CHAT_BACKEND": "legacy-direct"},
     ) == "legacy"
+
+
+def _make_handler():
+    h = MagicMock()
+    h.wfile = MagicMock()
+    h.headers = MagicMock()
+    h.headers.get = MagicMock(return_value="")
+    return h
+
+
+def _captured_response(handler):
+    write_calls = handler.wfile.write.call_args_list
+    assert write_calls, "no body was written to handler.wfile"
+    body = write_calls[-1][0][0]
+    return json.loads(body.decode("utf-8"))
+
+
+def test_gateway_steer_session_posts_to_gateway_session_steer(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, limit=-1):
+            return b'{"accepted": true, "fallback": null, "session_id": "sid-1"}'
+
+    def fake_urlopen(req, timeout=0):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = req.data.decode("utf-8")
+        return FakeResponse()
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    result = gateway_chat.gateway_steer_session("sid-1", "guide the current run")
+
+    assert result == {"accepted": True, "fallback": None, "session_id": "sid-1"}
+    assert captured["url"] == "http://gateway.local/api/sessions/sid-1/steer"
+    assert captured["headers"]["Authorization"] == "Bearer secret-token"
+    assert captured["headers"]["X-hermes-session-key"] == "webui:sid-1"
+    assert json.loads(captured["body"]) == {"text": "guide the current run"}
+
+
+def test_handle_chat_steer_relays_when_gateway_backend_enabled(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+
+    def fake_gateway_steer_session(session_id, text):
+        return {"accepted": True, "fallback": None, "session_id": session_id, "text": text}
+
+    monkeypatch.setattr(gateway_chat, "gateway_steer_session", fake_gateway_steer_session, raising=False)
+    handler = _make_handler()
+
+    streaming._handle_chat_steer(handler, {"session_id": "sid-gateway", "text": "use this guidance"})
+
+    body = _captured_response(handler)
+    assert body == {
+        "accepted": True,
+        "fallback": None,
+        "session_id": "sid-gateway",
+        "text": "use this guidance",
+    }
 
 
 def test_gateway_sse_delta_extracts_openai_chat_chunks():

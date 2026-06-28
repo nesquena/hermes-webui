@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -116,6 +117,64 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
         return None if not coerced else str(coerced)
     except Exception:
         return None
+
+
+def gateway_steer_session(session_id: str, text: str, config_data=None, environ: dict[str, str] | None = None) -> dict:
+    """Forward non-interrupting /steer guidance to a Gateway API-server session."""
+    sid = str(session_id or "").strip()
+    msg = str(text or "").strip()
+    if not sid:
+        return {"accepted": False, "fallback": "missing_session_id", "session_id": sid}
+    if not msg:
+        return {"accepted": False, "fallback": "missing_text", "session_id": sid}
+    base_url = _gateway_base_url(config_data, environ)
+    api_key = _gateway_api_key(environ)
+    quoted_sid = urllib.parse.quote(sid, safe="")
+    url = f"{base_url}/api/sessions/{quoted_sid}/steer"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-Hermes-Session-Key": f"webui:{sid}",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"text": msg}).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = exc.read(2048).decode("utf-8", errors="replace")
+        except Exception:
+            err_body = ""
+        return {
+            "accepted": False,
+            "fallback": "gateway_steer_http_error",
+            "session_id": sid,
+            "status": exc.code,
+            "error": _redact_text(err_body or str(exc))[:500],
+        }
+    except Exception as exc:
+        return {
+            "accepted": False,
+            "fallback": "gateway_steer_error",
+            "session_id": sid,
+            "error": _redact_text(str(exc))[:500],
+        }
+    if not isinstance(payload, dict):
+        return {"accepted": False, "fallback": "gateway_steer_bad_response", "session_id": sid}
+    return {
+        "accepted": bool(payload.get("accepted")),
+        "fallback": payload.get("fallback"),
+        "session_id": str(payload.get("session_id") or sid),
+        **({"error": payload.get("error")} if payload.get("error") else {}),
+    }
+
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
