@@ -41,7 +41,7 @@ def test_session_stream_has_visibility_hook():
     assert "_hermesSessionStreamVisibilityHook" in MESSAGES_JS
     start_idx = MESSAGES_JS.find("function startSessionStream(sid)")
     assert start_idx != -1
-    block = MESSAGES_JS[start_idx:start_idx + 1600]
+    block = MESSAGES_JS[start_idx:start_idx + 2400]
     assert "visibilitychange" in block
     assert "document.hidden" in block
     # Must skip opening a new EventSource while the tab is hidden.
@@ -95,7 +95,7 @@ def test_session_stream_hidden_open_preserves_id_for_reopen():
     _sessionStreamHiddenSid = sid before returning.
     """
     start_idx = MESSAGES_JS.find("function startSessionStream(sid)")
-    block = MESSAGES_JS[start_idx:start_idx + 1700]
+    block = MESSAGES_JS[start_idx:start_idx + 2400]
     # Find the hidden-tab early-return skip path (distinct from the in-hook
     # `if (document.hidden)` branch) and assert it preserves the id.
     hidden_idx = block.find("!== 'undefined' && document.hidden) {")
