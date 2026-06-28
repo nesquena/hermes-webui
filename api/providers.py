@@ -2094,12 +2094,26 @@ def _normalize_llm_proxy_quota_stats_base_url(base_url: str | None) -> str | Non
     return f"{parsed.scheme}://{parsed.netloc}{path}"
 
 
+def _has_named_llm_proxy_custom_provider(cfg: dict[str, Any]) -> bool:
+    target_slug = f"custom:{_LLM_PROXY_PROVIDER_ID}"
+    custom_providers = cfg.get("custom_providers", [])
+    if not isinstance(custom_providers, list):
+        return False
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if _custom_provider_slug_from_name(name) == target_slug:
+            return True
+    return False
+
+
 def _llm_proxy_quota_stats_config() -> tuple[str | None, str | None]:
-    custom_api_key, custom_base_url = resolve_custom_provider_connection("custom:llm-proxy")
-    if custom_api_key or custom_base_url:
+    cfg = get_config()
+    if _has_named_llm_proxy_custom_provider(cfg):
+        custom_api_key, custom_base_url = resolve_custom_provider_connection("custom:llm-proxy")
         return _normalize_llm_proxy_quota_stats_base_url(custom_base_url), custom_api_key
 
-    cfg = get_config()
     providers_cfg = cfg.get("providers") or {}
     provider_cfg: dict[str, Any] = {}
     if isinstance(providers_cfg, dict):

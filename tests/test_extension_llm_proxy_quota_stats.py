@@ -46,6 +46,12 @@ def _set_llm_proxy_config(monkeypatch, *, base_url: str | None, api_key: str | N
     )
 
 
+def _set_custom_llm_proxy_config(monkeypatch, custom_providers):
+    cfg = {"custom_providers": custom_providers}
+    monkeypatch.setattr(providers, "get_config", lambda: cfg)
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+
+
 def test_get_quota_stats_forwards_provider_query_and_bearer_auth(monkeypatch):
     _set_llm_proxy_config(
         monkeypatch,
@@ -124,22 +130,24 @@ def test_post_quota_stats_forwards_validated_body(monkeypatch):
 
 def test_get_quota_stats_uses_custom_provider_authority_and_strips_duplicate_v1(monkeypatch):
     monkeypatch.setattr(
-        config,
+        providers,
         "get_config",
         lambda: {
             "custom_providers": [
                 {
                     "name": "llm-proxy",
                     "base_url": "https://llm-proxy.example.test/v1",
-                    "key_env": "ISSUE_5033_LLM_PROXY_KEY",
                 }
             ]
         },
     )
     monkeypatch.setattr(
-        config,
-        "_thread_local_env_value",
-        lambda name: "server-held-secret" if name == "ISSUE_5033_LLM_PROXY_KEY" else "",
+        providers,
+        "resolve_custom_provider_connection",
+        lambda provider_id: (
+            "server-held-secret",
+            "https://llm-proxy.example.test/v1",
+        ) if provider_id == "custom:llm-proxy" else (None, None),
     )
     seen = {}
 
@@ -166,6 +174,37 @@ def test_get_quota_stats_uses_custom_provider_authority_and_strips_duplicate_v1(
         "data": None,
         "timeout": 3.0,
     }
+
+
+def test_get_quota_stats_rejects_unrelated_single_custom_provider(monkeypatch):
+    _set_custom_llm_proxy_config(
+        monkeypatch,
+        [
+            {
+                "name": "unrelated",
+                "base_url": "https://unrelated.example.test/v1",
+                "api_key": "sk-unrelated-secret",
+            }
+        ],
+    )
+    called = False
+
+    def explode(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("network should not be reached for unrelated custom providers")
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", explode)
+
+    status, payload = providers.get_llm_proxy_quota_stats(query={"provider": ["anthropic"]})
+
+    assert status == 503
+    assert payload == {
+        "ok": False,
+        "error": "llm_proxy_quota_stats_unconfigured",
+        "message": "llm-proxy quota stats is not configured.",
+    }
+    assert called is False
 
 
 def test_post_quota_stats_rejects_invalid_action_or_scope_without_network(monkeypatch):
