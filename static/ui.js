@@ -14086,16 +14086,19 @@ function autoResizeTextarea(ta) {
 
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
-  // Truncate session at msgIdx (keep messages before the edited one)
-  // then re-send the edited text
+  const initialSid = S.session.session_id;
+  const absoluteKeepCount = _oldestIdx + msgIdx;
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: msgIdx  // keep messages[0..msgIdx-1], discard from msgIdx onward
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
     })});
-    S.messages = S.messages.slice(0, msgIdx);
+    S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
-    // Now send the edited message as a new chat
     $('msg').value = newText;
     await send();
   } catch(e) { setStatus(t('edit_failed') + e.message); }
@@ -14103,24 +14106,27 @@ async function submitEdit(msgIdx, newText) {
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
-  // Find the last user message and re-run it
-  // Remove the last assistant message first (truncate to before it)
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
-  // Find the last user message text (one before this assistant message)
+  const absoluteKeepCount = _oldestIdx + assistantIdx;
+  const initialSid = S.session.session_id;
   let lastUserText = '';
   for(let i = assistantIdx - 1; i >= 0; i--) {
     const m = S.messages[i];
     if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
   }
   if(!lastUserText) return;
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: assistantIdx  // remove the assistant message
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
     })});
-    S.messages = S.messages.slice(0, assistantIdx);
+    S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = lastUserText;
     await send();

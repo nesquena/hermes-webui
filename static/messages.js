@@ -5481,19 +5481,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_terminalStateReached || _streamFinalized){
         return;
       }
-      // Attempt one reconnect if the stream is still active server-side
+      // Attempt several reconnect/replay probes before declaring the turn lost.
+      // A short-lived SSE error can arrive while the worker is still running or
+      // while the run-journal replay file is just becoming visible. The old
+      // single 1.5s probe could fall through to _handleStreamError(), clearing
+      // S.activeStreamId/INFLIGHT and rendering a connection-interrupted marker
+      // even though the backend was still producing tokens; the settled response
+      // then reappeared later from sidecar/replay. Keep the live DOM/state intact
+      // during this retry window and only surface an error after all probes fail.
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
-        setComposerStatus('Reconnecting…');
-        setTimeout(async()=>{
+        const _retryDelays=[1500,3000,5000,8000];
+        setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
+        const _probeReconnect=async(attempt=0)=>{
+          if(_terminalStateReached || _streamFinalized) return;
+          if(!_isSessionCurrentPane(activeSid)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-            if(st.active){
+            if(st&&st.active){
               setComposerStatus('Reconnected');
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
-            if(st.replay_available){
+            if(st&&st.replay_available){
               setComposerStatus('Restoring stream…');
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
@@ -5504,10 +5514,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(await _restoreSettledSession(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
+          const nextDelay=_retryDelays[attempt+1];
+          if(nextDelay){
+            setComposerStatus(`Reconnecting… (${attempt+2}/${_retryDelays.length})`);
+            setTimeout(()=>{void _probeReconnect(attempt+1);}, nextDelay);
+            return;
+          }
           _flushReasoningToAnchor();
           _scheduleAnchorRegistryCleanup(120000);
           _handleStreamError(source);
-        },1500);
+        };
+        setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
         return;
       }
       if(await _restoreSettledSession(source)) return;
