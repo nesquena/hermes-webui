@@ -6001,6 +6001,8 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .msg-row[data-role="assistant"] .msg-foot,
   .assistant-turn .msg-foot{opacity:1;}
   .msg-actions{opacity:1;}
+  .msg-actions{gap:4px;}
+  .msg-action-btn{min-width:40px;min-height:40px;padding:8px;display:inline-flex;align-items:center;justify-content:center;}
 }
 
 /* ── /btw ephemeral side-question bubble ── */
