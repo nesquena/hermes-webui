@@ -1404,7 +1404,14 @@ function clearPreview(opts={}){
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
+  // #2668 (opt-in, default off): tear down the git diff surface too. When the
+  // feature is off gitDiffView is empty/hidden and S.git.selectedDiff is null,
+  // so this is a no-op; only the gated git flow ever populates them.
+  const gdv=$('gitDiffView');if(gdv){gdv.style.display='none';gdv.innerHTML='';}
+  const pbk=$('btnPreviewBack');if(pbk)pbk.style.display='none';
+  if(S.git)S.git.selectedDiff=null;
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  if(window._workspaceGitEnabled&&typeof renderWorkspacePanelTabState==='function')renderWorkspacePanelTabState();
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();
@@ -2132,6 +2139,8 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     );
     window._workspaceTodosTab=!!s.workspace_todos_tab;
     if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
+    window._workspaceGitEnabled=!!s.workspace_git_enabled;
+    if(typeof _applyWorkspaceGitVisibility==='function') _applyWorkspaceGitVisibility();
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._inflightStateLimits={
@@ -2248,6 +2257,8 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._terminalAutoExpandOnOutput=false;
     window._workspaceTodosTab=false;
     if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
+    window._workspaceGitEnabled=false;
+    if(typeof _applyWorkspaceGitVisibility==='function') _applyWorkspaceGitVisibility();
     window._sessionJumpButtonsEnabled=false;
     window._structuredCodeDefaultView='auto';
     window._structuredCodeAutoTreeLines=10;
