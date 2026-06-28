@@ -139,6 +139,72 @@ def test_truncate_endpoint_also_truncates_context_messages(monkeypatch, tmp_path
     assert loaded.truncation_watermark == 2.0
 
 
+def test_truncate_endpoint_compaction_leading_context_row(monkeypatch, tmp_path):
+    """Context longer than display (leading compaction row): naive [:keep] would
+    leave a stale tail; truncate must align suffix to display prefix (#5096 / C).
+    """
+    import json
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    import api.models as models
+    import api.routes as routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    models.SESSIONS.clear()
+    monkeypatch.setattr(
+        "api.config._evict_session_agent",
+        lambda _sid: None,
+    )
+
+    display = [
+        _msg("user", "u1", 1.0, "u1"),
+        _msg("assistant", "a1", 2.0, "a1"),
+        _msg("user", "REMOVE", 3.0, "u2"),
+    ]
+    context = [
+        _msg("user", "compaction-only", 0.5, "cref"),
+        _msg("user", "u1", 1.0, "cu1"),
+        _msg("assistant", "a1", 2.0, "ca1"),
+        _msg("user", "REMOVE", 3.0, "cu2"),
+    ]
+    session = Session(
+        session_id="issue5096truncatectx",
+        messages=display,
+        context_messages=context,
+    )
+    session.save()
+
+    body = {"session_id": "issue5096truncatectx", "keep_count": 2}
+    body_bytes = json.dumps(body).encode()
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+
+    captured_response = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured_response["payload"] = payload
+
+    monkeypatch.setattr(routes, "j", fake_j)
+
+    handler = SimpleNamespace(
+        headers={"Content-Length": str(len(body_bytes))},
+        rfile=BytesIO(body_bytes),
+    )
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/truncate"))
+
+    assert captured_response["payload"].get("ok") is True
+    loaded = Session.load("issue5096truncatectx")
+    assert loaded is not None
+    assert [m["content"] for m in loaded.messages] == ["u1", "a1"]
+    assert len(loaded.context_messages) == 3
+    assert loaded.context_messages[0]["content"] == "compaction-only"
+    assert "REMOVE" not in [m["content"] for m in loaded.context_messages]
+
+
 def test_truncate_without_context_messages_truncation_leaks_to_agent(monkeypatch, tmp_path):
     """Prove the bug: if context_messages is NOT truncated, agent sees old rows."""
     import api.models as models

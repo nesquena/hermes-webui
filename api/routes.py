@@ -12227,24 +12227,9 @@ def handle_post(handler, parsed) -> bool:
         if keep < 0:
             return bad(handler, "keep_count must be non-negative")
         with _get_session_agent_lock(body["session_id"]):
-            old_msg_count = len(s.messages or [])
-            old_ctx_count = len(getattr(s, 'context_messages', None) or [])
-            s.messages = s.messages[:keep]
-            # Truncate context_messages in sync with messages so the agent's
-            # model-facing context doesn't retain rows the user removed via
-            # Edit / Regenerate.  Without this, context_messages still contains
-            # the full pre-truncation history and the agent sees "deleted"
-            # turns on the next turn (#2914).
-            if isinstance(getattr(s, 'context_messages', None), list):
-                s.context_messages = s.context_messages[:keep]
-            try:
-                from api.session_ops import _truncation_watermark_for
-                s.truncation_watermark = _truncation_watermark_for(s.messages)
-                # Persist the original truncate cutoff.
-                s.truncation_boundary = s.truncation_watermark
-            except Exception:
-                s.truncation_watermark = 0.0
-                s.truncation_boundary = 0.0
+            from api.session_ops import truncate_session_at_keep
+
+            old_msg_count, old_ctx_count = truncate_session_at_keep(s, keep)
             s.save()
             logger.info(
                 "truncate %s: messages %d→%d, context_messages %d→%d, watermark=%.2f",
@@ -12252,6 +12237,8 @@ def handle_post(handler, parsed) -> bool:
                 old_ctx_count, len(getattr(s, 'context_messages', None) or []),
                 s.truncation_watermark or 0,
             )
+        from api.config import _evict_session_agent
+        _evict_session_agent(body["session_id"])
         return j(
             handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
         )

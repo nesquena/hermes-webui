@@ -90,6 +90,23 @@ def truncate_context_for_display_keep(
     return prefix + suffix[:keep]
 
 
+def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
+    """Truncate display + context; set watermark/boundary. Returns old counts."""
+    full_messages = list(session.messages or [])
+    old_msg_count = len(full_messages)
+    old_ctx_count = len(getattr(session, 'context_messages', None) or [])
+    session.messages = full_messages[:keep]
+    if isinstance(getattr(session, 'context_messages', None), list):
+        session.context_messages = truncate_context_for_display_keep(
+            session.context_messages,
+            full_messages,
+            keep,
+        )
+    session.truncation_watermark = _truncation_watermark_for(session.messages)
+    session.truncation_boundary = session.truncation_watermark
+    return old_msg_count, old_ctx_count
+
+
 def retry_last(session_id: str) -> dict[str, Any]:
     """Truncate the session to before the last user message, return its text.
 
