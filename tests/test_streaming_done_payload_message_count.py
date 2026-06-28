@@ -1,5 +1,6 @@
 """Regression coverage for settled SSE payload message counts."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +34,40 @@ def test_full_message_payload_overrides_stale_compact_message_count():
     assert payload["messages"] == session.messages
     assert payload["message_count"] == len(session.messages)
     assert payload["message_count"] != session.compact()["message_count"]
+
+
+def test_full_message_payload_includes_todo_state_snapshot():
+    todo_result = {
+        "todos": [
+            {"id": "todo-1", "content": "keep workspace todos visible", "status": "in_progress"},
+        ],
+        "summary": {
+            "total": 1,
+            "pending": 0,
+            "in_progress": 1,
+            "completed": 0,
+            "cancelled": 0,
+        },
+    }
+    session = _FakeSession(
+        session_id="todo-session",
+        messages=[
+            {"role": "user", "content": "plan the fix", "timestamp": 100},
+            {
+                "role": "tool",
+                "content": json.dumps(todo_result),
+                "timestamp": 101,
+            },
+            {"role": "assistant", "content": "done", "timestamp": 102},
+        ],
+    )
+
+    payload = _session_payload_with_full_messages(session, tool_calls=[])
+
+    assert payload["todo_state"]["todos"] == todo_result["todos"]
+    assert payload["todo_state"]["summary"] == todo_result["summary"]
+    assert payload["todo_state"]["version"] == 1
+    assert payload["todo_state"]["ts"] == 101
 
 
 def test_done_payload_uses_full_message_count_helper():

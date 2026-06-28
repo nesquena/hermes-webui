@@ -116,7 +116,7 @@ def test_576_panel_restore_gated_on_workspace():
 
 def test_576_restore_happens_after_load_session():
     """boot.js: loadSession() must come before the panel restore guard."""
-    load_pos    = BOOT_JS.find("await loadSession(saved)")
+    load_pos    = BOOT_JS.find("await loadSession(saved, {preserveActiveInput:true})")
     restore_pos = BOOT_JS.find("panelPref")
     assert load_pos != -1, "loadSession call not found in boot.js"
     assert restore_pos != -1, "workspace panel restore guard not found"

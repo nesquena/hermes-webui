@@ -620,11 +620,16 @@ def test_stream_end_restore_attaches_projected_anchor_scene_before_render():
 def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
     cancel = _event_listener_body(MESSAGES_JS, "cancel")
 
-    fetch_idx = cancel.index("const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);")
+    fetch_idx = cancel.index("const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);")
     attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = cancel.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
     render_idx = cancel.index("renderMessages({preserveScroll:true});")
     assert fetch_idx < attach_idx < carry_idx < render_idx
+
+    embedded_idx = cancel.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
+    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);")
+    fallback_apply_idx = cancel.index("if(data&&data.session) _applyCancelSessionPayload(data.session);")
+    assert embedded_idx < fallback_get_idx < fallback_apply_idx
 
     fallback_push_idx = cancel.index("S.messages.push({role:'assistant',content:`**Task cancelled:**")
     fallback_attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);", fallback_push_idx)
@@ -721,7 +726,7 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
 
     projected_idx = complete.index("const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];")
     projected_push_idx = complete.index("for(const row of projectedRows){")
-    backfill_idx = complete.index("for(let idx=turnStart+1;idx<lastAsstIndex;idx+=1)")
+    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)")
     terminal_idx = complete.index("if(row&&row.role==='terminal') pushRow(row);", backfill_idx)
     assert projected_idx < projected_push_idx < backfill_idx < terminal_idx
 
@@ -835,6 +840,45 @@ def test_settled_anchor_scene_final_answer_does_not_fold_into_worklog_source():
     assert "seg.classList.add('assistant-segment-worklog-source')" in render
     assert "seg.hidden=true" in render
     assert "_renderSettledAnchorSceneForMessage(msg, seg, rawIdx)" in render
+
+
+def test_settled_anchor_scene_promotes_final_content_array_to_ordered_activity_rows():
+    complete = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
+    rows_by_message = _function_body(MESSAGES_JS, "_anchorSceneRowsByMessageIndex")
+    content_rows = _function_body(MESSAGES_JS, "_anchorSceneRowsFromContentParts")
+    final_answer = _function_body(MESSAGES_JS, "_anchorSceneFinalAnswerText")
+    content_text = _function_body(MESSAGES_JS, "_anchorSceneContentText")
+    visible_text = _function_body(MESSAGES_JS, "_anchorSceneContentVisibleText")
+
+    assert "const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);" in complete
+    assert "const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)" in complete
+    assert "_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true})" in complete
+    assert "for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)" in complete
+    assert "options=(options&&typeof options==='object')?options:{};" in rows_by_message
+    assert "const endIndex=options&&options.includeFinal?lastAsstIndex+1:lastAsstIndex;" in rows_by_message
+    assert "const contentRows=_anchorSceneRowsFromContentParts(message,idx,{isFinalMessage:idx===lastAsstIndex});" in rows_by_message
+    assert "part.type==='tool_use'" in content_rows
+    assert "const isFinalMessage=!!options.isFinalMessage;" in content_rows
+    assert "if(!part||typeof part!=='object'){" in content_rows
+    assert "if(isFinalMessage&&i>lastToolIndex) continue;" in content_rows
+    assert "if(isFinalMessage&&i>lastToolIndex&&_anchorSceneContentVisibleText(part)) continue;" in content_rows
+    assert "_anchorSceneProseRow(text,rows.length,messageIndex)" in content_rows
+    assert "_anchorSceneToolRowFromCall(_anchorSceneContentTool(part),rows.length,messageIndex)" in content_rows
+    assert "lastToolIndex+1" in final_answer
+    assert "_anchorSceneContentVisibleText(part)" in final_answer
+    assert "if(typeof part==='string') return part;" in content_text
+    assert "part.thinking||part.reasoning||part.summary" in content_text
+    assert "partType==='thinking'||partType==='reasoning'" in visible_text
+    assert "part.text||part.input_text||part.output_text" in visible_text
+    assert "_fromContent:true" in rows_by_message
+    assert "const useStartedAt=!hasOrderedContentRows;" in rows_by_message
+    assert "if(useStartedAt){" in rows_by_message
+    assert "const {_phase,_encounter,_fromContent,...clean}=row;" in rows_by_message
+    content_tool = _function_body(MESSAGES_JS, "_anchorSceneContentTool")
+    assert "part.id||part.tid||part.tool_call_id||part.tool_use_id||part.call_id" in content_tool
+    assert "part.name||part.tool_name||fn.name||'tool'" in content_tool
+    assert "args:part.args" in content_tool
+    assert "input:part.input" in content_tool
 
 
 def test_settled_anchor_scene_hides_prior_process_segments_not_final_answer():

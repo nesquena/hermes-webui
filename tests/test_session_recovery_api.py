@@ -24,8 +24,17 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     index.write_text(json.dumps([]), encoding="utf-8")
     monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(_m, "SESSION_INDEX_FILE", index)
+    stale = _m.Session(
+        session_id="stale_cached",
+        title="stale",
+        messages=[{"role": "user", "content": "from another test"}],
+    )
+    _m.SESSIONS[stale.session_id] = stale
 
-    result = repair_safe_session_recovery(tmp_path)
+    try:
+        result = repair_safe_session_recovery(tmp_path)
+    finally:
+        _m.SESSIONS.pop(stale.session_id, None)
 
     assert result["clean"] is True
     assert result["ok"] is True

@@ -43,7 +43,10 @@ def test_boot_prefers_url_session_over_local_storage_session():
     assert "const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;" in BOOT_JS
     assert "const savedLocal=localStorage.getItem('hermes-webui-session');" in BOOT_JS
     assert "const saved=urlSession||savedLocal;" in BOOT_JS
-    assert "if(!urlSession&&savedLocal&&await _savedSessionShouldStaySidebarOnly(savedLocal))" in BOOT_JS
+    assert "const savedSidebarOnlyState=(!urlSession&&savedLocal)" in BOOT_JS
+    assert "? await _savedSessionSidebarOnlyState(savedLocal)" in BOOT_JS
+    assert "if(savedSidebarOnlyState&&savedSidebarOnlyState.sidebarOnly)" in BOOT_JS
+    assert "if(savedSidebarOnlyState.archived)" in BOOT_JS
 
 
 def test_api_helper_resolves_against_document_base_not_session_path():

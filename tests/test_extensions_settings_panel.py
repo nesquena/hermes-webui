@@ -247,6 +247,33 @@ def test_extensions_gallery_renders_post_install_guidance():
     assert "webui_restart_required" in install_block
 
 
+def test_extensions_gallery_links_sources_and_humanizes_permissions():
+    helper_block = _between("function _extensionRegistrySourceUrl", "function _extensionPostInstallNote")
+    render_block = _between("function _renderExtensionsGallery", "function _bindExtensionGalleryButtons")
+
+    assert "entry.homepage" in helper_block
+    assert "entry.repository_url" in helper_block
+    assert "entry.entry_path||entry.runtime_manifest_path" in helper_block
+    assert "hermes-webui/hermes-webui-extensions/tree/main" in helper_block
+    assert "encodeURIComponent" in helper_block
+    assert "extension-gallery-source-link" in helper_block
+    assert "target=\"_blank\"" in helper_block
+    assert "rel=\"noopener noreferrer\"" in helper_block
+    assert "t('ext_gallery_permissions_empty')" in helper_block
+    assert "webui_api" in helper_block
+    assert "sidecar_commands" in helper_block
+    assert "dom.mutates_core_views" in helper_block
+    assert "storage.shared_webui_keys" in helper_block
+    assert "loopback_sidecar" in helper_block
+    assert "native_host" in helper_block
+    assert "network_external" in helper_block
+    assert "extension-gallery-permission-row" in helper_block
+    assert "_extensionSourceLink(entry)" in render_block
+    assert "_extensionPermissionSummary(perms)" in render_block
+    assert "JSON.stringify(perms" not in render_block
+    assert "<pre>" not in render_block
+
+
 def test_copy_extensions_diagnostics_copies_current_sanitized_payload():
     copy_block = _between("function copyExtensionsDiagnostics", "// ── Plugins panel")
 
@@ -268,8 +295,11 @@ def test_extensions_styles_are_scoped_to_extensions_panel():
     assert ".extension-sidecar-list" in STYLE_CSS
     assert ".extension-sidecar-runtime" in STYLE_CSS
     assert ".extension-sidecar-status-badge" in STYLE_CSS
+    assert ".extension-gallery-source-link" in STYLE_CSS
     assert ".extension-gallery-next-step" in STYLE_CSS
     assert ".extension-gallery-next-link" in STYLE_CSS
+    assert ".extension-gallery-permission-list" in STYLE_CSS
+    assert ".extension-gallery-permission-row" in STYLE_CSS
 
 
 def test_extensions_i18n_keys_exist_for_all_locales():
@@ -280,6 +310,7 @@ def test_extensions_i18n_keys_exist_for_all_locales():
         "settings_tab_extensions",
         "ext_gallery_next_step",
         "ext_gallery_after_install",
+        "ext_gallery_permissions_empty",
         "ext_gallery_local_component_required",
         "ext_gallery_local_app_label",
         "ext_gallery_required_suffix",

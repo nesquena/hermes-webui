@@ -1,10 +1,333 @@
+import json
 import pathlib
+import shutil
+import subprocess
+import tempfile
+import textwrap
 import re
+import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+UI_PATH = REPO / "static" / "ui.js"
+PANELS_PATH = REPO / "static" / "panels.js"
+NODE = shutil.which("node")
+requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
+_DASHBOARD_LINK_DRIVER = textwrap.dedent(
+    """\
+    const fs = require('fs');
+
+    function extractFn(src, name) {
+      const markers = [`async function ${name}(`, `function ${name}(`];
+      let start = -1;
+      for (const marker of markers) {
+        start = src.indexOf(marker);
+        if (start >= 0) break;
+      }
+      if (start < 0) throw new Error(`${name}() not found`);
+      let i = src.indexOf('{', start);
+      let depth = 0;
+      let inString = null;
+      let escaped = false;
+      let inLineComment = false;
+      let inBlockComment = false;
+      for (; i < src.length; i++) {
+        const ch = src[i];
+        const nxt = src[i + 1] || '';
+        if (inLineComment) {
+          if (ch === '\\n') inLineComment = false;
+          continue;
+        }
+        if (inBlockComment) {
+          if (ch === '*' && nxt === '/') inBlockComment = false;
+          continue;
+        }
+        if (inString) {
+          if (escaped) {
+            escaped = false;
+          } else if (ch === '\\\\') {
+            escaped = true;
+          } else if (ch === inString) {
+            inString = null;
+          }
+          continue;
+        }
+        if (ch === '/' && nxt === '/') { inLineComment = true; continue; }
+        if (ch === '/' && nxt === '*') { inBlockComment = true; continue; }
+        if (ch === '\\'' || ch === '\"' || ch === '`') { inString = ch; continue; }
+        if (ch === '{') depth += 1;
+        if (ch === '}') {
+          depth -= 1;
+          if (depth === 0) return src.slice(start, i + 1);
+        }
+      }
+      throw new Error(`could not extract ${name}`);
+    }
+
+    function makeEl() {
+      return {
+        children: [],
+        style: {},
+        classList: {
+          _set: new Set(),
+          add(c){this._set.add(c);},
+          remove(c){this._set.delete(c);},
+          toggle(c, on){const want = on === undefined ? !this._set.has(c) : Boolean(on); if (want) this._set.add(c); else this._set.delete(c);},
+          contains(c){return this._set.has(c);},
+        },
+        dataset: {},
+        _attrs: {},
+        textContent: '',
+        datasetUrl: '',
+        setAttribute(name, value) {
+          this._attrs[name] = String(value);
+          if (name === 'data-dashboard-url') this.datasetUrl = String(value);
+        },
+        getAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null; },
+        hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name); },
+        appendChild(child) { this.children.push(child); return child; },
+      };
+    }
+
+    function makeButton(id) {
+      const btn = makeEl();
+      btn.id = id;
+      btn._classes = btn.classList._set;
+      if (id === 'dashboardRailBtn' || id === 'dashboardMobileBtn') {
+        btn.setAttribute('data-dashboard-link', '');
+        btn.setAttribute('aria-label', 'Dashboard');
+      }
+      return btn;
+    }
+
+    const action = process.argv[2] || 'load';
+    const mode = process.argv[3] || 'auto';
+    const url = process.argv[4] || '';
+    const uiSrc = fs.readFileSync(process.argv[5], 'utf8');
+    const panelsSrc = fs.readFileSync(process.argv[6], 'utf8');
+
+    const modeEl = makeButton('settingsDashboardMode');
+    const urlEl = makeButton('settingsDashboardUrl');
+    const statusEl = makeButton('settingsDashboardStatus');
+    modeEl.value = mode;
+    urlEl.value = url;
+    const railBtn = makeButton('dashboardRailBtn');
+    const mobileBtn = makeButton('dashboardMobileBtn');
+    const buttons = [railBtn, mobileBtn];
+    const result = { calls: [], renderCalls: 0, statusCalls: 0, buttonStates: [] };
+    let delayedConfigResolve = null;
+    const delayedConfigValue = { enabled: 'never', url: 'http://stale.local:1234' };
+    let delayedConfigUsed = false;
+
+    global._dashboardLastNonNeverMode = 'auto';
+    global._dashboardStatusCache = null;
+    global._dashboardStatusFetchedAt = 0;
+    global._dashboardSettingsLoadSeq = 0;
+    global._dashboardSettingsWriteSeq = 0;
+    global.window = { location: { hostname: '127.0.0.1' } };
+    global.document = {
+      createElement: () => makeEl(),
+      querySelectorAll: (sel) => {
+        if (sel === '[data-dashboard-link]') return buttons;
+        return [];
+      },
+      querySelector: () => null,
+      addEventListener: () => {},
+    };
+    global.$ = (id) => {
+      if (id === 'settingsDashboardMode') return modeEl;
+      if (id === 'settingsDashboardUrl') return urlEl;
+      if (id === 'settingsDashboardStatus') return statusEl;
+      return null;
+    };
+
+    global.t = (key) => {
+      if (key === 'tab_dashboard') return 'Dashboard';
+      if (key === 'dashboard_loopback_warning') return 'Loopback';
+      return key;
+    };
+    global._dashboardIsBrowserLoopback = () => false;
+
+    global.api = (url, opts = {}) => {
+      result.calls.push({ url: String(url), method: (opts.method || 'GET').toUpperCase(), body: opts.body || '', timeoutToast: !!(opts.timeoutToast) });
+      if (String(url) === '/api/dashboard/config') {
+        if (
+          (opts.method || 'GET').toUpperCase() === 'GET' &&
+          (action === 'stale-load' || action === 'failed-save-stale-load') &&
+          !delayedConfigUsed
+        ) {
+          delayedConfigUsed = true;
+          return new Promise((resolve) => {
+            delayedConfigResolve = () => resolve(delayedConfigValue);
+          });
+        }
+        if ((opts.method || 'GET').toUpperCase() === 'GET' && action === 'failed-save-stale-load') {
+          return Promise.resolve(delayedConfigValue);
+        }
+        const payload = opts.body ? JSON.parse(opts.body) : {};
+        if ((opts.method || 'GET').toUpperCase() === 'POST' && action === 'failed-save-stale-load') {
+          return Promise.reject(new Error('save failed'));
+        }
+        const enabled = payload.enabled || modeEl.value || 'auto';
+        const configuredUrl = payload.url || urlEl.value || '';
+        return Promise.resolve({ enabled, url: configuredUrl });
+      }
+      if (String(url) === '/api/dashboard/status') {
+        result.statusCalls += 1;
+        return Promise.resolve({
+          running: modeEl.value !== 'never',
+          browser_url: modeEl.value === 'never' ? '' : 'http://127.0.0.1:1234',
+        });
+      }
+      return Promise.resolve({ running: false });
+    };
+    global._renderTabVisibilityChips = () => {
+      result.renderCalls += 1;
+      result.lastRenderMode = modeEl.value;
+    };
+
+    for (const name of ['_normalizeDashboardEnabledMode','_setDashboardModeForChip','_getDashboardChipRestoreMode']) {
+      eval(extractFn(uiSrc, name));
+    }
+    for (const name of ['_dashboardBrowserUrl', '_applyDashboardStatus', 'refreshDashboardStatus', 'loadDashboardSettings', 'saveDashboardSettings']) {
+      let src = extractFn(uiSrc, name);
+      if(name === 'saveDashboardSettings'){
+        src = src.replace(
+          "if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();",
+          "if(typeof globalThis._renderTabVisibilityChips==='function') globalThis._renderTabVisibilityChips();"
+        );
+      }
+      eval(src);
+    }
+    for (const name of ['_dashboardPanelMode', '_toggleDashboardVisibilityChip']) {
+      eval(extractFn(panelsSrc, name));
+    }
+
+    function recordButtons() {
+      result.buttonStates = buttons.map((btn) => ({
+        id: btn.id,
+        classes: Array.from(btn.classList._set || []),
+        display: btn.style.display || '',
+        dashboardUrl: btn._attrs['data-dashboard-url'] || '',
+        tooltip: btn._attrs['data-tooltip'] || '',
+      }));
+    }
+
+    (async () => {
+      if (action === 'load') {
+        await loadDashboardSettings();
+        recordButtons();
+        console.log(JSON.stringify({
+          mode: modeEl.value,
+          url: urlEl.value,
+          renderCalls: result.renderCalls,
+          lastRenderMode: result.lastRenderMode || '',
+          calls: result.calls,
+          buttonStates: result.buttonStates,
+        }));
+        return;
+      }
+
+      if (action === 'failed-save-stale-load') {
+        const loadPromise = loadDashboardSettings();
+        modeEl.value = 'always';
+        urlEl.value = 'http://fresh.local:4321';
+        await saveDashboardSettings();
+        if (!delayedConfigResolve) throw new Error('delayed config read was not started');
+        delayedConfigResolve();
+        await loadPromise;
+        await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        recordButtons();
+        console.log(JSON.stringify({
+          mode: modeEl.value,
+          url: urlEl.value,
+          renderCalls: result.renderCalls,
+          lastRenderMode: result.lastRenderMode || '',
+          calls: result.calls,
+          statusCalls: result.statusCalls,
+          buttonStates: result.buttonStates,
+        }));
+        return;
+      }
+
+      if (action === 'stale-load') {
+        const loadPromise = loadDashboardSettings();
+        modeEl.value = 'always';
+        urlEl.value = 'http://fresh.local:4321';
+        await saveDashboardSettings();
+        if (!delayedConfigResolve) throw new Error('delayed config read was not started');
+        delayedConfigResolve();
+        await loadPromise;
+        await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        recordButtons();
+        console.log(JSON.stringify({
+          mode: modeEl.value,
+          url: urlEl.value,
+          renderCalls: result.renderCalls,
+          lastRenderMode: result.lastRenderMode || '',
+          calls: result.calls,
+          statusCalls: result.statusCalls,
+          buttonStates: result.buttonStates,
+        }));
+        return;
+      }
+
+      if (action === 'chip-toggle') {
+        _toggleDashboardVisibilityChip();
+      } else {
+        await saveDashboardSettings();
+      }
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      recordButtons();
+      console.log(JSON.stringify({
+        mode: modeEl.value,
+        url: urlEl.value,
+        renderCalls: result.renderCalls,
+        lastRenderMode: result.lastRenderMode || '',
+        calls: result.calls,
+        statusCalls: result.statusCalls,
+        buttonStates: result.buttonStates,
+      }));
+    })().catch((err) => { console.error(err); process.exit(1); });
+    """
+)
+
+
+def _run_dashboard_link_driver(action: str, mode: str = 'auto', url: str = '') -> dict:
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as f:
+        f.write(_DASHBOARD_LINK_DRIVER)
+        driver = f.name
+    try:
+        result = subprocess.run(
+            [
+                NODE,
+                driver,
+                action,
+                mode,
+                url,
+                str(UI_PATH),
+                str(PANELS_PATH),
+            ],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            timeout=2.0,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"node harness failed: {result.stderr or result.stdout}")
+        return json.loads(result.stdout.strip())
+    finally:
+        try:
+            pathlib.Path(driver).unlink()
+        except OSError:
+            pass
 
 
 def test_dashboard_nav_buttons_are_hidden_by_default_and_subpath_safe():
@@ -95,3 +418,77 @@ def test_desktop_dashboard_link_button_stays_in_desktop_nav():
     assert mobile_nav_match is not None
     mobile_nav = mobile_nav_match.group(0)
     assert 'id="dashboardMobileBtn"' in mobile_nav
+
+@requires_node
+def test_dashboard_dropdown_save_resyncs_chip_state():
+    out = _run_dashboard_link_driver("save", mode="never", url="http://example.local:1234")
+    assert out["mode"] == "never"
+    assert out["url"] == "http://example.local:1234"
+    assert out["lastRenderMode"] == "never"
+    assert out["renderCalls"] == 1
+    assert any(call["url"] == "/api/dashboard/config" and call["method"] == "POST" for call in out["calls"])
+    assert any(call["url"] == "/api/dashboard/status" for call in out["calls"])
+    assert out["statusCalls"] >= 1
+    assert all(
+        "dashboard-link-visible" not in state["classes"]
+        and state["display"] == "none"
+        for state in out["buttonStates"]
+    )
+
+
+@requires_node
+def test_dashboard_chip_save_keeps_buttons_refreshed():
+    out = _run_dashboard_link_driver("chip-toggle", mode="never", url="http://example.local:1234")
+    assert out["mode"] == "auto"
+    assert out["url"] == "http://example.local:1234"
+    assert out["renderCalls"] == 1
+    assert out["lastRenderMode"] == "auto"
+    assert any(call["url"] == "/api/dashboard/config" and call["method"] == "POST" for call in out["calls"])
+    assert any(call["url"] == "/api/dashboard/status" for call in out["calls"])
+    assert out["statusCalls"] >= 1
+    assert all(
+        "dashboard-link-visible" in state["classes"]
+        and state["display"] != "none"
+        for state in out["buttonStates"]
+    )
+
+
+@requires_node
+def test_stale_dashboard_load_does_not_overwrite_newer_save():
+    out = _run_dashboard_link_driver("stale-load", mode="never", url="http://stale.local:1234")
+    assert out["mode"] == "always"
+    assert out["url"] == "http://fresh.local:4321"
+    assert out["renderCalls"] == 1
+    assert out["lastRenderMode"] == "always"
+    assert [
+        (call["url"], call["method"])
+        for call in out["calls"]
+    ] == [
+        ("/api/dashboard/config", "GET"),
+        ("/api/dashboard/config", "POST"),
+        ("/api/dashboard/status", "GET"),
+    ]
+    assert out["statusCalls"] == 1
+    assert all(
+        "dashboard-link-visible" in state["classes"]
+        and state["display"] != "none"
+        for state in out["buttonStates"]
+    )
+
+
+@requires_node
+def test_failed_dashboard_save_reloads_backend_after_stale_load_is_dropped():
+    out = _run_dashboard_link_driver("failed-save-stale-load", mode="never", url="http://stale.local:1234")
+    assert out["mode"] == "never"
+    assert out["url"] == "http://stale.local:1234"
+    assert out["renderCalls"] == 1
+    assert out["lastRenderMode"] == "never"
+    assert [
+        (call["url"], call["method"])
+        for call in out["calls"]
+    ] == [
+        ("/api/dashboard/config", "GET"),
+        ("/api/dashboard/config", "POST"),
+        ("/api/dashboard/config", "GET"),
+    ]
+    assert out["statusCalls"] == 0

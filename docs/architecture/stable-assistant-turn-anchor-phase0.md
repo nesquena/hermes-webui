@@ -281,9 +281,37 @@ in-memory `_anchor_activity_scene`. `renderMessages()` uses that snapshot to
 build a folded activity summary above the final answer and leaves the final
 answer as ordinary assistant prose. Successful auto-compression rows remain
 live-only in settled history unless they explain a visible error or recovery
-state. This is not a Transparent Stream handoff and not a durable reload
-guarantee: hard reload scene persistence still requires a later persisted scene
-or journal hydration slice.
+state. The original live Compact Worklog handoff did not by itself cover
+Transparent Stream or durable reload; those require explicit settled-scene
+persistence or read-side hydration slices.
+
+Settled mixed `content[]` assistant messages now bridge into the same
+`activity_scene_v1` ownership. When the final assistant message interleaves text
+parts with `tool_use` parts, settlement and read-side hydration promote those
+ordered parts into anchor activity rows. The final answer remains the text after
+the last tool use on the final assistant message, while earlier text, non-final
+post-tool process text, thinking rows, and tool rows stay in chronological
+activity order for Compact Worklog and Transparent Stream renderers. The
+Transparent Stream raw `content[]` helper remains a fallback for settled
+messages that do not yet carry `_anchor_activity_scene`.
+
+### Settled Fallback Ownership Matrix
+
+After the mixed `content[]` bridge, `_anchor_activity_scene` is the semantic
+owner for settled assistant activity whenever it is present. Legacy raw-message
+paths stay as compatibility fallbacks for older or non-anchor transcripts; they
+must not compete with an anchor-owned turn.
+
+| Surface | Anchor-present owner | Compatibility fallback | Fallback exit |
+| --- | --- | --- | --- |
+| Settled Compact Worklog activity | `_renderSettledAnchorSceneForMessage()` renders `activity_scene_v1` rows before the final answer. | Legacy `S.toolCalls`, `tool_calls`, `_partial_tool_calls`, and raw `content[].tool_use` rebuilds. | `anchorOwnedAssistantRawIdxs` excludes the anchor-owned turn from message metadata scans, fallback source collection, tool buckets, thinking buckets, and worklog-source mirroring. |
+| Settled Transparent Stream activity | `_renderSettledAnchorSceneTransparentForMessage()` renders the same scene rows as transparent event rows or inline prose before the final answer segment. | `_transparentStreamOrderedParts()` rebuilds raw `content[]` order for historical messages without an anchor scene. | `_transparentStreamOrderedParts()` returns `null` when `message._anchor_activity_scene` exists, leaving the dedicated anchor renderer in charge. |
+| Historical / non-anchor transcripts | No anchor owner is available. | Raw `content[]`, persisted `session.tool_calls`, role=`tool` rows, and partial tool-call snapshots continue to recover visible tool/prose history. | None. These paths remain until replay/runtime-journal coverage proves the same transcript shapes hydrate through anchors. |
+| Live reattach / session switch | `renderLiveAnchorActivityScene()` consumes the projected live scene, and session switch first attempts runtime-journal anchor scene restore. | Saved live DOM snapshots and `INFLIGHT` tool replay. | Snapshot fallback only runs when no usable live anchor scene can be rendered. |
+
+This matrix is an audit baseline, not permission to delete fallbacks. Fallback
+removal should wait for replay/runtime-journal parity tests that prove all
+supported settled transcript sources hydrate through anchors.
 
 ## Source Event Classification
 

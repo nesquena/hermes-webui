@@ -45,7 +45,7 @@ from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.metering import meter
 from api.run_journal import RunJournalWriter
-from api.todo_state import emit_todo_state
+from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
@@ -69,6 +69,7 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
         'messages': messages,
         'message_count': len(messages),
     }
+    attach_todo_state(raw, messages)
     if tool_calls is not None:
         raw['tool_calls'] = tool_calls
     return raw
@@ -91,6 +92,34 @@ def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 
         if _compact_for_echo_compare(tail[idx:]) == candidate:
             return raw[: offset + idx].rstrip(), True
     return raw, False
+
+
+def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
+    """Best-effort terminal SSE session payload for already-persisted state."""
+    try:
+        return redact_session_data(
+            _session_payload_with_full_messages(session, tool_calls=tool_calls)
+        )
+    except Exception:
+        logger.debug("Failed to build redacted session payload", exc_info=True)
+        return None
+
+
+def _cancel_event_payload(
+    message: str = "Cancelled by user",
+    *,
+    session: dict | None = None,
+) -> dict:
+    """Return base cancel terminal event metadata."""
+    payload = {
+        'message': message,
+        'type': 'cancelled',
+        'status': 'cancelled',
+    }
+    if session:
+        payload['session'] = session
+        payload['session_id'] = session.get('session_id')
+    return payload
 
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
@@ -1424,6 +1453,8 @@ from api.workspace import set_last_workspace
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
 # metadata added by the webui and must be stripped before the API call.
+# `reasoning_content` is provider-facing for reasoning-capable models. Display
+# metadata such as `reasoning`, `thinking`, and `_reasoning` stays omitted here.
 _API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content'}
 
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
@@ -1868,38 +1899,98 @@ def _is_valid_image(path: Path, mime: str) -> bool:
     return False
 
 
-def _resolve_image_input_mode(cfg: dict) -> str:
-    """Return ``"native"`` or ``"text"`` based on config, mirroring
-    ``agent/image_routing.py:decide_image_input_mode``.
+def _explicit_text_signal(cfg: dict) -> bool:
+    """True when the user has explicitly opted into the text (vision_analyze)
+    image pipeline.
 
-    The agent has this logic, but the WebUI's ``_build_native_multimodal_message``
-    was unconditionally embedding images as native ``image_url`` parts, completely
-    bypassing ``image_input_mode``.  This caused silent failures when the main model
-    does not support images and the fallback model is also text-only (#21160-related).
+    Two explicit signals, either of which means "the user chose text on
+    purpose" and we must honour it rather than forwarding images natively:
+
+      * ``agent.image_input_mode: text`` — a direct mode override.
+      * a configured ``auxiliary.vision`` backend (provider not ``auto``/empty,
+        or an explicit model / base_url) — the user is paying for a dedicated
+        vision model and wants the text pipeline regardless of the main model.
+
+    This mirrors the explicit-signal portion of
+    ``agent/image_routing.py:decide_image_input_mode`` and is used both to
+    interpret *why* the canonical router returned ``"text"`` (so the
+    unknown-model carve-out only fires when there's no explicit user choice)
+    and as the fallback decision when the agent package is unavailable.
     """
+    if not isinstance(cfg, dict):
+        return False
     agent_cfg = cfg.get("agent") or {}
-    mode = str(agent_cfg.get("image_input_mode", "auto") or "auto").strip().lower()
-    if mode not in ("auto", "native", "text"):
-        mode = "auto"
-
-    if mode == "native":
-        return "native"
-    if mode == "text":
-        return "text"
-
-    # auto: if auxiliary.vision is explicitly configured → text mode
-    # (user opted into a dedicated vision backend)
+    if isinstance(agent_cfg, dict):
+        mode = str(agent_cfg.get("image_input_mode", "auto") or "auto").strip().lower()
+        if mode == "text":
+            return True
     aux = cfg.get("auxiliary") or {}
-    vision = aux.get("vision") or {}
+    vision = (aux.get("vision") or {}) if isinstance(aux, dict) else {}
+    if not isinstance(vision, dict):
+        return False
     provider = str(vision.get("provider") or "").strip().lower()
     model_name = str(vision.get("model") or "").strip()
     base_url = str(vision.get("base_url") or "").strip()
-    if provider not in ("", "auto") or model_name or base_url:
-        return "text"
+    return provider not in ("", "auto") or bool(model_name) or bool(base_url)
 
-    # No explicit vision config, no model-capability lookup available in WebUI.
-    # Default to native — the agent's ``_strip_images_from_messages`` guard will
-    # strip images on rejection and retry as text.
+
+def _resolve_image_input_mode(cfg: dict) -> str:
+    """Return ``"native"`` or ``"text"`` for current-turn image uploads.
+
+    Delegates the routing decision to ``agent/image_routing.py:
+    decide_image_input_mode`` — the single source of truth — instead of the
+    local re-implementation that previously lived here. That copy had DIVERGED
+    from the canonical function: it returned ``"text"`` (dropping the image) in
+    cases the canonical router would have forwarded natively, because it never
+    consulted the active model's vision capability and instead hard-coded a
+    handful of config heuristics.
+
+    The WebUI keeps one deliberate carve-out on top of the canonical decision:
+    for UNKNOWN / custom models (no models.dev capability data) the canonical
+    router conservatively returns ``"text"``, but the WebUI historically
+    forwards images NATIVELY and relies on the agent's strip-and-retry guard
+    (``run_agent._try_shrink_image_parts_in_messages`` /
+    ``_strip_images_from_messages``) to downgrade on a provider rejection. We
+    preserve that behaviour here: a canonical ``"text"`` verdict is only
+    honoured when there is a real signal — an explicit user choice
+    (``image_input_mode: text`` or a configured ``auxiliary.vision`` backend)
+    or a model KNOWN to lack vision. Otherwise we forward native.
+
+    When the agent package is unavailable (e.g. the WebUI standalone test
+    environment, where ``import agent`` fails), we fall back to the historical
+    WebUI behaviour: honour an explicit text signal, otherwise native.
+    """
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    try:
+        from agent.image_routing import decide_image_input_mode, _lookup_supports_vision
+        from agent.auxiliary_client import _read_main_provider, _read_main_model
+
+        provider = (_read_main_provider() or "").strip()
+        model = (_read_main_model() or "").strip()
+
+        mode = decide_image_input_mode(provider, model, cfg)
+        if mode == "native":
+            return "native"
+
+        # Canonical returned "text". Honour it only when it reflects a genuine
+        # signal; otherwise apply the WebUI unknown-model native carve-out.
+        if _explicit_text_signal(cfg):
+            return "text"
+        if _lookup_supports_vision(provider, model, cfg) is False:
+            # Model is KNOWN to be text-only — respect the canonical verdict.
+            return "text"
+        # Unknown / custom model (capability is None): WebUI forwards native
+        # and lets the agent's strip-and-retry guard downgrade on rejection.
+        return "native"
+    except Exception:
+        # Agent package unavailable or import error — preserve historical WebUI
+        # behaviour: explicit text signal wins, otherwise native.
+        pass
+
+    if _explicit_text_signal(cfg):
+        return "text"
     return "native"
 
 
@@ -3532,6 +3623,32 @@ def _strip_native_image_parts_from_content(content):
     return clean_parts
 
 
+_OOB_USER_MESSAGE_BLOCK_RE = re.compile(
+    r'\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)\s*.*?)?\]\s*?.*?\[/OUT-OF-BAND\s+USER\s+MESSAGE\]',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_oob_blocks(content):
+    """Remove consumed [OUT-OF-BAND USER MESSAGE ...] blocks from content.
+
+    These markers are internal control data that should never reach the model.
+    They can appear as plain strings or inside list-based content parts.
+    """
+    if isinstance(content, str):
+        return _OOB_USER_MESSAGE_BLOCK_RE.sub('', content)
+    if isinstance(content, list):
+        return [_strip_oob_blocks(part) for part in content]
+    if isinstance(content, dict):
+        return {
+            key: _strip_oob_blocks(value)
+            if isinstance(value, (str, list, dict))
+            else copy.deepcopy(value)
+            for key, value in content.items()
+        }
+    return content
+
+
 def _content_has_reasoning_only_parts(content) -> bool:
     if not isinstance(content, list) or not content:
         return False
@@ -3639,6 +3756,8 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
+        if 'content' in sanitized:
+            sanitized['content'] = _strip_oob_blocks(sanitized['content'])
         if strip_native_images and 'content' in sanitized:
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):
@@ -3736,6 +3855,8 @@ def _api_safe_message_positions(messages):
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
+        if 'content' in sanitized:
+            sanitized['content'] = _strip_oob_blocks(sanitized['content'])
         if sanitized.get('role'):
             out.append((idx, sanitized))
 
@@ -3870,7 +3991,10 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     def _safe_projection(msg):
         if not isinstance(msg, dict):
             return None
-        return {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+        projected = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+        if 'content' in projected:
+            projected['content'] = _strip_oob_blocks(projected['content'])
+        return projected
 
     safe_pos = 0
     while safe_pos < len(prev_safe):
@@ -5801,6 +5925,7 @@ def _run_agent_streaming(
     ephemeral=False,
     model_provider=None,
     goal_related=False,
+    moa_config=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -6244,7 +6369,7 @@ def _run_agent_streaming(
         if cancel_event.is_set():
             with _agent_lock:
                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
-            put('cancel', {'message': 'Cancelled before start'})
+            put('cancel', _cancel_event_payload('Cancelled before start'))
             return
 
         # Resolve profile home for this agent run — use the session's own profile
@@ -7426,7 +7551,7 @@ def _run_agent_streaming(
                         logger.debug("Failed to interrupt agent before start")
                     with _agent_lock:
                         _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
-                    put('cancel', {'message': 'Cancelled by user'})
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
 
             # Prepend workspace context so the agent always knows which directory
@@ -7550,13 +7675,19 @@ def _run_agent_streaming(
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
-            result = agent.run_conversation(
+            _run_conversation_kwargs = dict(
                 user_message=user_message,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
+            # Only pass moa_config when a /moa override is actually active, so a
+            # normal send never trips a TypeError on an older hermes-agent whose
+            # run_conversation() predates the moa_config kwarg.
+            if moa_config is not None:
+                _run_conversation_kwargs["moa_config"] = moa_config
+            result = agent.run_conversation(**_run_conversation_kwargs)
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
             # reasoning with no trailing token/tool boundary to trigger a flush) so the last
@@ -7584,7 +7715,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', {'message': 'Cancelled by user'})
+                put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
@@ -7626,7 +7757,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', {'message': 'Cancelled by user'})
+                put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
             _writeback_timings = []
             _writeback_started = time.perf_counter()
@@ -7667,7 +7798,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', {'message': 'Cancelled by user'})
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
                     _next_context_messages = _restore_reasoning_metadata(
                         _previous_context_messages,
@@ -7874,7 +8005,7 @@ def _run_agent_streaming(
                                 )
                             except Exception:
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', {'message': 'Cancelled by user'})
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
                     _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                     _err_str = str(_last_err) if _last_err else ''
@@ -7930,13 +8061,16 @@ def _run_agent_streaming(
                             _self_healed = True
                             _token_sent = False
                             try:
-                                _heal_result = agent.run_conversation(
+                                _heal_kwargs = dict(
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                 )
+                                if moa_config is not None:
+                                    _heal_kwargs["moa_config"] = moa_config
+                                _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _heal_all_msgs = _heal_result.get('messages') or []
                                 _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
                             except Exception as _retry_exc:
@@ -8484,7 +8618,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', {'message': 'Cancelled by user'})
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
@@ -8502,7 +8636,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', {'message': 'Cancelled by user'})
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
                 if not ephemeral:
                     try:
@@ -8926,7 +9060,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-            put('cancel', {'message': 'Cancelled by user'})
+            put('cancel', _cancel_event_payload('Cancelled by user'))
             return
         _exc_is_quota = _classification['type'] == 'quota_exhausted'
         # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.
@@ -8986,13 +9120,16 @@ def _run_agent_streaming(
                     # Retry the conversation
                     _token_sent = False
                     try:
-                        _heal_result = _heal_agent.run_conversation(
+                        _heal_kwargs2 = dict(
                             user_message=user_message,
                             system_message=workspace_system_msg,
                             conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                             task_id=session_id,
                             persist_user_message=msg_text,
                         )
+                        if moa_config is not None:
+                            _heal_kwargs2["moa_config"] = moa_config
+                        _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         # Retry succeeded — persist the result normally
                         if s is not None:
                             if _checkpoint_stop is not None:
@@ -9332,6 +9469,7 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_tool_calls = None
     _snap_flag = None
     _snap_agent = None
+    _cancel_session_payload = None
 
     with streams_lock:
         stream_present = stream_id in streams
@@ -9632,6 +9770,7 @@ def cancel_stream(stream_id: str) -> bool:
                         'timestamp': int(time.time()),
                     })
                 _cs.save()
+                _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
@@ -9643,7 +9782,8 @@ def cancel_stream(stream_id: str) -> bool:
             except Exception:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
-            q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
+            _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
+            q.put_nowait(('cancel', _payload))
         except Exception:
             logger.debug("Failed to put cancel event to queue")
 

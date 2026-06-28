@@ -1174,11 +1174,28 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
 const DASHBOARD_STATUS_TTL_MS=60000;
 let _dashboardStatusCache=null;
 let _dashboardStatusFetchedAt=0;
+let _dashboardLastNonNeverMode='auto'; // Server-scoped dashboard config keeps this restore target session-global on purpose.
+let _dashboardSettingsLoadSeq=0;
+let _dashboardSettingsWriteSeq=0;
 
 function _dashboardIsBrowserLoopback(){
   const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
   return host==='127.0.0.1'||host==='localhost'||host==='::1';
 }
+
+function _normalizeDashboardEnabledMode(mode){
+  return mode==='auto'||mode==='always'||mode==='never'?mode:'auto';
+}
+
+function _setDashboardModeForChip(mode){
+  mode=_normalizeDashboardEnabledMode(mode);
+  if(mode==='auto'||mode==='always') _dashboardLastNonNeverMode=mode;
+}
+
+function _getDashboardChipRestoreMode(){
+  return _dashboardLastNonNeverMode||'auto';
+}
+
 function _dashboardBrowserUrl(status){
   if(!status||!status.running) return '';
   if(status.browser_url||status.url){
@@ -1234,26 +1251,39 @@ async function loadDashboardSettings(){
   const modeEl=$('settingsDashboardMode');
   const urlEl=$('settingsDashboardUrl');
   if(!modeEl&&!urlEl) return;
+  const loadSeq=++_dashboardSettingsLoadSeq;
+  const writeSeq=_dashboardSettingsWriteSeq;
   try{
     const cfg=await api('/api/dashboard/config');
-    if(modeEl) modeEl.value=cfg.enabled||'auto';
+    if(loadSeq!==_dashboardSettingsLoadSeq||writeSeq!==_dashboardSettingsWriteSeq) return;
+    const mode=_normalizeDashboardEnabledMode(cfg&&cfg.enabled);
+    if(modeEl) modeEl.value=mode;
+    _setDashboardModeForChip(mode);
     if(urlEl) urlEl.value=cfg.url||'';
+    if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
   }catch(_){/* leave defaults visible */}
 }
-async function saveDashboardSettings(){
+async function saveDashboardSettings(opts){
+  opts=opts||{};
   const modeEl=$('settingsDashboardMode');
   const urlEl=$('settingsDashboardUrl');
   const statusEl=$('settingsDashboardStatus');
   const payload={enabled:(modeEl&&modeEl.value)||'auto',url:(urlEl&&urlEl.value||'').trim()};
+  _dashboardSettingsWriteSeq+=1;
   try{
     const saved=await api('/api/dashboard/config',{method:'POST',body:JSON.stringify(payload)});
-    if(modeEl) modeEl.value=saved.enabled||'auto';
+    const mode=_normalizeDashboardEnabledMode(saved&&saved.enabled);
+    if(modeEl) modeEl.value=mode;
+    _setDashboardModeForChip(mode);
     if(urlEl) urlEl.value=saved.url||'';
     if(statusEl) statusEl.textContent='Dashboard link settings saved.';
     await refreshDashboardStatus(true);
+    if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
   }catch(err){
     if(statusEl) statusEl.textContent='Dashboard link settings failed to save.';
     else if(typeof showToast==='function') showToast('Dashboard link settings failed to save.');
+    try{await loadDashboardSettings();}catch(_){}
+    if(opts.raiseOnError) throw err;
   }
 }
 function openHermesDashboard(event){
@@ -6697,6 +6727,26 @@ function speakMessage(btn){
     _playEdgeTtsChunked(clean, btn);
     return;
   }
+  // Extension-registered TTS engine (window.registerHermesTtsEngine). Synthesize
+  // via the extension, then play through the shared audio-buffer path.
+  if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+    if(btn) btn.dataset.speaking='1';
+    _ttsSpeaking=true;
+    const _failReg=function(msg){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn)btn.dataset.speaking='0';
+      if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+    };
+    const _opts={
+      voice: localStorage.getItem('hermes-tts-voice')||'',
+      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
+      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
+    };
+    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
+      .then(function(buf){ return _playAudioBuf(buf, btn, 'TTS'); })
+      .catch(function(e){ _failReg((e&&e.message)||'TTS engine failed'); });
+    return;
+  }
 
   if(!('speechSynthesis' in window)){
     showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
@@ -6828,6 +6878,24 @@ function autoReadLastAssistant(){
     _playEdgeTtsChunked(clean, null);
     return;
   }
+  // Extension-registered TTS engine (window.registerHermesTtsEngine): synth via
+  // the extension, then play through the shared audio-buffer path. Mirrors the
+  // registered-engine branch in speakMessage() so auto-read honors the selection.
+  if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+    _ttsSpeaking=true;
+    const _opts={
+      voice: localStorage.getItem('hermes-tts-voice')||'',
+      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
+      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
+    };
+    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
+      .then(function(buf){ return _playAudioBuf(buf, null, 'TTS'); })
+      .catch(function(){ _ttsSpeaking=false; _playingEdgeAudio=null; });
+    return;
+  }
+  // Unknown/unregistered engine (e.g. an extension engine that's no longer
+  // registered) — fall back to browser TTS only if it's available.
+  if(!('speechSynthesis' in window)) return;
   // Use chunked playback for browser TTS
   _ttsChunkQueue=_splitForTTS(clean);
   _ttsChunkIndex=0;
@@ -6991,8 +7059,9 @@ function clearInflightState(sid){
 //      and as the hash that compares "rendered vs current" snapshots.
 //
 //   2. scheduleTodosRefresh() — coalesces multiple `todo_state` events that
-//      land in the same animation frame into a single loadTodos() call.
-//      Skips work entirely when the panel is not active.
+//      land in the same animation frame into a single refresh pass. It keeps
+//      the left sidebar Todos behavior unchanged, and also lets the workspace
+//      Todos tab repaint when that tab is enabled and currently visible.
 //
 //   3. _hydrateTodosFromSession(session) — applies cold-load todo_state
 //      from the session GET payload, or clears the panel when neither a
@@ -7035,12 +7104,14 @@ function scheduleTodosRefresh(){
   if(_todosRenderRafId) return;
   if(typeof requestAnimationFrame!=='function'){
     if(typeof loadTodos==='function') loadTodos();
+    if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
     return;
   }
   _todosRenderRafId=requestAnimationFrame(()=>{
     _todosRenderRafId=0;
-    if(!_todosPanelIsActive()) return;
-    if(typeof loadTodos==='function') loadTodos();
+    const sidebarActive=_todosPanelIsActive();
+    if(sidebarActive&&typeof loadTodos==='function') loadTodos();
+    if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
   });
 }
 
@@ -7048,6 +7119,7 @@ function _resetTodosRenderCache(){
   // Clear after every cross-session navigation so the next render is
   // never short-circuited against a hash from a different session.
   _todosLastRenderedHash=null;
+  if(typeof _resetWorkspaceTodosRenderCache==='function') _resetWorkspaceTodosRenderCache();
 }
 
 function _hydrateTodosFromSession(session){
@@ -7128,6 +7200,7 @@ function _hydrateTodosFromSession(session){
     S.todoStateMeta=null;
   }
   _resetTodosRenderCache();
+  if(typeof scheduleTodosRefresh==='function') scheduleTodosRefresh();
 }
 
 function snapshotLiveTurnHtmlForSession(sid){
@@ -14013,16 +14086,19 @@ function autoResizeTextarea(ta) {
 
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
-  // Truncate session at msgIdx (keep messages before the edited one)
-  // then re-send the edited text
+  const initialSid = S.session.session_id;
+  const absoluteKeepCount = _oldestIdx + msgIdx;
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: msgIdx  // keep messages[0..msgIdx-1], discard from msgIdx onward
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
     })});
-    S.messages = S.messages.slice(0, msgIdx);
+    S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
-    // Now send the edited message as a new chat
     $('msg').value = newText;
     await send();
   } catch(e) { setStatus(t('edit_failed') + e.message); }
@@ -14030,24 +14106,27 @@ async function submitEdit(msgIdx, newText) {
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
-  // Find the last user message and re-run it
-  // Remove the last assistant message first (truncate to before it)
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
-  // Find the last user message text (one before this assistant message)
+  const absoluteKeepCount = _oldestIdx + assistantIdx;
+  const initialSid = S.session.session_id;
   let lastUserText = '';
   for(let i = assistantIdx - 1; i >= 0; i--) {
     const m = S.messages[i];
     if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
   }
   if(!lastUserText) return;
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: assistantIdx  // remove the assistant message
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
     })});
-    S.messages = S.messages.slice(0, assistantIdx);
+    S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = lastUserText;
     await send();

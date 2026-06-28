@@ -141,6 +141,8 @@ def test_memory_panel_references_all_memory_path_fields():
     assert "_memoryData.user_path" in panels
     assert "_memoryData.soul_path" in panels
     assert "_memoryData.project_context_path" in panels
+    assert "const sectionPath = _memorySectionPath(s.key)" in panels
+    assert "if (sectionPath) el.title = sectionPath" in panels
 
 
 def _memory_render_blocks():
@@ -222,6 +224,90 @@ console.log(JSON.stringify({memoryHtml, userHtml, soulHtml, projectHtml, memoryM
     return json.loads(completed.stdout)
 
 
+def _memory_button_render_blocks():
+    panels = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    sections_start = panels.index("const MEMORY_SECTIONS = [")
+    sections_end = panels.index("];", sections_start) + 2
+    helper_start = panels.index("function _memorySectionPath(key)")
+    helper_end = panels.index("function _setMemoryHeaderButtons", helper_start)
+    loop_start = panels.index("for (const s of MEMORY_SECTIONS) {")
+    loop_end = panels.index("    if (_currentMemorySection && _memoryMode !== 'edit') {", loop_start)
+    return (
+        panels[sections_start:sections_end],
+        panels[helper_start:helper_end],
+        panels[loop_start:loop_end].rsplit("    }", 1)[0],
+    )
+
+
+def _run_memory_button_harness():
+    sections_block, helper_block, loop_block = _memory_button_render_blocks()
+    script = (
+        "const sectionsBlock = "
+        + json.dumps(sections_block)
+        + ";\nconst helperBlock = "
+        + json.dumps(helper_block)
+        + ";\nconst loopBlock = "
+        + json.dumps(loop_block)
+        + ";\n"
+        + r"""
+let _memoryData = {
+  memory_path: 'C:/Users/Rod/.hermes/memories/MEMORY.md',
+  user_path: 'C:/Users/Rod/.hermes/memories/USER.md',
+  soul_path: 'C:/Users/Rod/.hermes/SOUL.md',
+  project_context_path: 'D:/Repos/hermes-webui/AGENTS.md',
+  external_notes_enabled: true,
+};
+let _currentMemorySection = 'memory';
+const nodes = {
+  memoryPanel: {
+    innerHTML: '',
+    appended: [],
+    appendChild(node) { this.appended.push(node); },
+  },
+};
+const document = {
+  createElement() {
+    return {
+      title: '',
+      type: '',
+      className: '',
+      innerHTML: '',
+      onclick: null,
+      classList: { add() {} },
+      setAttribute(name, value) { this[name] = value; },
+    };
+  },
+};
+function _memorySectionLabel(meta) { return meta.key; }
+function li() { return ''; }
+function esc(value) { return String(value); }
+function openMemorySection() {}
+eval(
+  sectionsBlock +
+  "\n" +
+  helperBlock +
+  "\nfunction renderButtons() {\nconst panel = nodes.memoryPanel;\n" +
+  loopBlock +
+  "\n}\nrenderButtons();"
+);
+const buttons = nodes.memoryPanel.appended.map(btn => ({
+  label: btn.innerHTML.replace(/<[^>]+>/g, ''),
+  title: btn.title || '',
+}));
+console.log(JSON.stringify(buttons));
+"""
+    )
+    completed = subprocess.run(
+        [NODE, "-e", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
 def test_memory_detail_renders_path_for_non_project_sections():
     """Base-fails/head-passes regression for issue #4999.
 
@@ -242,6 +328,20 @@ def test_memory_detail_renders_path_for_non_project_sections():
     assert "C:/Users/Rod/.hermes/SOUL.md" in rendered["soulHtml"]
     assert "AGENTS.md · D:/Repos/hermes-webui/AGENTS.md" in rendered["projectHtml"]
     assert "CLAUDE.md present, shadowed by AGENTS.md" in rendered["projectHtml"]
+
+
+def test_memory_section_list_renders_hover_path_titles():
+    """Base-fails/head-passes regression for issue #5045."""
+    if NODE is None:
+        pytest.skip("node not on PATH")
+
+    rendered = {item["label"]: item["title"] for item in _run_memory_button_harness()}
+
+    assert rendered["memory"] == "C:/Users/Rod/.hermes/memories/MEMORY.md"
+    assert rendered["user"] == "C:/Users/Rod/.hermes/memories/USER.md"
+    assert rendered["soul"] == "C:/Users/Rod/.hermes/SOUL.md"
+    assert rendered["project_context"] == "D:/Repos/hermes-webui/AGENTS.md"
+    assert rendered["external_notes"] == ""
 
 
 def test_blank_session_workspace_does_not_resolve_to_server_cwd(monkeypatch):
