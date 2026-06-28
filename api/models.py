@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -2756,6 +2757,199 @@ def _has_live_sidebar_state(session: dict) -> bool:
         session.get('active_stream_id')
         or session.get('has_pending_user_message')
         or session.get('pending_user_message')
+    )
+
+
+def _session_delete_row_id(row: dict) -> str:
+    if not isinstance(row, dict):
+        return ''
+    return str(row.get('session_id') or row.get('id') or '').strip()
+
+
+def _session_delete_row_source(row: dict) -> str:
+    if not isinstance(row, dict):
+        return ''
+    for key in ('session_source', 'source_tag', 'raw_source', 'source', 'source_label'):
+        value = str(row.get(key) or '').strip().lower()
+        if value:
+            return value
+    return ''
+
+
+def _session_delete_row_is_fork(row: dict) -> bool:
+    return _session_delete_row_source(row) == 'fork'
+
+
+def _session_delete_parent_id(row: dict) -> str:
+    if not isinstance(row, dict) or _session_delete_row_is_fork(row):
+        return ''
+    parent = str(row.get('parent_session_id') or '').strip()
+    return parent if parent else ''
+
+
+def _session_delete_target_ids_from_rows(
+    session_id: str,
+    rows: list[dict],
+    *,
+    scope: str = 'conversation',
+) -> list[str]:
+    """Return session ids deleted by Delete Conversation.
+
+    Default deletion follows the compression parent/child chain so deleting the
+    visible continuation also removes hidden pre-compression snapshots. Forks are
+    intentionally excluded: a branch is a separate user-facing conversation even
+    though it also uses ``parent_session_id``.
+    """
+    sid = str(session_id or '').strip()
+    if not sid:
+        return []
+    normalized_scope = str(scope or 'conversation').strip().lower()
+    if normalized_scope in {'segment', 'single', 'session'}:
+        return [sid]
+
+    rows_by_id: dict[str, dict] = {}
+    original_order: dict[str, int] = {}
+    for index, row in enumerate(rows or []):
+        row_id = _session_delete_row_id(row)
+        if not row_id or row_id in rows_by_id:
+            continue
+        rows_by_id[row_id] = row
+        original_order[row_id] = index
+
+    target_row = rows_by_id.get(sid)
+    if target_row is not None and _session_delete_row_is_fork(target_row):
+        return [sid]
+    if sid not in rows_by_id:
+        return [sid]
+
+    neighbors: dict[str, set[str]] = {row_id: set() for row_id in rows_by_id}
+    lineage_groups: dict[str, set[str]] = {}
+    for row_id, row in rows_by_id.items():
+        if _session_delete_row_is_fork(row):
+            continue
+        parent_id = _session_delete_parent_id(row)
+        if parent_id and parent_id in rows_by_id:
+            neighbors.setdefault(row_id, set()).add(parent_id)
+            neighbors.setdefault(parent_id, set()).add(row_id)
+        explicit_root = str(row.get('_lineage_root_id') or row.get('lineage_root_id') or '').strip()
+        if explicit_root:
+            lineage_groups.setdefault(explicit_root, set()).add(row_id)
+            if explicit_root in rows_by_id:
+                lineage_groups.setdefault(explicit_root, set()).add(explicit_root)
+    for ids in lineage_groups.values():
+        for row_id in ids:
+            neighbors.setdefault(row_id, set()).update(other for other in ids if other != row_id)
+
+    selected: set[str] = set()
+    stack = [sid]
+    while stack:
+        current = stack.pop()
+        if current in selected:
+            continue
+        row = rows_by_id.get(current)
+        if row is not None and _session_delete_row_is_fork(row) and current != sid:
+            continue
+        selected.add(current)
+        stack.extend(sorted(neighbors.get(current, set()) - selected))
+
+    def _depth(row_id: str) -> int:
+        depth = 0
+        seen = {row_id}
+        parent_id = _session_delete_parent_id(rows_by_id.get(row_id, {}))
+        while parent_id and parent_id in selected and parent_id not in seen:
+            depth += 1
+            seen.add(parent_id)
+            parent_id = _session_delete_parent_id(rows_by_id.get(parent_id, {}))
+        return depth
+
+    return sorted(selected, key=lambda row_id: (_depth(row_id), original_order.get(row_id, 10**9), row_id))
+
+
+def _session_delete_candidate_rows() -> list[dict]:
+    """Return sidecar + state.db rows that can participate in deletion lineage."""
+    rows: list[dict] = []
+    seen: set[str] = set()
+
+    def add_row(row: dict) -> None:
+        row_id = _session_delete_row_id(row)
+        if not row_id or row_id in seen:
+            return
+        seen.add(row_id)
+        rows.append(row)
+
+    try:
+        with LOCK:
+            memory_sessions = list(SESSIONS.values())
+        for session in memory_sessions:
+            try:
+                add_row(session.compact(include_runtime=True))
+            except Exception:
+                add_row({
+                    'session_id': getattr(session, 'session_id', None),
+                    'parent_session_id': getattr(session, 'parent_session_id', None),
+                    'pre_compression_snapshot': getattr(session, 'pre_compression_snapshot', None),
+                    'session_source': getattr(session, 'session_source', None),
+                    'source_tag': getattr(session, 'source_tag', None),
+                })
+    except Exception:
+        logger.debug("Failed to collect in-memory session rows for delete lineage", exc_info=True)
+
+    try:
+        if SESSION_INDEX_FILE.exists():
+            index_rows = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            if isinstance(index_rows, list):
+                for row in index_rows:
+                    if isinstance(row, dict):
+                        add_row(row)
+    except Exception:
+        logger.debug("Failed to collect session index rows for delete lineage", exc_info=True)
+
+    try:
+        for path in SESSION_DIR.glob('*.json'):
+            if path.name.startswith('_'):
+                continue
+            sidecar = Session.load_metadata_only(path.stem)
+            if sidecar:
+                add_row(sidecar.compact(include_runtime=True))
+    except Exception:
+        logger.debug("Failed to collect sidecar rows for delete lineage", exc_info=True)
+
+    try:
+        db_path = _active_state_db_path()
+        if db_path.exists():
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(sessions)")
+                cols = {str(row[1]) for row in cur.fetchall()}
+                if 'id' in cols:
+                    wanted = {
+                        'id', 'source', 'session_source', 'source_tag', 'raw_source',
+                        'source_label', 'parent_session_id', 'title', 'message_count',
+                        'started_at', 'ended_at', 'end_reason', '_lineage_root_id',
+                        '_lineage_tip_id', '_compression_segment_count',
+                    }
+                    select_cols = [col for col in wanted if col in cols]
+                    if 'id' not in select_cols:
+                        select_cols.append('id')
+                    cur.execute(f"SELECT {', '.join(select_cols)} FROM sessions")
+                    for db_row in cur.fetchall():
+                        row = dict(db_row)
+                        row['session_id'] = row.get('id')
+                        normalized = normalize_agent_session_source(row.get('source'))
+                        row = {**row, **{k: row.get(k) or v for k, v in normalized.items()}}
+                        add_row(row)
+    except Exception:
+        logger.debug("Failed to collect state.db rows for delete lineage", exc_info=True)
+
+    return rows
+
+
+def session_delete_target_ids(session_id: str, *, scope: str = 'conversation') -> list[str]:
+    return _session_delete_target_ids_from_rows(
+        session_id,
+        _session_delete_candidate_rows(),
+        scope=scope,
     )
 
 

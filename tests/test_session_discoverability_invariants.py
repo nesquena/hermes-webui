@@ -111,3 +111,35 @@ def test_fuller_snapshot_still_replaces_single_inactive_continuation():
 
     assert [row["session_id"] for row in result] == ["snapshot"]
     assert result[0]["_show_pre_compression_snapshot"] is True
+
+
+def test_delete_conversation_targets_entire_compression_lineage():
+    """Delete Conversation should remove every compression segment, not only the visible tip."""
+    from api.models import _session_delete_target_ids_from_rows
+
+    rows = [
+        {"session_id": "root", "pre_compression_snapshot": True, "message_count": 10},
+        {
+            "session_id": "middle",
+            "parent_session_id": "root",
+            "pre_compression_snapshot": True,
+            "message_count": 20,
+        },
+        {"session_id": "tip", "parent_session_id": "middle", "message_count": 5},
+        {"session_id": "fork", "parent_session_id": "middle", "session_source": "fork", "message_count": 1},
+        {"session_id": "unrelated", "message_count": 1},
+    ]
+
+    assert _session_delete_target_ids_from_rows("tip", rows) == ["root", "middle", "tip"]
+    assert _session_delete_target_ids_from_rows("middle", rows) == ["root", "middle", "tip"]
+
+
+def test_delete_segment_scope_keeps_legacy_single_session_delete():
+    from api.models import _session_delete_target_ids_from_rows
+
+    rows = [
+        {"session_id": "root", "pre_compression_snapshot": True, "message_count": 10},
+        {"session_id": "tip", "parent_session_id": "root", "message_count": 5},
+    ]
+
+    assert _session_delete_target_ids_from_rows("tip", rows, scope="segment") == ["tip"]

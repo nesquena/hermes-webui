@@ -3316,6 +3316,12 @@ function _sessionArchiveToast(response, session){
 function _sessionDeleteDescription(session){
   return session&&session.worktree_path?t('session_delete_worktree_desc'):t('session_delete_desc');
 }
+function _sessionDeleteConfirmMessage(session){
+  const base=session&&session.worktree_path
+    ? t('session_delete_worktree_confirm',session.worktree_path)
+    : t('session_delete_confirm');
+  return `${base}\n\n${t('session_delete_lineage_note')}`;
+}
 function _optimisticallyArchiveSessionInList(sid, archived){
   if(!sid||!Array.isArray(_allSessions)) return;
   let changed=false;
@@ -3327,11 +3333,24 @@ function _optimisticallyArchiveSessionInList(sid, archived){
   if(changed) renderSessionListFromCache();
 }
 function _optimisticallyRemoveSessionFromList(sid){
-  if(!sid||!Array.isArray(_allSessions)) return;
+  _optimisticallyRemoveSessionsFromList([sid]);
+}
+function _sessionDeletedIdsFromResponse(response, fallbackSid){
+  const ids=[];
+  if(response&&Array.isArray(response.deleted_session_ids)){
+    response.deleted_session_ids.forEach(sid=>{if(sid&&!ids.includes(sid)) ids.push(sid);});
+  }
+  if(fallbackSid&&!ids.includes(fallbackSid)) ids.push(fallbackSid);
+  return ids;
+}
+function _optimisticallyRemoveSessionsFromList(ids){
+  const targets=(ids||[]).filter(Boolean);
+  if(!targets.length||!Array.isArray(_allSessions)) return;
+  const targetSet=new Set(targets);
   const before=_allSessions.length;
-  _allSessions=_allSessions.filter(s=>!s||s.session_id!==sid);
-  if(_selectedSessions&&_selectedSessions.has(sid)) _selectedSessions.delete(sid);
-  if(typeof _dropStaleOptimisticSessionRow==='function') _dropStaleOptimisticSessionRow(sid);
+  _allSessions=_allSessions.filter(s=>!s||!targetSet.has(s.session_id));
+  if(_selectedSessions) targets.forEach(sid=>_selectedSessions.delete(sid));
+  if(typeof _dropStaleOptimisticSessionRow==='function') targets.forEach(_dropStaleOptimisticSessionRow);
   if(_allSessions.length!==before) renderSessionListFromCache();
 }
 
@@ -3467,8 +3486,9 @@ function _renderBatchActionBar(){
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
     const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
+    const deleteMessage=wtCount?t('session_batch_delete_worktree_confirm',ids.length,wtCount):t('session_batch_delete_confirm',ids.length);
     const ok=await showConfirmDialog({
-      message:wtCount?t('session_batch_delete_worktree_confirm',ids.length,wtCount):t('session_batch_delete_confirm',ids.length),
+      message:`${deleteMessage}\n\n${t('session_delete_lineage_note')}`,
       confirmLabel:t('delete_title'),
       danger:true
     });
@@ -3476,18 +3496,25 @@ function _renderBatchActionBar(){
     try{
       const results=await Promise.all(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
-        return {response,session:sessionsById.get(sid)||null};
+        return {response,session:sessionsById.get(sid)||null,sid};
       }));
       const retainedCount=_worktreeResponseCount(results);
-      ids.forEach(_clearHandoffStorageForSession);
-      if(S.session&&ids.includes(S.session.session_id)){
+      const deletedIds=[];
+      results.forEach(result=>{
+        _sessionDeletedIdsFromResponse(result&&result.response,result&&result.sid).forEach(sid=>{
+          if(sid&&!deletedIds.includes(sid)) deletedIds.push(sid);
+        });
+      });
+      deletedIds.forEach(_clearHandoffStorageForSession);
+      _optimisticallyRemoveSessionsFromList(deletedIds);
+      if(S.session&&deletedIds.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
-      showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');exitSessionSelectMode();await renderSessionList();
+      showToast((retainedCount?t('session_deleted_worktree'):t('session_deleted'))+' ('+deletedIds.length+')');exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
@@ -7576,7 +7603,7 @@ async function removeWorktree(session){
 async function deleteSession(sid, beforeDelete=null){
   const session=_sessionSnapshotById(sid);
   const ok=await showConfirmDialog({
-    message:session&&session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path):t('session_delete_confirm'),
+    message:_sessionDeleteConfirmMessage(session),
     confirmLabel:t('delete_title'),
     danger:true
   });
@@ -7586,7 +7613,7 @@ async function deleteSession(sid, beforeDelete=null){
   const previousSessions=_allSessions;
   let optimisticRendered=false;
   const deleteRequest=api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})}).then(response=>{
-    _clearHandoffStorageForSession(sid);
+    _sessionDeletedIdsFromResponse(response,sid).forEach(_clearHandoffStorageForSession);
     return {response};
   }, error=>({error}));
   if(beforeDeleteHold){
@@ -7609,12 +7636,12 @@ async function deleteSession(sid, beforeDelete=null){
     return false;
   }
   const response=deleteResult&&deleteResult.response;
-  if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
-  if(!optimisticRendered){
-    _pendingSessionReflowPositions=reflowPositions;
-    _optimisticallyRemoveSessionFromList(sid);
-  }
-  if(S.session&&S.session.session_id===sid){
+  const deletedIds=_sessionDeletedIdsFromResponse(response,sid);
+  if(typeof _clearPersistedSessionQueue==='function') deletedIds.forEach(_clearPersistedSessionQueue);
+  deletedIds.forEach(deletedSid=>_optimisticallyRemovedSessionIds.add(deletedSid));
+  _pendingSessionReflowPositions=reflowPositions;
+  _optimisticallyRemoveSessionsFromList(deletedIds);
+  if(S.session&&deletedIds.includes(S.session.session_id)){
     S.session=null;S.messages=[];S.entries=[];
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
@@ -7633,8 +7660,12 @@ async function deleteSession(sid, beforeDelete=null){
     }
   }
   showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
-  if(optimisticRendered) void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(sid));
-  else await renderSessionList();
+  const clearOptimisticDeletedIds=()=>deletedIds.forEach(deletedSid=>_optimisticallyRemovedSessionIds.delete(deletedSid));
+  if(optimisticRendered) void renderSessionList().finally(clearOptimisticDeletedIds);
+  else{
+    try{await renderSessionList();}
+    finally{clearOptimisticDeletedIds();}
+  }
   return true;
 }
 
