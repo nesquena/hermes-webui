@@ -81,13 +81,20 @@ async function cancelSessionStream(session){
 }
 
 async function _savedSessionShouldStaySidebarOnly(sid){
+  const state = await _savedSessionSidebarOnlyState(sid);
+  return !!(state&&state.sidebarOnly);
+}
+
+async function _savedSessionSidebarOnlyState(sid){
   if(!sid) return false;
   try{
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
     const session = data&&data.session;
-    return !!(session&&(session.active_stream_id||session.pending_user_message||session.archived));
+    const archived = !!(session&&session.archived);
+    const running = !!(session&&(session.active_stream_id||session.pending_user_message));
+    return {sidebarOnly:archived||running, archived};
   }catch(e){
-    return false;
+    return null;
   }
 }
 
@@ -2479,7 +2486,13 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   const saved=urlSession||savedLocal;
   if(saved){
     try{
-      if(!urlSession&&savedLocal&&await _savedSessionShouldStaySidebarOnly(savedLocal)){
+      const savedSidebarOnlyState=(!urlSession&&savedLocal)
+        ? await _savedSessionSidebarOnlyState(savedLocal)
+        : null;
+      if(savedSidebarOnlyState&&savedSidebarOnlyState.sidebarOnly){
+        if(savedSidebarOnlyState.archived){
+          try{localStorage.removeItem('hermes-webui-session');}catch(_){}
+        }
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
