@@ -464,6 +464,185 @@ function enhanceMarkdownTables(root){
   });
 }
 
+function _sanitizeMarkdownTableCellText(cell){
+  if(!cell) return '';
+  const sortButton=cell.querySelector?cell.querySelector('.markdown-table-sort'):null;
+  if(sortButton){
+    const sortLabel=sortButton.querySelector?sortButton.querySelector('.markdown-table-sort-label'):null;
+    if(sortLabel) return _markdownTableCellText(sortLabel);
+    return _markdownTableCellText(sortButton);
+  }
+  return _markdownTableCellText(cell);
+}
+
+function _markdownTableCopyHtmlEscape(value){
+  return String(value||'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+
+function _markdownTableCopyPayloadForTable(table){
+  if(!table||!table.rows) return null;
+  const rows=Array.from(table.rows||[]);
+  if(!rows.length) return null;
+  let headerRowCount=0;
+  while(headerRowCount<rows.length){
+    const cells=Array.from(rows[headerRowCount].cells||[]);
+    if(!cells.length||!cells.every((cell)=>cell&&cell.tagName==='TH')) break;
+    headerRowCount++;
+  }
+
+  const renderRows=(rowSet)=>rowSet.map((row)=>{
+    const cellTag=(cell)=>String(cell&&cell.tagName?cell.tagName.toLowerCase():'td');
+    const cells=Array.from(row.cells||[])
+      .filter((cell)=>cell&&cell.nodeType===1)
+      .map((cell)=>{
+        const tag=cellTag(cell);
+        const text=_sanitizeMarkdownTableCellText(cell);
+        return `<${tag}>${_markdownTableCopyHtmlEscape(text)}</${tag}>`;
+      })
+      .join('');
+    return `<tr>${cells}</tr>`;
+  }).join('');
+  const headerRows=headerRowCount?renderRows(rows.slice(0, headerRowCount)):'';
+  const bodyRows=renderRows(rows.slice(headerRowCount));
+  const tableSections=[
+    headerRows?`<thead>${headerRows}</thead>`:'',
+    bodyRows?`<tbody>${bodyRows}</tbody>`:'',
+  ].join('');
+
+  const plainRows=rows.map((row)=>{
+    return Array.from(row.cells||[])
+      .map(_sanitizeMarkdownTableCellText)
+      .join('\t');
+  }).join('\n');
+
+  return {html:`<table>${tableSections}</table>`, plain:plainRows};
+}
+
+function _findEnhancedMarkdownTable(node){
+  let current=node&&node.nodeType===3?node.parentElement:node;
+  while(current){
+    if(current.matches&&current.matches('table[data-markdown-table-enhanced]')) return current;
+    current=current.parentElement||current.parentNode;
+  }
+  return null;
+}
+
+function _findMarkdownTableCell(node){
+  let current=node&&node.nodeType===3?node.parentElement:node;
+  while(current){
+    if(current.matches&&current.matches('th,td')) return current;
+    current=current.parentElement||current.parentNode;
+  }
+  return null;
+}
+
+function _markdownTableNodeChildren(node){
+  if(!node) return [];
+  if(node.childNodes&&typeof node.childNodes.length==='number') return Array.from(node.childNodes);
+  if(node.children&&typeof node.children.length==='number') return Array.from(node.children);
+  return [];
+}
+
+function _markdownTableNodeBoundaryLength(node){
+  if(!node) return 0;
+  if(node.nodeType===3) return String(node.textContent||'').length;
+  return _markdownTableNodeChildren(node).length;
+}
+
+function _markdownTableBoundaryWithinCell(container, offset, cell, edge){
+  if(!container||!cell||typeof offset!=='number') return false;
+  const atStart=edge==='start';
+  let current=container;
+  let currentOffset=offset;
+  while(current){
+    const boundaryLength=_markdownTableNodeBoundaryLength(current);
+    if(atStart){
+      if(currentOffset!==0) return false;
+    }else if(currentOffset!==boundaryLength){
+      return false;
+    }
+    if(current===cell) return true;
+    const parent=current.parentElement||current.parentNode;
+    if(!parent) return false;
+    const siblings=_markdownTableNodeChildren(parent);
+    const index=siblings.indexOf(current);
+    if(index===-1) return false;
+    currentOffset=atStart?index:index+1;
+    current=parent;
+  }
+  return false;
+}
+
+function _markdownTableEdgeCell(table, edge){
+  const rows=Array.from(table&&table.rows||[]);
+  if(!rows.length) return null;
+  const row=edge==='start'?rows[0]:rows[rows.length-1];
+  const cells=Array.from(row&&row.cells||[]);
+  if(!cells.length) return null;
+  return edge==='start'?cells[0]:cells[cells.length-1];
+}
+
+function _isFullEnhancedMarkdownTableSelection(range, table){
+  if(!range||!table) return false;
+  const firstCell=_markdownTableEdgeCell(table,'start');
+  const lastCell=_markdownTableEdgeCell(table,'end');
+  if(!firstCell||!lastCell) return false;
+  const startCell=_findMarkdownTableCell(range.startContainer);
+  const endCell=_findMarkdownTableCell(range.endContainer);
+  if(startCell!==firstCell||endCell!==lastCell) return false;
+  return _markdownTableBoundaryWithinCell(range.startContainer, range.startOffset, firstCell, 'start')
+    && _markdownTableBoundaryWithinCell(range.endContainer, range.endOffset, lastCell, 'end');
+}
+
+function _findEnhancedMarkdownTableFromRange(range){
+  if(!range) return null;
+  const found=_findEnhancedMarkdownTable(range.startContainer)
+    || _findEnhancedMarkdownTable(range.endContainer)
+    || _findEnhancedMarkdownTable(range.commonAncestorContainer);
+  if(found) return found;
+  const container=range.commonAncestorContainer&&range.commonAncestorContainer.nodeType===3
+    ? range.commonAncestorContainer.parentElement
+    : range.commonAncestorContainer;
+  if(!container||!container.querySelectorAll||typeof range.intersectsNode!=='function') return null;
+  for(const table of container.querySelectorAll('table[data-markdown-table-enhanced]')){
+    try{
+      if(range.intersectsNode(table)) return table;
+    }catch(_){}
+  }
+  return null;
+}
+
+function _handleMarkdownTableCopy(event){
+  if(!event) return;
+  if(!window.getSelection)return;
+  const selection=window.getSelection();
+  if(!selection||selection.isCollapsed||!selection.rangeCount) return;
+  const range=selection.getRangeAt(0);
+  if(!range) return;
+  const startCell=_findMarkdownTableCell(range.startContainer);
+  const endCell=_findMarkdownTableCell(range.endContainer);
+  if(startCell&&endCell&&startCell===endCell) return;
+  const table=_findEnhancedMarkdownTableFromRange(range);
+  if(!table||!table.matches||!table.matches('table[data-markdown-table-enhanced]')) return;
+  if(!_isFullEnhancedMarkdownTableSelection(range, table)) return;
+  const payload=_markdownTableCopyPayloadForTable(table);
+  if(!payload) return;
+  const clipboardData=event.clipboardData||event.originalEvent&&event.originalEvent.clipboardData;
+  if(!clipboardData||typeof clipboardData.setData!=='function') return;
+  if(typeof event.preventDefault==='function') event.preventDefault();
+  clipboardData.setData('text/html', payload.html);
+  clipboardData.setData('text/plain', payload.plain);
+}
+
+function _wireMarkdownTableCopyHandler(root){
+  if(!root||!root.addEventListener||root.__markdownTableCopyHandlerInstalled) return;
+  root.addEventListener('copy', _handleMarkdownTableCopy);
+  root.__markdownTableCopyHandlerInstalled=true;
+}
+
 function _markdownTableText(value){
   return String(value||'').replace(/\s+/g,' ').trim();
 }
@@ -481,6 +660,7 @@ window.enhanceMarkdownTables=enhanceMarkdownTables;
     const result=baseRenderMessages.apply(this,args);
     const inner=typeof $==='function'?$('msgInner'):document.getElementById('msgInner');
     enhanceMarkdownTables(inner);
+    _wireMarkdownTableCopyHandler(inner);
     return result;
   };
   window.renderMessages._markdownTablesEnhanced=true;
@@ -1141,6 +1321,7 @@ async function send(){
     return;
   }
   let _slashDisplayTextOverride=null;
+  let _pendingMoaConfig=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1210,6 +1391,27 @@ async function send(){
         S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
+      if(_agentCmdName==='moa'){
+        const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
+        if(!S.session){await newSession();await renderSessionList();}
+        if(!_moaArgs){
+          let _moaUsage='/moa <prompt>';
+          try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:_moaUsage,_ts:Date.now()/1000});
+          renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
+        }
+        try{
+          await api('/api/commands/moa/resolve');
+          _slashDisplayTextOverride=text;
+          text=_moaArgs;
+          _pendingMoaConfig=true;
+        }catch(_e){
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:'MoA unavailable: '+(_e&&_e.message||_e),_ts:Date.now()/1000});
+          renderMessages();$('msg').value='';autoResize();hideCmdDropdown();return;
+        }
       }
       const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'
         ? await getBundleCommandMetadata(_parsedCmd.name)
@@ -1396,8 +1598,10 @@ async function send(){
       model_provider:_modelState.model_provider,
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
-      attachments:uploaded.length?uploaded:undefined
+      attachments:uploaded.length?uploaded:undefined,
+      moa_config:_pendingMoaConfig?true:undefined
     })});
+    _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
@@ -2404,6 +2608,38 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return typeof content==='string'?content:String(content||'');
   }
+  function _anchorSceneContentText(part){
+    if(part===undefined||part===null) return '';
+    if(typeof part==='string') return part;
+    if(typeof part!=='object') return String(part||'');
+    return String(part.text||part.content||part.input_text||part.output_text||part.thinking||part.reasoning||part.summary||'');
+  }
+  function _anchorSceneContentVisibleText(part){
+    if(part===undefined||part===null) return '';
+    if(typeof part==='string') return part;
+    if(typeof part!=='object') return String(part||'');
+    const partType=String(part.type||'');
+    if(partType==='thinking'||partType==='reasoning') return '';
+    const contentText=(partType==='text'||partType==='input_text'||partType==='output_text')?part.content:'';
+    return String(part.text||part.input_text||part.output_text||contentText||'');
+  }
+  function _anchorSceneMessageHasContentToolUse(message){
+    return !!(message&&Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use'));
+  }
+  function _anchorSceneFinalAnswerText(message){
+    if(!_anchorSceneMessageHasContentToolUse(message)) return _anchorSceneMessageText(message);
+    const content=Array.isArray(message.content)?message.content:[];
+    let lastToolIndex=-1;
+    for(let i=0;i<content.length;i+=1){
+      const part=content[i];
+      if(part&&typeof part==='object'&&part.type==='tool_use') lastToolIndex=i;
+    }
+    const tailText=content.slice(lastToolIndex+1)
+      .map(part=>_anchorSceneContentVisibleText(part))
+      .filter(text=>_anchorSceneCleanText(text))
+      .join('\n');
+    return _anchorSceneCleanText(tailText)?tailText:'';
+  }
   function _anchorSceneCleanText(value){
     return String(value||'').replace(/\s+/g,' ').trim();
   }
@@ -2438,6 +2674,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     }
     return {};
+  }
+  function _anchorSceneContentTool(part){
+    if(!part||typeof part!=='object') return {};
+    const fn=part.function&&typeof part.function==='object'?part.function:{};
+    return {
+      id:part.id||part.tid||part.tool_call_id||part.tool_use_id||part.call_id,
+      tid:part.tid||part.id||part.tool_call_id||part.tool_use_id||part.call_id,
+      tool_call_id:part.tool_call_id,
+      tool_use_id:part.tool_use_id,
+      call_id:part.call_id,
+      name:part.name||part.tool_name||fn.name||'tool',
+      tool_name:part.tool_name,
+      args:part.args,
+      input:part.input,
+      function:part.function,
+      command:part.command||part.raw_command||part.original_command||part.display_command,
+      preview:part.preview||part.summary,
+      snippet:part.snippet||part.result||part.output,
+      result:part.result,
+      output:part.output,
+      is_error:part.is_error,
+      error:part.error,
+      duration:part.duration,
+      started_at:part.started_at,
+    };
   }
   function _anchorSceneStringPayload(value){
     if(value===undefined||value===null) return '';
@@ -2541,11 +2802,276 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     return row;
   }
+  function _anchorSceneToolRowName(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    return String(tool.name||payload.name||'tool').trim().toLowerCase();
+  }
+  function _anchorSceneToolRowId(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    return String(
+      (row&&row.tool_call_id)||
+      tool.id||
+      tool.tid||
+      tool.tool_call_id||
+      tool.tool_use_id||
+      tool.call_id||
+      payload.tid||
+      payload.id||
+      ''
+    ).trim();
+  }
+  function _anchorSceneToolRowsHaveNonConflictingIds(existing, incoming){
+    const existingId=_anchorSceneToolRowId(existing);
+    const incomingId=_anchorSceneToolRowId(incoming);
+    return !existingId||!incomingId||existingId===incomingId;
+  }
+  function _anchorSceneToolRowsHaveDifferentExplicitIds(existing, incoming){
+    const existingId=_anchorSceneToolRowId(existing);
+    const incomingId=_anchorSceneToolRowId(incoming);
+    return !!existingId&&!!incomingId&&existingId!==incomingId;
+  }
+  function _anchorSceneToolRowStartedAt(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    const value=tool.started_at!==undefined&&tool.started_at!==null&&tool.started_at!==''?tool.started_at:payload.started_at;
+    return value!==undefined&&value!==null&&value!==''?String(value):'';
+  }
+  function _anchorSceneToolRowsHaveSameStartedAt(existing, incoming){
+    const existingStartedAt=_anchorSceneToolRowStartedAt(existing);
+    const incomingStartedAt=_anchorSceneToolRowStartedAt(incoming);
+    return !!existingStartedAt&&!!incomingStartedAt&&existingStartedAt===incomingStartedAt;
+  }
+  function _anchorSceneToolRowBodyText(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    for(const value of [tool.snippet,payload.snippet,tool.output,payload.output,tool.result,payload.result,tool.preview,payload.preview]){
+      const text=_anchorSceneStringPayload(value).trim();
+      if(text) return text;
+    }
+    return '';
+  }
+  function _anchorSceneToolRowsHaveCompatibleBody(existing, incoming){
+    const existingBody=_anchorSceneToolRowBodyText(existing);
+    const incomingBody=_anchorSceneToolRowBodyText(incoming);
+    return !!existingBody&&!!incomingBody&&(
+      existingBody===incomingBody||
+      existingBody.startsWith(incomingBody)||
+      incomingBody.startsWith(existingBody)
+    );
+  }
+  function _anchorSceneToolRowsHaveCompatibleNames(existing, incoming){
+    const existingName=_anchorSceneToolRowName(existing);
+    const incomingName=_anchorSceneToolRowName(incoming);
+    return !existingName||!incomingName||existingName==='tool'||incomingName==='tool'||existingName===incomingName;
+  }
+  function _anchorSceneToolRowArgs(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    const args=(tool.args&&typeof tool.args==='object'&&!Array.isArray(tool.args))?tool.args:payload.args;
+    return args&&typeof args==='object'&&!Array.isArray(args)?args:null;
+  }
+  function _anchorSceneObjectContainsSubset(base, subset){
+    if(!base||!subset||typeof base!=='object'||typeof subset!=='object') return false;
+    const stableStringify=(candidate)=>{
+      const normalize=(value)=>{
+        if(!value||typeof value!=='object') return value;
+        if(Array.isArray(value)) return value.map(normalize);
+        const normalized={};
+        Object.keys(value).sort().forEach((key)=>{normalized[key]=normalize(value[key]);});
+        return normalized;
+      };
+      try{return JSON.stringify(normalize(candidate));}catch(_){return JSON.stringify(candidate);}
+    };
+    for(const [key,value] of Object.entries(subset)){
+      if(!Object.prototype.hasOwnProperty.call(base,key)) return false;
+      if(stableStringify(base[key])!==stableStringify(value)) return false;
+    }
+    return true;
+  }
+  function _anchorSceneToolRowsHaveCompatibleInvocation(existing, incoming){
+    const existingTool=existing&&existing.tool&&typeof existing.tool==='object'?existing.tool:{};
+    const incomingTool=incoming&&incoming.tool&&typeof incoming.tool==='object'?incoming.tool:{};
+    const existingPayload=existing&&existing.payload&&typeof existing.payload==='object'?existing.payload:{};
+    const incomingPayload=incoming&&incoming.payload&&typeof incoming.payload==='object'?incoming.payload:{};
+    const existingCommand=_anchorSceneStringPayload(existingTool.command||existingPayload.command).trim();
+    const incomingCommand=_anchorSceneStringPayload(incomingTool.command||incomingPayload.command).trim();
+    if(existingCommand&&incomingCommand) return existingCommand===incomingCommand;
+    const existingArgs=_anchorSceneToolRowArgs(existing);
+    const incomingArgs=_anchorSceneToolRowArgs(incoming);
+    if(!existingArgs||!incomingArgs||!Object.keys(existingArgs).length||!Object.keys(incomingArgs).length) return false;
+    return _anchorSceneObjectContainsSubset(existingArgs,incomingArgs)||_anchorSceneObjectContainsSubset(incomingArgs,existingArgs);
+  }
+  function _anchorSceneToolRowHasInvocationEvidence(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    const command=_anchorSceneStringPayload(tool.command||payload.command).trim();
+    const args=_anchorSceneToolRowArgs(row);
+    return !!command||!!(args&&Object.keys(args).length);
+  }
+  function _anchorSceneToolRowsCanNameMatch(existing, incoming){
+    if(!_anchorSceneToolRowsHaveCompatibleNames(existing,incoming)) return false;
+    if(_anchorSceneToolRowHasInvocationEvidence(existing)&&_anchorSceneToolRowHasInvocationEvidence(incoming)){
+      return _anchorSceneToolRowsHaveCompatibleInvocation(existing,incoming);
+    }
+    return true;
+  }
+  function _anchorSceneMatchingContentToolRow(contentToolRows, incomingRow, ordinal, usedRows, incomingTotal, idFlexibleRows){
+    if(!Array.isArray(contentToolRows)||!incomingRow) return null;
+    const incomingTid=incomingRow.tool_call_id||(incomingRow.tool&&incomingRow.tool.id);
+    for(const row of contentToolRows){
+      if(!row||usedRows.has(row)) continue;
+      const tid=row.tool_call_id||(row.tool&&row.tool.id);
+      if(tid&&incomingTid&&tid===incomingTid) return row;
+    }
+    if(contentToolRows.length===1&&Number(incomingTotal)===1){
+      const onlyRow=contentToolRows[0];
+      if(onlyRow&&!usedRows.has(onlyRow)&&_anchorSceneToolRowsCanNameMatch(onlyRow,incomingRow)) return onlyRow;
+    }
+    const availableRows=contentToolRows.filter(row=>row&&!usedRows.has(row));
+    if(availableRows.length===1){
+      if(Number(incomingTotal)===1&&_anchorSceneToolRowsCanNameMatch(availableRows[0],incomingRow)) return availableRows[0];
+      if(
+        _anchorSceneToolRowsHaveCompatibleNames(availableRows[0],incomingRow)&&
+        _anchorSceneToolRowsHaveCompatibleInvocation(availableRows[0],incomingRow)
+      ) return availableRows[0];
+    }
+    const reusableRows=contentToolRows.filter(row=>row&&usedRows.has(row));
+    if(
+      reusableRows.length===1&&
+      Number(incomingTotal)===1&&
+      (
+        (
+          _anchorSceneToolRowId(reusableRows[0])&&
+          _anchorSceneToolRowId(incomingRow)&&
+          _anchorSceneToolRowId(reusableRows[0])===_anchorSceneToolRowId(incomingRow)
+        )||
+        (
+          idFlexibleRows&&
+          idFlexibleRows.has(reusableRows[0])&&
+          _anchorSceneToolRowsHaveSameStartedAt(reusableRows[0],incomingRow)&&
+          _anchorSceneToolRowsHaveCompatibleBody(reusableRows[0],incomingRow)
+        )
+      )&&
+      _anchorSceneToolRowsHaveCompatibleNames(reusableRows[0],incomingRow)&&
+      _anchorSceneToolRowsHaveCompatibleInvocation(reusableRows[0],incomingRow)
+    ) return reusableRows[0];
+    for(const row of contentToolRows){
+      if(!row||usedRows.has(row)) continue;
+      const tid=row.tool_call_id||(row.tool&&row.tool.id);
+      if(!tid&&!incomingTid&&_anchorSceneToolRowsCanNameMatch(row,incomingRow)) return row;
+    }
+    return null;
+  }
   function _anchorSceneMessageReasoningText(message){
     if(!message||typeof message!=='object') return '';
     return String(message.reasoning||message._reasoning||message.reasoning_content||message.thinking||'');
   }
-  function _anchorSceneRowsByMessageIndex(messages, turnStart, lastAsstIndex){
+  function _anchorSceneRowsFromContentParts(message, messageIndex, options){
+    if(!_anchorSceneMessageHasContentToolUse(message)) return null;
+    options=(options&&typeof options==='object')?options:{};
+    const isFinalMessage=!!options.isFinalMessage;
+    const rows=[];
+    const content=Array.isArray(message.content)?message.content:[];
+    let lastToolIndex=-1;
+    for(let i=0;i<content.length;i+=1){
+      const part=content[i];
+      if(part&&typeof part==='object'&&part.type==='tool_use') lastToolIndex=i;
+    }
+    for(let i=0;i<content.length;i+=1){
+      const part=content[i];
+      if(!part||typeof part!=='object'){
+        if(isFinalMessage&&i>lastToolIndex) continue;
+        const text=_anchorSceneContentText(part);
+        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneProseRow(text,rows.length,messageIndex));
+        continue;
+      }
+      if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
+        if(isFinalMessage&&i>lastToolIndex&&_anchorSceneContentVisibleText(part)) continue;
+        const text=_anchorSceneContentText(part);
+        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneProseRow(text,rows.length,messageIndex));
+        continue;
+      }
+      if(part.type==='thinking'||part.type==='reasoning'){
+        const text=_anchorSceneContentText(part);
+        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneThinkingRow(text,rows.length,messageIndex));
+        continue;
+      }
+      if(part.type==='tool_use'){
+        rows.push(_anchorSceneToolRowFromCall(_anchorSceneContentTool(part),rows.length,messageIndex));
+      }
+    }
+    return rows;
+  }
+  // #4622: a settled tool row built from messages[].tool_calls (state.db/sidecar)
+  // can lack the result body — terminal stdout, or the diff/output that a
+  // patch/edit card renders — because the persisted row carries only a short
+  // preview (or, on a cold/paginated load, nothing). The full body lives on the
+  // live S.toolCalls entry at settle time. When a settled row and a live call
+  // match by tool id, restore the missing body fields from the live call onto
+  // the settled row's tool+payload (only when the settled value is empty — never
+  // clobber a genuine persisted body), so the rebuilt card shows full output +
+  // the Show-more expander + the rendered diff. Returns true if it enriched.
+  function _enrichSettledToolRowBodyFromLive(row, live){
+    if(!row||typeof row!=='object'||!live||typeof live!=='object') return false;
+    const tool=(row.tool&&typeof row.tool==='object')?row.tool:(row.tool={});
+    const payload=(row.payload&&typeof row.payload==='object')?row.payload:(row.payload={});
+    let enriched=false;
+    const _empty=v=>v===undefined||v===null||v==='';
+    // Result body: _anchorSceneToolCallFromRow renders tool.snippet||payload.snippet
+    // (||payload.result||payload.output) as the card output + diff source, so
+    // restore the snippet onto both tool+payload when the settled row has none.
+    const liveSnippet=_anchorSceneStringPayload(live.snippet||live.result||live.output);
+    // Restore the live body when the settled snippet is missing OR is a bounded
+    // preview of the live one. The backend persists a capped preview
+    // (_TOOL_RESULT_SNIPPET_MAX = 4000 chars in api/streaming.py), so a long
+    // terminal/tool output settles to that 4000-char prefix, not to empty —
+    // #4622's actual symptom. Treat a settled snippet as restorable when the
+    // live snippet is strictly longer AND the settled value is a prefix of it
+    // AND the settled value is at/over the persistence cap (i.e. it's a
+    // truncated preview, not a genuinely short real value we must not clobber).
+    const _SETTLED_SNIPPET_CAP=4000;
+    const _isBoundedPreview=(settled,full)=>(
+      typeof settled==='string'&&typeof full==='string'&&
+      full.length>settled.length&&settled.length>=_SETTLED_SNIPPET_CAP&&
+      full.startsWith(settled)
+    );
+    const _settledSnippet=(!_empty(tool.snippet)?tool.snippet:(!_empty(payload.snippet)?payload.snippet:''));
+    const _snippetRestorable=(_empty(tool.snippet)&&_empty(payload.snippet))||_isBoundedPreview(_settledSnippet,liveSnippet);
+    if(liveSnippet&&_snippetRestorable){
+      tool.snippet=liveSnippet; payload.snippet=liveSnippet; enriched=true;
+    }
+    // Command (shell detail-lead) + args (diff/input reconstruction, the "Full" tab).
+    const liveCommand=_anchorSceneStringPayload(live.command||live.raw_command);
+    if(liveCommand&&_empty(tool.command)&&_empty(payload.command)){
+      tool.command=liveCommand; payload.command=liveCommand; enriched=true;
+    }
+    if(!_empty(live.started_at)&&_empty(tool.started_at)&&_empty(payload.started_at)){
+      tool.started_at=live.started_at; payload.started_at=live.started_at; enriched=true;
+    }
+    const liveArgs=_anchorSceneToolArgs(live);
+    if(liveArgs&&typeof liveArgs==='object'&&Object.keys(liveArgs).length){
+      const mergeMissingArgs=(existing)=>{
+        const base=(existing&&typeof existing==='object'&&!Array.isArray(existing))?{...existing}:{};
+        let changed=!(existing&&typeof existing==='object'&&!Array.isArray(existing));
+        for(const [key,value] of Object.entries(liveArgs)){
+          if(!Object.prototype.hasOwnProperty.call(base,key)){
+            base[key]=value;
+            changed=true;
+          }
+        }
+        return changed?base:existing;
+      };
+      const nextToolArgs=mergeMissingArgs(tool.args);
+      const nextPayloadArgs=mergeMissingArgs(payload.args);
+      if(nextToolArgs!==tool.args){ tool.args=nextToolArgs; enriched=true; }
+      if(nextPayloadArgs!==payload.args){ payload.args=nextPayloadArgs; enriched=true; }
+    }
+    return enriched;
+  }
+  function _anchorSceneRowsByMessageIndex(messages, turnStart, lastAsstIndex, options){
+    options=(options&&typeof options==='object')?options:{};
     const byIdx=new Map();
     const add=(idx,row)=>{
       if(!byIdx.has(idx)) byIdx.set(idx,[]);
@@ -2561,12 +3087,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     let encounter=0;
-    for(let idx=turnStart+1;idx<lastAsstIndex;idx+=1){
+    const endIndex=options&&options.includeFinal?lastAsstIndex+1:lastAsstIndex;
+    for(let idx=turnStart+1;idx<endIndex;idx+=1){
       const message=messages[idx];
       if(!message||message.role!=='assistant') continue;
       const pool=[];
       const text=_anchorSceneMessageText(message);
-      if(_anchorSceneCleanText(text)){
+      const contentRows=_anchorSceneRowsFromContentParts(message,idx,{isFinalMessage:idx===lastAsstIndex});
+      const hasOrderedContentRows=Array.isArray(contentRows)&&contentRows.length>0;
+      const contentToolRows=[];
+      const usedContentToolRows=new Set();
+      const idFlexibleContentToolRows=new Set();
+      const seenToolIds=new Set();
+      const rowByToolId=new Map();
+      if(hasOrderedContentRows){
+        for(const row of contentRows){
+          pool.push({...row,_phase:1,_encounter:encounter++,_fromContent:true});
+          const tid=row.tool_call_id||(row.tool&&row.tool.id);
+          if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
+          if(row.role==='tool') contentToolRows.push(row);
+        }
+      }else if(_anchorSceneCleanText(text)){
         pool.push({..._anchorSceneProseRow(text,0,idx),_phase:2,_encounter:encounter++});
       }
       const reasoning=_anchorSceneMessageReasoningText(message);
@@ -2576,30 +3117,77 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const messageTools=[];
       if(Array.isArray(message.tool_calls)) messageTools.push(...message.tool_calls);
       if(Array.isArray(message._partial_tool_calls)) messageTools.push(...message._partial_tool_calls);
-      const seenToolIds=new Set();
+      let messageToolOrdinal=0;
       for(const tool of messageTools){
         const row=_anchorSceneToolRowFromCall(tool,0,idx);
-        pool.push({...row,_phase:1,_encounter:encounter++});
         const tid=row.tool_call_id||(row.tool&&row.tool.id);
-        if(tid) seenToolIds.add(tid);
+        if(tid&&seenToolIds.has(tid)){
+          const existing=rowByToolId.get(tid);
+          if(existing){
+            _enrichSettledToolRowBodyFromLive(existing, tool);
+            if(contentToolRows.includes(existing)) usedContentToolRows.add(existing);
+          }
+          messageToolOrdinal+=1;
+          continue;
+        }
+        const contentMatch=_anchorSceneMatchingContentToolRow(contentToolRows,row,messageToolOrdinal,usedContentToolRows,messageTools.length,idFlexibleContentToolRows);
+        if(contentMatch){
+          if(_anchorSceneToolRowsHaveDifferentExplicitIds(contentMatch,row)) idFlexibleContentToolRows.add(contentMatch);
+          _enrichSettledToolRowBodyFromLive(contentMatch, tool);
+          if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,contentMatch); }
+          usedContentToolRows.add(contentMatch);
+          messageToolOrdinal+=1;
+          continue;
+        }
+        pool.push({...row,_phase:1,_encounter:encounter++});
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
+        messageToolOrdinal+=1;
       }
-      // Merge S.toolCalls for this index, dedup by tool id
+      // Merge S.toolCalls for this index, dedup by tool id. When a live call
+      // matches a settled row already in the pool, don't just skip it —
+      // restore any result body the settled row is missing (#4622): the live
+      // S.toolCalls entry carries the full terminal output / patch diff that the
+      // persisted state.db row may have dropped to a short preview or nothing.
+      let liveToolOrdinal=0;
       for(const tool of (toolsByIdx.get(idx)||[])){
         if(!tool||typeof tool!=='object') continue;
         const toolIdx=Number(tool.assistant_msg_idx);
         if(!Number.isFinite(toolIdx)||toolIdx!==idx) continue;
         const row=_anchorSceneToolRowFromCall(tool,0,idx);
         const tid=row.tool_call_id||(row.tool&&row.tool.id);
-        if(tid&&seenToolIds.has(tid)) continue;
-        if(tid) seenToolIds.add(tid);
+        if(tid&&seenToolIds.has(tid)){
+          const existing=rowByToolId.get(tid);
+          if(existing){
+            _enrichSettledToolRowBodyFromLive(existing, tool);
+            if(contentToolRows.includes(existing)) usedContentToolRows.add(existing);
+          }
+          liveToolOrdinal+=1;
+          continue;
+        }
+        const liveTools=toolsByIdx.get(idx)||[];
+        const contentMatch=_anchorSceneMatchingContentToolRow(contentToolRows,row,liveToolOrdinal,usedContentToolRows,liveTools.length,idFlexibleContentToolRows);
+        if(contentMatch){
+          if(_anchorSceneToolRowsHaveDifferentExplicitIds(contentMatch,row)) idFlexibleContentToolRows.add(contentMatch);
+          _enrichSettledToolRowBodyFromLive(contentMatch, tool);
+          if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,contentMatch); }
+          usedContentToolRows.add(contentMatch);
+          liveToolOrdinal+=1;
+          continue;
+        }
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
         pool.push({...row,_phase:1,_encounter:encounter++});
+        liveToolOrdinal+=1;
       }
-      // Stable sort by (phase, started_at, encounter)
+      // Stable sort by (phase, started_at, encounter). Once a message has an
+      // ordered content[] scene, preserve that content bucket order exactly.
+      const useStartedAt=!hasOrderedContentRows;
       pool.sort((a,b)=>{
         if(a._phase!==b._phase) return a._phase-b._phase;
-        const aTime=(a.tool&&a.tool.started_at!=null)?a.tool.started_at:Infinity;
-        const bTime=(b.tool&&b.tool.started_at!=null)?b.tool.started_at:Infinity;
-        if(aTime!==bTime) return aTime-bTime;
+        if(useStartedAt){
+          const aTime=(a.tool&&a.tool.started_at!=null)?a.tool.started_at:Infinity;
+          const bTime=(b.tool&&b.tool.started_at!=null)?b.tool.started_at:Infinity;
+          if(aTime!==bTime) return aTime-bTime;
+        }
         return a._encounter-b._encounter;
       });
       // Emit with sequential order_index values, strip temp props.
@@ -2609,7 +3197,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // (no tool id) at the same message index don't collide on the same row_id
       // and get silently deduped by _completeSettledAnchorSceneForTurn().
       for(const row of pool){
-        const {_phase,_encounter,...clean}=row;
+        const {_phase,_encounter,_fromContent,...clean}=row;
         const oi=byIdx.has(idx)?byIdx.get(idx).length:0;
         clean.order_index=oi;
         clean.seq=oi;
@@ -2682,6 +3270,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(lastAsst&&lastAsst._turnDuration!==undefined&&lastAsst._turnDuration!==null) return lastAsst._turnDuration;
     if(base&&base.turn_duration!==undefined&&base.turn_duration!==null) return base.turn_duration;
     const session=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
+    // The `pending_started_at` fallback below is the START of an IN-FLIGHT turn.
+    // For a SETTLED turn that recorded no live duration, computing
+    // `now - pending_started_at` is wrong: pending_started_at is either stale
+    // (left over from an earlier turn / a session that sat idle) or belongs to a
+    // different, still-pending turn — which rendered a bogus "Processed 15h 32m"
+    // on fresh conversations (#4930). Only use it while a turn is actually in
+    // flight; otherwise show no duration rather than a fabricated one.
+    const turnInFlight=!!(session&&(session.active_stream_id||session.pending_user_message));
+    if(!turnInFlight) return undefined;
     const candidates=[
       session&&session.pending_started_at,
       session&&session.active_started_at,
@@ -2708,10 +3305,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         break;
       }
     }
-    const finalAnswer=_anchorSceneMessageText(lastAsst);
-    const finalKey=_anchorSceneTextKey(finalAnswer);
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
-    const messageRows=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex);
+    const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
+    const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
+      ? messageFinalAnswer
+      : (typeof base.final_answer==='string'?base.final_answer:'');
+    const finalKey=_anchorSceneTextKey(finalAnswer);
+    const messageRows=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true});
     const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);
     const rows=[];
     const seen=new Set();
@@ -2735,7 +3335,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(row&&row.role==='terminal') continue;
       pushRow(row);
     }
-    for(let idx=turnStart+1;idx<lastAsstIndex;idx+=1){
+    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
       const bucket=messageRows.get(idx)||[];
       for(const row of bucket) pushRow(row);
     }
@@ -2753,7 +3353,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           .map(m=>_anchorSceneMessageRef(m)),
       },
       lifecycle:(base.lifecycle&&typeof base.lifecycle==='object')?{...base.lifecycle}:{},
-      final_answer:_anchorSceneCleanText(finalAnswer)?finalAnswer:(typeof base.final_answer==='string'?base.final_answer:''),
+      final_answer:_anchorSceneCleanText(finalAnswer)?finalAnswer:'',
       final_message_ref:_anchorSceneMessageRef(lastAsst),
       turn_duration:_anchorSceneTurnDurationForSettlement(lastAsst,base),
       terminal_state:base.terminal_state||((base.lifecycle&&base.lifecycle.terminal_state)||null),
@@ -4404,6 +5004,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession){
           S.activeStreamId=null;
         }
+        let lastAsst=null;
         if(isActiveSession){
           // Capture previous session totals BEFORE overwriting S.session with the new
           // cumulative values from the done event. prevIn/prevOut are the totals as of
@@ -4433,7 +5034,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
-          const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
+          lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
           // Persist reasoning trace for Worklog Thinking Cards; normal transcript
           // rendering keeps provider reasoning out of the final answer.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
@@ -4557,6 +5158,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // TTS auto-read: speak the last assistant response if enabled (#499)
           if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
         }
+        if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
+          lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
+        }
         if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
           const _goalNext=_pendingGoalContinuation;
           _pendingGoalContinuation=null;
@@ -4579,7 +5183,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // If the user watched the whole stream, _wasEverHidden stays false and
         // the notification is suppressed (matches Slack/Discord/Gmail/Claude).
         const _wasEverBackgrounded=_shouldForceCompletionNotification(activeSid, streamId);
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        const _completionPreview=_completionNotificationPreviewText(lastAsst,{
+          sessionId:completedSid,
+          liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
+        });
+        sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -4938,22 +5546,35 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
-      // Fetch latest session from server to get accurate message list (includes cancel status)
-      // This ensures messages stay in sync with server, fixing race condition where local
-      // "*Task cancelled.*" message gets lost when done event overwrites S.messages
+      const _applyCancelSessionPayload=(sessionPayload)=>{
+        if(!sessionPayload||typeof sessionPayload!=='object'||!S.session||S.session.session_id!==activeSid) return false;
+        // Belt-and-suspenders: the embedded cancel snapshot must be for THIS session.
+        // The GET path guarantees it via the URL; the embedded path via the stream→session
+        // binding — but reject a mismatched id so a stray payload can't overwrite the view.
+        if(sessionPayload.session_id&&sessionPayload.session_id!==activeSid) return false;
+        S.session=sessionPayload;
+        const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
+        _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
+        S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+        if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
+        clearLiveToolCards();if(!assistantText)removeThinking();
+        _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
+        renderMessages({preserveScroll:true});
+        return true;
+      };
+      // Prefer the canonical session snapshot embedded in the terminal cancel event.
+      // It includes _partial reasoning/tool rows captured by cancel_stream(), avoiding
+      // a second GET race where the visible cancelled work briefly collapses to only
+      // the fallback "Task cancelled" marker (#4076).
+      const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;
       (async()=>{
         try{
+          if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
+          // Fetch latest session from server to get accurate message list (includes cancel status)
+          // This ensures messages stay in sync with server, fixing race condition where local
+          // "*Task cancelled.*" message gets lost when done event overwrites S.messages
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
-          if(data&&data.session&&S.session&&S.session.session_id===activeSid){
-            S.session=data.session;
-            const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);
-            _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
-            S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
-            if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-            clearLiveToolCards();if(!assistantText)removeThinking();
-            _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
-            renderMessages({preserveScroll:true});
-          }
+          if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
@@ -5302,6 +5923,46 @@ function hideApprovalCard(force=false) {
 let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
+let _approvalResponding = null;
+
+const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
+
+// Dismissed approvals are namespaced by session so that two sessions carrying
+// the SAME approval_id (e.g. a gateway/run source that reuses externally
+// supplied IDs across sessions) can't have a dismissal in one session hide the
+// other's still-pending approval. Stored value is "<sid>\u0000<approval_id>".
+function _approvalDismissKey(sid, approvalId) {
+  if (!approvalId) return '';
+  return String(sid || '') + '\u0000' + String(approvalId);
+}
+
+function _getDismissedApprovals() {
+  try { return JSON.parse(localStorage.getItem(_DISMISSED_APPROVALS_KEY) || '[]'); }
+  catch (_) { return []; }
+}
+
+function _isApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return false;
+  return _getDismissedApprovals().includes(key);
+}
+
+function _markApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return;
+  const set = _getDismissedApprovals().filter(k => k !== key);
+  set.push(key);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set.slice(-100))); }
+  catch (_) {}
+}
+
+function _unmarkApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return;
+  const set = _getDismissedApprovals().filter(k => k !== key);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set)); }
+  catch (_) {}
+}
 
 function _promptActiveSessionId() {
   return (S.session && S.session.session_id) || null;
@@ -5351,6 +6012,27 @@ function _renderPendingApprovalForActiveSession() {
   if (entry) showApprovalCard(entry.pending, entry.pendingCount);
 }
 
+function _approvalResponseMatches(sid, approvalId) {
+  return !!(
+    _approvalResponding &&
+    _approvalResponding.sid === sid &&
+    (_approvalResponding.approvalId || null) === (approvalId || null)
+  );
+}
+
+function _setApprovalControlsDisabled(choice, disabled) {
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+    const b = $(id);
+    if (!b) return;
+    b.disabled = !!disabled;
+    if (disabled && choice && b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) {
+      b.classList.add("loading");
+    } else {
+      b.classList.remove("loading");
+    }
+  });
+}
+
 function showApprovalForSession(sid, pending, pendingCount) {
   if (!pending) return;
   pending._session_id = sid;
@@ -5360,6 +6042,7 @@ function showApprovalForSession(sid, pending, pendingCount) {
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
+  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
@@ -5388,10 +6071,11 @@ function showApprovalCard(pending, pendingCount) {
     // approval's collapsed state, which would hide its command + action buttons. (#3515)
     card.classList.remove("collapsed");
   }
-  // Re-enable buttons in case a previous approval disabled them
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
-    const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
-  });
+  const responding = _approvalResponseMatches(sid, _approvalCurrentId);
+  _setApprovalControlsDisabled(
+    responding ? _approvalResponding.choice : null,
+    responding,
+  );
   card.classList.add("visible");
   _syncApprovalCollapseButton(card);
   _syncApprovalTranscriptSpace(card, {immediate: true});
@@ -5401,6 +6085,13 @@ function showApprovalCard(pending, pendingCount) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
   if (typeof syncTopbar === 'function') syncTopbar();
+}
+
+function dismissApprovalCard() {
+  const sid = _approvalSessionId;
+  if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
+  hideApprovalCard(true);
+  if (sid) _clearApprovalPendingForSession(sid);
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -5453,6 +6144,14 @@ function _syncApprovalTranscriptSpace(card, opts) {
   setTimeout(measure, 420);
 }
 
+function _restoreFailedApprovalResponse(sid, errMsg) {
+  _approvalResponding = null;
+  _setApprovalControlsDisabled(null, false);
+  if (_approvalPromptBelongsToActiveSession(sid)) _renderPendingApprovalForActiveSession();
+  if (typeof showToast === "function") showToast(errMsg, 5000);
+  if (typeof setStatus === "function") setStatus(errMsg);
+}
+
 function toggleApprovalCardCollapsed(forceCollapsed) {
   const card = $("approvalCard");
   if (!card) return;
@@ -5466,21 +6165,56 @@ async function respondApproval(choice) {
   const sid = _approvalSessionId || (S.session && S.session.session_id);
   if (!sid) return;
   const approvalId = _approvalCurrentId;
-  // Disable all buttons immediately to prevent double-submit
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
-    const b = $(id);
-    if (b) { b.disabled = true; if (b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) b.classList.add("loading"); }
-  });
-  _approvalSessionId = null;
-  _approvalCurrentId = null;
-  _clearApprovalPendingForSession(sid);
-  hideApprovalCard(true);
+  if (_approvalResponseMatches(sid, approvalId)) return;
+  _unmarkApprovalDismissed(sid, approvalId);
+  _approvalResponding = {sid, approvalId: approvalId || null, choice};
+  _setApprovalControlsDisabled(choice, true);
   try {
-    await api("/api/approval/respond", {
+    const result = await api("/api/approval/respond", {
       method: "POST",
       body: JSON.stringify({ session_id: sid, choice, approval_id: approvalId })
     });
-  } catch(e) { setStatus(t("approval_responding") + " " + e.message); }
+    if (result && result.ok) {
+      _approvalResponding = null;
+      const pendingEntry = _approvalPendingBySession.get(sid);
+      const samePending = !!(pendingEntry && pendingEntry.pending && (pendingEntry.pending.approval_id || null) === (approvalId || null));
+      // `stale_cleared` means the server found nothing pending for this session
+      // (the approval already resolved or its stream ended while the card was
+      // up). The orphan card must be cleared unconditionally so it can never
+      // get stuck — even if the displayed id has since drifted. (#4948 local
+      // variant: previously surfaced as a stuck "Approval response not
+      // accepted." toast.)
+      if (result.stale_cleared || (_approvalSessionId === sid && _approvalCurrentId === approvalId)) {
+        _approvalSessionId = null;
+        _approvalCurrentId = null;
+        hideApprovalCard(true);
+      }
+      if (samePending || result.stale_cleared) _clearApprovalPendingForSession(sid);
+      // Hardening for the narrow stale-clear race: a brand-new approval could
+      // have been parked server-side after the server's empty-check but before
+      // we processed this stale response. The unconditional clear above would
+      // hide that fresh card. Re-query the authoritative server pending state
+      // (same endpoint the fallback poll uses) so any approval that arrived in
+      // the window re-surfaces immediately instead of waiting for the next
+      // SSE/poll tick. Best-effort; poll/SSE remain the backstop. (Opus review
+      // nit on the #4948 fix.)
+      if (result.stale_cleared) {
+        api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast: false})
+          .then(data => {
+            if (data && data.pending && _approvalPromptBelongsToActiveSession(sid)) {
+              showApprovalForSession(sid, data.pending, data.pending_count || 1);
+            }
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+    const errMsg = (result && result.error) || "Approval response not accepted.";
+    _restoreFailedApprovalResponse(sid, errMsg);
+  } catch(e) {
+    const errMsg = (e && e.message) || (t("approval_responding") + " failed");
+    _restoreFailedApprovalResponse(sid, errMsg);
+  }
 }
 
 function startApprovalPolling(sid) {
@@ -5519,7 +6253,10 @@ function _startApprovalFallbackPoll(sid) {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
+        const _resolvedEntry = _approvalPendingBySession.get(sid);
         _clearApprovalPendingForSession(sid);
+        const _resolvedId = _resolvedEntry && _resolvedEntry.pending && _resolvedEntry.pending.approval_id;
+        if (_resolvedId) _unmarkApprovalDismissed(sid, _resolvedId);
         _hideApprovalCardIfOwner(sid);
         if (!S.busy) {
           stopApprovalPollingForSession(sid);
@@ -6359,6 +7096,36 @@ function stopClarifyPolling() {
 }
 
 // ── Notifications and Sound ──────────────────────────────────────────────────
+
+function _completionNotificationPreviewText(lastAssistantMessage, options){
+  const opts=(options&&typeof options==='object')?options:{};
+  const sessionId=String(opts.sessionId||'').trim();
+  let text='';
+  if(lastAssistantMessage&&typeof lastAssistantMessage==='object'){
+    if(typeof _assistantTurnAnchorSettledFinalAnswer==='function'){
+      const anchorFinal=_assistantTurnAnchorSettledFinalAnswer(
+        lastAssistantMessage,
+        lastAssistantMessage.content,
+        {session_id:sessionId||undefined}
+      );
+      if(anchorFinal!==null&&anchorFinal!==undefined) text=String(anchorFinal||'').trim();
+    }
+    if(!text&&typeof msgContent==='function') text=String(msgContent(lastAssistantMessage)||'').trim();
+    if(!text){
+      let raw=lastAssistantMessage.content||'';
+      if(Array.isArray(raw)) raw=raw.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('').trim();
+      text=String(raw||'').trim();
+    }
+    if(text&&typeof _extractInlineThinkingFromContent==='function'){
+      const split=_extractInlineThinkingFromContent(text, lastAssistantMessage.reasoning, {streaming:false});
+      if(split&&typeof split.content==='string') text=split.content.trim();
+    }
+  }
+  if(!text&&typeof opts.liveDisplayText==='string') text=opts.liveDisplayText.trim();
+  if(!text) return '';
+  const normalized=text.replace(/\s+/g,' ').trim();
+  return normalized.length>100?`${normalized.slice(0,100)}…`:normalized;
+}
 
 function playNotificationSound(){
   if(!window._soundEnabled) return;

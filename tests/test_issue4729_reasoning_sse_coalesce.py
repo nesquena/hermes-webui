@@ -16,6 +16,7 @@ These are source-structure assertions on the on_reasoning closure in api/streami
 coalescing contract can't silently regress to the drop-based version.
 """
 import pathlib
+import re
 
 REPO = pathlib.Path(__file__).parent.parent
 STREAMING = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -96,9 +97,10 @@ def test_reasoning_buffer_flushed_at_every_boundary():
     # terminal catch-all: flush right after the agent run returns, AND a guaranteed-exit
     # flush in the inner finally so exception / retry paths (which bypass the post-run
     # flush) still emit the tail before the outer apperror.
-    assert "persist_user_message=msg_text,\n            )\n            # #4729" in STREAMING, (
-        "must flush after agent.run_conversation() returns (success path, before done)"
-    )
+    assert re.search(
+        r"agent\.run_conversation\(\*\*_run_conversation_kwargs\)\n\s*# #4729",
+        STREAMING,
+    ), "must flush after agent.run_conversation() returns (success path, before done)"
     # the inner finally must also flush (covers exception/retry exits)
     fin = STREAMING[STREAMING.index("        finally:\n            # #4729"):]
     fin = fin[:700]

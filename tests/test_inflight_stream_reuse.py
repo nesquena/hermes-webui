@@ -951,8 +951,10 @@ def test_merge_inflight_tail_preserves_all_segmented_live_progress():
     groups whose burst ids point to those anchors pile up at the bottom.
     """
     assert NODE, "node not on PATH"
+    helper_start = SESSIONS_JS.index("function _currentTailUserMessage")
     fn_start = SESSIONS_JS.index("function _mergeInflightTailMessages")
     fn_end = SESSIONS_JS.index("// Load older messages", fn_start)
+    tail_user_helpers = SESSIONS_JS[helper_start:fn_start]
     merge_fn = SESSIONS_JS[fn_start:fn_end]
     script = f"""
 const assert = require('assert');
@@ -960,6 +962,7 @@ function _messageComparableText(m) {{ return String((m&&m.content)||'').trim(); 
 function _sameTranscriptMessage(a,b) {{
   return !!(a&&b&&a.role===b.role&&_messageComparableText(a)===_messageComparableText(b));
 }}
+{tail_user_helpers}
 {merge_fn}
 const base = [{{role:'user', content:'go'}}];
 const inflight = [

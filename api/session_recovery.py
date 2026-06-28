@@ -65,6 +65,152 @@ def _msg_count(p: Path) -> int:
     return len(msgs) if isinstance(msgs, list) else -1
 
 
+def _rebuild_recovery_session_index(session_dir: Path) -> None:
+    """Rebuild ``session_dir/_index.json`` from persisted sidecars only.
+
+    Recovery repair/audit operates on a concrete sidecar directory. Unlike the
+    live sidebar path, its rebuilt index must not include unrelated in-memory
+    ``Session`` cache entries whose backing JSON files are absent from this
+    directory; those would immediately audit as ``index_missing_file`` rows.
+    """
+    from api.models import _load_session_from_path
+
+    entry_map: dict[str, dict] = {}
+    for path in sorted(session_dir.glob('*.json')):
+        if path.name.startswith('_'):
+            continue
+        session = _load_session_from_path(path)
+        if not session:
+            continue
+        entry = session.compact()
+        session_id = entry.get('session_id')
+        if not session_id:
+            continue
+        existing = entry_map.get(session_id)
+        if existing is None or entry.get('message_count', 0) > existing.get('message_count', 0):
+            entry_map[session_id] = entry
+
+    entries = sorted(
+        entry_map.values(),
+        key=lambda entry: entry.get('updated_at', 0),
+        reverse=True,
+    )
+    index_path = session_dir / '_index.json'
+    tmp = index_path.with_suffix(f'.tmp.recovery.{os.getpid()}.{threading.current_thread().ident}')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            fh.write(json.dumps(entries, ensure_ascii=False, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, index_path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _session_records_intentional_compress_shrink(session_path: Path) -> bool:
+    """Return True when the live sidecar records an intentional context shrink.
+
+    Manual ``/compress`` keeps the visible transcript but replaces the
+    model-facing ``context_messages`` with a smaller compacted prefix. That
+    operation must not be treated as accidental data loss by the #1558
+    ``.bak`` safeguard or startup recovery (#4836).
+
+    NOTE: this only reports *whether* the live session was intentionally
+    compressed. It must NOT, on its own, decide to skip ``.bak`` recovery —
+    a session can be manually compressed and *then* later suffer a genuine
+    #1558 ``messages``-array loss. The caller pairs this with a freshness
+    check (the backup must predate the compression) so a real post-compress
+    loss is still recovered. See ``inspect_session_recovery_status``.
+    """
+    try:
+        data = json.loads(session_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    context_messages = data.get('context_messages')
+    messages = data.get('messages')
+    has_shorter_context = (
+        isinstance(context_messages, list)
+        and isinstance(messages, list)
+        and len(context_messages) < len(messages)
+    )
+    anchor_summary = str(data.get('compression_anchor_summary') or '').strip()
+    anchor_key = data.get('compression_anchor_message_key')
+    mode = str(data.get('compression_anchor_mode') or '').strip().lower()
+    watermark = data.get('truncation_watermark')
+
+    if mode == 'manual':
+        return True
+    if has_shorter_context and anchor_summary and anchor_key is not None:
+        return True
+    if has_shorter_context and watermark is not None:
+        return True
+    return False
+
+
+def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> bool:
+    """True when the ``.bak`` captured the PRE-compression transcript.
+
+    The intentional-compress guard (#4836) must only suppress recovery for a
+    backup whose restore would *undo* the user's deliberate shrink — i.e. a
+    backup taken before ``/compress`` ran, still carrying the large
+    UNCOMPRESSED ``context_messages``. A backup written *after* the
+    compression (a later save that lost data) carries the ALREADY-COMPRESSED
+    context and MUST still be recoverable.
+
+    Time can't tell these apart (the ``.bak`` and main file are written in the
+    same ``save()`` milliseconds apart), so we use the same content-semantic
+    signal reconciliation uses: the compaction marker. A post-compression
+    backup carries the ``[context compaction…]`` marker in its
+    ``context_messages`` (it persists across saves); a pre-compression backup
+    does not. We suppress recovery ONLY when the backup is genuinely
+    pre-compression — its context lacks the compaction marker AND is larger
+    than the live compressed context (the shrink hasn't been applied to it).
+    If the backup already carries the marker, it post-dates the compression →
+    a real loss → recover. The length clause is a secondary guard for the rare
+    compression that emits no marker; whenever in doubt we fail OPEN (return
+    False, allow recovery) — for a data-loss safeguard, recovering real data
+    is always the safer error. Fail OPEN on any read/parse error too.
+    """
+    try:
+        live = json.loads(session_path.read_text(encoding='utf-8'))
+        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(live, dict) or not isinstance(bak, dict):
+        return False
+
+    bak_ctx = bak.get('context_messages')
+    bak_ctx = bak_ctx if isinstance(bak_ctx, list) else []
+
+    # If the backup's context already carries the compaction marker, the backup
+    # post-dates the compression (the marker persists across saves) → it is a
+    # recoverable post-compression snapshot, never a shrink-undoing one.
+    try:
+        from api.models import _context_messages_include_compression_marker
+        if _context_messages_include_compression_marker(bak_ctx):
+            return False
+    except Exception:
+        # If the marker check is unavailable, fall through to the length guard.
+        logger.debug("compaction-marker check unavailable in recovery", exc_info=True)
+
+    live_ctx = live.get('context_messages')
+    live_ctx_len = len(live_ctx) if isinstance(live_ctx, list) else 0
+    bak_ctx_len = len(bak_ctx)
+
+    # Secondary guard (unmarked compression): a pre-compression backup's context
+    # is larger than the live compressed context (the shrink hasn't been applied
+    # to it). A backup whose context is already <= the live compressed context
+    # post-dates the compression and represents recoverable post-compress data.
+    return bak_ctx_len > live_ctx_len
+
+
 def inspect_session_recovery_status(session_path: Path) -> dict:
     """Return a status dict describing whether recovery is recommended.
 
@@ -86,6 +232,17 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
         }
     bak_count = _msg_count(bak_path)
     if bak_count > live_count:
+        if (
+            _session_records_intentional_compress_shrink(session_path)
+            and _backup_predates_intentional_shrink(session_path, bak_path)
+        ):
+            return {
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_compress_shrink": True,
+            }
         return {
             "session_id": session_path.stem,
             "live_messages": live_count,
@@ -558,8 +715,7 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     sidecar_repair = recover_missing_sidecars_from_state_db(session_dir, state_db_path)
     if sidecar_repair.get('materialized'):
         try:
-            from api.models import _write_session_index
-            _write_session_index(updates=None)
+            _rebuild_recovery_session_index(session_dir)
         except Exception as exc:
             logger.warning("repair_safe_session_recovery: index rebuild after state.db reconciliation failed: %s", exc)
     after = audit_session_recovery(session_dir, state_db_path=state_db_path)
@@ -623,9 +779,8 @@ def recover_all_sessions_on_startup(
         )
     if rebuild_index:
         try:
-            from api.models import SESSION_INDEX_FILE, _write_session_index
-            if restored or not SESSION_INDEX_FILE.exists():
-                _write_session_index(updates=None)
+            if restored or not (session_dir / '_index.json').exists():
+                _rebuild_recovery_session_index(session_dir)
         except Exception as exc:
             logger.warning("recover_all_sessions_on_startup: index rebuild failed: %s", exc)
     return {

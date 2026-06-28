@@ -736,6 +736,53 @@ class TestApplyForceUpdate:
         assert 'reset' in git_cmds, "force update must call git reset --hard"
         assert 'checkout' in git_cmds, "force update must call git checkout . to clear conflicts"
 
+    def test_apply_force_update_proceeds_when_clean_fails(self, tmp_path, monkeypatch):
+        """#4914 — a `git clean -fd` failure must NOT abort the force update.
+
+        On Windows a reserved-device-name file (nul/con/prn/aux/com1-9/lpt1-9)
+        can land in the working tree (e.g. `> nul` under Git Bash) and git can't
+        delete it, so `clean -fd` exits non-zero. The reset --hard still applies
+        the update, so clean failure must be non-fatal.
+        """
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        ran = []
+
+        def fake_run(args, cwd, timeout=10):
+            ran.append(args)
+            if args[0] == 'fetch':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[0] == 'checkout':
+                return '', True
+            if args[0] == 'clean':
+                # Simulate the Windows reserved-name failure.
+                return "warning: failed to remove nul: Invalid argument", False
+            if args[0] == 'reset':
+                return '', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+
+        result = upd.apply_force_update('webui')
+
+        # Clean failed, but reset --hard succeeded → the force update must STILL
+        # succeed (clean failure is non-fatal, #4914).
+        assert result['ok'] is True, (
+            f"force update must not abort on git clean failure (#4914): {result}"
+        )
+        assert result.get('restart_scheduled') is True
+        git_cmds = [r[0] for r in ran]
+        assert 'clean' in git_cmds, "force update should still attempt git clean"
+        assert 'reset' in git_cmds, (
+            "force update must proceed to git reset --hard even after clean failed"
+        )
+
     def test_apply_force_update_rejects_unknown_target(self, tmp_path, monkeypatch):
         import api.updates as upd
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)

@@ -194,6 +194,19 @@ function handleWorkspaceClose(){
   closeWorkspacePanel();
 }
 
+async function _maybeBindFreshDefaultWorkspaceSession(){
+  if(S.session) return false;
+  if(_workspacePanelMode!=='browse') return false;
+  if(!S._profileDefaultWorkspace) return false;
+  try{
+    await newSession(false, {awaitWorkspaceLoad: true});
+    return true;
+  }catch(e){
+    console.warn('[hermes] failed to bind fresh default workspace session', e);
+    return false;
+  }
+}
+
 /**
  * Set a tooltip on a button, preferring the custom CSS tooltip (`data-tooltip`)
  * when the element opts in via the `has-tooltip` class. Falls back to the
@@ -872,6 +885,68 @@ function _micToastKeyForRecognitionError(error){
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;
 
+// ── Extension TTS-engine registry (registerHermesTtsEngine) ──────────────────
+// Defined at MODULE scope (not inside the voice-mode IIFE below) so the public
+// API exists even on browsers without SpeechRecognition / speechSynthesis — an
+// extension can register a TTS engine regardless of STT/browser-TTS support.
+// Lets a trusted local extension contribute a TTS engine that appears in the
+// Settings -> TTS Engine dropdown and is used by BOTH playback paths (voice-mode
+// auto-read and the per-message Listen button). The extension provides an async
+// synthesize(text, opts) that returns audio bytes (ArrayBuffer or Blob); core
+// handles selection, the dropdown option, and playback. Mirrors registerHermesSkin.
+//
+//   window.registerHermesTtsEngine({
+//     id: 'voicevox',            // [a-z0-9_-], not a built-in (browser/edge/elevenlabs)
+//     label: 'VOICEVOX (local)',
+//     synthesize(text, opts) { return Promise<ArrayBuffer|Blob>; }
+//   }) -> true on success, false if rejected
+var _HERMES_TTS_ENGINES = Object.create(null);
+var _HERMES_TTS_RESERVED = { browser:1, edge:1, elevenlabs:1 };
+function _hermesTtsValidId(id){ return typeof id==='string' && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(id); }
+function _hermesAddTtsOption(id, label){
+  var sel=document.getElementById('settingsTtsEngine');
+  if(!sel) return;
+  if(sel.querySelector('option[value="'+id+'"]')) return;
+  var opt=document.createElement('option');
+  opt.value=id;
+  opt.textContent=label;   // textContent — never innerHTML (no injection)
+  sel.appendChild(opt);
+}
+window.registerHermesTtsEngine=function(desc){
+  try{
+    if(!desc||typeof desc!=='object') return false;
+    var id=String(desc.id||'').toLowerCase();
+    if(!_hermesTtsValidId(id)) return false;
+    if(_HERMES_TTS_RESERVED[id]) return false;          // can't shadow a built-in
+    if(typeof desc.synthesize!=='function') return false;
+    var label=(typeof desc.label==='string' && desc.label.trim()) ? desc.label.trim().slice(0,48) : id;
+    _HERMES_TTS_ENGINES[id]={ id:id, label:label, synthesize:desc.synthesize };
+    _hermesAddTtsOption(id, label);
+    return true;
+  }catch(_){ return false; }
+};
+window._hermesTtsIsRegistered=function(id){ return !!_HERMES_TTS_ENGINES[id]; };
+// List registered engines (for the settings panel to re-add options on render).
+window._hermesTtsEngineOptions=function(){
+  return Object.keys(_HERMES_TTS_ENGINES).map(function(k){
+    return { id:_HERMES_TTS_ENGINES[k].id, label:_HERMES_TTS_ENGINES[k].label };
+  });
+};
+// Returns a Promise<ArrayBuffer> or null if the engine isn't registered.
+window._hermesTtsSynth=function(id, text, opts){
+  var eng=_HERMES_TTS_ENGINES[id];
+  if(!eng) return null;
+  return Promise.resolve()
+    .then(function(){ return eng.synthesize(text, opts||{}); })
+    .then(function(out){
+      if(!out) throw new Error('empty TTS result');
+      if(out instanceof ArrayBuffer) return out;
+      if(typeof Blob!=='undefined' && out instanceof Blob) return out.arrayBuffer();
+      if(out.buffer instanceof ArrayBuffer) return out.buffer;   // typed array
+      throw new Error('TTS engine returned an unsupported type');
+    });
+};
+
 // ── Turn-based voice mode (#1333) ────────────────────────────────────────
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
 (function(){
@@ -1105,6 +1180,46 @@ window._micPendingSend=window._micPendingSend||false;
     }
     if(!clean){ _startListening(); return; }
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
+    // Extension-registered TTS engine (window.registerHermesTtsEngine): synth
+    // via the extension, then play through the same Audio lifecycle as edge.
+    if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+      _ttsSpeaking=true;
+      const _opts={
+        voice: localStorage.getItem("hermes-tts-voice")||'',
+        rate: parseFloat(localStorage.getItem("hermes-tts-rate")),
+        pitch: parseFloat(localStorage.getItem("hermes-tts-pitch")),
+      };
+      Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
+        .then(function(buf){
+          const blob=new Blob([buf]);
+          const url=URL.createObjectURL(blob);
+          const audio=new Audio(url);
+          _playingEdgeAudio=audio;
+          audio.onended=function(){
+            _ttsSpeaking=false;
+            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+            URL.revokeObjectURL(url);
+            if(_voiceModeActive) setTimeout(function(){_startListening();},500);
+          };
+          audio.onerror=function(){
+            _ttsSpeaking=false;
+            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+            URL.revokeObjectURL(url);
+            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+          };
+          audio.play().catch(function(){
+            _ttsSpeaking=false;
+            if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+            URL.revokeObjectURL(url);
+            if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+          });
+        })
+        .catch(function(){
+          _ttsSpeaking=false;
+          if(_voiceModeActive) setTimeout(function(){_startListening();},1000);
+        });
+      return;
+    }
     if(engine==="elevenlabs"){
       _ttsSpeaking=true;
       fetch(new URL('api/tts', document.baseURI || location.href).href, {
@@ -1789,6 +1904,9 @@ const _SKINS=[
   {name:'Ares',     colors:['#FF4444','#CC3333','#992222']},
   {name:'Mono',     colors:['#CCCCCC','#999999','#666666']},
   {name:'Graphite', colors:['#FFFFFF','#D6D6D6','#242424']},
+  {name:'GitHub', colors:['#0969DA','#1F883D','#242424']},
+  {name:'Codex', colors:['#72B39A','#242624','#ECEBE4']},
+  {name:'Terracotta', colors:['#D97757','#F0EEE6','#141413']},
   {name:'Slate',    colors:['#334155','#475569','#64748b']},
   {name:'Poseidon', colors:['#0EA5E9','#0284C7','#0369A1']},
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
@@ -1972,13 +2090,131 @@ function _buildSkinPicker(activeSkin){
     btn.dataset.skinVal=key;
     btn.style.cssText='border:1px solid var(--border2);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;background:none;transition:all .15s';
     btn.onclick=()=>_pickSkin(key);
-    const dots=skin.colors.map(c=>`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c}"></span>`).join('');
-    const label=skin.label||skin.name;
-    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${label}</span>`;
+    // Build with DOM nodes + textContent so an extension-registered skin's
+    // label/name (registerHermesSkin descriptor) can never inject markup into
+    // the picker. Swatch colors are already value-sanitized upstream, but set
+    // them via element.style.background (not interpolated HTML) as defense in depth.
+    const dotRow=document.createElement('div');
+    dotRow.style.cssText='display:flex;gap:3px;justify-content:center;margin-bottom:4px';
+    for(const c of (skin.colors||[])){
+      const dot=document.createElement('span');
+      dot.style.cssText='display:inline-block;width:10px;height:10px;border-radius:50%';
+      dot.style.background=c;
+      dotRow.appendChild(dot);
+    }
+    const labelEl=document.createElement('span');
+    labelEl.style.cssText='font-size:11px;color:var(--text)';
+    labelEl.textContent=skin.label||skin.name||'';
+    btn.appendChild(dotRow);
+    btn.appendChild(labelEl);
     grid.appendChild(btn);
   }
   _syncSkinPicker((activeSkin||'default').toLowerCase());
 }
+
+// ── Extension-registered skins (theme-registration capability) ───────────────
+// Lets a trusted local extension contribute a custom skin that appears in the
+// NATIVE skin picker (rather than bolting on a parallel theme switcher). An
+// extension calls window.registerHermesSkin(descriptor); core validates +
+// sanitizes it, injects a managed <style> rule for its CSS-variable tokens,
+// appends it to _SKINS so the picker renders it, and re-applies the persisted
+// selection if it was waiting on this (late-registered) skin.
+//
+// Security: token values are written into CSS, so every value is sanitized
+// against a strict allowlist HERE, once, so all theme extensions inherit the
+// guard safe-by-construction. Reserved core skin keys cannot be overwritten.
+const _EXT_SKIN_STYLE_ID='hermesExtensionSkinStyles';
+const _EXT_SKIN_KEYS=new Set();                 // keys we registered (for idempotent re-register)
+const _RESERVED_SKIN_KEYS=new Set((_SKINS||[]).map(s=>(s.value||s.name).toLowerCase()));
+// CSS custom-property names a skin is allowed to set. Mirrors the documented
+// design-token contract; anything outside this set is dropped.
+const _ALLOWED_SKIN_TOKENS=new Set([
+  '--bg','--surface','--surface2','--surface-subtle','--text','--text2','--muted',
+  '--accent','--accent2','--accent3','--accent-contrast','--accent-hover',
+  '--accent-text','--accent-bg','--accent-bg-strong','--accent-rgb',
+  '--border','--border2','--hover-bg','--code-bg','--code-text',
+  '--sidebar','--sidebar-text','--user-bubble','--assistant-bubble',
+  '--success','--warning','--danger','--info','--link'
+]);
+// Accept only safe color / simple numeric-with-unit values, OR a bare RGB triple
+// (e.g. "0, 0, 0" for --accent-rgb, consumed inside rgba(...)). Rejects anything
+// with url(), expression(), semicolons, braces, or other CSS-injection vectors.
+const _SAFE_SKIN_VALUE_RE=/^(#(?:[0-9a-fA-F]{3,8})|rg(?:b|ba)\(\s*[0-9.,%\s/]+\)|hsl(?:a)?\(\s*[0-9.,%\s/deg]+\)|[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}|[a-zA-Z]{3,20}|[0-9.]+(?:px|em|rem|%)?)$/;
+
+function _sanitizeSkinTokens(tokens){
+  const out={};
+  if(!tokens||typeof tokens!=='object') return out;
+  for(const rawKey of Object.keys(tokens)){
+    const key=String(rawKey).trim();
+    if(!_ALLOWED_SKIN_TOKENS.has(key)) continue;          // unknown token → drop
+    const val=String(tokens[rawKey]).trim();
+    if(val.length>64) continue;                            // absurd length → drop
+    if(!_SAFE_SKIN_VALUE_RE.test(val)) continue;          // unsafe value → drop
+    out[key]=val;
+  }
+  return out;
+}
+
+function _renderExtensionSkinStyles(){
+  let styleEl=document.getElementById(_EXT_SKIN_STYLE_ID);
+  if(!styleEl){
+    styleEl=document.createElement('style');
+    styleEl.id=_EXT_SKIN_STYLE_ID;
+    document.head.appendChild(styleEl);
+  }
+  const blocks=[];
+  for(const skin of _SKINS){
+    if(!skin||!skin._extToken) continue;                  // only ext-registered skins
+    const key=(skin.value||skin.name).toLowerCase();
+    const decls=Object.keys(skin._extToken).map(k=>`${k}:${skin._extToken[k]}`).join(';');
+    if(decls) blocks.push(`:root[data-skin="${key}"]{${decls}}`);
+  }
+  styleEl.textContent=blocks.join('\n');
+}
+
+// Public API for extensions. Returns true on success, false if rejected.
+function registerHermesSkin(descriptor){
+  try{
+    if(!descriptor||typeof descriptor!=='object') return false;
+    const name=String(descriptor.name||'').trim();
+    if(!name) return false;
+    const rawVal=String(descriptor.value||name).trim().toLowerCase();
+    // key must be a simple slug (safe as a data-skin attr + CSS attr selector)
+    const key=rawVal.replace(/[^a-z0-9_-]/g,'');
+    if(!key) return false;
+    if(_RESERVED_SKIN_KEYS.has(key)) return false;        // never shadow a core skin
+    const tokens=_sanitizeSkinTokens(descriptor.tokens);
+    if(Object.keys(tokens).length===0) return false;      // nothing valid to apply
+    // 3 swatch colors for the picker (sanitized); fall back to accent/bg/text.
+    let colors=Array.isArray(descriptor.colors)?descriptor.colors.slice(0,3):[];
+    colors=colors.map(c=>String(c).trim()).filter(c=>_SAFE_SKIN_VALUE_RE.test(c));
+    while(colors.length<3) colors.push(tokens['--accent']||tokens['--bg']||tokens['--text']||'#888');
+    const label=String(descriptor.label||name).slice(0,40);
+    const entry={name:name.slice(0,40),value:key,label,colors,_extToken:tokens,_extension:true};
+
+    const existingIdx=_SKINS.findIndex(s=>(s.value||s.name).toLowerCase()===key);
+    if(existingIdx>=0&&_EXT_SKIN_KEYS.has(key)){
+      _SKINS[existingIdx]=entry;                           // idempotent update
+    }else if(existingIdx>=0){
+      return false;                                        // collides w/ a non-ext skin
+    }else{
+      _SKINS.push(entry);
+    }
+    _EXT_SKIN_KEYS.add(key);
+    _VALID_SKINS.add(key);
+    _renderExtensionSkinStyles();
+    // Refresh the picker if it's already built.
+    if(document.getElementById('skinPickerGrid')){
+      _buildSkinPicker((localStorage.getItem('hermes-skin')||'default').toLowerCase());
+    }
+    // If the user had previously selected this (now-available) skin, apply it.
+    if((localStorage.getItem('hermes-skin')||'').toLowerCase()===key){
+      _applySkin(key);
+    }
+    return true;
+  }catch(_){ return false; }
+}
+if(typeof window!=='undefined') window.registerHermesSkin=registerHermesSkin;
 
 function applyBotName(){
   // The saved assistant name applies to the default profile only.
@@ -2181,17 +2417,26 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     const lsTheme=(localStorage.getItem('hermes-theme')||'').trim().toLowerCase();
     const lsSkin=(localStorage.getItem('hermes-skin')||'').trim().toLowerCase();
     const lsAppearance=_normalizeAppearance(lsTheme||null,lsSkin||null);
+    // An unknown non-default persisted skin is most likely an extension-provided
+    // skin (registerHermesSkin) whose extension script hasn't registered it yet
+    // at this point in boot. Preserve it verbatim instead of normalizing it away
+    // to 'default' — the extension's registerHermesSkin() will inject the CSS and
+    // re-apply it once it loads. Without this, the boot sync would clobber the
+    // saved choice before the extension runs.
+    const lsSkinIsPendingExt=!!lsSkin&&lsSkin!=='default'&&!_VALID_SKINS.has(lsSkin)&&!_LEGACY_THEME_MAP[lsSkin];
     const lsHasExplicitSkin=lsSkin&&lsSkin!=='default';
     const lsHasExplicitTheme=lsTheme&&['system','light','dark'].includes(lsTheme);
     const theme=lsHasExplicitTheme?lsAppearance.theme:srvAppearance.theme;
-    const skin=lsHasExplicitSkin?lsAppearance.skin:srvAppearance.skin;
+    const skin=lsHasExplicitSkin?(lsSkinIsPendingExt?lsSkin:lsAppearance.skin):srvAppearance.skin;
     localStorage.setItem('hermes-theme',theme);
     _applyTheme(theme);
     localStorage.setItem('hermes-skin',skin);
     _applySkin(skin);
     // Reconcile: if localStorage and server disagree, push localStorage
-    // values to the server so the next refresh won't revert.
-    if((lsHasExplicitTheme||lsHasExplicitSkin)&&(theme!==srvAppearance.theme||skin!==srvAppearance.skin)){
+    // values to the server so the next refresh won't revert. Skip the push for a
+    // still-pending extension skin (don't persist it server-side until it's a
+    // confirmed-registered skin — avoids writing a skin the server can't validate).
+    if((lsHasExplicitTheme||lsHasExplicitSkin)&&!lsSkinIsPendingExt&&(theme!==srvAppearance.theme||skin!==srvAppearance.skin)){
       try{
         api('/api/settings',{method:'POST',body:JSON.stringify({theme,skin})});
       }catch(_){}
@@ -2260,8 +2505,92 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
     api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false})}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
+  const _bootActiveProfileUnauthRedirectBudget=(()=>{
+    const markerKey='hermes-webui-active-profile-bootstrap-401';
+    let consumed=false;
+    const readAttempted=(storage=sessionStorage)=>{
+      try{
+        const attempted=storage&&storage.getItem?storage.getItem(markerKey)==='1':false;
+        if(attempted) consumed=true;
+        return attempted;
+      }catch(_){
+        return false;
+      }
+    };
+    const markAttempted=(storage=sessionStorage)=>{
+      consumed=true;
+      try{
+        if(storage&&storage.setItem) storage.setItem(markerKey,'1');
+      }catch(_){}
+    };
+    const clearAttempted=(storage=sessionStorage)=>{
+      try{
+        if(storage&&storage.removeItem) storage.removeItem(markerKey);
+      }catch(_){}
+    };
+    const spendOnFallback=(storage=sessionStorage)=>{
+      consumed=true;
+      clearAttempted(storage);
+    };
+    const spendOnRedirect=(storage=sessionStorage)=>{
+      if(consumed) return false;
+      markAttempted(storage);
+      return true;
+    };
+    const redirectToLogin=(nextUrl)=>{
+      window.location.href='login?next='+encodeURIComponent(nextUrl);
+    };
+    return {
+      readAttempted,
+      clearAttempted,
+      spendOnFallback,
+      spendOnRedirect,
+      redirectToLogin,
+      isConsumed:()=>consumed,
+    };
+  })();
+  async function _resolveActiveProfileBootstrapState({
+    loadActiveProfile = () => api('/api/profile/active', {redirect401: false}),
+    getNextUrl = () => window.location.pathname + window.location.search,
+    redirectToLogin = (nextUrl) => {
+      _bootActiveProfileUnauthRedirectBudget.redirectToLogin(nextUrl);
+    },
+    markerStorage = sessionStorage,
+  } = {}) {
+    const alreadyAttempted = _bootActiveProfileUnauthRedirectBudget.readAttempted(markerStorage);
+    try {
+      const p = await loadActiveProfile();
+      if (p && typeof p === 'object' && typeof p.name === 'string') {
+        _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+      }
+      if (p === undefined && !alreadyAttempted) {
+        if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
+          redirectToLogin(getNextUrl());
+        }
+        return {status: 'recovery-redirect'};
+      }
+      if (p === undefined) _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
+      else _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+      return {status: 'fallback', profile: 'default', isDefault: true};
+    } catch (e) {
+      _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+      if (!alreadyAttempted && e && e.status === 401) {
+        if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
+          redirectToLogin(getNextUrl());
+        }
+        return {status: 'recovery-redirect'};
+      }
+      if (e && e.status === 401) _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
+      return {status: 'fallback', profile: 'default', isDefault: true};
+    }
+  }
+
   // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';S.activeProfileIsDefault=!!p.is_default;}catch(e){S.activeProfile='default';S.activeProfileIsDefault=true;}
+  const activeProfileState = await _resolveActiveProfileBootstrapState();
+  if (activeProfileState.status === 'recovery-redirect') return;
+  S.activeProfile = activeProfileState.profile;
+  S.activeProfileIsDefault = activeProfileState.isDefault;
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
@@ -2271,7 +2600,19 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
-  const _hydrateBootModelDropdown=()=>populateModelDropdown({preferProfileDefaultOnFreshBoot:true}).then(()=>{
+  const _redirectBootModelDropdownIfUnauth=(res)=>{
+    if(!res||res.status!==401) return false;
+    window._modelDropdownReady=null;
+    if(_bootActiveProfileUnauthRedirectBudget.isConsumed()) return true;
+    if(_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(sessionStorage)){
+      _bootActiveProfileUnauthRedirectBudget.redirectToLogin(window.location.pathname+window.location.search);
+    }
+    return true;
+  };
+  const _hydrateModelDropdown=({redirectIfUnauth=null}={})=>populateModelDropdown({
+    preferProfileDefaultOnFreshBoot:true,
+    ...(redirectIfUnauth?{redirectIfUnauth}:{}),
+  }).then(()=>{
     const sessionModelState=S.session&&S.session.model
       ? {model:S.session.model,model_provider:S.session.model_provider||null}
       : null;
@@ -2309,15 +2650,23 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._modelDropdownReady=null;
     throw e;
   });
+  const _startModelDropdown=()=>{
+    const ready=window._modelDropdownReady;
+    if(ready&&typeof ready.then==='function') return ready;
+    const next=_hydrateModelDropdown();
+    window._modelDropdownReady=next;
+    return next;
+  };
   const _startBootModelDropdown=()=>{
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function') return ready;
-    const next=_hydrateBootModelDropdown();
+    const next=_hydrateModelDropdown({redirectIfUnauth:_redirectBootModelDropdownIfUnauth});
     window._modelDropdownReady=next;
     return next;
   };
   window._modelDropdownReady=null;
-  window._ensureModelDropdownReady=_startBootModelDropdown;
+  window._startBootModelDropdown=_startBootModelDropdown;
+  window._ensureModelDropdownReady=_startModelDropdown;
   setTimeout(()=>{
     try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
   },0);
@@ -2367,7 +2716,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
         await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
-      await loadSession(saved);
+      await loadSession(saved, {preserveActiveInput:true});
       // Hard refresh starts from the static HTML model list. Hydrate the live
       // catalog after the saved session is known, then re-apply that session's
       // model before S._bootReady lets syncModelChip reveal the composer label.
@@ -2399,6 +2748,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
+        await _maybeBindFreshDefaultWorkspaceSession();
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -2424,6 +2774,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
+  await _maybeBindFreshDefaultWorkspaceSession();
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();

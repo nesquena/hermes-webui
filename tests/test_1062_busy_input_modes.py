@@ -110,7 +110,7 @@ class TestSlashCommandHandlers:
         assert "cancelStream" not in helper_body
         assert "inp.value" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
-        assert "cmd_steer_fallback" in helper_body or "steer_fallback" in helper_body
+        assert "_steerFailureMessageKey" in helper_body or "steer_fail_" in helper_body
 
 
 # ── send() busy branch ───────────────────────────────────────────────────

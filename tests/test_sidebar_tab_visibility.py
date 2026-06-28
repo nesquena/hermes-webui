@@ -4,16 +4,302 @@ Covers backend validation round-trip, frontend static contracts,
 i18n coverage, and the key integration points that have broken before.
 """
 import json
+import shutil
+import subprocess
+import tempfile
+import textwrap
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+PANELS_PATH = ROOT / "static" / "panels.js"
+UI_PATH = ROOT / "static" / "ui.js"
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
+_PANELS_DASHBOARD_DRIVER = textwrap.dedent(
+    """\
+    const fs = require('fs');
+    const path = require('path');
+
+    function extractFn(src, name) {
+      const markers = [`async function ${name}(`, `function ${name}(`];
+      let start = -1;
+      for (const marker of markers) {
+        start = src.indexOf(marker);
+        if (start >= 0) break;
+      }
+      if (start < 0) throw new Error(`${name}() not found`);
+      let i = src.indexOf('{', start);
+      let depth = 0;
+      let inString = null;
+      let escaped = false;
+      let inLineComment = false;
+      let inBlockComment = false;
+      for (; i < src.length; i++) {
+        const ch = src[i];
+        const nxt = src[i + 1] || '';
+        if (inLineComment) {
+          if (ch === '\\n') inLineComment = false;
+          continue;
+        }
+        if (inBlockComment) {
+          if (ch === '*' && nxt === '/') inBlockComment = false;
+          continue;
+        }
+        if (inString) {
+          if (escaped) {
+            escaped = false;
+          } else if (ch === '\\\\') {
+            escaped = true;
+          } else if (ch === inString) {
+            inString = null;
+          }
+          continue;
+        }
+        if (ch === '/' && nxt === '/') { inLineComment = true; continue; }
+        if (ch === '/' && nxt === '*') { inBlockComment = true; continue; }
+        if (ch === '\\'' || ch === '\"' || ch === '`') { inString = ch; continue; }
+        if (ch === '{') depth += 1;
+        if (ch === '}') {
+          depth -= 1;
+          if (depth === 0) return src.slice(start, i + 1);
+        }
+      }
+      throw new Error(`could not extract ${name}`);
+    }
+
+    function makeEl() {
+      return {
+        children: [],
+        style: {},
+        classList: {
+          _set: new Set(),
+          add(c) { this._set.add(c); },
+          remove(c) { this._set.delete(c); },
+          toggle(c, on) {
+            const want = on === undefined ? !this._set.has(c) : Boolean(on);
+            if (want) this._set.add(c); else this._set.delete(c);
+          },
+          contains(c) { return this._set.has(c); },
+        },
+        dataset: {},
+        _attrs: {},
+        textContent: '',
+        setAttribute(name, value) {
+          this._attrs[name] = String(value);
+          if (name === 'data-tab-panel') this.dataset.tabPanel = String(value);
+        },
+        getAttribute(name) {
+          return Object.prototype.hasOwnProperty.call(this._attrs, name)
+            ? this._attrs[name]
+            : null;
+        },
+        hasAttribute(name) {
+          return Object.prototype.hasOwnProperty.call(this._attrs, name);
+        },
+        appendChild(child) {
+          this.children.push(child);
+          return child;
+        },
+        querySelector: () => null,
+        querySelectorAll: () => [],
+      };
+    }
+
+    const action = process.argv[2] || 'render';
+    const mode = process.argv[3] || 'auto';
+    const priorMode = process.argv[4] || '';
+    const forceNoRestore = process.argv[5] === '1';
+    const failSave = process.argv[6] === '1';
+    const panelsSrc = fs.readFileSync(process.argv[7], 'utf8');
+    const uiSrc = fs.readFileSync(process.argv[8], 'utf8');
+
+    const container = makeEl();
+    const modeEl = makeEl();
+    modeEl.id = 'settingsDashboardMode';
+    modeEl.value = mode;
+    const urlEl = makeEl();
+    urlEl.id = 'settingsDashboardUrl';
+    urlEl.value = '';
+
+    const registry = Object.create(null);
+    registry.tabVisibilityChips = container;
+    registry.settingsDashboardMode = modeEl;
+    registry.settingsDashboardUrl = urlEl;
+
+    let apiCalls = [];
+    let renderCalls = 0;
+    let hiddenCalls = 0;
+    let tabOrderCalls = 0;
+
+    global._dashboardLastNonNeverMode = 'auto';
+    global.window = {};
+    global.localStorage = {
+      _store: Object.create(null),
+      getItem(k) {
+        return Object.prototype.hasOwnProperty.call(this._store, k) ? this._store[k] : null;
+      },
+      setItem(k, v) {
+        this._store[k] = String(v);
+      },
+    };
+    global.document = {
+      createElement: () => makeEl(),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+    };
+    global.$ = (id) => registry[id] || null;
+    global._orderedSidebarPanels = () => [];
+    global._getHiddenTabs = () => [];
+    global._wireTabChipDrag = () => {};
+    global._tabVisibilityDragSuppressUntil = 0;
+    global._ALWAYS_VISIBLE_TABS = new Set(['chat', 'settings']);
+    global.t = (key) => key === 'tab_dashboard' ? 'Hermes Dashboard' : String(key);
+
+    let failNextSave = failSave;
+    global.api = (url, opts = {}) => {
+      apiCalls.push({ url: String(url), method: (opts.method || 'GET').toUpperCase(), body: opts.body || '' });
+      if (String(url) === '/api/dashboard/config' && failNextSave) {
+        failNextSave = false;
+        return Promise.reject(new Error('save failed'));
+      }
+      const payload = opts.body ? JSON.parse(opts.body) : {};
+      return Promise.resolve({ enabled: payload.enabled || 'auto', url: payload.url || '' });
+    };
+    global.saveDashboardSettings = async function (opts = {}) {
+      const payload = { enabled: modeEl.value || 'auto', url: (urlEl.value || '').trim() };
+      try {
+        const saved = await api('/api/dashboard/config', { method: 'POST', body: JSON.stringify(payload) });
+        const normalized = _normalizeDashboardEnabledMode(saved && saved.enabled);
+        modeEl.value = normalized;
+        _setDashboardModeForChip(normalized);
+        return saved;
+      } catch (err) {
+        if (opts.raiseOnError) throw err;
+      }
+    };
+    global._setHiddenTabs = () => { hiddenCalls += 1; };
+    global._setTabOrder = () => { tabOrderCalls += 1; };
+    global._renderTabVisibilityChips = () => { renderCalls += 1; };
+
+    for (const name of ['_normalizeDashboardEnabledMode', '_setDashboardModeForChip', '_getDashboardChipRestoreMode']) {
+      eval(extractFn(uiSrc, name));
+    }
+    for (const name of [
+      '_dashboardPanelMode',
+      '_isDashboardChipOn',
+      '_renderDashboardVisibilityChip',
+      '_renderTabVisibilityChips',
+      '_toggleDashboardVisibilityChip'
+    ]) {
+      eval(extractFn(panelsSrc, name));
+    }
+    const realRenderTabVisibilityChips = _renderTabVisibilityChips;
+    _renderTabVisibilityChips = function () {
+      renderCalls += 1;
+      return realRenderTabVisibilityChips();
+    };
+
+    (async () => {
+      if (forceNoRestore) global._dashboardLastNonNeverMode = null;
+      if (priorMode) _setDashboardModeForChip(priorMode);
+
+      if (action === 'render') {
+        _renderTabVisibilityChips();
+        const chip = container.children.find((node) => node.getAttribute('data-tab-panel') === '__hermes_dashboard__');
+        console.log(JSON.stringify({
+          chipCount: container.children.length,
+          hasChip: !!chip,
+          chipText: chip && chip.textContent,
+          chipAriaChecked: chip && chip.getAttribute('aria-checked'),
+          chipIsOff: chip && chip.classList.contains('chip-off'),
+        }));
+        return;
+      }
+
+      _toggleDashboardVisibilityChip();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const firstMode = modeEl.value;
+
+      if (action === 'toggle-fail') {
+        console.log(JSON.stringify({
+          firstMode,
+          dashboardLastNonNeverMode: global._dashboardLastNonNeverMode,
+          apiCalls,
+          hiddenCalls,
+          tabOrderCalls,
+          renderCalls,
+        }));
+        return;
+      }
+
+      _toggleDashboardVisibilityChip();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const secondMode = modeEl.value;
+
+      console.log(JSON.stringify({
+        firstMode,
+        secondMode,
+        dashboardLastNonNeverMode: global._dashboardLastNonNeverMode,
+        apiCalls,
+        hiddenCalls,
+        tabOrderCalls,
+        renderCalls,
+      }));
+    })().catch((err) => { console.error(err); process.exit(1); });
+    """
+)
+
+
+def _run_panels_driver(
+    action: str,
+    mode: str = 'auto',
+    prior_mode: str = '',
+    force_no_restore: bool = False,
+    fail_save: bool = False,
+) -> dict:
+    """Run the dashboard-visibility chip helpers with a DOM shim."""
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as f:
+        f.write(_PANELS_DASHBOARD_DRIVER)
+        driver = f.name
+    try:
+        result = subprocess.run(
+            [
+                NODE,
+                driver,
+                action,
+                mode,
+                prior_mode,
+                "1" if force_no_restore else "0",
+                "1" if fail_save else "0",
+                str(PANELS_PATH),
+                str(UI_PATH),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=2.0,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"node harness failed: {result.stderr or result.stdout}")
+        return json.loads(result.stdout.strip())
+    finally:
+        try:
+            Path(driver).unlink()
+        except OSError:
+            pass
 
 def test_backend_round_trip_and_validation(monkeypatch, tmp_path):
     """hidden_tabs defaults to [], saves/reloads, rejects non-list, filters empty strings."""
@@ -178,6 +464,66 @@ def test_chip_a11y_uses_switch_role_with_aria_checked():
         "chip needs dragging style for mouse reorder feedback"
     assert ".tab-visibility-chip.drag-over" in STYLE_CSS, \
         "chip needs drag-over style for mouse reorder target feedback"
+
+
+@requires_node
+def test_dashboard_chip_renders_in_tab_visibility_grid():
+    """Behavioral verification for render state and placement in the chip grid."""
+    for mode in ("auto", "always", "never"):
+        out = _run_panels_driver("render", mode=mode)
+        assert out["hasChip"] is True, out
+        if mode == "never":
+            assert out["chipIsOff"] is True, out
+            assert out["chipAriaChecked"] == "false", out
+        else:
+            assert out["chipIsOff"] is False, out
+            assert out["chipAriaChecked"] == "true", out
+        assert out["chipText"] == "Hermes Dashboard", out
+        assert out["chipCount"] >= 1, out
+
+
+@requires_node
+def test_dashboard_chip_off_sets_never_and_chip_on_restores_prior_mode():
+    """Chip toggling must save 'never' and restore non-never mode on the next toggle."""
+    out = _run_panels_driver("toggle", mode="always", prior_mode="always")
+    assert out["firstMode"] == "never", out
+    assert out["secondMode"] == "always", out
+    assert len([call for call in out["apiCalls"] if call["url"] == "/api/dashboard/config"]) == 2, out
+    assert out["hiddenCalls"] == 0, out
+    assert out["tabOrderCalls"] == 0, out
+    assert out["dashboardLastNonNeverMode"] == "always", out
+
+
+@requires_node
+def test_dashboard_chip_toggle_does_not_mutate_hidden_tabs_or_tab_order():
+    """Dashboard chip toggles stay on the dashboard config path, never the sidebar-tab payload."""
+    out = _run_panels_driver("toggle", mode="auto", prior_mode="auto")
+    assert out["firstMode"] == "never", out
+    assert len([call for call in out["apiCalls"] if call["url"] == "/api/dashboard/config"]) == 2, out
+    assert out["hiddenCalls"] == 0, out
+    assert out["tabOrderCalls"] == 0, out
+
+
+@requires_node
+def test_dashboard_chip_on_defaults_to_auto_without_prior_mode():
+    """Missing restore state should fall back to 'auto' before returning chip-on."""
+    out = _run_panels_driver("toggle", mode="never", force_no_restore=True)
+    assert out["firstMode"] == "auto", out
+    assert out["secondMode"] == "never", out
+    assert out["hiddenCalls"] == 0, out
+    assert out["tabOrderCalls"] == 0, out
+
+
+@requires_node
+def test_dashboard_chip_failed_save_restores_previous_mode():
+    """A failed chip save must roll the dropdown and chip state back to the prior mode."""
+    out = _run_panels_driver("toggle-fail", mode="auto", prior_mode="auto", fail_save=True)
+    assert out["firstMode"] == "auto", out
+    assert len([call for call in out["apiCalls"] if call["url"] == "/api/dashboard/config"]) == 1, out
+    assert out["hiddenCalls"] == 0, out
+    assert out["tabOrderCalls"] == 0, out
+    assert out["renderCalls"] == 1, out
+    assert out["dashboardLastNonNeverMode"] == "auto", out
 
 
 def test_tab_order_excludes_always_visible_tabs(monkeypatch, tmp_path):

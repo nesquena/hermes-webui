@@ -581,7 +581,9 @@ function _inflightHasVisibleLiveState(inflight) {
   if (Array.isArray(inflight.activityBurstAnchors) && inflight.activityBurstAnchors.length) return true;
   if (Array.isArray(inflight.messages)) {
     return inflight.messages.some((msg) => {
-      if (!msg || msg.role !== 'assistant') return false;
+      if (!msg) return false;
+      if (msg.role === 'user') return Boolean(_messageComparableText(msg));
+      if (msg.role !== 'assistant') return false;
       const content = msg.content;
       if (typeof content === 'string') return content.trim();
       if (Array.isArray(content)) return content.length > 0;
@@ -1292,11 +1294,18 @@ async function loadSession(sid){
   S._pendingSessionToolsets=null;
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
-    const modelRefreshPromise=Promise.resolve().then(()=>{
-      if(_loadingSessionId!==modelRefreshSid) return;
-      return populateModelDropdown({freshness:'session_visit'});
-    }).catch(()=>{});
-    if(typeof window!=='undefined') window._modelDropdownReady=modelRefreshPromise;
+    if(!S._bootReady&&typeof window!=='undefined'&&typeof window._startBootModelDropdown==='function'){
+      Promise.resolve().then(()=>{
+        if(_loadingSessionId!==modelRefreshSid) return;
+        return window._startBootModelDropdown();
+      }).catch(()=>{});
+    }else{
+      const modelRefreshPromise=Promise.resolve().then(()=>{
+        if(_loadingSessionId!==modelRefreshSid) return;
+        return populateModelDropdown({freshness:'session_visit'});
+      }).catch(()=>{});
+      if(typeof window!=='undefined') window._modelDropdownReady=modelRefreshPromise;
+    }
   }
   if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
@@ -1346,8 +1355,9 @@ async function loadSession(sid){
     if(!Array.isArray(messages)) return false;
     const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,messages):null;
     if(!pendingMsg) return false;
-    if(messages.some(existing=>_sameTranscriptMessage(existing,pendingMsg))) return false;
     const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+    const currentTurnMessages=liveAssistantIdx>=0?messages.slice(0,liveAssistantIdx):messages;
+    if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
     if(liveAssistantIdx>=0) messages.splice(liveAssistantIdx,0,pendingMsg);
     else messages.push(pendingMsg);
     return true;
@@ -1623,7 +1633,7 @@ async function loadSession(sid){
   // against stale writes from slow responses racing to restore the previous draft).
   const _draft = S.session && S.session.composer_draft;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
-    _restoreComposerDraft(_draft, sid, {preserveActiveInput:currentSid===sid&&forceReload});
+    _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
@@ -2200,6 +2210,13 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   // During active streaming, skip — clearing S.toolCalls would lose Activity
   // and the renderMessages fallback is blocked by S.busy=true.
   if(S.busy||S.activeStreamId) return;
+  // Persist the loaded compact tool summary onto S.session so the renderMessages
+  // derived rebuild can use it as a durable per-tid snippet fallback on cold
+  // load (#4927). loadSession keeps the messages=0 session object (tool_calls
+  // []), and the messages=1 summary arrives only as this argument — without
+  // copying it across, the fallback source is empty exactly on the cold-load
+  // path it's meant to repair.
+  if(S.session&&Array.isArray(sessionToolCalls)) S.session.tool_calls=sessionToolCalls.map(tc=>({...tc}));
   const hasMessageToolMetadata=msgs.some(m=>{
     if(!m) return false;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -2318,6 +2335,32 @@ function _stripAttachedFilesMarker(text){
   return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
 }
 
+function _stripForcedSkillEnvelope(text){
+  let value=String(text||'').trim();
+  // `/use <skill>` augments the model-facing prompt with a directive and a
+  // hidden skill-content envelope, while the optimistic UI row keeps the human
+  // prompt.  Treat them as the same submitted turn for active reload/reconnect
+  // dedupe without rewriting the persisted pending prompt.
+  value=value.replace(/^\[USER OVERRIDE\][^\n]*\n*/,'').trim();
+  value=value.replace(/\[FORCED SKILL CONTEXT:[^\]]+\][\s\S]*?\[\/FORCED SKILL CONTEXT\]\s*/g,'').trim();
+  return value;
+}
+
+function _normalizeUserTranscriptText(text){
+  const value=_stripAttachedFilesMarker(_stripForcedSkillEnvelope(text));
+  // ui.js is loaded before sessions.js in index.html and owns the canonical
+  // workspace-sentinel parser used by rendering.  Keep a small fallback for
+  // static/helper tests and defensive partial loads, but prefer the renderer's
+  // parser whenever it is available.
+  if(typeof _stripWorkspaceDisplayPrefix==='function'){
+    return _stripWorkspaceDisplayPrefix(value);
+  }
+  const raw=String(value||'');
+  const strippedV1=raw.replace(/^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*/,'');
+  if(strippedV1!==raw) return strippedV1.trim();
+  return raw.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
+}
+
 function _sameTranscriptMessage(a,b){
   if(!(a&&b)) return false;
   const role=String(a.role||'');
@@ -2326,9 +2369,27 @@ function _sameTranscriptMessage(a,b){
   const bText=_messageComparableText(b);
   if(aText===bText) return true;
   if(role==='user'){
-    return _stripAttachedFilesMarker(aText)===_stripAttachedFilesMarker(bText);
+    return _normalizeUserTranscriptText(aText)===_normalizeUserTranscriptText(bText);
   }
   return false;
+}
+
+function _currentTailUserMessage(messages){
+  const list=Array.isArray(messages)?messages:[];
+  for(let i=list.length-1;i>=0;i--){
+    const msg=list[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user') return msg;
+    if(msg._live||String(msg.role||'')==='tool') continue;
+    return null;
+  }
+  return null;
+}
+
+function _hasCurrentTailUserDuplicate(messages,candidate){
+  if(!candidate||String(candidate.role||'')!=='user') return false;
+  const existing=_currentTailUserMessage(messages);
+  return !!(existing&&_sameTranscriptMessage(existing,candidate));
 }
 
 function _currentTurnAssistantText(messages){
@@ -2623,7 +2684,9 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
   for(const msg of tail){
     let candidate=msg;
     if(!candidate) continue;
-    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
+    const duplicate=String(candidate.role||'')==='user'
+      ? _hasCurrentTailUserDuplicate(merged,candidate)
+      : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
     if(!duplicate) merged.push(candidate);
   }
   return merged;
@@ -4092,16 +4155,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
       retryTimeouts:true,
       retryStatuses:[502,503,504],
     };
-    const sessData = _sessionListHasLoadedOnce
-      ? await api('/api/sessions' + sessionListQS,{timeoutToast:false})
-      : await api('/api/sessions' + sessionListQS,sessionRequestOpts);
-    let projData={projects:_allProjects||[]};
-    try{
-      const projectQS = _showAllProfiles ? '?all_profiles=1' : '';
-      projData = await api('/api/projects' + projectQS,{timeoutToast:false});
-    }catch(projectError){
-      console.warn('renderProjectsList',projectError);
-    }
+    const {sessData, projData}=await _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
     // #4671: while a profile switch is mid-flight, drop ANY payload — even one whose
@@ -4153,6 +4207,25 @@ async function _runRenderSessionListRefresh(opts, _gen){
       renderSessionListFromCache();
     }
   }
+}
+
+async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts){
+  const projectPromise = (async() => {
+    try{
+      const projectQS = _showAllProfiles ? '?all_profiles=1' : '';
+      return await api('/api/projects' + projectQS,{timeoutToast:false});
+    }catch(projectError){
+      console.warn('renderProjectsList',projectError);
+      return {projects:_allProjects||[]};
+    }
+  })();
+
+  const sessData = _sessionListHasLoadedOnce
+    ? await api('/api/sessions' + sessionListQS,{timeoutToast:false})
+    : await api('/api/sessions' + sessionListQS,sessionRequestOpts);
+  const projData = await projectPromise;
+
+  return {sessData,projData};
 }
 
 async function _drainRenderSessionListQueue(initialRequest){
@@ -4290,8 +4363,31 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     if(S.busy || S.activeStreamId) return;
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
-    if(remoteCount > localCount || remoteLast > localLast){
+    // Force-reload the whole transcript whenever the visible conversation's
+    // message count CHANGED in either direction. A higher count means new
+    // messages; a LOWER count means another tab/client truncated, undid,
+    // retried, or regenerated the transcript (/api/session/truncate, /retry,
+    // /undo all shrink s.messages and write a lower message_count) — both must
+    // re-sync or this tab silently keeps a stale transcript.
+    //
+    // A bump in last_message_at WITHOUT a count change means a non-transcript
+    // write touched the session — most commonly the post-turn background
+    // skill/memory review, which rewrites memory/skills and advances updated_at
+    // but adds no chat messages. Reloading on that bump tears down and re-fetches
+    // the transcript: loadSession(force) clears S.messages and awaits a
+    // round-trip before re-rendering, so the whole conversation visibly
+    // disappears and "reappears a moment later" with no new content. Skip the
+    // destructive reload in that case and just refresh the lightweight sidebar
+    // list metadata, advancing the local last-seen marker so the same metadata
+    // bump doesn't re-trigger on every subsequent poll.
+    if(remoteCount !== localCount){
       await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});
+      if(typeof renderSessionList==='function') void renderSessionList();
+    }else if(remoteLast > localLast){
+      if(S.session && S.session.session_id === sid){
+        S.session.last_message_at = remoteLast;
+        if(data.session.updated_at) S.session.updated_at = data.session.updated_at;
+      }
       if(typeof renderSessionList==='function') void renderSessionList();
     }
   }catch(e){

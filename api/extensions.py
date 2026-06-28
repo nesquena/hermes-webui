@@ -14,6 +14,11 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlsplit
+import hashlib
+import io
+import time
+import zipfile
+from urllib.request import HTTPRedirectHandler, build_opener, urlopen
 
 from api.helpers import _security_headers, j
 
@@ -46,6 +51,14 @@ class ExtensionToggleError(Exception):
         self.status = status
 
 
+class ExtensionInstallError(Exception):
+    """Sanitized extension install/uninstall error safe to return to the browser."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
 EXTENSION_ROUTE_PREFIX = "/extensions/"
 _EXTENSION_DIR_ENV = "HERMES_WEBUI_EXTENSION_DIR"
 _EXTENSION_SCRIPT_URLS_ENV = "HERMES_WEBUI_EXTENSION_SCRIPT_URLS"
@@ -61,6 +74,37 @@ _MAX_DISABLED_EXTENSION_IDS = 512
 _EXTENSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _EXTENSION_STATE_WARNING_SOURCE = "extension_state"
 _EXTENSION_STATE_LOCK = threading.Lock()
+
+_GALLERY_INSTALL_STATE_FILENAME = "extension-install-manifest.json"
+_MAX_INSTALL_MANIFEST_BYTES = 128 * 1024
+_MAX_GALLERY_INSTALLED_IDS = 256
+_MAX_ZIP_DOWNLOAD_BYTES = 32 * 1024 * 1024
+_REGISTRY_URL = "https://hermes-webui.github.io/hermes-webui-extensions/registry.json"
+_REGISTRY_ALLOWED_DOWNLOAD_HOSTS = frozenset({"hermes-webui.github.io"})
+_REGISTRY_CACHE: dict = {}
+_REGISTRY_LOCK = threading.Lock()
+_REGISTRY_TTL_SECONDS = 300
+
+
+class _AllowlistRedirectHandler(HTTPRedirectHandler):
+    """Reject redirects to hosts not in the download allowlist."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlsplit(newurl)
+        if parsed.scheme != "https" or parsed.hostname not in _REGISTRY_ALLOWED_DOWNLOAD_HOSTS:
+            raise ExtensionInstallError("Download redirected to disallowed host")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_download(url: str, max_bytes: int, timeout: int = 30) -> bytes:
+    """Download from an allowlisted host, rejecting cross-host redirects."""
+    opener = build_opener(_AllowlistRedirectHandler)
+    resp = opener.open(url, timeout=timeout)
+    try:
+        return resp.read(max_bytes + 1)
+    finally:
+        resp.close()
+
 
 _EXTENSION_MIME = {
     "css": "text/css",
@@ -82,30 +126,85 @@ _EXTENSION_MIME = {
 _TEXT_MIME_TYPES = {"text/css", "application/javascript", "text/html", "image/svg+xml", "text/plain"}
 
 
-def _extension_root() -> Optional[Path]:
-    """Return the configured extension directory, or None when disabled.
+def _default_extension_root() -> Path:
+    """WebUI-managed default extension directory under the state dir.
 
-    A missing or non-directory path disables extensions instead of failing open.
-    The startup docs encourage users to point this at a directory they control.
+    Used when ``HERMES_WEBUI_EXTENSION_DIR`` is unset so one-click gallery
+    install works out of the box on a single-user self-hosted instance with no
+    environment setup. It lives alongside sessions/settings in the WebUI-owned
+    state dir, which is a different trust domain from "a user-writable directory
+    on a shared box" — the loaded code still runs with full session authority,
+    so the trust model is unchanged (see docs/EXTENSIONS.md).
+    """
+    return _extension_state_dir() / "extensions"
+
+
+def _extension_root() -> Optional[Path]:
+    """Return the active extension directory, or None when none is available.
+
+    Resolution order:
+    1. ``HERMES_WEBUI_EXTENSION_DIR`` when set — must be an existing directory,
+       otherwise None (the admin owns that path; we never auto-create it).
+    2. Otherwise the WebUI-managed default (``STATE_DIR/extensions``) when it
+       already exists. The first gallery install creates it on demand
+       (see ``_writable_extension_root``); until then this stays None and the
+       UI reports the same "nothing installed yet" state as before.
     """
     raw = os.getenv(_EXTENSION_DIR_ENV, "").strip()
-    if not raw:
+    if raw:
+        root = Path(raw).expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            return None
+        return root
+    default_root = _default_extension_root()
+    try:
+        if default_root.is_dir() and not default_root.is_symlink():
+            return default_root.resolve()
+    except OSError:
         return None
-    root = Path(raw).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
+    return None
+
+
+def _writable_extension_root() -> Optional[Path]:
+    """Resolve the extension root for writes, bootstrapping the managed default.
+
+    When ``HERMES_WEBUI_EXTENSION_DIR`` is set we use it as-is (the admin owns
+    it; it must already exist). When unset we create and return the
+    WebUI-managed default so a fresh install can install an extension with zero
+    configuration — plug and play.
+    """
+    raw = os.getenv(_EXTENSION_DIR_ENV, "").strip()
+    if raw:
+        return _extension_root()
+    default_root = _default_extension_root()
+    try:
+        default_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
         return None
-    return root
+    try:
+        if default_root.is_symlink() or not default_root.is_dir():
+            return None
+        return default_root.resolve()
+    except OSError:
+        return None
 
 
 def _extension_root_status() -> Tuple[Optional[Path], bool, bool]:
-    """Return (root, configured, valid) without exposing the configured path."""
+    """Return (root, configured, valid) without exposing the configured path.
+
+    With no ``HERMES_WEBUI_EXTENSION_DIR`` the WebUI-managed default is always
+    available as an install target, so ``configured`` is True (extensions are
+    no longer "not configured" out of the box). ``valid`` reflects whether that
+    managed directory currently exists — it is created on the first install.
+    """
     raw = os.getenv(_EXTENSION_DIR_ENV, "").strip()
-    if not raw:
-        return None, False, False
-    root = Path(raw).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        return None, True, False
-    return root, True, True
+    if raw:
+        root = Path(raw).expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            return None, True, False
+        return root, True, True
+    root = _extension_root()
+    return root, True, root is not None
 
 
 def _new_diagnostics() -> Dict[str, Any]:
@@ -373,7 +472,7 @@ def _manifest_path(root: Path) -> Optional[Path]:
     return manifest
 
 
-def _manifest_asset_url(value: object) -> str:
+def _manifest_asset_url(value: object, asset_base: str = "") -> str:
     """Normalize a manifest asset entry to the existing same-origin URL format."""
     if not isinstance(value, str):
         return ""
@@ -388,7 +487,32 @@ def _manifest_asset_url(value: object) -> str:
     # are still allowed and go through the same validator as env-configured URLs.
     if item.startswith("/"):
         return item
-    return EXTENSION_ROUTE_PREFIX + item
+    base = asset_base.strip("/")
+    rel = f"{base}/{item}" if base else item
+    return EXTENSION_ROUTE_PREFIX + rel
+
+
+def _manifest_asset_value_with_base(value: object, asset_base: str) -> object:
+    """Rewrite a manifest asset value so it remains relative to its manifest file."""
+    if not isinstance(value, str):
+        return value
+    item = value.strip()
+    if not item:
+        return item
+    parsed = urlsplit(item)
+    if parsed.scheme or parsed.netloc or item.startswith("//") or item.startswith("/"):
+        return item
+    base = asset_base.strip("/")
+    return f"{base}/{item}" if base else item
+
+
+def _copy_manifest_entry_with_asset_base(entry: Dict[str, object], asset_base: str) -> Dict[str, object]:
+    copied = dict(entry)
+    for key in ("scripts", "stylesheets"):
+        values = copied.get(key)
+        if isinstance(values, list):
+            copied[key] = [_manifest_asset_value_with_base(value, asset_base) for value in values]
+    return copied
 
 
 def _manifest_entry_text(entry: Dict[str, object], key: str) -> str:
@@ -562,11 +686,68 @@ def _empty_manifest_status(path_status: str) -> Dict[str, Any]:
         "configured": path_status != "not_configured",
         "loaded": False,
         "status": path_status,
+        "_asset_base": "",
         "entry_count": 0,
         "script_count": 0,
         "stylesheet_count": 0,
         "sidecar_count": 0,
     }
+
+
+def _manifest_asset_base(root: Path, manifest_file: Path) -> str:
+    try:
+        rel_parent = manifest_file.parent.relative_to(root).as_posix()
+    except ValueError:
+        return ""
+    return "" if rel_parent == "." else rel_parent
+
+
+def _gallery_installed_runtime_manifest(
+    root: Path, diagnostics: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, object]]:
+    """Build a runtime manifest from gallery-installed extension manifests."""
+    install_manifest = _load_install_manifest()
+    installed = install_manifest.get("installed", {})
+    if not isinstance(installed, dict):
+        return None
+    entries: List[Dict[str, object]] = []
+    for ext_id in sorted(installed):
+        if not _valid_extension_id(ext_id):
+            continue
+        manifest_file = root / ext_id / "manifest.json"
+        try:
+            if not manifest_file.exists() or not manifest_file.is_file():
+                _add_diagnostic_warning(diagnostics, "gallery_manifest_missing", "gallery")
+                continue
+            manifest = json.loads(_read_manifest_text(manifest_file))
+        except _ManifestTooLarge:
+            _add_diagnostic_warning(diagnostics, "gallery_manifest_oversized", "gallery")
+            continue
+        except json.JSONDecodeError:
+            _add_diagnostic_warning(diagnostics, "gallery_manifest_malformed", "gallery")
+            continue
+        except RecursionError:
+            _add_diagnostic_warning(diagnostics, "gallery_manifest_too_deeply_nested", "gallery")
+            continue
+        except (OSError, UnicodeDecodeError):
+            _add_diagnostic_warning(diagnostics, "gallery_manifest_unreadable", "gallery")
+            continue
+        asset_base = ext_id
+        if isinstance(manifest, dict):
+            top_entry: Dict[str, object] = {"id": ext_id}
+            for key in ("name", "enabled", "scripts", "stylesheets", "sidecar"):
+                if key in manifest:
+                    top_entry[key] = manifest[key]
+            if any(key in top_entry for key in ("scripts", "stylesheets", "sidecar")):
+                entries.append(_copy_manifest_entry_with_asset_base(top_entry, asset_base))
+        for _source, _index, entry in _manifest_extension_entries(manifest):
+            copied = _copy_manifest_entry_with_asset_base(entry, asset_base)
+            if not _valid_extension_id(copied.get("id")):
+                copied["id"] = ext_id
+            entries.append(copied)
+    if not entries:
+        return None
+    return {"extensions": entries}
 
 
 def _load_manifest_with_status(
@@ -578,6 +759,17 @@ def _load_manifest_with_status(
     if manifest_file is None:
         if path_status == "invalid_path":
             _add_diagnostic_warning(diagnostics, "manifest_invalid_path", "manifest")
+        elif path_status == "not_configured":
+            manifest = _gallery_installed_runtime_manifest(root, diagnostics)
+            if manifest is not None:
+                manifest_status.update(
+                    {
+                        "loaded": True,
+                        "status": "gallery_installed",
+                        "_asset_base": "",
+                    }
+                )
+                return manifest, manifest_status
         return None, manifest_status
     try:
         if not manifest_file.exists() or not manifest_file.is_file():
@@ -586,7 +778,13 @@ def _load_manifest_with_status(
             _add_diagnostic_warning(diagnostics, "manifest_missing", "manifest")
             return None, manifest_status
         manifest = json.loads(_read_manifest_text(manifest_file))
-        manifest_status.update({"loaded": True, "status": "loaded"})
+        manifest_status.update(
+            {
+                "loaded": True,
+                "status": "loaded",
+                "_asset_base": _manifest_asset_base(root, manifest_file),
+            }
+        )
         return manifest, manifest_status
     except _ManifestTooLarge:
         _log.warning("Configured extension manifest exceeds %d bytes", _MAX_MANIFEST_BYTES)
@@ -685,6 +883,7 @@ def _read_manifest_urls_with_diagnostics(
     scripts: List[str] = []
     stylesheets: List[str] = []
     sidecars: List[Dict[str, str]] = []
+    asset_base = str(manifest_status.get("_asset_base", "") or "")
     entries = _iter_manifest_entries(manifest, disabled_ids=disabled_ids)
     manifest_status["entry_count"] = len(entries)
     scripts_full = False
@@ -707,7 +906,7 @@ def _read_manifest_urls_with_diagnostics(
             for value in _entry_asset_values(entry, "scripts"):
                 if not _append_safe_asset_url(
                     scripts,
-                    _manifest_asset_url(value),
+                    _manifest_asset_url(value, asset_base),
                     script_source,
                     diagnostics=diagnostics,
                 ):
@@ -717,7 +916,7 @@ def _read_manifest_urls_with_diagnostics(
             for value in _entry_asset_values(entry, "stylesheets"):
                 if not _append_safe_asset_url(
                     stylesheets,
-                    _manifest_asset_url(value),
+                    _manifest_asset_url(value, asset_base),
                     stylesheet_source,
                     diagnostics=diagnostics,
                 ):
@@ -726,7 +925,7 @@ def _read_manifest_urls_with_diagnostics(
     manifest_status.update(
         {
             "loaded": True,
-            "status": "loaded",
+            "status": manifest_status.get("status") or "loaded",
             "script_count": len(scripts),
             "stylesheet_count": len(stylesheets),
             "sidecar_count": len(sidecars),
@@ -780,7 +979,12 @@ def get_extension_status() -> Dict[str, Any]:
         "stylesheet_count": 0,
         "sidecar_count": 0,
     }
-    if dir_configured and not dir_valid:
+    # Only warn about an unavailable directory when the admin explicitly set
+    # HERMES_WEBUI_EXTENSION_DIR to a path that is missing/not-a-dir. The
+    # WebUI-managed default simply not existing yet (pre-first-install) is the
+    # normal opt-in state, not a misconfiguration worth surfacing.
+    env_dir_set = bool(os.getenv(_EXTENSION_DIR_ENV, "").strip())
+    if env_dir_set and dir_configured and not dir_valid:
         _add_diagnostic_warning(diagnostics, "extension_dir_unavailable", "extension_dir")
 
     if root is None:
@@ -829,6 +1033,9 @@ def get_extension_status() -> Dict[str, Any]:
         manifest_stylesheets or None,
         diagnostics=diagnostics,
     )
+    public_manifest_status = {
+        key: value for key, value in manifest_status.items() if not key.startswith("_")
+    }
     return {
         "enabled": True,
         "extension_dir_configured": True,
@@ -843,8 +1050,9 @@ def get_extension_status() -> Dict[str, Any]:
             "manifest_extensions": len(extensions),
             "user_disabled": user_disabled_count,
         },
-        "manifest": manifest_status,
+        "manifest": public_manifest_status,
         "extensions": extensions,
+        "gallery_installed": _load_install_manifest().get("installed", {}),
         "warnings": diagnostics["warnings"],
     }
 
@@ -883,6 +1091,280 @@ def set_extension_user_enabled(extension_id: object, enabled: object) -> Dict[st
     # while blocking other toggles; a concurrent toggle may be reflected too,
     # which is fine because the UI re-renders from the current effective state.
     return get_extension_status()
+
+
+def _install_manifest_file() -> Path:
+    return _extension_state_dir() / _GALLERY_INSTALL_STATE_FILENAME
+
+
+def _empty_install_manifest() -> Dict[str, Any]:
+    return {"version": 1, "installed": {}}
+
+
+def _load_install_manifest() -> Dict[str, Any]:
+    """Load gallery install manifest, failing safe on any error."""
+    mfile = _install_manifest_file()
+    try:
+        if not mfile.exists() or not mfile.is_file():
+            return _empty_install_manifest()
+        with mfile.open("rb") as fh:
+            raw = fh.read(_MAX_INSTALL_MANIFEST_BYTES + 1)
+        if len(raw) > _MAX_INSTALL_MANIFEST_BYTES:
+            return _empty_install_manifest()
+        parsed = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return _empty_install_manifest()
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("installed"), dict):
+        return _empty_install_manifest()
+    installed: Dict[str, Any] = {}
+    for ext_id, entry in parsed["installed"].items():
+        if not _valid_extension_id(ext_id):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        files = entry.get("files", [])
+        if not isinstance(files, list):
+            continue
+        installed[ext_id] = {
+            "version": str(entry.get("version", "unknown")),
+            "files": [f for f in files if isinstance(f, str)],
+            "installed_at": str(entry.get("installed_at", "")),
+        }
+        if len(installed) >= _MAX_GALLERY_INSTALLED_IDS:
+            break
+    return {"version": 1, "installed": installed}
+
+
+def _write_install_manifest(manifest: Dict[str, Any]) -> None:
+    """Persist install manifest with atomic same-directory replace."""
+    target = _install_manifest_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    data = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    try:
+        with tmp.open("wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def install_extension(id: object, download_url: object, sha256: object) -> Dict[str, Any]:
+    """Download, verify, and extract a gallery extension."""
+    if not _valid_extension_id(id):
+        raise ExtensionInstallError("Invalid extension id")
+    ext_id = str(id).strip()
+    if not isinstance(download_url, str) or not download_url.startswith("https://"):
+        raise ExtensionInstallError("Invalid download URL")
+    parsed_url = urlsplit(download_url)
+    if parsed_url.hostname not in _REGISTRY_ALLOWED_DOWNLOAD_HOSTS:
+        raise ExtensionInstallError("Invalid download URL")
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise ExtensionInstallError("Invalid sha256")
+    root = _writable_extension_root()
+    if root is None:
+        raise ExtensionInstallError("Extensions not configured", 404)
+    try:
+        raw_data = _safe_download(download_url, _MAX_ZIP_DOWNLOAD_BYTES)
+    except ExtensionInstallError:
+        raise
+    except Exception as exc:
+        raise ExtensionInstallError("Download failed", 502) from exc
+    if len(raw_data) > _MAX_ZIP_DOWNLOAD_BYTES:
+        raise ExtensionInstallError("Download too large")
+    if hashlib.sha256(raw_data).hexdigest() != sha256:
+        raise ExtensionInstallError("SHA-256 mismatch")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw_data))
+    except zipfile.BadZipFile as exc:
+        raise ExtensionInstallError("Invalid zip archive") from exc
+    ext_dir = root / ext_id
+    member_names = zf.namelist()
+    total_uncompressed = sum(info.file_size for info in zf.infolist() if not info.is_dir())
+    if total_uncompressed > _MAX_ZIP_DOWNLOAD_BYTES * 10:
+        raise ExtensionInstallError("Archive uncompressed size exceeds limit")
+    file_members = [n for n in member_names if n and not n.endswith("/")]
+    if len(file_members) > 1024:
+        raise ExtensionInstallError("Archive contains too many files")
+    # Detect and strip a single top-level directory prefix matching the extension id.
+    # Registry artifacts root files under <id>/ (e.g. desktop-companion/manifest.json).
+    strip_prefix = ""
+    candidate = ext_id + "/"
+    if all(n.startswith(candidate) for n in file_members):
+        strip_prefix = candidate
+    def _stripped(name: str) -> str:
+        if strip_prefix and name.startswith(strip_prefix):
+            return name[len(strip_prefix):]
+        return name
+    root_resolved = root.resolve()
+    ext_dir_resolved = ext_dir.resolve()
+    for member_name in file_members:
+        decoded = _fully_unquote_path(_stripped(member_name))
+        if not decoded or not _is_safe_relative_path(decoded):
+            raise ExtensionInstallError("Unsafe archive member")
+        resolved = (ext_dir / decoded).resolve()
+        try:
+            resolved.relative_to(root_resolved)
+        except ValueError as exc:
+            raise ExtensionInstallError("Zip-slip detected") from exc
+        try:
+            resolved.relative_to(ext_dir_resolved)
+        except ValueError as exc:
+            raise ExtensionInstallError("Zip-slip detected") from exc
+    # Determine version from extension.json or manifest.json in zip
+    version = "unknown"
+    for vfile in ("extension.json", "manifest.json"):
+        candidate_name = strip_prefix + vfile if strip_prefix else vfile
+        if candidate_name in member_names:
+            try:
+                mdata = json.loads(zf.read(candidate_name).decode("utf-8"))
+                if isinstance(mdata, dict) and isinstance(mdata.get("version"), str):
+                    version = mdata["version"]
+                    break
+            except Exception:
+                pass
+    with _EXTENSION_STATE_LOCK:
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        if ext_dir.is_symlink():
+            raise ExtensionInstallError("Extension directory is a symlink", 400)
+        rollback: List[Path] = []
+        try:
+            for member_name in file_members:
+                decoded = _fully_unquote_path(_stripped(member_name))
+                dest = (ext_dir / decoded).resolve()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(member_name))
+                rollback.append(dest)
+        except Exception as exc:
+            for path in rollback:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                if ext_dir.exists() and not any(ext_dir.iterdir()):
+                    ext_dir.rmdir()
+            except OSError:
+                pass
+            raise ExtensionInstallError("Extraction failed", 500) from exc
+        try:
+            manifest = _load_install_manifest()
+            from datetime import datetime, timezone
+            rel_files = [p.relative_to(ext_dir_resolved).as_posix() for p in rollback]
+            manifest["installed"][ext_id] = {
+                "version": version,
+                "files": rel_files,
+                "installed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            encoded = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+            if len(encoded) > _MAX_INSTALL_MANIFEST_BYTES:
+                raise ExtensionInstallError("Install manifest would exceed size limit")
+            _write_install_manifest(manifest)
+        except ExtensionInstallError:
+            for path in rollback:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                if ext_dir.exists() and not any(ext_dir.iterdir()):
+                    ext_dir.rmdir()
+            except OSError:
+                pass
+            raise
+        except Exception as exc:
+            for path in rollback:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                if ext_dir.exists() and not any(ext_dir.iterdir()):
+                    ext_dir.rmdir()
+            except OSError:
+                pass
+            raise ExtensionInstallError("Failed to record install", 500) from exc
+    return {"installed": True, "id": ext_id, "version": version}
+
+
+def uninstall_extension(id: object) -> Dict[str, Any]:
+    """Remove a gallery-installed extension's files and manifest entry."""
+    if not _valid_extension_id(id):
+        raise ExtensionInstallError("Invalid extension id")
+    ext_id = str(id).strip()
+    root = _extension_root()
+    if root is None:
+        raise ExtensionInstallError("Extensions not configured", 404)
+    with _EXTENSION_STATE_LOCK:
+        manifest = _load_install_manifest()
+        entry = manifest["installed"].get(ext_id)
+        if entry is None:
+            raise ExtensionInstallError("Extension not installed", 404)
+        ext_dir = root / ext_id
+        for rel_path in entry.get("files", []):
+            if not _is_safe_relative_path(rel_path):
+                continue
+            target = (ext_dir / rel_path).resolve()
+            try:
+                target.relative_to(ext_dir.resolve())
+            except ValueError:
+                continue
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+        # Remove empty directories bottom-up
+        if ext_dir.exists():
+            for dirpath in sorted(
+                (d for d in ext_dir.rglob("*") if d.is_dir()),
+                key=lambda p: len(p.parts),
+                reverse=True,
+            ):
+                try:
+                    if not any(dirpath.iterdir()):
+                        dirpath.rmdir()
+                except OSError:
+                    pass
+            try:
+                if not any(ext_dir.iterdir()):
+                    ext_dir.rmdir()
+            except OSError:
+                pass
+        del manifest["installed"][ext_id]
+        _write_install_manifest(manifest)
+    return {"uninstalled": True, "id": ext_id}
+
+
+def get_extension_registry() -> Dict[str, Any]:
+    """Fetch the extension registry with a 5-minute TTL cache."""
+    with _REGISTRY_LOCK:
+        now = time.monotonic()
+        cached = _REGISTRY_CACHE.get("data")
+        cached_at = _REGISTRY_CACHE.get("fetched_at", 0.0)
+        if cached is not None and (now - cached_at) < _REGISTRY_TTL_SECONDS:
+            return {"entries": cached}
+        try:
+            raw = urlopen(_REGISTRY_URL, timeout=10).read(2 * 1024 * 1024)
+            data = json.loads(raw.decode("utf-8"))
+            if isinstance(data, list):
+                entries = data
+            elif isinstance(data, dict):
+                entries = data.get("extensions") or data.get("entries") or []
+            else:
+                entries = []
+            if not isinstance(entries, list):
+                entries = []
+            _REGISTRY_CACHE["data"] = entries
+            _REGISTRY_CACHE["fetched_at"] = now
+            return {"entries": entries}
+        except Exception:
+            return {"entries": [], "error": "registry_unavailable"}
 
 
 def inject_extension_tags(index_html: str) -> str:

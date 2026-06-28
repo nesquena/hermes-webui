@@ -10,7 +10,8 @@ JavaScript into the app shell without editing the WebUI source tree.
 > and triggering tool actions. **Only enable extensions you wrote yourself or
 > from sources you trust as much as the WebUI source itself.** If your WebUI is
 > shared with users you do not fully trust, do not enable extensions.
-> Do not point `HERMES_WEBUI_EXTENSION_DIR` at a user-writable directory.
+> If you set `HERMES_WEBUI_EXTENSION_DIR` yourself, do not point it at a
+> user-writable directory on a shared host.
 
 This is intentionally not a plugin marketplace or dependency system. It is a
 safe escape hatch for local dashboards, internal tooling, and workflow-specific
@@ -39,9 +40,38 @@ Extensions cannot, by themselves:
 
 ## Configuration
 
-Extensions are disabled by default. Configure them with environment variables
-before starting the WebUI server. `HERMES_WEBUI_EXTENSION_DIR` must point to an
-existing directory before any script or stylesheet URLs are injected:
+### One-click install (no configuration required)
+
+For a single-user self-hosted instance you do not need to configure anything.
+Open **Settings → Extensions**, pick an extension from the gallery, and click
+**Install** — it just works. The first install creates a WebUI-managed
+extension directory under your state dir (`STATE_DIR/extensions`, e.g.
+`~/.hermes/webui/extensions/`) and installs into it; gallery-installed
+extensions load automatically on the next app-shell render with no environment
+variables and no restart of your shell.
+
+The managed directory lives alongside your sessions and settings in the
+WebUI-owned state dir. That is a different trust domain from "a world-writable
+directory on a shared box": only the WebUI process (and whoever can already
+write your `~/.hermes` state) can place code there. The trust model below still
+applies — installed extension code runs with full session authority — so only
+install extensions from the vetted gallery or sources you trust as much as the
+WebUI source itself.
+
+Some gallery entries need more than WebUI assets. If an extension declares
+post-install guidance or lifecycle requirements such as a loopback sidecar or a
+native host, Settings -> Extensions shows a **Next step** note on the card after
+install. For example, Desktop Companion can install the WebUI bridge from the
+gallery, but the desktop pet is only visible after the local Desktop Companion
+app is started.
+
+### Manual / advanced configuration (optional)
+
+`HERMES_WEBUI_EXTENSION_DIR` is **optional** and overrides the managed default.
+Set it when you want extensions to live in a specific directory you control
+(e.g. a checked-out bundle, or a path mounted into a container). When set it
+must point to an existing directory before any script or stylesheet URLs are
+injected; WebUI never auto-creates an admin-specified path:
 
 ```bash
 export HERMES_WEBUI_EXTENSION_DIR=/path/to/my-extension/static
@@ -94,6 +124,22 @@ may be kept in the manifest with the JSON boolean `"enabled": false`. Explicit
 `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` and
 `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` still work and are appended after
 manifest assets, with duplicates ignored.
+
+When an extension is installed from Settings -> Extensions, WebUI records the
+installed package and loads that package's `manifest.json` automatically on the
+next app-shell render. In this gallery-installed mode, a manifest located at
+`HERMES_WEBUI_EXTENSION_DIR/<extension-id>/manifest.json` resolves bare relative
+assets relative to that package directory. For example,
+`"scripts": ["assets/companion-adapter.js"]` in
+`desktop-companion/manifest.json` injects
+`/extensions/desktop-companion/assets/companion-adapter.js`.
+
+Manual manifests configured with `HERMES_WEBUI_EXTENSION_MANIFEST` follow the
+same rule: relative assets resolve from the manifest file's directory. A root
+manifest such as `extensions.json` keeps the existing
+`/extensions/<asset-path>` behavior, while a subdirectory manifest such as
+`desktop-companion/manifest.json` resolves relative assets under
+`/extensions/desktop-companion/`.
 
 Extension entries may also declare a read-only loopback sidecar for diagnostics:
 
@@ -205,6 +251,37 @@ paths are never returned by the status endpoint. If `health_path` is omitted,
 diagnostics use `/health`; if `health_path` is present but invalid, the sidecar is
 skipped rather than probed.
 
+## Embedding an external web app in an iframe
+
+By default the WebUI's Content-Security-Policy only allows it to embed
+**same-origin** content in an `<iframe>` (the `frame-src` directive falls back to
+`'self'`). An extension that wants to pin an external self-hosted web app — a
+Grafana board, Vaultwarden, a personal dashboard — as a tab therefore needs the
+operator to widen `frame-src`, opt-in, via an environment variable:
+
+```bash
+# space-separated http(s) origins; optional *. subdomain wildcard and port.
+export HERMES_WEBUI_CSP_FRAME_EXTRA="https://grafana.example.com https://*.dash.example.com:8443"
+```
+
+Rules and guarantees:
+
+- Only `http(s)` origins are accepted (an iframe `src` is always http(s)).
+  Entries may include a `*.` subdomain wildcard and a port or `*` port; a path,
+  a `ws://`/`wss://` scheme, an invalid port, or any attempt to inject another
+  directive is rejected and the whole value is ignored (with a logged warning).
+- This mirrors the existing `HERMES_WEBUI_CSP_CONNECT_EXTRA` knob (which widens
+  `connect-src` for `fetch`/WebSocket); the two are independent.
+- It only governs what the WebUI page may **embed**. It does **not** touch
+  `frame-ancestors`, which stays `'none'` — so widening `frame-src` never lets
+  another site embed the WebUI itself.
+- Default-off: with the variable unset, the policy is unchanged (same-origin
+  iframes only).
+
+An "external app tab" extension should document the exact origin(s) it needs so
+the operator can set this knob deliberately, rather than assuming a wide-open
+policy.
+
 ## Static file serving
 
 When `HERMES_WEBUI_EXTENSION_DIR` points at an existing directory, files under
@@ -238,6 +315,100 @@ For shared or remotely exposed installations:
 - review extension code before enabling it
 - prefer small, auditable extension files
 - avoid serving generated or user-writable directories as extension roots
+
+## Registering a custom theme (skin)
+
+Extensions can contribute a custom **skin** that appears in the native
+**Settings → Appearance** skin picker, instead of bolting on a parallel theme
+switcher. Call `window.registerHermesSkin(descriptor)` from your extension
+script:
+
+```javascript
+window.registerHermesSkin({
+  name: 'E-Ink',            // display name (also the picker label)
+  value: 'e-ink',           // optional stable key; slugified from name if omitted
+  label: 'E-Ink',           // optional explicit picker label
+  colors: ['#000000', '#ffffff', '#555555'],  // up to 3 preview swatches
+  tokens: {                 // CSS design-token overrides for this skin
+    '--bg': '#ffffff',
+    '--surface': '#ffffff',
+    '--text': '#000000',
+    '--accent': '#000000',
+    '--border': '#000000'
+    // ...any of the allowed tokens below
+  }
+});
+```
+
+The call returns `true` on success and `false` if the descriptor was rejected
+(so an extension can detect and log a bad theme). Once registered, the skin
+shows up in the picker, can be selected, and persists across reloads exactly
+like a built-in skin. Registering the same key again updates it in place
+(idempotent), which is what a live theme editor relies on while the user edits.
+
+**Core does the security-sensitive work for you.** Because token values are
+written into CSS, every value is sanitized in core, once, so every theme
+extension inherits the guard:
+
+- **Allowed token names** (anything else is dropped): `--bg`, `--surface`,
+  `--surface2`, `--surface-subtle`, `--text`, `--text2`, `--muted`, `--accent`,
+  `--accent2`, `--accent3`, `--accent-contrast`, `--accent-hover`,
+  `--accent-text`, `--accent-bg`, `--accent-bg-strong`, `--accent-rgb`,
+  `--border`, `--border2`, `--hover-bg`, `--code-bg`, `--code-text`,
+  `--sidebar`, `--sidebar-text`, `--user-bubble`, `--assistant-bubble`,
+  `--success`, `--warning`, `--danger`, `--info`, `--link`.
+- **Allowed value shapes** (anything else is dropped): hex colors, `rgb()` /
+  `rgba()`, `hsl()` / `hsla()`, CSS color keywords, simple numeric-with-unit
+  values (`px`/`em`/`rem`/`%`), and a bare RGB triple (e.g. `0, 0, 0` for
+  `--accent-rgb`, which the app consumes inside `rgba(...)`). Values containing
+  `url()`, `expression()`, semicolons, braces, or other CSS-injection vectors
+  are rejected.
+- **Reserved keys are protected** — an extension cannot overwrite a built-in
+  skin key (e.g. `default`, `ares`, `graphite`).
+- A descriptor with no valid tokens after sanitization is rejected entirely.
+
+This is the supported, forward-looking way for theme-pack and theme-creator
+extensions to integrate with the built-in appearance system.
+
+## Registering a custom TTS engine
+
+Extensions can contribute a **text-to-speech engine** that appears in the
+**Settings → TTS Engine** dropdown alongside the built-ins (Browser / Edge /
+ElevenLabs) and is used by **both** playback paths — the hands-free voice-mode
+auto-read and the per-message "Listen" button. Call
+`window.registerHermesTtsEngine(descriptor)`:
+
+```javascript
+window.registerHermesTtsEngine({
+  id: 'voicevox',                 // [a-z0-9_-], not a built-in
+  label: 'VOICEVOX (local)',      // shown in the dropdown (textContent — escaped)
+  // synthesize(text, opts) -> Promise<ArrayBuffer | Blob | TypedArray> of audio.
+  // opts carries the user's saved { voice, rate, pitch } (engine may ignore).
+  synthesize(text, opts) {
+    return fetch('http://127.0.0.1:50021/...', { /* ... */ })
+      .then(r => r.arrayBuffer());
+  }
+});  // -> true on success, false if rejected
+```
+
+Rules and guarantees:
+
+- **id** must be slug-safe (`[a-z0-9][a-z0-9_-]{0,31}`) and may **not** shadow a
+  built-in engine (`browser`, `edge`, `elevenlabs`) — those are reserved.
+- **label** is inserted with `textContent`, never `innerHTML` (no markup
+  injection into the dropdown).
+- `synthesize` must return audio bytes (`ArrayBuffer`, `Blob`, or a typed array);
+  core coerces to an `ArrayBuffer` and plays it through the same `<audio>`
+  lifecycle as the Edge engine (including stop/rearm in voice mode). A rejected
+  promise or empty/invalid result fails gracefully (toast on the Listen button;
+  re-listen in voice mode).
+- Core owns selection, the dropdown option, and playback; the extension only
+  produces audio. Re-registering the same id updates it in place.
+- **Network note:** if your engine calls a local server (e.g. VOICEVOX on
+  `http://127.0.0.1:50021`), that request is a same-origin-policy / CSP
+  `connect-src` concern like any extension network call — loopback is already in
+  the default `connect-src`. Declare `permissions.network_external` honestly
+  based on where it calls.
 
 ## Extension authoring guidance
 
@@ -375,4 +546,9 @@ directly with `fetch(..., { credentials: 'omit', cache: 'no-store' })` and a
 short timeout. WebUI does **not** proxy sidecar requests and does not send WebUI
 cookies to sidecars. A successful HTTP response is shown as healthy, a non-OK
 HTTP response as unhealthy, and CORS/network/timeouts as unreachable or blocked;
-health response bodies are never rendered.
+raw health response bodies are never rendered. If a healthy response includes an
+optional top-level `runtime` object, the panel may parse it and render only
+allowlisted scalar fields such as `sidecar`, `native_host`, `bridge`,
+`last_seen_at`, and `webui_origin`. This keeps sidecar-specific diagnostics
+machine-readable without making WebUI depend on any one extension's private
+payload shape.

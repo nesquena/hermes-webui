@@ -812,10 +812,13 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     merge must treat those as the same user turn instead of rendering both.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    assert "function _stripAttachedFilesMarker" in src, (
-        "sessions.js must normalize the server-side attached-files suffix before deduping user turns"
+    assert "function _normalizeUserTranscriptText" in src, (
+        "sessions.js should normalize user transcript text before deduping user turns"
     )
-    assert "_stripAttachedFilesMarker(aText)===_stripAttachedFilesMarker(bText)" in src, (
+    assert "_stripAttachedFilesMarker(_stripForcedSkillEnvelope(text))" in src, (
+        "user transcript normalization should still remove the server-side attached-files suffix"
+    )
+    assert "_normalizeUserTranscriptText(aText)===_normalizeUserTranscriptText(bText)" in src, (
         "INFLIGHT user-message comparison should dedupe optimistic upload text against final pending text"
     )
     assert "role==='user'" in src, (
@@ -824,8 +827,11 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     pending_idx = src.find("function _mergePendingSessionMessage")
     assert pending_idx >= 0, "pending session merge helper not found"
     pending_block = src[pending_idx:pending_idx+500]
-    assert "_sameTranscriptMessage(existing,pendingMsg)" in pending_block, (
-        "pending-user merge should reuse transcript identity dedupe before inserting the server pending message"
+    assert "_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)" in pending_block, (
+        "pending-user merge should dedupe only against the current active-turn user row"
+    )
+    assert "messages.some(" not in pending_block, (
+        "pending-user merge must not scan historical user rows by normalized content"
     )
 
 

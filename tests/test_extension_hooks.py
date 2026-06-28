@@ -50,10 +50,15 @@ class FakeHandler:
         return None
 
 
-def test_extension_config_disabled_by_default(monkeypatch):
+def test_extension_config_disabled_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_WEBUI_EXTENSION_DIR", raising=False)
     monkeypatch.delenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", raising=False)
     monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+    # Point the managed state dir at an empty temp dir so the default extension
+    # root does not exist yet — config stays disabled until the first install.
+    import api.extensions as extensions
+
+    monkeypatch.setattr(extensions, "_extension_state_dir", lambda: tmp_path)
 
     from api.extensions import get_extension_config
 
@@ -193,6 +198,39 @@ def test_extension_manifest_adds_bundled_assets_before_env_urls(tmp_path, monkey
             "/extensions/templates/app.css",
             "/extensions/env-only.css",
         ],
+    }
+
+
+def test_extension_manifest_relative_assets_resolve_from_manifest_directory(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    ext_dir = root / "desktop-companion"
+    ext_dir.mkdir()
+    (ext_dir / "manifest.json").write_text(
+        """
+        {
+          "extensions": [
+            {
+              "id": "desktop-companion",
+              "scripts": ["assets/companion-adapter.js"],
+              "stylesheets": ["assets/companion-adapter.css"]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "desktop-companion/manifest.json")
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+
+    from api.extensions import get_extension_config
+
+    assert get_extension_config() == {
+        "enabled": True,
+        "script_urls": ["/extensions/desktop-companion/assets/companion-adapter.js"],
+        "stylesheet_urls": ["/extensions/desktop-companion/assets/companion-adapter.css"],
     }
 
 

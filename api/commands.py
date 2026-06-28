@@ -385,6 +385,22 @@ def _run_credits_command() -> str:
     return "\n".join(lines)
 
 
+def resolve_moa_config() -> dict:
+    try:
+        from hermes_cli.moa_config import moa_usage, normalize_moa_config
+    except ImportError as exc:
+        raise RuntimeError("MoA runtime unavailable (hermes-agent not installed or too old)") from exc
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        moa_cfg = normalize_moa_config(cfg.get("moa") if isinstance(cfg, dict) else {})
+    except Exception:
+        moa_cfg = normalize_moa_config({})
+    moa_cfg["preset"] = moa_cfg["default_preset"]
+    moa_cfg["usage"] = moa_usage()
+    return moa_cfg
+
+
 def execute_plugin_command(command: str) -> str:
     """Execute a plugin-registered slash command and return printable output.
 

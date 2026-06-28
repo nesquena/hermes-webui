@@ -7,6 +7,8 @@ initial streaming turn, the session still looks like Untitled + 0-messages
 The sidebar filter must exempt actively-streaming sessions from the empty-
 Untitled rule so they remain visible while the user navigates away.
 """
+import json
+
 import pytest
 
 import api.models as models
@@ -165,3 +167,39 @@ def test_compact_output_contains_active_stream_id(_isolate):
     assert compact.get("active_stream_id") == "test-stream-123", (
         "compact() must include active_stream_id for the sidebar filter."
     )
+
+def test_messageful_session_missing_from_index_is_recovered_in_sidebar(_isolate):
+    """A saved messageful sidecar must remain discoverable even if _index misses it.
+
+    During an active run, all_sessions() can see the in-memory SESSIONS overlay.
+    After the worker exits, only the sidecar JSON remains.  If the incremental
+    index missed that row, the sidebar must recover it instead of dropping a
+    session that GET /api/session can still load by id.
+    """
+    indexed = new_session()
+    indexed.messages.append({"role": "user", "content": "Indexed", "timestamp": 900.0})
+    indexed.messages.append({"role": "assistant", "content": "Present", "timestamp": 901.0})
+    indexed.title = "Already indexed"
+    indexed.save()
+
+    s = new_session()
+    s.messages.append({"role": "user", "content": "Hello", "timestamp": 1000.0})
+    s.messages.append({"role": "assistant", "content": "Hi", "timestamp": 1001.0})
+    s.title = "Indexed recovery"
+    s.save()
+
+    # Simulate the observed settled-worker shape: detail load can still read
+    # the sidecar file, but a non-empty sidebar index lacks this session and the
+    # in-memory runtime overlay is gone.
+    assert Session.load(s.session_id) is not None
+    models.SESSION_INDEX_FILE.write_text(
+        json.dumps([indexed.compact()]),
+        encoding="utf-8",
+    )
+    SESSIONS.clear()
+
+    rows = all_sessions()
+    by_id = {row["session_id"]: row for row in rows}
+    assert indexed.session_id in by_id
+    assert s.session_id in by_id
+    assert by_id[s.session_id]["message_count"] == 2

@@ -281,9 +281,19 @@ in-memory `_anchor_activity_scene`. `renderMessages()` uses that snapshot to
 build a folded activity summary above the final answer and leaves the final
 answer as ordinary assistant prose. Successful auto-compression rows remain
 live-only in settled history unless they explain a visible error or recovery
-state. This is not a Transparent Stream handoff and not a durable reload
-guarantee: hard reload scene persistence still requires a later persisted scene
-or journal hydration slice.
+state. The original live Compact Worklog handoff did not by itself cover
+Transparent Stream or durable reload; those require explicit settled-scene
+persistence or read-side hydration slices.
+
+Settled mixed `content[]` assistant messages now bridge into the same
+`activity_scene_v1` ownership. When the final assistant message interleaves text
+parts with `tool_use` parts, settlement and read-side hydration promote those
+ordered parts into anchor activity rows. The final answer remains the text after
+the last tool use on the final assistant message, while earlier text, non-final
+post-tool process text, thinking rows, and tool rows stay in chronological
+activity order for Compact Worklog and Transparent Stream renderers. The
+Transparent Stream raw `content[]` helper remains a fallback for settled
+messages that do not yet carry `_anchor_activity_scene`.
 
 ## Source Event Classification
 

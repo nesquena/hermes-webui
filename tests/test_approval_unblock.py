@@ -12,6 +12,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -479,3 +480,69 @@ class TestApprovalHTTPEndpoints:
                 r._pending.pop(sid, None)
                 r._gateway_queues.pop(sid, None)
                 pass  # no external token state to clean
+
+    def test_gateway_mirror_without_run_id_returns_explicit_conflict(self, monkeypatch):
+        """Gateway-mirrored approvals without relayable run state must stay actionable."""
+        from api import routes as r
+        from api import route_approvals as ra
+        from api.gateway_chat import _STREAM_RUN_IDS
+
+        sid = f"http-gateway-no-run-{uuid.uuid4().hex[:8]}"
+        stream_id = f"stream-no-run-{uuid.uuid4().hex[:8]}"
+        approval = {
+            "command": "rm -rf /tmp/no-run",
+            "pattern_key": "recursive delete",
+            "pattern_keys": ["recursive delete"],
+            "description": "recursive delete",
+        }
+        captured = {}
+
+        def fake_j(handler, data, status=200, extra_headers=None):
+            captured["payload"] = data
+            captured["status"] = status
+            return data
+
+        monkeypatch.setattr(r, "j", fake_j)
+        monkeypatch.setattr(r, "get_session", lambda _sid: SimpleNamespace(active_stream_id=stream_id))
+        # The relay-unavailable 409 is gateway-deployment behaviour: it only
+        # fires when the WebUI actually runs the gateway chat backend. On the
+        # default local backend a mirrored approval is resolved locally
+        # instead (see test_issue4771_local_approval_regression.py). Pin the
+        # gateway backend so this test exercises the intended 409 path.
+        monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
+
+        with _lock:
+            r._pending.pop(sid, None)
+            r._gateway_queues.pop(sid, None)
+            _STREAM_RUN_IDS.pop(stream_id, None)
+            r._gateway_queues[sid] = [_ApprovalEntry(approval)]
+        try:
+            ra.submit_gateway_pending_mirror(sid, approval)
+            with _lock:
+                approval_id = r._pending[sid][0]["approval_id"]
+
+            r._handle_approval_respond(
+                object(),
+                {"session_id": sid, "choice": "once", "approval_id": approval_id},
+            )
+
+            assert captured["status"] == 409
+            assert captured["payload"] == {
+                "ok": False,
+                "choice": "once",
+                "relayed": False,
+                "code": "gateway_run_unavailable",
+                "error": r._GATEWAY_APPROVAL_RELAY_UNAVAILABLE,
+            }
+            with _lock:
+                pending_queue = r._pending.get(sid)
+                assert isinstance(pending_queue, list)
+                assert len(pending_queue) == 1
+                assert pending_queue[0]["approval_id"] == approval_id
+                assert sid in r._gateway_queues
+                assert not r._gateway_queues[sid][0].event.is_set()
+        finally:
+            with _lock:
+                r._pending.pop(sid, None)
+                r._gateway_queues.pop(sid, None)
+                _STREAM_RUN_IDS.pop(stream_id, None)

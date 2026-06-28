@@ -93,6 +93,34 @@ def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 
     return raw, False
 
 
+def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
+    """Best-effort terminal SSE session payload for already-persisted state."""
+    try:
+        return redact_session_data(
+            _session_payload_with_full_messages(session, tool_calls=tool_calls)
+        )
+    except Exception:
+        logger.debug("Failed to build redacted session payload", exc_info=True)
+        return None
+
+
+def _cancel_event_payload(
+    message: str = "Cancelled by user",
+    *,
+    session: dict | None = None,
+) -> dict:
+    """Return base cancel terminal event metadata."""
+    payload = {
+        'message': message,
+        'type': 'cancelled',
+        'status': 'cancelled',
+    }
+    if session:
+        payload['session'] = session
+        payload['session_id'] = session.get('session_id')
+    return payload
+
+
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
 # interleave their os.environ writes. This global lock serializes the env
@@ -104,12 +132,78 @@ def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 
 _ENV_LOCK = threading.Lock()
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
+_STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS = 250.0
 
 _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "webui_streaming_cron_profile_home",
     default=None,
 )
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
+
+
+def _stream_writeback_diag_threshold_seconds(environ=None):
+    if environ is None:
+        environ = os.environ
+    raw = str(
+        environ.get(
+            "HERMES_WEBUI_STREAM_WRITEBACK_DIAG_MS",
+            _STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS,
+        )
+    ).strip()
+    try:
+        threshold_ms = float(raw)
+    except (TypeError, ValueError):
+        threshold_ms = _STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS
+    if threshold_ms < 0:
+        return None
+    return threshold_ms / 1000.0
+
+
+@contextlib.contextmanager
+def _stream_writeback_stage(timings, name, *, clock=time.perf_counter):
+    started = clock()
+    try:
+        yield
+    finally:
+        try:
+            timings.append((str(name), max(0.0, float(clock() - started))))
+        except Exception:
+            pass
+
+
+def _log_stream_writeback_timings(
+    session_id,
+    stream_id,
+    timings,
+    started,
+    *,
+    clock=time.perf_counter,
+    log=logger,
+    environ=None,
+):
+    threshold = _stream_writeback_diag_threshold_seconds(environ=environ)
+    if threshold is None:
+        return False
+    try:
+        total_seconds = max(0.0, float(clock() - started))
+    except Exception:
+        return False
+    if total_seconds < threshold:
+        return False
+    parts = []
+    for name, elapsed in timings or []:
+        try:
+            parts.append(f"{name}={float(elapsed) * 1000.0:.1f}ms")
+        except Exception:
+            continue
+    log.debug(
+        "stream final writeback timing session=%s stream=%s total=%.1fms stages=%s",
+        session_id,
+        stream_id,
+        total_seconds * 1000.0,
+        " ".join(parts),
+    )
+    return True
 
 
 def _install_streaming_cronjob_profile_wrapper() -> None:
@@ -1358,6 +1452,8 @@ from api.workspace import set_last_workspace
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
 # metadata added by the webui and must be stripped before the API call.
+# `reasoning_content` is provider-facing for reasoning-capable models. Display
+# metadata such as `reasoning`, `thinking`, and `_reasoning` stays omitted here.
 _API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content'}
 
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
@@ -3466,6 +3562,32 @@ def _strip_native_image_parts_from_content(content):
     return clean_parts
 
 
+_OOB_USER_MESSAGE_BLOCK_RE = re.compile(
+    r'\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)\s*.*?)?\]\s*?.*?\[/OUT-OF-BAND\s+USER\s+MESSAGE\]',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_oob_blocks(content):
+    """Remove consumed [OUT-OF-BAND USER MESSAGE ...] blocks from content.
+
+    These markers are internal control data that should never reach the model.
+    They can appear as plain strings or inside list-based content parts.
+    """
+    if isinstance(content, str):
+        return _OOB_USER_MESSAGE_BLOCK_RE.sub('', content)
+    if isinstance(content, list):
+        return [_strip_oob_blocks(part) for part in content]
+    if isinstance(content, dict):
+        return {
+            key: _strip_oob_blocks(value)
+            if isinstance(value, (str, list, dict))
+            else copy.deepcopy(value)
+            for key, value in content.items()
+        }
+    return content
+
+
 def _content_has_reasoning_only_parts(content) -> bool:
     if not isinstance(content, list) or not content:
         return False
@@ -3573,6 +3695,8 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
+        if 'content' in sanitized:
+            sanitized['content'] = _strip_oob_blocks(sanitized['content'])
         if strip_native_images and 'content' in sanitized:
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):
@@ -3670,6 +3794,8 @@ def _api_safe_message_positions(messages):
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
+        if 'content' in sanitized:
+            sanitized['content'] = _strip_oob_blocks(sanitized['content'])
         if sanitized.get('role'):
             out.append((idx, sanitized))
 
@@ -3722,12 +3848,28 @@ def _deduplicate_context_messages(messages):
 
     Prevents the agent from seeing the same message twice in conversation_history
     when result_messages contain duplicates that weren't caught by display-merge.
+    Compression/reference markers are internal recovery material: keep at most
+    one canonical assistant reference so a mis-role ``user`` marker cannot become
+    the next active user instruction.
     """
     if not messages:
         return messages
     seen = set()
     deduped = []
     for msg in messages:
+        if _is_context_compression_marker(msg):
+            marker_key = (
+                '__context_compression_marker__',
+                " ".join(_message_text(msg.get('content', '')).split())[:500],
+            )
+            if marker_key in seen:
+                continue
+            seen.add(marker_key)
+            if isinstance(msg, dict) and msg.get('role') != 'assistant':
+                msg = copy.deepcopy(msg)
+                msg['role'] = 'assistant'
+            deduped.append(msg)
+            continue
         key = _message_identity(msg)
         if key is not None and key in seen:
             continue
@@ -3788,7 +3930,10 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     def _safe_projection(msg):
         if not isinstance(msg, dict):
             return None
-        return {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+        projected = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+        if 'content' in projected:
+            projected['content'] = _strip_oob_blocks(projected['content'])
+        return projected
 
     safe_pos = 0
     while safe_pos < len(prev_safe):
@@ -4536,9 +4681,13 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     If Hermes Agent returns a normal append-only history, append that delta to
     the UI transcript. If the model/context history was compacted and no longer
     has the prior context as a prefix, keep the previous UI transcript and append
-    only compaction marker messages plus the current user turn onward.
+    the current user turn onward. Synthetic compaction/reference markers remain
+    internal recovery material and must not become visible user/assistant turns.
     """
-    previous_display = list(previous_display or [])
+    previous_display = [
+        m for m in list(previous_display or [])
+        if not _is_context_compression_marker(m)
+    ]
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -4684,10 +4833,6 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
-        marker_candidates = [
-            m for m in result_messages[:current_user_idx if current_user_idx is not None else len(result_messages)]
-            if _is_context_compression_marker(m)
-        ]
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
         # Normalize stale merges only in the current-turn slice.
         if msg_text and previous_user_tail:
@@ -4697,7 +4842,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                 previous_user_tail,
                 previous_context=previous_context,
             )
-        candidates = marker_candidates + turn_candidates
+        candidates = turn_candidates
 
     merged = previous_display[:]
     seen = {_message_identity(m) for m in merged}
@@ -4737,6 +4882,8 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         candidates = candidates[:insert_at] + [current_user_msg] + candidates[insert_at:]
 
     for msg in candidates:
+        if _is_context_compression_marker(msg):
+            continue
         key = _message_identity(msg)
         is_current_user_turn = _looks_like_current_user_turn(msg, msg_text)
         if (
@@ -4864,6 +5011,16 @@ def _agent_result_terminal_failure(result) -> bool:
 
 _TOOL_RESULT_SNIPPET_MAX = 4000
 
+# Tool-arg keys whose values are card content / diff-reconstruction inputs.
+# These must not be capped to the short incidental-arg limit (#4928), or long
+# commands/paths get cut and recovery-rebuilt diffs (built from old_string/
+# new_string/patch) break. Matched case-insensitively against the arg key.
+_TOOL_ARG_CONTENT_KEYS = frozenset({
+    'command', 'cmd', 'script', 'code', 'patch', 'diff',
+    'old_string', 'new_string', 'content', 'path', 'file_path',
+})
+_TOOL_ARG_CONTENT_CAP = _TOOL_RESULT_SNIPPET_MAX
+
 
 _LIVE_TOOL_PROMPT_DELTA_MAX = 12_000
 _LIVE_TOOL_PROMPT_TURN_MAX = 24_000
@@ -4923,6 +5080,31 @@ def live_usage_prompt_estimate_after_tool_delta(
     }
 
 
+def _live_usage_session_snapshot(session_id, current_session, cache_ref, *, loader=get_session):
+    """Return a session object for hot live-metering paths without repeated loads."""
+    if current_session is not None:
+        try:
+            cache_ref[0] = current_session
+        except Exception:
+            pass
+        return current_session
+    try:
+        cached = cache_ref[0]
+    except Exception:
+        cached = None
+    if cached is not None:
+        return cached
+    try:
+        loaded = loader(session_id)
+    except Exception:
+        return None
+    try:
+        cache_ref[0] = loaded
+    except Exception:
+        pass
+    return loaded
+
+
 def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     """Extract a bounded result preview from a stored tool message payload."""
     if limit <= 0:
@@ -4939,13 +5121,21 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
 
 
 def _truncate_tool_args(args, limit: int = 6) -> dict:
-    """Truncate tool args for compact session persistence."""
+    """Truncate tool args for compact session persistence.
+
+    Incidental args keep a short 120-char cap, but content/diff-bearing keys
+    (the command, code, and patch fields that tool cards and recovery-rebuilt
+    diffs are reconstructed from) get a much larger cap so a long command, file
+    path, or reconstructed diff is not silently corrupted (#4928). A hard cap is
+    still applied for storage safety, aligned with the result snippet cap.
+    """
     out = {}
     if not isinstance(args, dict):
         return out
     for k, v in list(args.items())[:limit]:
         s = str(v)
-        out[k] = s[:120] + ('...' if len(s) > 120 else '')
+        cap = _TOOL_ARG_CONTENT_CAP if str(k).lower() in _TOOL_ARG_CONTENT_KEYS else 120
+        out[k] = s[:cap] + ('...' if len(s) > cap else '')
     return out
 
 
@@ -5674,6 +5864,7 @@ def _run_agent_streaming(
     ephemeral=False,
     model_provider=None,
     goal_related=False,
+    moa_config=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -5744,6 +5935,14 @@ def _run_agent_streaming(
     # (model, base_url, provider) within one stream, so resolve it at most
     # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
     _real_ctx_cache = [None]
+    _live_usage_session_cache = [None]
+
+    def _current_live_usage_session():
+        return _live_usage_session_snapshot(
+            session_id,
+            s,
+            _live_usage_session_cache,
+        )
 
     def _seed_live_prompt_estimate() -> int:
         """Capture the latest exact prompt size before adding live tool deltas."""
@@ -5760,7 +5959,7 @@ def _run_agent_streaming(
                 _base = 0
         if not _base:
             try:
-                _session_obj = get_session(session_id)
+                _session_obj = _current_live_usage_session()
                 _base = getattr(_session_obj, 'last_prompt_tokens', 0) or 0
             except Exception:
                 _base = 0
@@ -5802,10 +6001,7 @@ def _run_agent_streaming(
             'threshold_tokens': 0,
             'last_prompt_tokens': 0,
         }
-        try:
-            _session_obj = get_session(session_id)
-        except Exception:
-            _session_obj = None
+        _session_obj = _current_live_usage_session()
 
         _agent = agent
         if _agent is not None:
@@ -6112,7 +6308,7 @@ def _run_agent_streaming(
         if cancel_event.is_set():
             with _agent_lock:
                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
-            put('cancel', {'message': 'Cancelled before start'})
+            put('cancel', _cancel_event_payload('Cancelled before start'))
             return
 
         # Resolve profile home for this agent run — use the session's own profile
@@ -6536,7 +6732,8 @@ def _run_agent_streaming(
                 if isinstance(args, dict):
                     for k, v in list(args.items())[:4]:
                         s2 = str(v)
-                        args_snap[k] = s2[:120] + ('...' if len(s2) > 120 else '')
+                        cap = _TOOL_ARG_CONTENT_CAP if str(k).lower() in _TOOL_ARG_CONTENT_KEYS else 120
+                        args_snap[k] = s2[:cap] + ('...' if len(s2) > cap else '')
                 return args_snap
 
             def _record_live_tool_start(tool_call_id, name, args):
@@ -6893,7 +7090,11 @@ def _run_agent_streaming(
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
-            _main_request_overrides = _main_model_request_overrides(_cfg)
+            _main_request_overrides = _main_model_request_overrides(
+                _cfg,
+                effective_model=resolved_model,
+                effective_provider=resolved_provider,
+            )
             put('context_status', {
                 'session_id': session_id,
                 'prefill': _public_prefill_context_status(_prefill_context),
@@ -7289,7 +7490,7 @@ def _run_agent_streaming(
                         logger.debug("Failed to interrupt agent before start")
                     with _agent_lock:
                         _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
-                    put('cancel', {'message': 'Cancelled by user'})
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
 
             # Prepend workspace context so the agent always knows which directory
@@ -7413,13 +7614,19 @@ def _run_agent_streaming(
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
-            result = agent.run_conversation(
+            _run_conversation_kwargs = dict(
                 user_message=user_message,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
+            # Only pass moa_config when a /moa override is actually active, so a
+            # normal send never trips a TypeError on an older hermes-agent whose
+            # run_conversation() predates the moa_config kwarg.
+            if moa_config is not None:
+                _run_conversation_kwargs["moa_config"] = moa_config
+            result = agent.run_conversation(**_run_conversation_kwargs)
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
             # reasoning with no trailing token/tool boundary to trigger a flush) so the last
@@ -7447,7 +7654,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', {'message': 'Cancelled by user'})
+                put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
@@ -7489,8 +7696,10 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                put('cancel', {'message': 'Cancelled by user'})
+                put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
+            _writeback_timings = []
+            _writeback_started = time.perf_counter()
             with _agent_lock:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                     if _stream_writeback_can_supersede_recovery_marker(s, msg_text):
@@ -7507,46 +7716,47 @@ def _run_agent_streaming(
                             getattr(s, 'active_stream_id', None),
                         )
                         return
-                _tool_limit_reached = _agent_result_tool_limit_reached(result)
-                _result_messages = result.get('messages') or _previous_context_messages
-                _result_messages = _drop_synthetic_max_iteration_summary_requests(
-                    _result_messages,
-                    enabled=_tool_limit_reached,
-                )
-                if cancel_event.is_set():
-                    _finalize_cancelled_turn(s, ephemeral=False)
-                    try:
-                        append_turn_journal_event_for_stream(
-                            s.session_id,
-                            stream_id,
-                            {
-                                "event": "interrupted",
-                                "created_at": time.time(),
-                                "reason": "cancelled",
-                            },
-                        )
-                    except Exception:
-                        logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', {'message': 'Cancelled by user'})
-                    return
-                _next_context_messages = _restore_reasoning_metadata(
-                    _previous_context_messages,
-                    _result_messages,
-                )
-                _next_context_messages = _dedupe_replayed_context_messages(
-                    _previous_context_messages,
-                    _next_context_messages,
-                    msg_text,
-                )
-                s.context_messages = _deduplicate_context_messages(_next_context_messages)
-                s.messages = _merge_display_messages_after_agent_result(
-                    _previous_messages,
-                    _previous_context_messages,
-                    _restore_display_reasoning_metadata(_previous_messages, _result_messages),
-                    msg_text,
-                    source=getattr(s, 'pending_user_source', None) or 'webui',
-                )
-                _advance_truncation_watermark_after_commit(s)  # #3831
+                with _stream_writeback_stage(_writeback_timings, "merge_result"):
+                    _tool_limit_reached = _agent_result_tool_limit_reached(result)
+                    _result_messages = result.get('messages') or _previous_context_messages
+                    _result_messages = _drop_synthetic_max_iteration_summary_requests(
+                        _result_messages,
+                        enabled=_tool_limit_reached,
+                    )
+                    if cancel_event.is_set():
+                        _finalize_cancelled_turn(s, ephemeral=False)
+                        try:
+                            append_turn_journal_event_for_stream(
+                                s.session_id,
+                                stream_id,
+                                {
+                                    "event": "interrupted",
+                                    "created_at": time.time(),
+                                    "reason": "cancelled",
+                                },
+                            )
+                        except Exception:
+                            logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
+                        return
+                    _next_context_messages = _restore_reasoning_metadata(
+                        _previous_context_messages,
+                        _result_messages,
+                    )
+                    _next_context_messages = _dedupe_replayed_context_messages(
+                        _previous_context_messages,
+                        _next_context_messages,
+                        msg_text,
+                    )
+                    s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                    s.messages = _merge_display_messages_after_agent_result(
+                        _previous_messages,
+                        _previous_context_messages,
+                        _restore_display_reasoning_metadata(_previous_messages, _result_messages),
+                        msg_text,
+                        source=getattr(s, 'pending_user_source', None) or 'webui',
+                    )
+                    _advance_truncation_watermark_after_commit(s)  # #3831
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -7734,7 +7944,7 @@ def _run_agent_streaming(
                                 )
                             except Exception:
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                        put('cancel', {'message': 'Cancelled by user'})
+                        put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
                     _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                     _err_str = str(_last_err) if _last_err else ''
@@ -7790,13 +8000,16 @@ def _run_agent_streaming(
                             _self_healed = True
                             _token_sent = False
                             try:
-                                _heal_result = agent.run_conversation(
+                                _heal_kwargs = dict(
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                 )
+                                if moa_config is not None:
+                                    _heal_kwargs["moa_config"] = moa_config
+                                _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _heal_all_msgs = _heal_result.get('messages') or []
                                 _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
                             except Exception as _retry_exc:
@@ -8344,9 +8557,10 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', {'message': 'Cancelled by user'})
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
-                s.save()
+                with _stream_writeback_stage(_writeback_timings, "session_save"):
+                    s.save()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
@@ -8361,7 +8575,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-                    put('cancel', {'message': 'Cancelled by user'})
+                    put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
                 if not ephemeral:
                     try:
@@ -8397,48 +8611,50 @@ def _run_agent_streaming(
                         mark_turn_completed(s.session_id, agent=agent)
                     except Exception:
                         logger.debug("Memory lifecycle mark failed for session %s", s.session_id, exc_info=True)
-                try:
-                    _persistent_changes = _persistent_state_changes(
-                        _persistent_state_before,
-                        _persistent_state_snapshot(_profile_home),
-                    )
-                    if _persistent_changes.get("memory_saved"):
-                        put("state_saved", {
-                            "session_id": session_id,
-                            "kind": "memory",
-                            "action": "saved",
-                        })
-                    for _skill_change in _persistent_changes.get("skills") or []:
-                        put("state_saved", {
-                            "session_id": session_id,
-                            "kind": "skill",
-                            "action": _skill_change.get("action") or "updated",
-                            "name": _skill_change.get("name") or "",
-                        })
-                except Exception:
-                    logger.debug("Persistent state change detection failed for session %s", s.session_id, exc_info=True)
+                with _stream_writeback_stage(_writeback_timings, "persistent_state_scan"):
+                    try:
+                        _persistent_changes = _persistent_state_changes(
+                            _persistent_state_before,
+                            _persistent_state_snapshot(_profile_home),
+                        )
+                        if _persistent_changes.get("memory_saved"):
+                            put("state_saved", {
+                                "session_id": session_id,
+                                "kind": "memory",
+                                "action": "saved",
+                            })
+                        for _skill_change in _persistent_changes.get("skills") or []:
+                            put("state_saved", {
+                                "session_id": session_id,
+                                "kind": "skill",
+                                "action": _skill_change.get("action") or "updated",
+                                "name": _skill_change.get("name") or "",
+                            })
+                    except Exception:
+                        logger.debug("Persistent state change detection failed for session %s", s.session_id, exc_info=True)
             # Sync to state.db for /insights (opt-in setting)
-            try:
-                from api.config import load_settings as _load_settings
-                if _load_settings().get('sync_to_insights'):
-                    from api.state_sync import sync_session_usage
-                    sync_session_usage(
-                        session_id=s.session_id,
-                        input_tokens=s.input_tokens or 0,
-                        output_tokens=s.output_tokens or 0,
-                        estimated_cost=s.estimated_cost,
-                        model=model,
-                        title=s.title,
-                        message_count=len(s.messages),
-                        # #2762: pass the session's profile explicitly so the
-                        # background-thread state.db lookup doesn't fall
-                        # through to the process-global active profile and
-                        # write to the wrong DB (TLS profile is set on the
-                        # HTTP thread but not propagated to this worker).
-                        profile=getattr(s, 'profile', None),
-                    )
-            except Exception:
-                logger.debug("Failed to sync session to insights")
+            with _stream_writeback_stage(_writeback_timings, "state_sync"):
+                try:
+                    from api.config import load_settings as _load_settings
+                    if _load_settings().get('sync_to_insights'):
+                        from api.state_sync import sync_session_usage
+                        sync_session_usage(
+                            session_id=s.session_id,
+                            input_tokens=s.input_tokens or 0,
+                            output_tokens=s.output_tokens or 0,
+                            estimated_cost=s.estimated_cost,
+                            model=model,
+                            title=s.title,
+                            message_count=len(s.messages),
+                            # #2762: pass the session's profile explicitly so the
+                            # background-thread state.db lookup doesn't fall
+                            # through to the process-global active profile and
+                            # write to the wrong DB (TLS profile is set on the
+                            # HTTP thread but not propagated to this worker).
+                            profile=getattr(s, 'profile', None),
+                        )
+                except Exception:
+                    logger.debug("Failed to sync session to insights")
             usage = {
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,
@@ -8660,18 +8876,31 @@ def _run_agent_streaming(
                         })
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
-            raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
-            _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
-            if _tool_limit_reached:
-                _done_payload['terminal_state'] = 'tool_limit_reached'
-                _done_payload['terminal_reason'] = 'max_iterations'
-            put('done', _done_payload)
-            # Emit one last metering packet for the live message-header TPS label.
-            meter_stats = meter().get_stats()
-            meter_stats['session_id'] = session_id
-            meter_stats.setdefault('tps_available', False)
-            meter_stats.setdefault('estimated', False)
-            put('metering', meter_stats)
+            with _stream_writeback_stage(_writeback_timings, "done_payload"):
+                raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
+                _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                if _tool_limit_reached:
+                    _done_payload['terminal_state'] = 'tool_limit_reached'
+                    _done_payload['terminal_reason'] = 'max_iterations'
+                put('done', _done_payload)
+                # Emit one last metering packet for the live message-header TPS label.
+                meter_stats = meter().get_stats()
+                meter_stats['session_id'] = session_id
+                meter_stats.setdefault('tps_available', False)
+                meter_stats.setdefault('estimated', False)
+                put('metering', meter_stats)
+            try:
+                _log_stream_writeback_timings(
+                    getattr(s, 'session_id', session_id),
+                    stream_id,
+                    _writeback_timings,
+                    _writeback_started,
+                )
+            except Exception:
+                # Diagnostics must never affect the stream lifecycle: a
+                # misbehaving log handler here would otherwise skip the
+                # background-title thread spawn below. (#4923 gate hardening)
+                pass
             if _should_bg_title and _u0 and _a0:
                 threading.Thread(
                     target=_run_background_title_update,
@@ -8770,7 +8999,7 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
-            put('cancel', {'message': 'Cancelled by user'})
+            put('cancel', _cancel_event_payload('Cancelled by user'))
             return
         _exc_is_quota = _classification['type'] == 'quota_exhausted'
         # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.
@@ -8830,13 +9059,16 @@ def _run_agent_streaming(
                     # Retry the conversation
                     _token_sent = False
                     try:
-                        _heal_result = _heal_agent.run_conversation(
+                        _heal_kwargs2 = dict(
                             user_message=user_message,
                             system_message=workspace_system_msg,
                             conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                             task_id=session_id,
                             persist_user_message=msg_text,
                         )
+                        if moa_config is not None:
+                            _heal_kwargs2["moa_config"] = moa_config
+                        _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         # Retry succeeded — persist the result normally
                         if s is not None:
                             if _checkpoint_stop is not None:
@@ -9176,6 +9408,7 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_tool_calls = None
     _snap_flag = None
     _snap_agent = None
+    _cancel_session_payload = None
 
     with streams_lock:
         stream_present = stream_id in streams
@@ -9476,6 +9709,7 @@ def cancel_stream(stream_id: str) -> bool:
                         'timestamp': int(time.time()),
                     })
                 _cs.save()
+                _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
@@ -9487,7 +9721,8 @@ def cancel_stream(stream_id: str) -> bool:
             except Exception:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
-            q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
+            _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
+            q.put_nowait(('cancel', _payload))
         except Exception:
             logger.debug("Failed to put cancel event to queue")
 
