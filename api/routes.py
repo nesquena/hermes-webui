@@ -15081,13 +15081,13 @@ def _message_content_text(content) -> str:
     return str(content or "")
 
 
-def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: set[str]) -> bool:
-    """Allow exact MEDIA:image paths already present in the requested session."""
+def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[str]) -> bool:
+    """Allow exact safe MEDIA: paths already present in the requested session."""
     sid = str(sid or "").strip()
     if not sid:
         return False
     mime = MIME_MAP.get(target.suffix.lower(), "application/octet-stream")
-    if mime not in image_mimes:
+    if mime not in allowed_mimes:
         return False
     try:
         target_resolved = target.resolve()
@@ -15122,6 +15122,11 @@ def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: 
     return False
 
 
+def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: set[str]) -> bool:
+    """Backward-compatible image-only wrapper for existing callers/tests."""
+    return _session_media_token_allows_path(sid, target, image_mimes)
+
+
 def _path_is_within_root(child: Path, root: Path) -> bool:
     """Return True when ``child`` is inside ``root`` without crashing on Windows drives."""
     try:
@@ -15136,7 +15141,7 @@ def _handle_media(handler, parsed):
     Security:
     - Path must resolve to an allowed root (hermes home, /tmp, common dirs)
     - Auth-gated when auth is enabled
-    - Only image MIME types are served inline; all others force download
+    - Safe preview MIME types can render inline when requested; SVG always downloads
     - SVG always served as attachment (XSS risk)
     - No path traversal: resolved path must stay within an allowed root
     - Additional roots can be added via MEDIA_ALLOWED_ROOTS env var
@@ -15210,10 +15215,17 @@ def _handle_media(handler, parsed):
         for root in allowed_roots
         if root.exists()
     )
-    session_media_allowed = _session_media_token_allows_image_path(
+    _AUDIO_VIDEO_PDF_TYPES = {
+        "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
+        "audio/ogg", "audio/opus", "audio/flac",
+        "video/mp4", "video/quicktime", "video/webm", "video/ogg",
+        "application/pdf",
+    }
+    _SESSION_MEDIA_TOKEN_TYPES = _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | {"text/html"}
+    session_media_allowed = _session_media_token_allows_path(
         qs.get("session_id", [""])[0],
         target,
-        _INLINE_IMAGE_TYPES,
+        _SESSION_MEDIA_TOKEN_TYPES,
     )
 
     # ── #3234: hard-deny Hermes's own state + secret/config files ────────────
@@ -15399,12 +15411,7 @@ def _handle_media(handler, parsed):
     # Only serve safe media/PDF types inline when explicitly requested. HTML is
     # allowed inline only with a CSP sandbox so "open full page" can work without
     # granting same-origin access to the WebUI. SVG is always a download (XSS risk).
-    _INLINE_PREVIEW_TYPES = _INLINE_IMAGE_TYPES | {
-        "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
-        "audio/ogg", "audio/opus", "audio/flac",
-        "video/mp4", "video/quicktime", "video/webm", "video/ogg",
-        "application/pdf",
-    }
+    _INLINE_PREVIEW_TYPES = _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES
     _DOWNLOAD_TYPES = {"image/svg+xml"}  # SVG: XSS risk, force download
     inline_preview = qs.get("inline", [""])[0] == "1"
     html_inline_ok = inline_preview and mime == "text/html"

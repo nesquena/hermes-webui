@@ -292,11 +292,15 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn("image/svg+xml", routes_src,
                       "SVG MIME type must be handled (forced download) in _handle_media")
 
-    def test_non_image_forces_download(self):
-        """Non-image files should be forced to download, not served inline."""
+    def test_inline_preview_mime_whitelist_exists(self):
+        """Only the explicit safe preview whitelist should be eligible for inline display."""
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
+        self.assertIn("_AUDIO_VIDEO_PDF_TYPES", routes_src,
+                      "shared audio/video/PDF preview MIME whitelist must exist in _handle_media")
+        self.assertIn('{"text/html"}', routes_src,
+                      "HTML must be added only to the session-token whitelist")
 
     def test_media_allowed_roots_env_var_referenced(self):
         """Handler must reference MEDIA_ALLOWED_ROOTS for configurable roots."""
@@ -637,6 +641,102 @@ class TestMediaEndpointUnit(unittest.TestCase):
                         "s-media", text_file, {"image/png"}
                     )
                 )
+
+    def test_session_media_token_allows_exact_html_path_when_mime_is_safe(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            html = pathlib.Path(tmpd) / "report.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{html}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertTrue(
+                    routes._session_media_token_allows_path(
+                        "s-media", html, {"text/html"}
+                    )
+                )
+
+    def test_session_media_token_rejects_mentioned_html_when_mime_not_allowed(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            html = pathlib.Path(tmpd) / "report.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{html}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertFalse(
+                    routes._session_media_token_allows_path(
+                        "s-media", html, {"image/png"}
+                    )
+                )
+
+    def test_session_media_token_rejects_user_authored_html_path(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            html = pathlib.Path(tmpd) / "report.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "user", "content": f"MEDIA:{html}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertFalse(
+                    routes._session_media_token_allows_path(
+                        "s-media", html, {"text/html"}
+                    )
+                )
+
+    def test_handle_media_session_authorizes_html_artifact_outside_roots(self):
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            html = pathlib.Path(outside) / "report.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{html}"}])
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                handler = _Handler()
+                routes._handle_media(
+                    handler,
+                    SimpleNamespace(
+                        query=(
+                            f"path={urllib.parse.quote(str(html.resolve()))}"
+                            "&session_id=s-media&inline=1"
+                        ),
+                        path="/api/media",
+                    ),
+                )
+
+            self.assertEqual(handler.status, 200)
+            self.assertIn("text/html", handler.headers.get("content-type", ""))
+            self.assertIn("sandbox", handler.headers.get("content-security-policy", ""))
+            self.assertIn(b"Report", handler.body)
 
 
 # ── Integration tests: live server on TEST_PORT ───────────────────────────────
