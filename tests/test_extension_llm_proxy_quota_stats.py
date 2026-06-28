@@ -151,6 +151,39 @@ def test_post_quota_stats_rejects_invalid_action_or_scope_without_network(monkey
     assert called is False
 
 
+def test_post_quota_stats_null_body_fails_before_network(monkeypatch):
+    _set_llm_proxy_config(
+        monkeypatch,
+        base_url="https://llm-proxy.example.test",
+        api_key="server-held-secret",
+    )
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: None)
+    monkeypatch.setattr(routes, "bad", lambda handler, message, status=400: {
+        "message": message,
+        "status": status,
+    })
+    called = False
+
+    def explode(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("network should not be reached for null llm-proxy quota requests")
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", explode)
+
+    result = routes.handle_post(
+        SimpleNamespace(headers={}, rfile=BytesIO()),
+        SimpleNamespace(path="/api/extensions/proxies/llm-proxy/quota-stats"),
+    )
+
+    assert result == {
+        "message": "Invalid llm-proxy quota-stats request.",
+        "status": 400,
+    }
+    assert called is False
+
+
 def test_quota_stats_route_reports_unconfigured_proxy_without_secret_leak(monkeypatch):
     monkeypatch.setattr(
         providers,

@@ -11503,6 +11503,8 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/extensions/proxies/llm-proxy/quota-stats":
         from api.profiles import profile_env_for_active_request_readonly
 
+        if body is None:
+            return bad(handler, "Invalid llm-proxy quota-stats request.", status=400)
         with profile_env_for_active_request_readonly("/api/extensions/proxies/llm-proxy/quota-stats", logger_override=logger):
             status, payload = get_llm_proxy_quota_stats(body=body)
         return j(handler, payload, status=status)
