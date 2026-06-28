@@ -27,10 +27,10 @@ I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 class TestBusyInputModeSetting:
     """The new setting key must be registered with a default and enum validator."""
 
-    def test_default_is_queue(self):
-        """Default value preserves existing queue behaviour for users who don't touch the setting."""
-        assert '"busy_input_mode": "queue"' in CONFIG_PY, (
-            "_DEFAULT_SETTINGS must include busy_input_mode='queue' so existing users see no change"
+    def test_default_is_steer(self):
+        """Default value resolves to steer for users who don't touch the setting."""
+        assert '"busy_input_mode": "steer"' in CONFIG_PY, (
+            "_DEFAULT_SETTINGS must include busy_input_mode='steer' so new users see the steer default"
         )
 
     def test_enum_validator_present(self):
@@ -385,18 +385,18 @@ class TestSendBusyBranchDispatch:
 class TestBootAndPanelsWiring:
     def test_boot_init_default_path(self):
         """Boot success path initialises window._busyInputMode from settings."""
-        assert "window._busyInputMode=(s.busy_input_mode||'queue')" in BOOT_JS
+        assert "window._busyInputMode=(s.busy_input_mode||'steer')" in BOOT_JS
 
     def test_boot_init_fallback_path(self):
         """Boot fallback path (settings load failed) initialises to safe default."""
-        # The fallback should set window._busyInputMode='queue'
-        assert "window._busyInputMode='queue'" in BOOT_JS
+        # The fallback should set window._busyInputMode='steer'
+        assert "window._busyInputMode='steer'" in BOOT_JS
 
     def test_panels_load_save_apply(self):
         assert "settingsBusyInputMode" in PANELS_JS, "panels.js must load the setting"
         assert "body.busy_input_mode" in PANELS_JS, "saveSettings must include busy_input_mode in body"
-        assert "window._busyInputMode=body.busy_input_mode" in PANELS_JS, (
-            "_applySavedSettingsUi must propagate busy_input_mode to the global"
+        assert "window._busyInputMode=body.busy_input_mode||'steer'" in PANELS_JS, (
+            "_applySavedSettingsUi must propagate busy_input_mode to the global with the steer fallback"
         )
 
     def test_index_html_dropdown_has_three_options(self):

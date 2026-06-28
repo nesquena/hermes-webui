@@ -8380,9 +8380,9 @@ async function loadSettingsPanel(){
     // Busy input mode
     const busyInputModeSel=$('settingsBusyInputMode');
     if(busyInputModeSel){
-      const val=String(settings.busy_input_mode||'queue');
-      busyInputModeSel.value=['queue','interrupt','steer'].includes(val)?val:'queue';
-      window._busyInputMode=busyInputModeSel.value;
+    const val=String(settings.busy_input_mode||'steer');
+    busyInputModeSel.value=['queue','interrupt','steer'].includes(val)?val:'steer';
+    window._busyInputMode=busyInputModeSel.value;
       busyInputModeSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
@@ -10417,7 +10417,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
-  window._busyInputMode=body.busy_input_mode||'queue';
+  window._busyInputMode=body.busy_input_mode||'steer';
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
   window._autoScrollFollow=body.auto_scroll_follow!==false;
   window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;

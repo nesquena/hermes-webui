@@ -2528,7 +2528,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       stringChars:parseInt(s.inflight_state_max_string_chars||60000,10)||60000,
       jsonChars:parseInt(s.inflight_state_max_json_chars||1500000,10)||1500000,
     };
-    window._busyInputMode=(s.busy_input_mode||'queue');
+    window._busyInputMode=(s.busy_input_mode||'steer');
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._autoScrollFollow=s.auto_scroll_follow!==false;
@@ -2652,7 +2652,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._structuredCodeAutoTreeLines=10;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
-    window._busyInputMode='queue';
+    window._busyInputMode='steer';
     window._showBusyPlaceholderHint=false;
     window._sessionEndlessScrollEnabled=false;
     window._autoScrollFollow=true;
