@@ -473,8 +473,8 @@ def test_mobile_sidebar_edge_guard_claims_body_edge_only():
     assert guard.get("display") == "block"
     assert guard.get("position") == "fixed"
     assert guard.get("left") == "0"
-    assert guard.get("top") == "calc(38px + var(--app-titlebar-safe-top))", (
-        "edge guard should start below the PWA titlebar so it does not block hamburger"
+    assert guard.get("top") == "0", (
+        "edge guard should start from the viewport top since titlebar is now inside main.main"
     )
     assert guard.get("width") == "24px"
     assert guard.get("pointer-events") == "none", (
