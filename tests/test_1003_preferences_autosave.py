@@ -40,8 +40,6 @@ PREFERENCE_FIELDS_AUTOSAVE = [
     ("settingsShowTokenUsage", "show_token_usage"),
     ("settingsShowConversationOutline", "show_conversation_outline"),
     ("settingsShowTps", "show_tps"),
-    ("settingsShowCliSessions", "show_cli_sessions"),
-    ("settingsShowPreviousMessagingSessions", "show_previous_messaging_sessions"),
     ("settingsSyncInsights", "sync_to_insights"),
     ("settingsCheckUpdates", "check_for_updates"),
     ("settingsIgnoreAgentUpdates", "ignore_agent_updates"),
@@ -179,3 +177,13 @@ def test_phase1_appearance_autosave_still_passes():
     assert "function _autosaveAppearanceSettings" in PANELS_JS
     assert "function _scheduleAppearanceAutosave" in PANELS_JS
     assert 'id="settingsAppearanceAutosaveStatus"' in INDEX_HTML
+
+
+def test_sidebar_filter_fields_are_not_preferences_autosave_fields():
+    for token in [
+        "settingsShowCliSessions",
+        "settingsShowCronSessions",
+        "settingsShowPreviousMessagingSessions",
+    ]:
+        assert token not in INDEX_HTML
+        assert token not in PANELS_JS

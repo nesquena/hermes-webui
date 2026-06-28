@@ -31,6 +31,7 @@ from contextlib import closing
 from urllib.parse import parse_qs, urlsplit
 from api.agent_sessions import (
     MESSAGING_SOURCES,
+    SOURCE_LABELS,
     _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
@@ -930,6 +931,201 @@ def _safe_first(*values):
     return ""
 
 
+_GATEWAY_PLATFORM_LABELS = {
+    **SOURCE_LABELS,
+    "weixin": "WeChat",
+    "signal": "Signal",
+    "whatsapp": "WhatsApp",
+    "teams": "Teams",
+    "google_chat": "Google Chat",
+    "homeassistant": "Home Assistant",
+    "qqbot": "QQBot",
+    "yuanbao": "Yuanbao",
+    "feishu": "Feishu",
+}
+_GATEWAY_PLATFORM_ALIASES = {
+    "wechat": "weixin",
+    "googlechat": "google_chat",
+    "home_assistant": "homeassistant",
+    "qq_bot": "qqbot",
+}
+
+
+def _normalize_gateway_platform_name(raw_platform) -> str:
+    raw = str(raw_platform or "").strip().lower()
+    if not raw:
+        return ""
+    normalized = raw.replace("-", "_").replace(" ", "_")
+    return _GATEWAY_PLATFORM_ALIASES.get(normalized, normalized)
+
+
+def _gateway_platform_label(name: str) -> str:
+    normalized = _normalize_gateway_platform_name(name)
+    if not normalized:
+        return ""
+    label = _GATEWAY_PLATFORM_LABELS.get(normalized)
+    if label:
+        return label
+    return normalized.replace("_", " ").title()
+
+
+def _gateway_known_platform_names() -> set[str]:
+    names = {
+        _normalize_gateway_platform_name(name)
+        for name in _GATEWAY_PLATFORM_LABELS
+    }
+    names.update(_normalize_gateway_platform_name(name) for name in _MESSAGING_RAW_SOURCES)
+    try:
+        from cron.scheduler import _KNOWN_DELIVERY_PLATFORMS
+    except Exception:
+        _KNOWN_DELIVERY_PLATFORMS = ()
+    names.update(_normalize_gateway_platform_name(name) for name in _KNOWN_DELIVERY_PLATFORMS)
+    names.discard("")
+    return names
+
+
+def _gateway_config_value_enabled(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_gateway_config_value_enabled(item) for item in value)
+    if isinstance(value, dict):
+        if value.get("enabled") is False:
+            return False
+        return bool(value) and any(_gateway_config_value_enabled(item) for item in value.values())
+    return True
+
+
+def _gateway_status_config_paths() -> list[Path]:
+    candidates: list[Path] = []
+    try:
+        candidates.append(Path(_get_config_path()))
+    except Exception:
+        pass
+    try:
+        candidates.append(Path(get_active_hermes_home()) / "config.yaml")
+    except Exception:
+        pass
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except Exception:
+            continue
+        key = str(resolved)
+        if key in seen or not resolved.exists():
+            continue
+        seen.add(key)
+        paths.append(resolved)
+    return paths
+
+
+def _load_gateway_configured_platform_names() -> set[str]:
+    try:
+        import yaml
+    except Exception:
+        return set()
+
+    known = _gateway_known_platform_names()
+    names: set[str] = set()
+
+    def _visit(node):
+        if isinstance(node, dict):
+            for field in ("name", "platform", "source", "delivery", "channel"):
+                normalized = _normalize_gateway_platform_name(node.get(field))
+                if normalized in known and _gateway_config_value_enabled(node):
+                    names.add(normalized)
+            for key, value in node.items():
+                normalized_key = _normalize_gateway_platform_name(key)
+                if normalized_key in known and _gateway_config_value_enabled(value):
+                    names.add(normalized_key)
+                _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit(item)
+
+    for path in _gateway_status_config_paths():
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        _visit(loaded)
+    return names
+
+
+def _load_gateway_runtime_platform_names() -> set[str]:
+    try:
+        from api.agent_health import _read_gateway_runtime_status
+    except Exception:
+        return set()
+    try:
+        runtime_status = _read_gateway_runtime_status()
+    except Exception:
+        return set()
+    if not isinstance(runtime_status, dict):
+        return set()
+    platforms = runtime_status.get("platforms")
+    if isinstance(platforms, dict):
+        return {
+            normalized
+            for normalized in (
+                _normalize_gateway_platform_name(name)
+                for name in platforms.keys()
+            )
+            if normalized
+        }
+    if isinstance(platforms, list):
+        names: set[str] = set()
+        for entry in platforms:
+            if isinstance(entry, dict):
+                normalized = _normalize_gateway_platform_name(
+                    entry.get("name") or entry.get("platform") or entry.get("source")
+                )
+            else:
+                normalized = _normalize_gateway_platform_name(entry)
+            if normalized:
+                names.add(normalized)
+        return names
+    return set()
+
+
+def _gateway_identity_platform_names(identity_map: dict[str, dict] | None) -> set[str]:
+    names: set[str] = set()
+    for meta in (identity_map or {}).values():
+        if not isinstance(meta, dict):
+            continue
+        normalized = _normalize_gateway_platform_name(
+            meta.get("raw_source") or meta.get("platform")
+        )
+        if normalized:
+            names.add(normalized)
+    return names
+
+
+def _gateway_platform_entries(identity_map: dict[str, dict] | None = None) -> list[dict[str, str]]:
+    platform_names = set()
+    platform_names.update(_load_gateway_runtime_platform_names())
+    platform_names.update(_load_gateway_configured_platform_names())
+    platform_names.update(_gateway_identity_platform_names(identity_map))
+    return sorted(
+        [
+            {"name": name, "label": _gateway_platform_label(name)}
+            for name in platform_names
+            if name
+        ],
+        key=lambda entry: entry["label"],
+    )
+
+
 def _gateway_session_metadata_path():
     try:
         from api.profiles import get_active_hermes_home
@@ -991,6 +1187,7 @@ def _gateway_status_payload() -> dict:
 
     identity_map = _load_gateway_session_identity_map()
     sessions_path = _gateway_session_metadata_path()
+    platforms = _gateway_platform_entries(identity_map)
 
     # Detect whether the gateway process is alive, independent of connected
     # messaging platforms. An empty identity_map means zero connected
@@ -1012,27 +1209,8 @@ def _gateway_status_payload() -> dict:
             health_reason == "gateway_stale_running_state"
             or health_gateway_state == "running"
         )
-        configured = True if gateway_running_metadata else bool(identity_map)
+        configured = True if gateway_running_metadata else bool(identity_map) or bool(platforms)
         running = bool(identity_map)
-
-    platforms_set: set[str] = set()
-    for meta in identity_map.values():
-        raw = meta.get("raw_source") or meta.get("platform") or ""
-        norm = _normalize_messaging_source(raw)
-        if norm:
-            platforms_set.add(norm)
-    platform_labels = {
-        "telegram": "Telegram",
-        "discord": "Discord",
-        "slack": "Slack",
-        "email": "Email",
-        "web": "Web",
-        "api": "API",
-    }
-    platforms = sorted(
-        [{"name": p, "label": platform_labels.get(p, p.title())} for p in platforms_set],
-        key=lambda x: x["label"],
-    )
     last_active = ""
     if running and sessions_path.exists():
         try:

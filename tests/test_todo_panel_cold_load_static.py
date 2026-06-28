@@ -14,6 +14,18 @@ def test_ensure_messages_loaded_hydrates_session_todo_state_sidecar():
     assert "scheduleTodosRefresh()" in src
 
 
+def test_new_session_hydrates_todos_after_session_assignment():
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.find("async function newSession(flash, options={}){")
+    assert start != -1
+    block = src[start:start + 6000]
+    assign_idx = block.find("S.session=data.session;S.messages=data.session.messages||[];")
+    hydrate_idx = block.find("if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);")
+
+    assert assign_idx != -1
+    assert hydrate_idx > assign_idx
+
+
 def test_load_todos_renders_single_source_of_truth_before_legacy_scan():
     src = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
     start = src.find("function loadTodos()")

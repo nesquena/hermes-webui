@@ -6,33 +6,33 @@ SESSIONS_JS = ROOT / "static" / "sessions.js"
 STYLE_CSS = ROOT / "static" / "style.css"
 
 
-def test_sidebar_has_separate_webui_and_cli_session_source_tabs():
+def test_sidebar_has_multi_select_origin_filter():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    assert "let _sessionSourceFilter = 'webui'" in src
-    assert "hermes-session-source-filter" in src
-    assert "session-source-tabs" in src
-    assert "WebUI sessions" in src
-    assert "CLI sessions" in src
-    assert "_sessionSourceFilter==='cli'" in src
+    assert "let _activeOriginFilters = new Set(['webui'])" in src
+    assert "hermes-origin-filters" in src
+    assert "session-filter-bar" in src
+    assert "session-origin-popover" in src
+    assert "_toggleOriginFilter" in src
+    assert "_restoreOriginFilters" in src
 
 
 def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    assert "function _partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in src
-    assert "cliSessionCount" in src
-    assert "const showCliOnly=_sessionSourceFilter==='cli';" in src
-    assert "const webuiProfileFiltered=[];" in src
-    assert "const cliProfileFiltered=[];" in src
-    assert "const webuiSessionsRaw=[];" in src
-    assert "const cliSessionsRaw=[];" in src
-    assert "profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered," in src
-    assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in src
+    assert "let webuiSessionCount=0;" in src
+    assert "let cliSessionCount=0;" in src
+    assert "const origin=_sidebarOriginIdForSession(s);" in src
+    assert "if(origin==='cli') cliSessionCount++;" in src
+    assert "else if(origin==='webui') webuiSessionCount++;" in src
+    assert "originCounts.set(origin, Number(originCounts.get(origin) || 0) + 1);" in src
+    assert "_activeOriginFilters.has(origin)" in src
+    assert "const selectedExternalOrigins=[..._activeOriginFilters].filter(origin=>origin!=='webui');" in src
+    assert "No sessions found for the selected origins." in src
 
 
-def test_session_source_tabs_have_dedicated_sidebar_styles():
+def test_session_origin_filter_has_dedicated_sidebar_styles():
     css = STYLE_CSS.read_text(encoding="utf-8")
-    assert ".session-source-tabs" in css
-    assert ".session-source-tab.active" in css
+    assert ".session-filter-bar" in css
+    assert ".session-origin-popover" in css
     assert ".session-empty-note" in css
 
 

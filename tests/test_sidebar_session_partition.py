@@ -32,11 +32,9 @@ def test_render_uses_single_pass_partition_helper():
 
     assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in render_body
     assert "_renderSidebarRowsFromRawSessions(sessionsRaw, referenceRaw)" in render_body
-    assert "const renderedWebuiSessionCount=_renderSidebarRowsFromRawSessions(webuiSessionsRaw, webuiReferenceRaw).length;" in render_body
-    assert "const renderedCliSessionCount=_renderSidebarRowsFromRawSessions(cliSessionsRaw, cliReferenceRaw).length;" in render_body
-    assert "const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);" in render_body
-    assert "const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);" in render_body
-    assert "const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;" in render_body
+    assert "const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, referenceRaw);" in render_body
+    assert "let originOptions=_sidebarOriginOptions(originCounts, originLabels);" in render_body
+    assert "_ensureOriginFilterDefaults(originOptions)" in render_body
     assert "const count=filter==='cli'?renderedCliSessionCount:renderedWebuiSessionCount;" not in render_body
     assert "withMessages.filter(" not in render_body
 
@@ -46,30 +44,38 @@ def test_partition_helper_applies_message_source_project_and_archive_gates():
 
     assert "function _sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in SESSIONS_JS
     assert "_sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in block
-    assert "if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0)" in block
-    assert "const showCliOnly=_sessionSourceFilter==='cli';" in block
+    assert "const origin=_sidebarOriginIdForSession(s);" in block
+    assert "if(origin==='cli') cliSessionCount++;" in block
+    assert "else if(origin==='webui') webuiSessionCount++;" in block
+    assert "originCounts.set(origin, Number(originCounts.get(origin) || 0) + 1);" in block
+    assert "originLabels.set(origin, _sidebarOriginLabelForId(origin, _getChannelLabel(s) || ''));" in block
+    assert "if(!_activeOriginFilters.has(origin)) continue;" in block
     assert "if(!_showArchived&&s.archived) continue;" in block
-    assert "if(s.archived){" in block
-    assert "const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;" in block
-    assert "archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0))," in block
+    assert "archivedCount," in block
     assert "return {" in block
-    assert "profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered," in block
-    assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in block
+    assert "sourceFiltered," in block
+    assert "profileFiltered," in block
+    assert "sessionsRaw," in block
+    assert "referenceRaw," in block
 
 
-def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_counts():
+def test_partition_helper_keeps_single_pass_filtering_and_shared_render_path():
     render_body = _function_block("renderSessionListFromCache")
+    block = _partition_block()
 
-    assert "webuiSessionCount," not in _partition_block()
-    assert "cliSessionCount," in _partition_block()
-    assert "webuiReferenceRaw," in _partition_block()
-    assert "cliReferenceRaw," in _partition_block()
-    assert "webuiSessionsRaw," in _partition_block()
-    assert "cliSessionsRaw," in _partition_block()
-    assert "const renderedWebuiSessionCount=" in render_body
-    assert "const renderedCliSessionCount=" in render_body
-    assert "_renderSidebarRowsFromRawSessions(webuiSessionsRaw, webuiReferenceRaw).length" in render_body
-    assert "_renderSidebarRowsFromRawSessions(cliSessionsRaw, cliReferenceRaw).length" in render_body
+    assert "webuiSessionCount," in block
+    assert "cliSessionCount," in block
+    assert "originCounts," in block
+    assert "originLabels," in block
+    assert "webuiReferenceRaw," not in block
+    assert "cliReferenceRaw," not in block
+    assert "webuiSessionsRaw," not in block
+    assert "cliSessionsRaw," not in block
+    assert "const renderedWebuiSessionCount=" not in render_body
+    assert "const renderedCliSessionCount=" not in render_body
+    assert "_renderSidebarRowsFromRawSessions(webuiSessionsRaw, webuiReferenceRaw).length" not in render_body
+    assert "_renderSidebarRowsFromRawSessions(cliSessionsRaw, cliReferenceRaw).length" not in render_body
+    assert "const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, referenceRaw);" in render_body
     assert "function _countRenderedSidebarRowsFromRawSessions" not in SESSIONS_JS
     assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){" in SESSIONS_JS
     assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows)" in SESSIONS_JS

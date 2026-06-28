@@ -7401,15 +7401,6 @@ function _preferencesPayloadFromUi(){
   if(workspaceTodosTabCb) payload.workspace_todos_tab=workspaceTodosTabCb.checked;
   const apiRedactCb=$('settingsApiRedact');
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
-  const showCliCb=$('settingsShowCliSessions');
-  if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
-  const showCronCb=$('settingsShowCronSessions');
-  // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
-  // identically to the explicit saveSettings() path, so neither save route can
-  // persist show_cron_sessions=true while show_cli_sessions=false. (#3514)
-  if(showCronCb) payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked);
-  const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
-  if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
   if(syncCb) payload.sync_to_insights=syncCb.checked;
   const updateCb=$('settingsCheckUpdates');
@@ -7896,17 +7887,6 @@ async function loadSettingsPanel(){
     }
     const apiRedactCb=$('settingsApiRedact');
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const showCliCb=$('settingsShowCliSessions');
-    if(showCliCb){showCliCb.checked=settings.show_cli_sessions!==false;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const showCronCb=$('settingsShowCronSessions');
-    if(showCronCb){
-      showCronCb.checked=!!settings.show_cron_sessions;
-      showCronCb.disabled=showCliCb?!showCliCb.checked:true;
-      showCronCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-      if(showCliCb){showCliCb.addEventListener('change',function(){showCronCb.disabled=!showCliCb.checked;},{once:false});}
-    }
-    const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
-    if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateCb=$('settingsCheckUpdates');
@@ -9813,7 +9793,7 @@ async function deletePasskey(id){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
+  const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,theme,skin,language,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showQuotaChip=showQuotaChip===true;
@@ -9822,8 +9802,9 @@ function _applySavedSettingsUi(saved, body, opts){
   if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
   window._showTps=showTps;
   window._fadeTextEffect=!!fadeTextEffect;
-  window._showCliSessions=showCliSessions;
-  window._showPreviousMessagingSessions=!!body.show_previous_messaging_sessions;
+  if(Object.prototype.hasOwnProperty.call(saved,'show_cli_sessions')) window._showCliSessions=saved.show_cli_sessions!==false;
+  if(Object.prototype.hasOwnProperty.call(saved,'show_cron_sessions')) window._showCronSessions=!!saved.show_cron_sessions;
+  if(Object.prototype.hasOwnProperty.call(saved,'show_previous_messaging_sessions')) window._showPreviousMessagingSessions=!!saved.show_previous_messaging_sessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
@@ -9857,7 +9838,7 @@ function _applySavedSettingsUi(saved, body, opts){
     maxTokensField.dataset.initialValue=maxTokensField.value;
   }
   if(typeof startGatewaySSE==='function'){
-    if(showCliSessions) startGatewaySSE();
+    if(window._showCliSessions) startGatewaySSE();
     else if(typeof stopGatewaySSE==='function') stopGatewaySSE();
   }
   _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
@@ -10383,9 +10364,6 @@ async function saveSettings(andClose){
   const showConversationOutline=!!($('settingsShowConversationOutline')||{}).checked;
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
-  const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
-  const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
-  const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
   const theme=($('settingsTheme')||{}).value||'dark';
@@ -10423,11 +10401,6 @@ async function saveSettings(andClose){
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
-  body.show_cli_sessions=showCliSessions;
-  // Cron sessions are gated on CLI sessions (server short-circuits otherwise);
-  // mirror the autosave path so the explicit Save Settings button persists it too. (#3514)
-  body.show_cron_sessions=showCliSessions&&showCronSessions;
-  body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
@@ -10464,7 +10437,7 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
       const pwField=$('settingsPassword'); if(pwField) pwField.value='';
@@ -10494,7 +10467,7 @@ async function saveSettings(andClose){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
       }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();

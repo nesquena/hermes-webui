@@ -61,8 +61,8 @@ def test_show_cron_sessions_kwarg_passthrough():
 
 def test_settings_show_cron_sessions_in_html():
     src = _read("static/index.html")
-    assert "settingsShowCronSessions" in src, (
-        "settingsShowCronSessions checkbox must appear in static/index.html"
+    assert "settingsShowCronSessions" not in src, (
+        "show_cron_sessions should no longer live in the Preferences panel"
     )
 
 
@@ -70,19 +70,27 @@ def test_settings_show_cron_sessions_in_html():
 
 def test_panels_save_wiring():
     src = _read("static/panels.js")
-    # Both save paths (autosave _preferencesPayloadFromUi + explicit saveSettings)
-    # must gate cron sessions on the CLI-sessions checkbox so neither can persist
-    # show_cron_sessions=true while show_cli_sessions=false (#3514).
-    assert "payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked)" in src, (
-        "autosave wiring must gate show_cron_sessions on settingsShowCliSessions in static/panels.js"
-    )
-    assert "body.show_cron_sessions=showCliSessions&&showCronSessions" in src, (
-        "explicit saveSettings() must gate show_cron_sessions on showCliSessions in static/panels.js"
-    )
+    for token in [
+        "settingsShowCliSessions",
+        "settingsShowCronSessions",
+        "settingsShowPreviousMessagingSessions",
+    ]:
+        assert token not in src, (
+            "legacy sidebar filter settings should not remain in static/panels.js"
+        )
 
 
-def test_panels_load_wiring():
-    src = _read("static/panels.js")
-    assert "show_cron_sessions" in src, (
-        "load wiring for show_cron_sessions must appear in static/panels.js"
+def test_sidebar_filter_settings_persist_from_sessions_js():
+    src = _read("static/sessions.js")
+    assert "function _persistSidebarVisibilitySettings(next)" in src, (
+        "sidebar filter persistence should live in static/sessions.js"
+    )
+    assert "show_cli_sessions: true" in src, (
+        "sidebar filter persistence must keep non-WebUI sessions enabled"
+    )
+    assert "show_cron_sessions: true" in src, (
+        "sidebar filter persistence must keep cron sessions enabled"
+    )
+    assert "function _toggleSidebarPreviousMessagingSessions(enabled)" in src, (
+        "previous messaging visibility should be controlled from static/sessions.js"
     )

@@ -255,6 +255,52 @@ def test_gateway_status_includes_gateway_health_metadata(monkeypatch):
     }
 
 
+def test_gateway_status_unions_runtime_config_and_identity_platforms(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr(
+        routes,
+        "build_agent_health_payload",
+        lambda: {"alive": True, "checked_at": "2026-05-06T12:00:00+00:00", "details": {}},
+    )
+    monkeypatch.setattr(
+        routes,
+        "_load_gateway_session_identity_map",
+        lambda: {"sess_a": {"raw_source": "telegram", "platform": "telegram"}},
+    )
+    monkeypatch.setattr(routes, "_load_gateway_runtime_platform_names", lambda: {"discord"})
+    monkeypatch.setattr(routes, "_load_gateway_configured_platform_names", lambda: {"slack", "discord"})
+
+    handler = _FakeHandler()
+    parsed = urlparse("http://example.com/api/gateway/status")
+    routes.handle_get(handler, parsed)
+    result = handler.get_json()
+
+    assert {entry["name"] for entry in result["platforms"]} == {"telegram", "discord", "slack"}
+
+
+def test_gateway_status_marks_configured_when_platforms_exist_from_config(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr(
+        routes,
+        "build_agent_health_payload",
+        lambda: {"alive": None, "checked_at": "2026-05-06T12:00:00+00:00", "details": {}},
+    )
+    monkeypatch.setattr(routes, "_load_gateway_session_identity_map", lambda: {})
+    monkeypatch.setattr(routes, "_load_gateway_runtime_platform_names", lambda: set())
+    monkeypatch.setattr(routes, "_load_gateway_configured_platform_names", lambda: {"slack"})
+
+    handler = _FakeHandler()
+    parsed = urlparse("http://example.com/api/gateway/status")
+    routes.handle_get(handler, parsed)
+    result = handler.get_json()
+
+    assert result["configured"] is True
+    assert result["running"] is False
+    assert result["platforms"] == [{"name": "slack", "label": "Slack"}]
+
+
 def test_gateway_status_last_active_empty_when_alive_and_no_sessions_path(monkeypatch):
     """Bonus: alive=true + identity_map={} → last_active is empty string.
     This guards the 'if running and sessions_path.exists()' guard from being

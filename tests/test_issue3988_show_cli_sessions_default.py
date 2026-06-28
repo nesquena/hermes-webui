@@ -163,13 +163,20 @@ def test_boot_settings_load_failure_fallback_defaults_true():
     )
 
 
-def test_settings_checkbox_renders_checked_by_default():
-    src = _read("static/panels.js")
-    assert "showCliCb.checked=settings.show_cli_sessions!==false" in src, (
-        "the show-CLI-sessions checkbox must default checked (!== false), matching "
-        "the True config default"
+def test_sidebar_visibility_default_true_moved_out_of_preferences_panel():
+    panels_src = _read("static/panels.js")
+    sessions_src = _read("static/sessions.js")
+    index_src = _read("static/index.html")
+    assert "settingsShowCliSessions" not in panels_src, (
+        "the duplicate show-CLI-sessions Settings checkbox should be removed after #3418"
     )
-    assert "showCliCb.checked=!!settings.show_cli_sessions" not in src, (
-        "panels.js must not use !!settings.show_cli_sessions for the checkbox — "
-        "that renders it unchecked by default, contradicting the config default"
+    assert 'id="settingsShowCliSessions"' not in index_src, (
+        "the Preferences panel should no longer render the legacy show-CLI-sessions toggle"
+    )
+    assert "show_cli_sessions: true" in sessions_src, (
+        "sidebar visibility persistence must still force show_cli_sessions on when "
+        "the filter popover saves its own visibility settings"
+    )
+    assert "function _ensureSidebarOriginSettingsInitialized()" in sessions_src, (
+        "sessions.js should initialize the moved sidebar visibility settings"
     )

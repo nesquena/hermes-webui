@@ -1,4 +1,9 @@
-"""Regression coverage for issue #4766: `/api/sessions` filters by active sidebar source."""
+"""Regression coverage for issue #4766: `/api/sessions` still supports sidebar-source pushdown.
+
+The backend route still honors `sidebar_source` for narrow fetches such as
+`show_cli_sessions=false`, while the #3418 sidebar UI now filters origins
+client-side after loading the combined payload.
+"""
 
 import io
 import json
@@ -250,10 +255,10 @@ def test_frontend_sends_sidebar_source_param():
 
     assert "function _requestedSessionSidebarSource()" in src
     assert "function _sessionListQueryString()" in src
-    assert "qs.set('sidebar_source', _requestedSessionSidebarSource());" in src
-    assert "_serverWebuiSessionCount" in src
-    assert "_serverCliSessionCount" in src
-    assert "function _sessionSourceTabCount(" in src
+    assert "const sidebarSource = _requestedSessionSidebarSource();" in src
+    assert "if (sidebarSource) qs.set('sidebar_source', sidebarSource);" in src
+    assert "function _toggleOriginFilter(origin)" in src
+    assert "function _ensureOriginFilterDefaults(originOptions)" in src
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -284,129 +289,122 @@ console.log(JSON.stringify({{ first, second, third }}));
 """
     body = _run_node(script)
 
-    assert body["first"] == "?sidebar_source=cli&exclude_hidden=1&all_profiles=1"
+    assert body["first"] == "?exclude_hidden=1&all_profiles=1"
     assert body["second"] == "?sidebar_source=webui&exclude_hidden=1&all_profiles=1&include_archived=1"
     assert body["third"] == "?sidebar_source=webui&exclude_hidden=1"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_session_source_switch_fetches_selected_bucket():
+def test_origin_filter_toggle_updates_local_state_without_refetch():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    fn_source = _extract_function(src, "_setSessionSourceFilter")
+    normalize_origin_fn = _extract_function(src, "_normalizeSidebarOriginId")
+    persist_fn = _extract_function(src, "_persistOriginFilters")
+    signature_fn = _extract_function(src, "_originFilterSignature")
+    ensure_fn = _extract_function(src, "_ensureOriginFilterDefaults")
+    fn_toggle = _extract_function(src, "_toggleOriginFilter")
     script = f"""
-const renderCalls = [];
-global._sessionSourceFilter = 'webui';
-global._activeProject = 'demo-project';
-global._selectedSessions = new Set(['first', 'second']);
-global._sessionSelectMode = true;
+    const renderCalls = [];
+    global._originFiltersHydrated = false;
+    global._originFiltersLoadedFromStorage = false;
+    global._activeOriginFilters = new Set(['webui', 'cli']);
+    global._activeProject = 'demo-project';
+    global._selectedSessions = new Set(['first', 'second']);
+    global._sessionSelectMode = true;
 global.localStorage = {{
   writes: [],
   setItem(key, value) {{
     this.writes.push([key, value]);
   }},
 }};
-global.renderSessionListFromCache = () => {{
-  renderCalls.push('cache');
-}};
-global.renderSessionList = (opts) => {{
-  renderCalls.push(opts);
-  return Promise.resolve();
-}};
-{fn_source}
-_setSessionSourceFilter('cli');
+    global.renderSessionListFromCache = () => {{
+      renderCalls.push('cache');
+    }};
+    {normalize_origin_fn}
+    {persist_fn}
+    {signature_fn}
+    {ensure_fn}
+    {fn_toggle}
+    _toggleOriginFilter('cli');
+    const changedAfterToggle = _ensureOriginFilterDefaults([
+      {{ id: 'webui' }},
+      {{ id: 'cli' }},
+      {{ id: 'slack' }},
+    ]);
+    console.log(JSON.stringify({{
+      activeOrigins: Array.from(global._activeOriginFilters),
+      originFiltersLoadedFromStorage: global._originFiltersLoadedFromStorage,
+      activeProject: global._activeProject,
+      selectedSize: global._selectedSessions.size,
+      sessionSelectMode: global._sessionSelectMode,
+      storageWrites: global.localStorage.writes,
+      changedAfterToggle,
+      renderCalls,
+    }}));
+    """
+    body = _run_node(script)
+
+    assert body["activeOrigins"] == ["webui"]
+    assert body["originFiltersLoadedFromStorage"] is True
+    assert body["activeProject"] is None
+    assert body["selectedSize"] == 0
+    assert body["sessionSelectMode"] is False
+    assert body["storageWrites"] == [["hermes-origin-filters", "[\"webui\"]"]]
+    assert body["changedAfterToggle"] is False
+    assert body["renderCalls"] == ["cache"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_origin_filter_defaults_expand_catalog_without_overriding_saved_choices():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    normalize_origin_fn = _extract_function(src, "_normalizeSidebarOriginId")
+    persist_fn = _extract_function(src, "_persistOriginFilters")
+    signature_fn = _extract_function(src, "_originFilterSignature")
+    ensure_fn = _extract_function(src, "_ensureOriginFilterDefaults")
+    script = f"""
+    global.window = {{ _showCliSessions: true }};
+    global.localStorage = {{
+      writes: [],
+      setItem(key, value) {{
+        this.writes.push([key, value]);
+      }},
+    }};
+    global._activeOriginFilters = new Set(['webui']);
+    global._originFiltersHydrated = false;
+    global._originFiltersLoadedFromStorage = false;
+    {normalize_origin_fn}
+    {persist_fn}
+    {signature_fn}
+    {ensure_fn}
+const firstChanged = _ensureOriginFilterDefaults([
+  {{ id: 'webui' }},
+  {{ id: 'cli' }},
+  {{ id: 'slack' }},
+]);
+const firstOrigins = Array.from(global._activeOriginFilters);
+global._activeOriginFilters = new Set(['webui', 'cli']);
+global._originFiltersHydrated = true;
+global._originFiltersLoadedFromStorage = true;
+const secondChanged = _ensureOriginFilterDefaults([
+  {{ id: 'webui' }},
+  {{ id: 'cli' }},
+  {{ id: 'discord' }},
+]);
+const secondOrigins = Array.from(global._activeOriginFilters);
 console.log(JSON.stringify({{
-  sourceFilter: global._sessionSourceFilter,
-  activeProject: global._activeProject,
-  selectedSize: global._selectedSessions.size,
-  sessionSelectMode: global._sessionSelectMode,
-  storageWrites: global.localStorage.writes,
-  renderCalls,
+  firstChanged,
+  firstOrigins,
+  secondChanged,
+  secondOrigins,
+  writes: global.localStorage.writes,
 }}));
 """
     body = _run_node(script)
 
-    assert body["sourceFilter"] == "cli"
-    assert body["activeProject"] is None
-    assert body["selectedSize"] == 0
-    assert body["sessionSelectMode"] is False
-    assert body["storageWrites"] == [["hermes-session-source-filter", "cli"]]
-    assert body["renderCalls"] == ["cache", {"deferWhileInteracting": False}]
-
-
-@pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_apply_payload_and_tab_count_helpers_cover_old_and_new_payloads():
-    src = SESSIONS_JS.read_text(encoding="utf-8")
-    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
-    exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
-    apply_fn = _extract_function(src, "_applySessionListPayload")
-    count_fn = _extract_function(src, "_sessionSourceTabCount")
-    clear_fn = _extract_function(src, "_clearSessionSourceTabCounts")
-    script = f"""
-global.window = {{ _showCliSessions: true }};
-global._otherProfileCount = 0;
-global._archivedWebuiCount = 0;
-global._archivedCliCount = 0;
-global._serverWebuiSessionCount = null;
-global._serverCliSessionCount = null;
-global._serverTimeDelta = 0;
-global._serverTz = null;
-global._optimisticallyRemovedSessionIds = new Set();
-global._allSessions = [];
-global._allSessionsScope = null;
-global._allProjects = [];
-global._sessionListLoadError = null;
-global._sessionListHasLoadedOnce = false;
-global._sessionListFirstRenderAnimated = true;
-global._sessionListSkeletonActive = true;
-global._activeProject = null;
-global.NO_PROJECT_FILTER = '__none__';
-global._showAllProfiles = false;
-global._sessionSourceFilter = 'webui';
-global.S = {{ activeProfile: 'default' }};
-global._reconcileActiveSessionIdleStateFromList = rows => rows;
-global._mergeOptimisticFirstTurnSessions = rows => rows;
-global._syncSessionAttentionSoundState = () => {{}};
-global._pruneLineageReportCacheToVisibleSessions = () => {{}};
-global._markPollingCompletionUnreadTransitions = () => {{}};
-global._recordSessionProfileCount = () => {{}};
-global._isSessionEffectivelyStreaming = () => false;
-global.startStreamingPoll = () => {{}};
-global.stopStreamingPoll = () => {{}};
-global.ensureSessionTimeRefreshPoll = () => {{}};
-global.ensureActiveSessionExternalRefreshPoll = () => {{}};
-    global.ensureSessionEventsSSE = () => {{}};
-    global.animateNextSessionListRefresh = () => {{}};
-    global.renderSessionListFromCache = () => {{}};
-    {clear_fn}
-    {count_fn}
-    {requested_source_fn}
-    {exclude_hidden_fn}
-    {apply_fn}
-const sessions = [{{ session_id: 'webui-1' }}];
-_applySessionListPayload({{ sessions, other_profile_count: 0, archived_count: 0, active_profile: 'default' }}, {{ projects: [] }});
-const oldPayload = {{
-  webui: _sessionSourceTabCount('webui', 7, 3),
-  cli: _sessionSourceTabCount('cli', 7, 3),
-}};
-_clearSessionSourceTabCounts();
-_applySessionListPayload({{
-  sessions,
-  other_profile_count: 0,
-  archived_count: 0,
-  active_profile: 'default',
-  webui_session_count: 11,
-  cli_session_count: 5,
-}}, {{ projects: [] }});
-const newPayload = {{
-  webui: _sessionSourceTabCount('webui', 7, 3),
-  cli: _sessionSourceTabCount('cli', 7, 3),
-}};
-console.log(JSON.stringify({{ oldPayload, newPayload }}));
-"""
-    body = _run_node(script)
-
-    assert body["oldPayload"] == {"webui": 7, "cli": 3}
-    assert body["newPayload"] == {"webui": 11, "cli": 5}
+    assert body["firstChanged"] is True
+    assert body["firstOrigins"] == ["webui", "cli", "slack"]
+    assert body["secondChanged"] is False
+    assert body["secondOrigins"] == ["webui", "cli"]
+    assert body["writes"] == [["hermes-origin-filters", "[\"webui\",\"cli\",\"slack\"]"]]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -535,7 +533,6 @@ def test_session_list_response_omits_bucket_counts_when_missing(monkeypatch):
 def test_scope_mismatch_error_path_respects_sidebar_source():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
-    clear_fn = _extract_function(src, "_clearSessionSourceTabCounts")
     requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
     query_fn = _extract_function(src, "_sessionListQueryString")
@@ -564,33 +561,30 @@ global.S = {{ activeProfile: 'default' }};
 global.$ = () => ({{ value: '' }});
 global._isSessionListUserInteracting = () => false;
 global._schedulePendingSessionListApply = () => {{}};
-global._showSessionListLoadError = error => {{
-  global._lastError = error.message;
-}};
-const renders = [];
-const cleared = [];
-global.renderSessionListFromCache = () => {{
-  _purgeStaleInflightEntries();
-  renders.push({{
-    sessions: Array.isArray(global._allSessions) ? global._allSessions.map(s => s.session_id) : null,
-    scope: global._allSessionsScope ? {{ ...global._allSessionsScope }} : null,
-    webui: global._serverWebuiSessionCount,
-    cli: global._serverCliSessionCount,
-    skeleton: global._sessionListSkeletonActive,
-    inflightKeys: Object.keys(global.INFLIGHT || {{}}).sort(),
-  }});
-}};
-global.api = () => Promise.reject(new Error('boom'));
+    global._showSessionListLoadError = error => {{
+      global._lastError = error.message;
+    }};
+    const renders = [];
+    const cleared = [];
+    global.renderSessionListFromCache = () => {{
+      _purgeStaleInflightEntries();
+      renders.push({{
+        sessions: Array.isArray(global._allSessions) ? global._allSessions.map(s => s.session_id) : null,
+        scope: global._allSessionsScope ? {{ ...global._allSessionsScope }} : null,
+        skeleton: global._sessionListSkeletonActive,
+        inflightKeys: Object.keys(global.INFLIGHT || {{}}).sort(),
+      }});
+    }};
+    global.api = () => Promise.reject(new Error('boom'));
     global.clearInflightState = sid => cleared.push(sid);
     {purge_fn}
-    {clear_fn}
     {requested_source_fn}
     {exclude_hidden_fn}
     {query_fn}
     {fetch_helper_fn}
     {refresh_fn}
-async function runCase(requestedSource, cachedSource) {{
-  global._sessionSourceFilter = requestedSource;
+async function runCase(showCliSessions, cachedSource) {{
+  global.window._showCliSessions = showCliSessions;
   global._allSessions = [{{ session_id: cachedSource + '-1' }}];
   global._allSessionsScope = {{
     profile: 'default',
@@ -601,8 +595,6 @@ async function runCase(requestedSource, cachedSource) {{
   global._sessionListSourceById = new Map([['webui-live', 'webui']]);
   global.INFLIGHT = {{ 'webui-live': {{ lastAssistantText: 'working' }} }};
   cleared.length = 0;
-  global._serverWebuiSessionCount = 11;
-  global._serverCliSessionCount = 5;
   global._sessionListSkeletonActive = true;
   global._lastError = null;
   renders.length = 0;
@@ -610,8 +602,6 @@ async function runCase(requestedSource, cachedSource) {{
   return {{
     sessions: Array.isArray(global._allSessions) ? global._allSessions.map(s => s.session_id) : null,
     scope: global._allSessionsScope ? {{ ...global._allSessionsScope }} : null,
-    webui: global._serverWebuiSessionCount,
-    cli: global._serverCliSessionCount,
     skeleton: global._sessionListSkeletonActive,
     error: global._lastError,
     cleared: [...cleared],
@@ -620,8 +610,8 @@ async function runCase(requestedSource, cachedSource) {{
   }};
 }}
 (async () => {{
-  const mismatch = await runCase('cli', 'webui');
-  const match = await runCase('webui', 'webui');
+  const mismatch = await runCase(false, null);
+  const match = await runCase(true, null);
   console.log(JSON.stringify({{ mismatch, match }}));
 }})().catch(error => {{
   console.error(error);
@@ -634,26 +624,22 @@ async function runCase(requestedSource, cachedSource) {{
     assert body["mismatch"]["scope"] == {
         "profile": "default",
         "allProfiles": False,
-        "sidebarSource": "cli",
-        "excludeHidden": True,
-    }
-    assert body["mismatch"]["webui"] is None
-    assert body["mismatch"]["cli"] is None
-    assert body["mismatch"]["skeleton"] is False
-    assert body["mismatch"]["render"]["sessions"] == []
-    assert body["mismatch"]["inflightKeys"] == ["webui-live"]
-    assert body["mismatch"]["cleared"] == []
-    assert body["mismatch"]["render"]["inflightKeys"] == ["webui-live"]
-    assert body["match"]["sessions"] == ["webui-1"]
-    assert body["match"]["scope"] == {
-        "profile": "default",
-        "allProfiles": False,
         "sidebarSource": "webui",
         "excludeHidden": True,
     }
-    assert body["match"]["webui"] == 11
-    assert body["match"]["cli"] == 5
-    assert body["match"]["render"]["sessions"] == ["webui-1"]
+    assert body["mismatch"]["skeleton"] is False
+    assert body["mismatch"]["render"]["sessions"] == []
+    assert body["mismatch"]["inflightKeys"] == []
+    assert body["mismatch"]["cleared"] == ["webui-live"]
+    assert body["mismatch"]["render"]["inflightKeys"] == []
+    assert body["match"]["sessions"] == ["null-1"]
+    assert body["match"]["scope"] == {
+        "profile": "default",
+        "allProfiles": False,
+        "sidebarSource": None,
+        "excludeHidden": True,
+    }
+    assert body["match"]["render"]["sessions"] == ["null-1"]
 
 
 def test_payload_row_count_regression(monkeypatch):

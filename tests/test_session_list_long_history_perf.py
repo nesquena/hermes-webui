@@ -172,7 +172,10 @@ def test_session_list_fetch_adds_include_archived_only_when_toggle_is_on():
 
     assert "if(_showArchived) qs.set('include_archived','1');" in src
     assert "api('/api/sessions' + sessionListQS" in src
-    assert "toggle.onclick=()=>{_showArchived=!_showArchived;renderSessionList();};" in src
+    assert "const archivedCb=document.createElement('input');" in src
+    assert "archivedCb.checked=!!_showArchived;" in src
+    assert "_showArchived=archivedCb.checked;" in src
+    assert "void renderSessionList({deferWhileInteracting:false});" in src
     assert "_archivedWebuiCount" in src
     assert "sessData.archived_webui_count ?? sessData.archived_count ?? 0" in src
     assert "archived_webui_count" in src
