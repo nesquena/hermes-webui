@@ -353,3 +353,136 @@ def test_first_password_setup_allows_public_client_with_open_onboarding(monkeypa
 
     assert handler.status == 200
     assert any(key.lower() == "set-cookie" for key, _ in handler.sent_headers)
+
+
+# ── Public-bind-requires-auth fail-closed guard (PR #3758, GAP 2) ──────────
+# These cover server._public_bind_requires_auth and the Dockerfile default.
+# The guard fails CLOSED (server sys.exit(1)s) for a passwordless server about
+# to bind a public/non-loopback address inside a container, while keeping
+# loopback, auth-enabled, and bare-metal-dev behavior unchanged.
+
+_REQUIRE_AUTH_FLAG = 'HERMES_WEBUI_REQUIRE_AUTH_FOR_PUBLIC_BIND'
+
+
+def test_public_bind_blocks_passwordless_public_container(monkeypatch):
+    """Container + public host + no auth + no explicit flag -> BLOCK (fail closed)."""
+    import server
+
+    monkeypatch.delenv(_REQUIRE_AUTH_FLAG, raising=False)
+    assert server._public_bind_requires_auth(
+        "0.0.0.0", within_container=True, auth_enabled=False
+    ) is True
+    assert server._public_bind_requires_auth(
+        "::", within_container=True, auth_enabled=False
+    ) is True
+    assert server._public_bind_requires_auth(
+        "203.0.113.7", within_container=True, auth_enabled=False
+    ) is True
+
+
+def test_public_bind_allows_loopback_even_in_container(monkeypatch):
+    """Loopback binds are local-only and must NEVER trip the guard."""
+    import server
+
+    monkeypatch.delenv(_REQUIRE_AUTH_FLAG, raising=False)
+    for host in ("127.0.0.1", "::1", "localhost"):
+        assert server._public_bind_requires_auth(
+            host, within_container=True, auth_enabled=False
+        ) is False
+        assert server._public_bind_requires_auth(
+            host, within_container=False, auth_enabled=False
+        ) is False
+
+
+def test_public_bind_allows_when_auth_enabled(monkeypatch):
+    """Configured auth (password or passkey) disables the guard entirely."""
+    import server
+
+    monkeypatch.delenv(_REQUIRE_AUTH_FLAG, raising=False)
+    assert server._public_bind_requires_auth(
+        "0.0.0.0", within_container=True, auth_enabled=True
+    ) is False
+    # Even with the explicit on-flag set, auth short-circuits to allow.
+    monkeypatch.setenv(_REQUIRE_AUTH_FLAG, '1')
+    assert server._public_bind_requires_auth(
+        "0.0.0.0", within_container=True, auth_enabled=True
+    ) is False
+
+
+def test_public_bind_bare_metal_dev_is_warn_only_by_default(monkeypatch):
+    """Bare-metal (non-container) dev host binding 0.0.0.0 passwordless does NOT
+    fail closed by default — it keeps the historical warn-only behavior."""
+    import server
+
+    monkeypatch.delenv(_REQUIRE_AUTH_FLAG, raising=False)
+    assert server._public_bind_requires_auth(
+        "0.0.0.0", within_container=False, auth_enabled=False
+    ) is False
+
+
+def test_public_bind_explicit_flag_on_blocks_even_bare_metal(monkeypatch):
+    """The explicit opt-in flag forces fail-closed even on a bare-metal host."""
+    import server
+
+    monkeypatch.setenv(_REQUIRE_AUTH_FLAG, '1')
+    assert server._public_bind_requires_auth(
+        "0.0.0.0", within_container=False, auth_enabled=False
+    ) is True
+    for truthy in ("1", "true", "yes", "on", "ON", "True"):
+        monkeypatch.setenv(_REQUIRE_AUTH_FLAG, truthy)
+        assert server._public_bind_requires_auth(
+            "0.0.0.0", within_container=False, auth_enabled=False
+        ) is True
+
+
+def test_public_bind_explicit_flag_off_allows_even_in_container(monkeypatch):
+    """The explicit opt-out lets operators who secured access elsewhere (reverse
+    proxy / private network / VPN) run passwordless public binds in a container."""
+    import server
+
+    for falsy in ('0', "false", "no", "off", "OFF", "False"):
+        monkeypatch.setenv(_REQUIRE_AUTH_FLAG, falsy)
+        assert server._public_bind_requires_auth(
+            "0.0.0.0", within_container=True, auth_enabled=False
+        ) is False
+
+
+def test_dockerfile_enables_require_auth_for_public_bind_by_default():
+    """The Docker image must enable the fail-closed guard by default so a
+    container that publishes 0.0.0.0 is protected out of the box."""
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    expected = "ENV " + _REQUIRE_AUTH_FLAG + "=" + '1'
+    assert expected in dockerfile, (
+        "Dockerfile must set " + _REQUIRE_AUTH_FLAG + " on by default so "
+        "passwordless public binds in containers fail closed."
+    )
+
+
+def test_public_bind_refusal_message_is_clear_and_actionable():
+    """Pin the crystal-clear fatal message: it must say what happened, why it
+    is dangerous, name the detected host, and lay out all three fix paths."""
+    from api.bind_guard import public_bind_refusal_message
+
+    msg = public_bind_refusal_message("0.0.0.0")
+    # Unmistakable lead-in
+    assert "REFUSING TO START" in msg
+    assert "passwordless server would be exposed on a public" in msg
+    # States WHAT happened + the detected host + that no auth is configured
+    assert "'0.0.0.0'" in msg
+    assert "NO password" in msg and "NO passkey" in msg
+    # Fix path 1: set a password (recommended)
+    assert "RECOMMENDED" in msg
+    assert ("HERMES_WEBUI_PASSWORD=") in msg
+    # Fix path 2: bind to localhost
+    assert ("HERMES_WEBUI_HOST=127.0.0.1") in msg
+    # Fix path 3: explicit opt-out for an externally-secured deployment
+    assert ("HERMES_WEBUI_REQUIRE_AUTH_FOR_PUBLIC_BIND=" + "0") in msg
+    assert "reverse proxy" in msg and "VPN" in msg
+
+
+def test_public_bind_refusal_message_reflects_detected_host():
+    """The refusal message echoes whatever public host was about to be bound."""
+    from api.bind_guard import public_bind_refusal_message
+
+    assert "'::'" in public_bind_refusal_message("::")
+    assert "'203.0.113.7'" in public_bind_refusal_message("203.0.113.7")

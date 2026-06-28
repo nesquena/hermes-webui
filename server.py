@@ -136,6 +136,9 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 from api.auth import check_auth
+# Re-export so `server._public_bind_requires_auth` stays a stable reference
+# (the predicate + message live in api.bind_guard to keep server.py thin).
+from api.bind_guard import _public_bind_requires_auth  # noqa: F401
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
@@ -587,16 +590,21 @@ def main() -> None:
     if within_container:
         print('[ok] Running within container.', flush=True)
 
-    # Security: warn if binding non-loopback without authentication
+    # Security: refuse (fail closed) or warn if binding non-loopback without auth
     from api.auth import is_auth_enabled
-    if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
+    from api.bind_guard import public_bind_refusal_message
+    auth_enabled = is_auth_enabled()
+    if _public_bind_requires_auth(HOST, within_container=within_container, auth_enabled=auth_enabled):
+        print(public_bind_refusal_message(HOST), flush=True)
+        sys.exit(1)
+    if HOST not in ('127.0.0.1', '::1', 'localhost') and not auth_enabled:
         print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
         print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
         print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
         print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
         if within_container:
             print(f'     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.', flush=True)
-    elif not is_auth_enabled():
+    elif not auth_enabled:
         print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
         print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
         print(f'        enable authentication.', flush=True)

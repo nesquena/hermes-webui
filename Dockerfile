@@ -98,6 +98,10 @@ RUN echo "__version__ = '${HERMES_VERSION}'" > /apptoo/api/_version.py
 # Default to binding all interfaces (required for container networking)
 ENV HERMES_WEBUI_HOST=0.0.0.0
 ENV HERMES_WEBUI_PORT=8787
+# Security: containers commonly publish 0.0.0.0 beyond the local machine,
+# so fail closed (refuse to start) on a passwordless public bind by default.
+# Operators who terminate auth at another layer can override with =0.
+ENV HERMES_WEBUI_REQUIRE_AUTH_FOR_PUBLIC_BIND=1
 
 EXPOSE 8787
 
