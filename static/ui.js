@@ -7021,8 +7021,9 @@ function clearInflightState(sid){
 //      and as the hash that compares "rendered vs current" snapshots.
 //
 //   2. scheduleTodosRefresh() — coalesces multiple `todo_state` events that
-//      land in the same animation frame into a single loadTodos() call.
-//      Skips work entirely when the panel is not active.
+//      land in the same animation frame into a single refresh pass. It keeps
+//      the left sidebar Todos behavior unchanged, and also lets the workspace
+//      Todos tab repaint when that tab is enabled and currently visible.
 //
 //   3. _hydrateTodosFromSession(session) — applies cold-load todo_state
 //      from the session GET payload, or clears the panel when neither a
@@ -7065,12 +7066,14 @@ function scheduleTodosRefresh(){
   if(_todosRenderRafId) return;
   if(typeof requestAnimationFrame!=='function'){
     if(typeof loadTodos==='function') loadTodos();
+    if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
     return;
   }
   _todosRenderRafId=requestAnimationFrame(()=>{
     _todosRenderRafId=0;
-    if(!_todosPanelIsActive()) return;
-    if(typeof loadTodos==='function') loadTodos();
+    const sidebarActive=_todosPanelIsActive();
+    if(sidebarActive&&typeof loadTodos==='function') loadTodos();
+    if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
   });
 }
 
@@ -7078,6 +7081,7 @@ function _resetTodosRenderCache(){
   // Clear after every cross-session navigation so the next render is
   // never short-circuited against a hash from a different session.
   _todosLastRenderedHash=null;
+  if(typeof _resetWorkspaceTodosRenderCache==='function') _resetWorkspaceTodosRenderCache();
 }
 
 function _hydrateTodosFromSession(session){
@@ -7158,6 +7162,7 @@ function _hydrateTodosFromSession(session){
     S.todoStateMeta=null;
   }
   _resetTodosRenderCache();
+  if(typeof scheduleTodosRefresh==='function') scheduleTodosRefresh();
 }
 
 function snapshotLiveTurnHtmlForSession(sid){

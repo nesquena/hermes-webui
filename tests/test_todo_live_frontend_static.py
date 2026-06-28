@@ -51,6 +51,103 @@ def test_hydrate_todos_from_session_reconciles_cold_and_inflight_snapshots():
     assert "S.todos=inflight.todos" in block
     assert "S.todoStateMeta=null" in block
     assert "_resetTodosRenderCache();" in block
+    assert "scheduleTodosRefresh()" in block
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required for frontend scheduler behavior test")
+def test_schedule_todos_refresh_fans_out_without_breaking_sidebar_path(tmp_path):
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('let _todosLastRenderedHash=null;');
+const end = src.indexOf('function _resetTodosRenderCache()', start);
+if (start < 0 || end < 0) throw new Error('todo scheduler block not found');
+const block = src.slice(start, end) + '\nthis.scheduleTodosRefresh = scheduleTodosRefresh;';
+function run(panelActive) {
+  const panel = {classList:{contains:(name)=> name === 'active' && panelActive}};
+  const calls = {load:0, workspace:0, raf:0};
+  const context = {
+    document:{getElementById:(id)=> id === 'panelTodos' ? panel : null},
+    requestAnimationFrame:(cb)=>{ calls.raf++; cb(); return calls.raf; },
+    loadTodos:()=>{ calls.load++; },
+    _refreshWorkspacePanelTodos:()=>{ calls.workspace++; },
+  };
+  vm.createContext(context);
+  vm.runInContext(block, context);
+  context.scheduleTodosRefresh();
+  return calls;
+}
+function assert(cond, msg){ if(!cond) throw new Error(msg); }
+let active = run(true);
+assert(active.raf === 1, 'scheduler must use RAF coalescing');
+assert(active.load === 1, 'active sidebar Todos must still call loadTodos');
+assert(active.workspace === 1, 'scheduler must fan out to workspace refresh helper');
+let inactive = run(false);
+assert(inactive.load === 0, 'inactive sidebar Todos must not call loadTodos from RAF path');
+assert(inactive.workspace === 1, 'workspace helper remains responsible for workspace visibility gating');
+'''
+    script_path = tmp_path / "todo_scheduler_test.js"
+    script_path.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        ["node", str(script_path), str(REPO_ROOT / "static" / "ui.js")],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required for workspace todo gate behavior test")
+def test_workspace_todos_refresh_gate_requires_enabled_visible_todos_tab(tmp_path):
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function _workspaceTodosTabIsActive()');
+const end = src.indexOf("if(typeof document !== 'undefined')", start);
+if (start < 0 || end < 0) throw new Error('workspace todos gate block not found');
+const block = src.slice(start, end) + '\nthis._refreshWorkspacePanelTodos = _refreshWorkspacePanelTodos;';
+function run({enabled=true, activeTab='todos', tabHidden=false, panelHidden=false}) {
+  const elements = {
+    workspaceTodosTab:{hidden:tabHidden},
+    workspaceTodosPanel:{hidden:panelHidden},
+  };
+  const calls = {load:0};
+  const context = {
+    window:{_workspaceTodosTab:enabled},
+    document:{
+      querySelector:(sel)=> sel === '.rightpanel' ? {dataset:{activeTab}} : null,
+      getElementById:(id)=> elements[id] || null,
+    },
+    _loadWorkspacePanelTodos:()=>{ calls.load++; },
+  };
+  vm.createContext(context);
+  vm.runInContext(block, context);
+  context._refreshWorkspacePanelTodos();
+  return calls.load;
+}
+function assert(cond, msg){ if(!cond) throw new Error(msg); }
+assert(run({}) === 1, 'visible enabled workspace Todos tab must refresh');
+assert(run({activeTab:'files'}) === 0, 'Files tab must not refresh workspace Todos');
+assert(run({activeTab:'artifacts'}) === 0, 'Artifacts tab must not refresh workspace Todos');
+assert(run({enabled:false}) === 0, 'default-off workspace Todos setting must not refresh');
+assert(run({tabHidden:true}) === 0, 'hidden workspace Todos tab must not refresh');
+assert(run({panelHidden:true}) === 0, 'hidden workspace Todos panel must not refresh');
+'''
+    script_path = tmp_path / "workspace_todos_gate_test.js"
+    script_path.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        ["node", str(script_path), str(REPO_ROOT / "static" / "workspace.js")],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required for frontend handler behavior test")

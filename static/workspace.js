@@ -289,6 +289,7 @@ async function authorizeWorkspaceEscapeNavigation(item){
 
 let _workspacePanelActiveTab = 'files';
 let _renderSessionArtifactsTimer = null;
+let _workspaceTodosLastRenderedHash = null;
 
 function _setWorkspacePanelTabDataset(){
   const panel = document.querySelector('.rightpanel');
@@ -301,6 +302,35 @@ function scheduleRenderSessionArtifacts(){
     _renderSessionArtifactsTimer = null;
     renderSessionArtifacts();
   }, 100);
+}
+
+function _workspaceTodosHash(items){
+  if(!Array.isArray(items)) return '';
+  let h=items.length+'|';
+  for(let i=0;i<items.length;i++){
+    const t=items[i]||{};
+    h+=String(t.id==null?'':t.id)+'\x1f'+String(t.content==null?(t.text==null?'':t.text):t.content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
+  }
+  return h;
+}
+
+function _workspaceTodosTabIsActive(){
+  if(typeof window==='undefined'||window._workspaceTodosTab!==true) return false;
+  if(typeof document==='undefined') return false;
+  const rightPanel=document.querySelector('.rightpanel');
+  if(!rightPanel||!rightPanel.dataset||rightPanel.dataset.activeTab!=='todos') return false;
+  const tab=document.getElementById('workspaceTodosTab');
+  const panel=document.getElementById('workspaceTodosPanel');
+  return !!(tab&&panel&&!tab.hidden&&!panel.hidden);
+}
+
+function _resetWorkspaceTodosRenderCache(){
+  _workspaceTodosLastRenderedHash=null;
+}
+
+function _refreshWorkspacePanelTodos(){
+  if(!_workspaceTodosTabIsActive()) return;
+  _loadWorkspacePanelTodos();
 }
 
 if(typeof document !== 'undefined'){
@@ -348,9 +378,14 @@ function _loadWorkspacePanelTodos(){
     }
   }catch(e){ todos = []; }
   if(!todos.length){
+    if(_workspaceTodosLastRenderedHash === '__empty__') return;
     panel.innerHTML = '<div style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px">No active tasks</div>';
+    _workspaceTodosLastRenderedHash = '__empty__';
     return;
   }
+  const hash = _workspaceTodosHash(todos);
+  if(hash === _workspaceTodosLastRenderedHash) return;
+  _workspaceTodosLastRenderedHash = hash;
   const statusIcon = (s) => {
     if(s === 'completed') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
     if(s === 'in_progress') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';

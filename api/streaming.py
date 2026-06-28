@@ -45,7 +45,7 @@ from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.metering import meter
 from api.run_journal import RunJournalWriter
-from api.todo_state import emit_todo_state
+from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
@@ -69,6 +69,7 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
         'messages': messages,
         'message_count': len(messages),
     }
+    attach_todo_state(raw, messages)
     if tool_calls is not None:
         raw['tool_calls'] = tool_calls
     return raw
