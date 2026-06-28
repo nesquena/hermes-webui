@@ -19209,18 +19209,24 @@ def _handle_chat_start(handler, body, diag=None):
             if "model_provider" in body
             else getattr(s, "model_provider", None)
         )
-        _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
         if body.get("moa_config"):
-            if webui_gateway_chat_enabled(get_config()):
-                return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
             from api.commands import resolve_moa_config
 
             try:
                 moa_config = resolve_moa_config()
             except RuntimeError as e:
                 return bad(handler, str(e), 503)
+            if webui_gateway_chat_enabled(get_config()):
+                requested_model = str(
+                    moa_config.get("preset") or moa_config.get("default_preset") or ""
+                ).strip()
+                if not requested_model:
+                    return bad(handler, "MoA preset is not configured", 503)
+                requested_provider = "moa"
+                explicit_model_pick = True
+        _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
         diag.stage("resolve_model_provider") if diag else None
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,

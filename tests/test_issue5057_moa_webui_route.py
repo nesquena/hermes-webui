@@ -122,8 +122,80 @@ def test_moa_config_is_per_turn_not_persisted():
     routes_source = routes_path.read_text(encoding="utf-8")
     assert re.search(r"if body\.get\(\"moa_config\"\):[\s\S]*?moa_config = resolve_moa_config\(\)", routes_source), \
         "chat-start must re-resolve MoA config server-side instead of trusting the browser payload"
-    assert "MoA override is unavailable on gateway-backed sessions" in routes_source
+    assert "MoA override is unavailable on gateway-backed sessions" not in routes_source
+    assert 'requested_provider = "moa"' in routes_source
     js_path = Path(__file__).resolve().parent.parent / "static" / "messages.js"
     js_source = js_path.read_text(encoding="utf-8")
     assert "moa_config:_pendingMoaConfig?true:undefined" in js_source
     assert "_pendingMoaConfig=null" in js_source
+
+
+def test_moa_gateway_chat_start_routes_to_moa_provider(monkeypatch, tmp_path):
+    """Gateway-backed WebUI sessions should send /moa as provider=moa + preset model."""
+    import api.commands as commands
+    import api.routes as routes
+
+    class _Handler:
+        def __init__(self):
+            import io
+
+            self.status = None
+            self.response_headers = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.response_headers.append((key, value))
+
+        def end_headers(self):
+            self.response_headers.append(("__end__", ""))
+
+    class _Session:
+        session_id = "sess-moa-gateway"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        profile = "default"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+
+    captured = {}
+
+    def start_run(session, **kwargs):
+        captured["session"] = session
+        captured["kwargs"] = kwargs
+        return {"stream_id": "stream-moa", "session_id": session.session_id}
+
+    def resolve_model(model, provider, **_kwargs):
+        captured["resolve_model"] = (model, provider)
+        return model, provider, False
+
+    monkeypatch.setattr(routes, "get_session", lambda _sid: _Session())
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _provider: (None, None))
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", resolve_model)
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    monkeypatch.setattr(routes, "get_config", lambda: {"chat_backend": "gateway"})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(commands, "resolve_moa_config", lambda: {"preset": "moa-fast", "default_preset": "moa-fast"})
+
+    handler = _Handler()
+    routes._handle_chat_start(
+        handler,
+        {
+            "session_id": "sess-moa-gateway",
+            "message": "diagnose issue",
+            "workspace": str(tmp_path),
+            "moa_config": True,
+        },
+    )
+
+    body = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert handler.status == 200
+    assert body["stream_id"] == "stream-moa"
+    assert captured["resolve_model"] == ("moa-fast", "moa")
+    assert captured["kwargs"]["model"] == "moa-fast"
+    assert captured["kwargs"]["model_provider"] == "moa"
