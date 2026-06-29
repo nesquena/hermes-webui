@@ -2604,10 +2604,13 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models from `models` list or `model` single
+            # Collect models from `models` dict/list or `model` single
             cp_models = []
             if isinstance(cp.get("models"), list):
                 cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"]]
+            elif isinstance(cp.get("models"), dict):
+                # Dict-form stores per-model metadata; use dict keys as model IDs
+                cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"].keys()]
             elif cp.get("model"):
                 cp_models = [{"id": cp["model"], "label": cp["model"]}]
             # Check for env var reference (${VAR_NAME} pattern)
