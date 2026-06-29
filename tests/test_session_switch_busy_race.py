@@ -41,7 +41,7 @@ def test_loadSession_clears_busy_before_async_message_load_when_server_idle():
     assert "S.busy=false" in idle_block, "idle switch must clear S.busy immediately"
     assert "S.activeStreamId=null" in idle_block, "idle switch must clear S.activeStreamId immediately"
 
-    ensure_load = body.find("await _ensureMessagesLoaded(sid)")
+    ensure_load = body.find("await _ensureMessagesLoaded(sid")
     assert ensure_load != -1, "loadSession must still lazy-load messages for idle sessions"
     assert idle_reset < ensure_load, (
         "S.busy must be cleared before _ensureMessagesLoaded so session-list polling "

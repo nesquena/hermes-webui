@@ -40,7 +40,7 @@ def test_active_session_external_refresh_skips_destructive_reload_on_metadata_on
     """
     assert "remoteCount > localCount || remoteLast > localLast" not in SESSIONS_JS
     assert "if(remoteCount !== localCount){" in SESSIONS_JS
-    assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});" in SESSIONS_JS
+    assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll', keepStaleUntilLoaded:_keepStaleUntilLoaded});" in SESSIONS_JS
     assert "}else if(remoteLast > localLast){" in SESSIONS_JS
     assert "S.session.last_message_at = remoteLast" in SESSIONS_JS
     assert "if(data.session.updated_at) S.session.updated_at = data.session.updated_at;" in SESSIONS_JS
@@ -187,7 +187,7 @@ def test_same_width_force_reload_invalidates_visible_message_cache():
     assert "_visWithIdxCacheLen=0;" in clear_body
     assert "clearVisibleMessageRowCache();" in UI_JS[UI_JS.index("function clearMessageRenderCache()") :]
 
-    ensure_start = SESSIONS_JS.index("async function _ensureMessagesLoaded(sid)")
+    ensure_start = SESSIONS_JS.index("async function _ensureMessagesLoaded(sid")
     ensure_end = SESSIONS_JS.index("function _messageComparableText", ensure_start)
     ensure_body = SESSIONS_JS[ensure_start:ensure_end]
     invalidate_pos = ensure_body.index("if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();")

@@ -848,7 +848,7 @@ def test_load_session_rearms_stream_on_every_early_return():
 
     # Isolate the loadSession body.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 12000]
+    body = js[fn_ix:fn_ix + 14000]
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).
@@ -881,7 +881,7 @@ def test_load_session_rearms_stream_on_every_early_return():
     # but guarded against the self-healed-current (404'd) case so it never
     # spins the reconnect loop against a dead session_id.
     catch_ix = body.index("const _selfHealedCurrent")
-    catch_src = body[catch_ix:catch_ix + 1400]
+    catch_src = body[catch_ix:catch_ix + 2200]
     assert "!_selfHealedCurrent" in catch_src and "startSessionStream(currentSid)" in catch_src, (
         "fetch-error path must restart the on-screen stream, guarded against "
         "the self-healed-current (deleted/404) session"

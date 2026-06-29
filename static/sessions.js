@@ -1203,6 +1203,7 @@ async function loadSession(sid){
       snapshotLiveTurnHtmlForSession(currentSid);
     }
   }
+  const _keepStaleUntilLoaded = !!opts.keepStaleUntilLoaded && sameSessionForceReload;
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we
@@ -1221,10 +1222,27 @@ async function loadSession(sid){
     // instead of collapsing a long session back to the default tail window.
     if (sameSessionForceReload) _captureSameSessionForceReloadHint(sid);
     else _clearSameSessionForceReloadHint();
-    S.messages = [];
-    S.toolCalls = [];
-    _messagesTruncated = false;
-    _oldestIdx = 0;
+    // #5177: keep-stale-until-loaded path — defer the destructive
+    // S.messages/toolCalls clear so the user does NOT see a transcript-wide
+    // blank gap during the metadata + messages round-trip. Only the
+    // visibility / focus recovery callers in refreshActiveSessionIfExternallyUpdated
+    // request this. The new transcript will be SWAPPED into S.messages by the
+    // forced _ensureMessagesLoaded(...{force:true}) call below, producing a
+    // single render frame with old DOM directly replaced by new DOM rather
+    // than the old → empty → new sequence the default branch produces.
+    //
+    // The session-switch branch (currentSid !== sid) MUST continue to clear
+    // synchronously — leaving a prior session's transcript on screen during a
+    // navigation is the original bug this clear was written for. We gate
+    // strictly on sameSessionForceReload (computed above as part of
+    // _keepStaleUntilLoaded) so cross-session switches keep their existing
+    // behaviour.
+    if (!_keepStaleUntilLoaded) {
+      S.messages = [];
+      S.toolCalls = [];
+      _messagesTruncated = false;
+      _oldestIdx = 0;
+    }
     // Close live SSE streams from the session we're leaving. The error
     // handler checks _isSessionActivelyViewed() and won't auto-reconnect
     // for a backgrounded session, preventing leaked connections that would
@@ -1489,7 +1507,7 @@ async function loadSession(sid){
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
     try {
-      await _ensureMessagesLoaded(sid);
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded});
     } catch(e) {
       S.messages=inflightMessages;
     }
@@ -1582,8 +1600,12 @@ async function loadSession(sid){
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
+    // #5177: when the caller asked us to keep stale messages until the new ones
+    // arrive (visibility/focus recovery), force the fetch so the
+    // "messages already populated" early-return inside _ensureMessagesLoaded
+    // does NOT skip the swap to the new transcript.
     try {
-      await _ensureMessagesLoaded(sid);
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded});
     } catch (e) {
       // Network errors, server failures, or SSE drops (Chrome error codes 4/5)
       // can cause _ensureMessagesLoaded to throw. Without a try/catch here the
@@ -2336,9 +2358,21 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   }
 }
 
-async function _ensureMessagesLoaded(sid) {
+async function _ensureMessagesLoaded(sid, opts) {
+  // `opts` is an explicit named parameter (vs loadSession's arguments[1]
+  // pattern) because _ensureMessagesLoaded is a module-private helper: it is
+  // only called from inside loadSession, so the public signature does not need
+  // to be preserved. Strict-mode engines optimize named params more reliably
+  // than arguments-indexing, and a named opts is self-documenting for static
+  // analysis. Callers pass {force:true} when they need to BYPASS the
+  // "messages already populated" early-return — currently only the #5177
+  // keep-stale-until-loaded path, which intentionally leaves the old messages
+  // in place (to avoid a visible disappear/reappear gap) and relies on
+  // _ensureMessagesLoaded to fetch and SWAP the new transcript into
+  // S.messages in a single frame.
+  opts = opts || {};
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
-  if (S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
+  if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     _clearSameSessionForceReloadHint(sid);
     return;
   }
@@ -4512,7 +4546,23 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     // list metadata, advancing the local last-seen marker so the same metadata
     // bump doesn't re-trigger on every subsequent poll.
     if(remoteCount !== localCount){
-      await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});
+      // Hidden-tab return / visibility / focus recovery commonly trips
+      // remoteCount !== localCount when the post-turn bg-review thread or a
+      // sibling tab persisted messages while the tab was hidden. The default
+      // loadSession(force) path clears S.messages synchronously and waits for
+      // the full transcript round-trip before re-rendering, producing the
+      // user-visible "everything disappears, then reappears after a moment"
+      // gap that #5061 (metadata-only) and #5122 (SSE 4-probe) DO NOT cover
+      // (#5177). Pass keepStaleUntilLoaded so the destructive clear is
+      // deferred to swap-in-place when the new transcript actually arrives.
+      // Restrict to the recovery reasons that produced the field repro; the
+      // post-stream idle reconcile and external/imported-session polls keep
+      // the original behaviour (no DOM is on-screen long enough for the gap
+      // to matter, and any change there would have to re-verify their own
+      // tradeoffs).
+      const _recoveryReasons = {visible:true, focus:true};
+      const _keepStaleUntilLoaded = !!_recoveryReasons[String(reason||'')];
+      await loadSession(sid, {force:true, externalRefreshReason:reason||'poll', keepStaleUntilLoaded:_keepStaleUntilLoaded});
       if(typeof renderSessionList==='function') void renderSessionList();
       return 'reloaded';
     }else if(remoteLast > localLast){
