@@ -1,31 +1,47 @@
+"""Health route and shared gateway restart helper checks."""
+
 import io
 import subprocess
+import threading
 import types
-from api import routes
+
+import api.gateway_restart as gateway_restart
+import api.routes as routes
 
 
 class MockPopen:
-    def __init__(self, args, stdout=None, stderr=None, text=True, env=None):
+    def __init__(
+        self,
+        args,
+        *,
+        stdout_text="",
+        stderr_text="",
+        returncode=0,
+        communicate_timeout=False,
+        wait_timeout=False,
+        env=None,
+    ):
         self.args = args
-        self.env = env
-        self.returncode = 0
-        self.stdout = io.StringIO("✓ Service restarted")
-        self.stderr = io.StringIO("")
-        self._should_timeout = False
-        self._should_raise = False
-        self._wait_should_timeout = False
+        self.env = env or {}
+        self.returncode = returncode
+        self.stdout = io.StringIO(stdout_text)
+        self.stderr = io.StringIO(stderr_text)
+        self.communicate_timeout = communicate_timeout
+        self.wait_timeout = wait_timeout
         self.terminated = False
         self.killed = False
+        self.communicate_timeout_arg = None
+        self.wait_timeout_arg = None
 
     def communicate(self, timeout=None):
-        if self._should_raise:
-            raise OSError("Subprocess execution failed")
-        if self._should_timeout:
+        self.communicate_timeout_arg = timeout
+        if self.communicate_timeout:
             raise subprocess.TimeoutExpired(self.args, timeout)
         return self.stdout.getvalue(), self.stderr.getvalue()
 
     def wait(self, timeout=None):
-        if self._wait_should_timeout:
+        self.wait_timeout_arg = timeout
+        if self.wait_timeout:
             raise subprocess.TimeoutExpired(self.args, timeout)
         return self.returncode
 
@@ -36,197 +52,166 @@ class MockPopen:
         self.killed = True
 
 
-def test_handle_health_restart_success(monkeypatch):
-    import threading
-    routes._RESTART_LOCK = threading.Lock()
-    # Mock profiles home path
-    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
+class InlineThread:
+    def __init__(self, *, target, args=(), daemon=None):
+        self.target = target
+        self.args = args
+        self.daemon = daemon
 
-    # Mock shutil.which to find hermes CLI
-    monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
+    def start(self):
+        self.target(*self.args)
 
-    called_args = []
-    called_env = {}
 
-    def mock_popen(args, stdout=None, stderr=None, text=True, env=None):
-        called_args.append(args)
-        called_env.update(env or {})
-        return MockPopen(args, stdout, stderr, text, env)
-
-    monkeypatch.setattr(subprocess, "Popen", mock_popen)
-
-    # Mock response helper j
-    responses = []
-    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True)
-
+def _call_health_restart(monkeypatch, helper_result):
     handler = types.SimpleNamespace()
+    responses = []
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True,
+    )
+    monkeypatch.setattr(routes, "restart_active_profile_gateway", lambda: dict(helper_result))
+    return routes._handle_health_restart(handler), responses
 
-    # Call _handle_health_restart
-    result = routes._handle_health_restart(handler)
 
+def test_restart_active_profile_gateway_success_uses_active_profile_home(monkeypatch):
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+    called = {}
+
+    def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+        called["args"] = args
+        called["env"] = env
+        return MockPopen(
+            args,
+            stdout_text="✓ Service restarted",
+            returncode=0,
+            env=env,
+        )
+
+    monkeypatch.setattr(gateway_restart, "get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
+    monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
+
+    result = gateway_restart.restart_active_profile_gateway()
+
+    assert result["status"] == "completed"
+    assert result["message"] == "Gateway service restarted successfully"
+    assert called["args"] == ["/mock/bin/hermes", "gateway", "restart"]
+    assert called["env"]["HERMES_HOME"] == "/mock/hermes/home"
+    assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
+
+
+def test_restart_active_profile_gateway_failure_preserves_empty_output_contract(monkeypatch):
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+
+    monkeypatch.setattr(gateway_restart, "get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
+    monkeypatch.setattr(
+        gateway_restart.subprocess,
+        "Popen",
+        lambda args, stdout=None, stderr=None, text=True, env=None: MockPopen(
+            args,
+            returncode=7,
+            env=env,
+        ),
+    )
+
+    result = gateway_restart.restart_active_profile_gateway()
+
+    assert result["status"] == "failed"
+    assert result["message"] == "Restart failed: "
+    assert result["returncode"] == 7
+    assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
+
+
+def test_restart_active_profile_gateway_timeout_releases_lock_after_background_wait(monkeypatch):
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+    proc = MockPopen(
+        ["/mock/bin/hermes", "gateway", "restart"],
+        communicate_timeout=True,
+        env={"HERMES_HOME": "/mock/hermes/home"},
+    )
+
+    monkeypatch.setattr(gateway_restart, "get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
+    monkeypatch.setattr(gateway_restart.subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(gateway_restart.threading, "Thread", InlineThread)
+
+    result = gateway_restart.restart_active_profile_gateway()
+
+    assert result["status"] == "in_progress"
+    assert proc.communicate_timeout_arg == 2.0
+    assert proc.wait_timeout_arg == 240.0
+    assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
+
+
+def test_restart_active_profile_gateway_busy_reports_contention(monkeypatch):
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+    assert gateway_restart._GATEWAY_RESTART_LOCK.acquire(blocking=False) is True
+
+    try:
+        result = gateway_restart.restart_active_profile_gateway()
+    finally:
+        gateway_restart._GATEWAY_RESTART_LOCK.release()
+
+    assert result == {
+        "status": "busy",
+        "message": "Restart already in progress. Please wait a moment and try again.",
+    }
+
+
+def test_handle_health_restart_success(monkeypatch):
+    result, responses = _call_health_restart(
+        monkeypatch,
+        {"status": "completed", "message": "Gateway service restarted successfully"},
+    )
     assert result is True
-    assert called_args == [["/mock/bin/hermes", "gateway", "restart"]]
-    assert called_env.get("HERMES_HOME") == "/mock/hermes/home"
     assert responses == [({"ok": True, "message": "Gateway service restarted successfully"}, 200)]
 
 
-def test_handle_health_restart_failure(monkeypatch):
-    import threading
-    routes._RESTART_LOCK = threading.Lock()
-    # Mock profiles home path
-    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
-    monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
-
-    # Mock subprocess.Popen failure
-    def mock_popen(args, stdout=None, stderr=None, text=True, env=None):
-        mp = MockPopen(args, stdout, stderr, text, env)
-        mp.returncode = 1
-        mp.stdout = io.StringIO("")
-        mp.stderr = io.StringIO("Error: something went wrong")
-        return mp
-
-    monkeypatch.setattr(subprocess, "Popen", mock_popen)
-
-    responses = []
-    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True)
-
-    handler = types.SimpleNamespace()
-    result = routes._handle_health_restart(handler)
-
-    assert result is True
-    assert responses == [({"ok": False, "error": "Restart failed: Error: something went wrong"}, 500)]
-
-
-def test_handle_health_restart_exception(monkeypatch):
-    import threading
-    routes._RESTART_LOCK = threading.Lock()
-    # Mock profiles home path
-    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
-    monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
-
-    # Mock Popen raising OSError immediately on start
-    def mock_popen(args, **kwargs):
-        raise OSError("Subprocess execution failed")
-
-    monkeypatch.setattr(subprocess, "Popen", mock_popen)
-
-    responses = []
-    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True)
-
-    handler = types.SimpleNamespace()
-    result = routes._handle_health_restart(handler)
-
-    assert result is True
-    assert responses[0][0]["ok"] is False
-    assert "Internal error running restart" in responses[0][0]["error"]
-    assert responses[0][1] == 500
-
-
 def test_handle_health_restart_timeout(monkeypatch):
-    import threading
-    routes._RESTART_LOCK = threading.Lock()
-    # Mock profiles home path
-    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
-    monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
-
-    # Mock Popen raising TimeoutExpired on communicate
-    def mock_popen(args, stdout=None, stderr=None, text=True, env=None):
-        mp = MockPopen(args, stdout, stderr, text, env)
-        mp._should_timeout = True
-        return mp
-
-    monkeypatch.setattr(subprocess, "Popen", mock_popen)
-
-    responses = []
-    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True)
-
-    handler = types.SimpleNamespace()
-    result = routes._handle_health_restart(handler)
-
+    result, responses = _call_health_restart(
+        monkeypatch,
+        {"status": "in_progress", "message": "Gateway service restart initiated (in progress)"},
+    )
     assert result is True
     assert responses == [({"ok": True, "message": "Gateway service restart initiated (in progress)"}, 200)]
+
+
+def test_handle_health_restart_failure_preserves_empty_output_message(monkeypatch):
+    result, responses = _call_health_restart(
+        monkeypatch,
+        {"status": "failed", "message": "Restart failed: "},
+    )
+    assert result is True
+    assert responses == [({"ok": False, "error": "Restart failed: "}, 500)]
+
+
+def test_handle_health_restart_failure(monkeypatch):
+    result, responses = _call_health_restart(
+        monkeypatch,
+        {"status": "failed", "message": "Restart failed: bad thing"},
+    )
+    assert result is True
+    assert responses == [({"ok": False, "error": "Restart failed: bad thing"}, 500)]
+
+
+def test_handle_health_restart_internal_error(monkeypatch):
+    _, responses = _call_health_restart(
+        monkeypatch,
+        {"status": "failed", "message": "Internal error running restart: OSError: bad spawn"},
+    )
+    assert responses == [({"ok": False, "error": "Internal error running restart: OSError: bad spawn"}, 500)]
 
 
 def test_handle_health_restart_concurrency(monkeypatch):
-    import threading
-    import time
-    routes._RESTART_LOCK = threading.Lock()
-    
-    # Mock profiles home path
-    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
-    monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
-
-    # Mock Popen that blocks on communicate
-    barrier = threading.Barrier(2)
-
-    class BlockingMockPopen(MockPopen):
-        def communicate(self, timeout=None):
-            barrier.wait()  # synchronize with test thread
-            time.sleep(0.5)  # hold the lock briefly
-            return self.stdout.getvalue(), self.stderr.getvalue()
-
-    def mock_popen(args, stdout=None, stderr=None, text=True, env=None):
-        return BlockingMockPopen(args, stdout, stderr, text, env)
-
-    monkeypatch.setattr(subprocess, "Popen", mock_popen)
-
-    responses = []
-    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True)
-
-    handler1 = types.SimpleNamespace()
-    handler2 = types.SimpleNamespace()
-
-    # Run first restart in a separate thread (it will block on communicate)
-    t1 = threading.Thread(target=routes._handle_health_restart, args=(handler1,))
-    t1.start()
-
-    # Wait until the first thread starts Popen and blocks on communicate
-    barrier.wait()
-
-    # Attempt a second restart concurrently; it should fail immediately with 429
-    result2 = routes._handle_health_restart(handler2)
-
-    t1.join()
-
-    assert result2 is True
-    # The second response must be a 429 Conflict / Too Many Requests
-    assert responses[0][0]["ok"] is False
-    assert "Restart already in progress" in responses[0][0]["error"]
-    assert responses[0][1] == 429
-
-
-def test_handle_health_restart_wait_timeout(monkeypatch):
-    import threading
-    import time
-    routes._RESTART_LOCK = threading.Lock()
-    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
-    monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
-
-    mock_instances = []
-    def mock_popen(args, stdout=None, stderr=None, text=True, env=None):
-        mp = MockPopen(args, stdout, stderr, text, env)
-        mp._should_timeout = True
-        mp._wait_should_timeout = True
-        mock_instances.append(mp)
-        return mp
-
-    monkeypatch.setattr(subprocess, "Popen", mock_popen)
-
-    responses = []
-    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True)
-
-    handler = types.SimpleNamespace()
-    assert not routes._RESTART_LOCK.locked()
-    
-    result = routes._handle_health_restart(handler)
-    assert result is True
-    assert responses == [({"ok": True, "message": "Gateway service restart initiated (in progress)"}, 200)]
-    
-    # Wait for background thread to run and finish wait_and_release
-    time.sleep(0.5)
-    
-    # The lock should be released even if wait() timed out
-    assert not routes._RESTART_LOCK.locked()
-    assert len(mock_instances) == 1
-    assert mock_instances[0].terminated is True
-    assert mock_instances[0].killed is True
+    _, responses = _call_health_restart(
+        monkeypatch,
+        {"status": "busy", "message": "Restart already in progress. Please wait a moment and try again."},
+    )
+    assert responses == [
+        (
+            {"ok": False, "error": "Restart already in progress. Please wait a moment and try again."},
+            429,
+        )
+    ]

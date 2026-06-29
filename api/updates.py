@@ -23,6 +23,7 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
+from api.gateway_restart import restart_active_profile_gateway
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
 
 logger = logging.getLogger(__name__)
@@ -1245,6 +1246,33 @@ def _schedule_restart(delay: float = 2.0) -> None:
     threading.Thread(target=_do, daemon=True).start()
 
 
+def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
+    """Run the active-profile gateway restart when agent checkout changed.
+
+    Returns:
+        (ok, restart_payload) where:
+        - ok is False when restart did not complete and callers must abort success.
+        - restart_payload contains helper status fields for response shaping.
+    """
+    restart_result = restart_active_profile_gateway()
+    status = str(restart_result.get("status") or "")
+    if status in {"completed", "in_progress"}:
+        return True, restart_result
+    return False, restart_result
+
+
+def _agent_gateway_restart_failure_message(target: str, restart_result: dict) -> str:
+    if restart_result.get("message"):
+        return (
+            f'{target} updated, but gateway restart did not complete: '
+            f'{restart_result["message"]}. Run `hermes gateway restart` manually.'
+        )
+    return (
+        f'{target} updated, but gateway restart did not complete. '
+        'Run `hermes gateway restart` manually.'
+    )
+
+
 def apply_force_update(target: str) -> dict:
     """Force-reset the target repo to the latest remote HEAD.
 
@@ -1316,14 +1344,27 @@ def apply_force_update(target: str) -> dict:
         with _cache_lock:
             _update_cache['checked_at'] = 0
 
+        if target == 'agent':
+            gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+            if not gateway_ok:
+                return {
+                    'ok': False,
+                    'message': _agent_gateway_restart_failure_message(target, gateway_result),
+                    'target': target,
+                    'gateway_restart': gateway_result.get('status'),
+                }
+
         _schedule_restart()
 
-        return {
+        response = {
             'ok': True,
             'message': f'{target} force-updated to {compare_ref}',
             'target': target,
             'restart_scheduled': True,
         }
+        if target == 'agent':
+            response['gateway_restart'] = gateway_result.get('status')
+        return response
     finally:
         _apply_lock.release()
 
@@ -1532,8 +1573,18 @@ def _apply_update_inner(target):
                 }
             with _cache_lock:
                 _update_cache['checked_at'] = 0
+
+            if target == 'agent':
+                gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+                if not gateway_ok:
+                    return {
+                        'ok': False,
+                        'message': _agent_gateway_restart_failure_message(target, gateway_result),
+                        'target': target,
+                        'gateway_restart': gateway_result.get('status'),
+                    }
             _schedule_restart()
-            return {
+            response = {
                 'ok': True,
                 'message': (
                     f'{target} updated to the latest version. Your local '
@@ -1547,10 +1598,23 @@ def _apply_update_inner(target):
                 'restart_scheduled': True,
                 'stash_conflict': True,
             }
+            if target == 'agent':
+                response['gateway_restart'] = gateway_result.get('status')
+            return response
 
     # Invalidate cache
     with _cache_lock:
         _update_cache['checked_at'] = 0
+
+    if target == 'agent':
+        gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+        if not gateway_ok:
+            return {
+                'ok': False,
+                'message': _agent_gateway_restart_failure_message(target, gateway_result),
+                'target': target,
+                'gateway_restart': gateway_result.get('status'),
+            }
 
     # Schedule a self-restart so the updated code is loaded fresh.  A plain
     # git pull leaves stale Python modules in sys.modules — agent imports that
@@ -1571,9 +1635,12 @@ def _apply_update_inner(target):
             'entry may still be present because git stash drop failed.'
         )
 
-    return {
+    response = {
         'ok': True,
         'message': message,
         'target': target,
         'restart_scheduled': True,
     }
+    if target == 'agent':
+        response['gateway_restart'] = gateway_result.get('status')
+    return response
