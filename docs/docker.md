@@ -61,6 +61,20 @@ use `docker-compose.two-container.yml`,
 `docker-compose.three-container.yml`, or run `hermes gateway` separately before
 relying on offline scheduled runs. See [Scheduled jobs and the gateway daemon](#scheduled-jobs-and-the-gateway-daemon) below for the full background and verification steps.
 
+Docker-dependent tools inside Hermes, such as local Supabase `db reset`, need
+access to the host Docker daemon. The Compose files mount
+`/var/run/docker.sock` into the agent/WebUI containers and add the runtime user
+to the host socket group. On Linux, set the group id before starting Compose:
+
+```bash
+export DOCKER_GID=$(stat -c %g /var/run/docker.sock)
+docker compose up -d --force-recreate
+```
+
+Without that socket mount, `docker --version` may still work in a Hermes tool
+process, but `docker info`, local Supabase, and other container-backed checks
+will fail because only the Docker client is present.
+
 For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
 your real `~/.hermes` unless you intentionally want to test real state. Use an
 isolated Hermes home and follow

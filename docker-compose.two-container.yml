@@ -60,8 +60,15 @@ services:
       - hermes-home:/home/hermes/.hermes
       # Expose agent source so the WebUI can install dependencies from it
       - hermes-agent-src:/opt/hermes
+      # Allow gateway/cron/Kanban workers to run Docker-dependent verification.
+      # On the host, set:
+      #   export DOCKER_GID=$(stat -c %g /var/run/docker.sock)
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-998}"
     environment:
       - HERMES_HOME=/home/hermes/.hermes
+      - DOCKER_HOST=unix:///var/run/docker.sock
       # Align UID/GID across containers sharing the hermes-home volume.
       # Defaults to 1000 to match WANTED_UID/WANTED_GID in the webui service.
       # The agent image's entrypoint already supports usermod remapping.
@@ -101,9 +108,14 @@ services:
       # ${HOME} is used rather than `~` so the default resolves the same way
       # across Linux, macOS, WSL2, and Docker Desktop on Windows.
       - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+      # Tools launched in the WebUI container also need Docker for local checks.
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-998}"
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
+      - DOCKER_HOST=unix:///var/run/docker.sock
       - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
       # Let the WebUI health/status checks reach the gateway container over
       # the compose network. Cron listing is local, but scheduled ticking and
