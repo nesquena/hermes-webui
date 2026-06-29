@@ -65,7 +65,8 @@ def _run_node_script(script: str) -> str:
             f"\nstdout:\n{result.stdout or '<empty>'}"
             f"\nstderr:\n{result.stderr or '<empty>'}",
         )
-    return result.stdout.strip()
+    stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+    return stdout_lines[-1] if stdout_lines else ""
 
 
 def _is_js_identifier_char(char: str) -> bool:
@@ -504,21 +505,24 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         }}
         function matchesSimple(el, selector) {{
           if (!selector) return false;
-          if (selector.includes(':not(')) {{
-            const base = selector.replace(/:not\\([^)]*\\)/g, '');
-            return matchesSimple(el, base);
-          }}
-          const classMatches = [...selector.matchAll(/\\.([A-Za-z0-9_-]+)/g)].map((m) => m[1]);
+          const negated = [];
+          const baseSelector = selector.replace(/:not\\(([^()]*)\\)/g, (_, inner) => {{
+            negated.push(String(inner || '').trim());
+            return '';
+          }}).trim();
+          if (negated.some((inner) => inner && matchesSimple(el, inner))) return false;
+          if (!baseSelector) return true;
+          const classMatches = [...baseSelector.matchAll(/\\.([A-Za-z0-9_-]+)/g)].map((m) => m[1]);
           if (classMatches.some((name) => !el.classList.contains(name))) return false;
-          const attrMatches = [...selector.matchAll(/\\[([^=\\]]+)(?:=["']?([^"'\\]]+)["']?)?\\]/g)];
+          const attrMatches = [...baseSelector.matchAll(/\\[([^=\\]]+)(?:=["']?([^"'\\]]+)["']?)?\\]/g)];
           for (const match of attrMatches) {{
             const value = el.getAttribute(match[1]);
             if (value === null) return false;
             if (match[2] !== undefined && String(value) !== String(match[2])) return false;
           }}
-          const idMatch = selector.match(/#([A-Za-z0-9_-]+)/);
+          const idMatch = baseSelector.match(/#([A-Za-z0-9_-]+)/);
           if (idMatch && el.id !== idMatch[1]) return false;
-          const tagMatch = selector.match(/^[A-Za-z][A-Za-z0-9_-]*/);
+          const tagMatch = baseSelector.match(/^[A-Za-z][A-Za-z0-9_-]*/);
           if (tagMatch && el.tagName.toLowerCase() !== tagMatch[0].toLowerCase()) return false;
           return true;
         }}
@@ -676,6 +680,14 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         eval({json.dumps(render_source)});
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
+        const selectorSanityElement = new FakeElement('div');
+        selectorSanityElement.className = 'tool-worklog-group anchor-owned';
+        selectorSanityElement.setAttribute('data-owner', 'anchor');
+        const selectorSanity = {{
+          positive: selectorSanityElement.matches('.tool-worklog-group:not(.legacy-owner)[data-owner="anchor"]'),
+          negatedClass: selectorSanityElement.matches('.tool-worklog-group:not(.anchor-owned)'),
+          negatedAttr: selectorSanityElement.matches('.tool-worklog-group:not([data-owner="anchor"])'),
+        }};
         const legacyToolCall = {{
           id: 'toolu_1',
           function: {{ name: 'terminal', arguments: '{{"cmd":"git status"}}' }},
@@ -755,12 +767,22 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           sToolCalls: S.toolCalls.length,
         }};
 
-        console.log(JSON.stringify({{ anchorSummary, historicalSummary, rawHistoricalSummary }}));
+        console.log(JSON.stringify({{
+          selectorSanity,
+          anchorSummary,
+          historicalSummary,
+          rawHistoricalSummary,
+        }}));
         """
     )
 
     result = json.loads(_run_node_script(script))
 
+    assert result["selectorSanity"] == {
+        "positive": True,
+        "negatedClass": False,
+        "negatedAttr": False,
+    }
     assert result["anchorSummary"] == {
         "anchorGroups": 1,
         "legacyGroups": 0,
