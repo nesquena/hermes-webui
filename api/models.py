@@ -3376,9 +3376,16 @@ def get_session_for_file_ops(sid: str):
 
     from api.profiles import _profiles_match, get_active_profile_name
 
-    if not _profiles_match(
-        getattr(session, 'profile', None), get_active_profile_name()
-    ):
+    session_profile = getattr(session, 'profile', None)
+    active_profile = get_active_profile_name()
+    if not _profiles_match(session_profile, active_profile):
+        logger.debug(
+            "Rejected file-manager session for foreign profile: "
+            "session_id=%s session_profile=%r active_profile=%r",
+            sid,
+            session_profile,
+            active_profile,
+        )
         raise KeyError(sid)
     return session
 

@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import io
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -138,7 +139,7 @@ def test_get_session_for_file_ops_webui_passthrough(models_module, monkeypatch):
 
 
 def test_get_session_for_file_ops_rejects_foreign_profile(
-    models_module, monkeypatch, tmp_path
+    models_module, monkeypatch, tmp_path, caplog
 ):
     """WebUI sessions must belong to the active profile before file access."""
     profiles_module = pytest.importorskip("api.profiles")
@@ -164,11 +165,16 @@ def test_get_session_for_file_ops_rejects_foreign_profile(
     monkeypatch.setattr(profiles_module, "_profiles_match", fake_profiles_match)
     monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
 
-    with pytest.raises(KeyError):
-        models_module.get_session_for_file_ops("foreign-webui-sid")
+    with caplog.at_level(logging.DEBUG, logger=models_module.logger.name):
+        with pytest.raises(KeyError):
+            models_module.get_session_for_file_ops("foreign-webui-sid")
     # A found-but-foreign WebUI sidecar is an authorization failure, not a
     # missing-session condition that can fall through to the state.db fallback.
     assert called == {"get_session": 1, "profile_match": 1, "state_db": 0}
+    assert "Rejected file-manager session for foreign profile" in caplog.text
+    assert "foreign-webui-sid" in caplog.text
+    assert "session_profile='research'" in caplog.text
+    assert "active_profile='default'" in caplog.text
 
 
 def test_file_read_rejects_foreign_profile_session(
