@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -187,9 +188,12 @@ def _run_git(args, cwd, timeout=10):
     On failure, returns stderr (or stdout as fallback) so callers can
     surface actionable git error messages instead of empty strings.
     """
+    git_executable = _resolve_git_executable()
+    if not git_executable:
+        return 'git executable not found', False
     try:
         r = subprocess.run(
-            ['git'] + args, cwd=str(cwd), capture_output=True,
+            [git_executable] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
             encoding='utf-8', errors='replace',
         )
@@ -208,6 +212,15 @@ def _run_git(args, cwd, timeout=10):
         return 'git executable not found', False
     except OSError as exc:
         return f'git failed to start: {exc}', False
+
+
+def _resolve_git_executable():
+    git_executable = shutil.which('git')
+    if git_executable:
+        return git_executable
+    if sys.platform == 'darwin' and os.path.exists('/usr/bin/git'):
+        return '/usr/bin/git'
+    return None
 
 
 def _dirty_suffix(path: Path, timeout=1) -> str:
