@@ -123,7 +123,7 @@ def test_settled_restore_and_error_close_only_the_event_source_owner():
     assert "function _handleStreamError(source)" in MESSAGES_JS
     assert "_closeSource(source);" in restore_body
     assert "_closeSource(source);" in error_body
-    assert "_restoreSettledSession(source)" in event_body
+    assert "_restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})" in event_body
     assert "_handleStreamError(source)" in event_body
     assert "_restoreSettledSession())" not in event_body
     assert "_handleStreamError();" not in event_body
