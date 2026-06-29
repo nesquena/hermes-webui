@@ -8,6 +8,7 @@ foreign-profile sessions directly: duplicate, file reads, and chat/start.
 from __future__ import annotations
 
 import io
+import time
 from urllib.parse import urlparse
 
 import api.routes as routes
@@ -259,3 +260,254 @@ def test_workspace_upload_foreign_profile_session_returns_404_before_workspace_r
     upload.handle_workspace_upload(handler)
 
     assert cap == {"ok": {"error": "Session not found"}, "status": 404}
+
+
+def test_chat_stream_status_blocks_foreign_active_stream(monkeypatch):
+    from api import config
+
+    handler = _FakeHandler()
+    foreign = _SimpleSession("foreign_session", profile="other")
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    with config.ACTIVE_RUNS_LOCK:
+        previous = dict(config.ACTIVE_RUNS)
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS["stream-foreign"] = {
+            "session_id": "foreign_session",
+            "started_at": time.time(),
+            "phase": "running",
+        }
+
+    try:
+        cap = _capture(monkeypatch)
+        routes.handle_get(handler, urlparse("/api/chat/stream/status?stream_id=stream-foreign"))
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+            config.ACTIVE_RUNS.update(previous)
+
+    assert cap["bad"] == ("Session not found", 404)
+
+
+def test_chat_stream_status_blocks_foreign_registered_stream_before_worker_start(monkeypatch):
+    from api import config
+
+    handler = _FakeHandler()
+    foreign = _SimpleSession("foreign_session", profile="other")
+
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid, metadata_only=False: foreign
+        if sid == "foreign_session"
+        else (_ for _ in ()).throw(KeyError("Session not found")),
+    )
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda _stream_id: (_ for _ in ()).throw(AssertionError("journal fallback should not run")),
+    )
+    with config.ACTIVE_RUNS_LOCK:
+        previous_runs = dict(config.ACTIVE_RUNS)
+        config.ACTIVE_RUNS.clear()
+    with config.STREAM_SESSION_OWNERS_LOCK:
+        previous_owners = dict(config.STREAM_SESSION_OWNERS)
+        config.STREAM_SESSION_OWNERS.clear()
+    config.register_stream_owner("stream-registered", "foreign_session")
+
+    try:
+        cap = _capture(monkeypatch)
+        routes.handle_get(handler, urlparse("/api/chat/stream/status?stream_id=stream-registered"))
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+            config.ACTIVE_RUNS.update(previous_runs)
+        with config.STREAM_SESSION_OWNERS_LOCK:
+            config.STREAM_SESSION_OWNERS.clear()
+            config.STREAM_SESSION_OWNERS.update(previous_owners)
+
+    assert cap["bad"] == ("Session not found", 404)
+
+
+def test_chat_stream_status_keeps_same_profile_stream_visible(monkeypatch):
+    from api import config
+
+    handler = _FakeHandler()
+    visible = _SimpleSession("visible_session", profile="default")
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: visible if sid == "visible_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    with config.ACTIVE_RUNS_LOCK:
+        previous = dict(config.ACTIVE_RUNS)
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS["stream-visible"] = {
+            "session_id": "visible_session",
+            "started_at": time.time(),
+            "phase": "running",
+        }
+
+    try:
+        cap = _capture(monkeypatch)
+        routes.handle_get(handler, urlparse("/api/chat/stream/status?stream_id=stream-visible"))
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+            config.ACTIVE_RUNS.update(previous)
+
+    assert cap["ok"]["stream_id"] == "stream-visible"
+    assert cap["ok"]["active"] is False
+
+
+def test_chat_cancel_blocks_foreign_owned_stream_before_cancel_call(monkeypatch):
+    from api import runtime_adapter
+    from api import config
+    handler = _FakeHandler()
+    foreign = _SimpleSession("foreign_session", profile="other")
+    calls = {"cancel": 0}
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    with config.ACTIVE_RUNS_LOCK:
+        previous = dict(config.ACTIVE_RUNS)
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS["stream-foreign"] = {
+            "session_id": "foreign_session",
+            "started_at": time.time(),
+            "phase": "running",
+        }
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: calls.__setitem__("cancel", calls["cancel"] + 1) or True)
+
+    cap = _capture(monkeypatch)
+    try:
+        routes.handle_get(
+            handler,
+            urlparse("/api/chat/cancel?stream_id=stream-foreign"),
+        )
+    finally:
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+            config.ACTIVE_RUNS.update(previous)
+
+    assert calls["cancel"] == 0
+    assert cap["bad"] == ("Session not found", 404)
+
+
+def test_chat_cancel_same_profile_stream_still_passes_through(monkeypatch):
+    from api import runtime_adapter
+    handler = _FakeHandler()
+    visible = _SimpleSession("visible_session", profile="default")
+    calls = {"cancel": 0}
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: visible if sid == "visible_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: calls.__setitem__("cancel", calls["cancel"] + 1) or True)
+
+    cap = _capture(monkeypatch)
+
+    with routes.ACTIVE_RUNS_LOCK:
+        previous = dict(routes.ACTIVE_RUNS)
+        routes.ACTIVE_RUNS.clear()
+        routes.ACTIVE_RUNS["stream-visible"] = {
+            "session_id": "visible_session",
+            "started_at": time.time(),
+            "phase": "running",
+        }
+
+    try:
+        routes.handle_get(handler, urlparse("/api/chat/cancel?stream_id=stream-visible"))
+    finally:
+        with routes.ACTIVE_RUNS_LOCK:
+            routes.ACTIVE_RUNS.clear()
+            routes.ACTIVE_RUNS.update(previous)
+
+    assert calls["cancel"] == 1
+    assert cap["ok"]["cancelled"] is True
+
+
+def test_chat_stream_blocks_foreign_owned_dead_stream_before_replay(monkeypatch):
+    from api import runtime_adapter
+    handler = _FakeHandler()
+    foreign = _SimpleSession("foreign_session", profile="other")
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(routes, "_stream_runner_run_events", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(routes, "find_run_summary", lambda _stream_id: {"session_id": "foreign_session", "terminal": False})
+    monkeypatch.setattr(routes, "_replay_run_journal", lambda *_, **__: (_ for _ in ()).throw(AssertionError("replay should not run")))
+
+    cap = _capture(monkeypatch)
+    routes.handle_get(handler, urlparse("/api/chat/stream?stream_id=stream-dead-foreign"))
+
+    assert cap["bad"] == ("Session not found", 404)
+
+
+def test_chat_stream_allows_unknown_dead_stream_fallback_replay_path(monkeypatch):
+    handler = _FakeHandler()
+    calls = {"replay": 0}
+
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("session lookup should be avoided")))
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_stream_runner_run_events", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(routes, "find_run_summary", lambda _stream_id: None)
+    monkeypatch.setattr(routes, "_replay_run_journal", lambda *_args, **_kwargs: calls.__setitem__("replay", calls["replay"] + 1))
+
+    cap = _capture(monkeypatch)
+    routes.handle_get(handler, urlparse("/api/chat/stream?stream_id=does-not-exist"))
+
+    assert cap["ok"] == {"error": "stream not found"}
+    assert calls["replay"] == 0
+
+
+def test_session_new_blocks_prev_session_from_other_profile(monkeypatch):
+    import api.session_lifecycle as session_lifecycle
+    handler = _FakeHandler()
+    foreign = _SimpleSession("foreign_session", profile="other")
+    calls = {"commit": 0, "new": 0}
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"prev_session_id": "foreign_session"})
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(session_lifecycle, "commit_session_memory", lambda sid, agent=None: calls.__setitem__("commit", calls["commit"] + 1))
+    monkeypatch.setattr(routes, "new_session", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("new session should not be created")))
+
+    cap = _capture(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/new"))
+
+    assert calls["commit"] == 0
+    assert calls["new"] == 0
+    assert cap["bad"] == ("Session not found", 404)
+
+
+def test_session_new_keeps_prev_session_commit_for_same_profile(monkeypatch):
+    import api.session_lifecycle as session_lifecycle
+    handler = _FakeHandler()
+    visible = _SimpleSession("visible_session", profile="default")
+    calls = {"commit": 0, "new": 0}
+
+    class _NewSession:
+        def __init__(self):
+            self.session_id = "new_session"
+            self.messages = []
+
+        def compact(self):
+            return {"session_id": self.session_id}
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"prev_session_id": "visible_session"})
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: visible if sid == "visible_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(session_lifecycle, "commit_session_memory", lambda sid, agent=None: calls.__setitem__("commit", calls["commit"] + 1))
+    monkeypatch.setattr(routes, "new_session", lambda **_kwargs: calls.__setitem__("new", calls["new"] + 1) or _NewSession())
+
+    cap = _capture(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/new"))
+
+    assert calls["commit"] == 1
+    assert calls["new"] == 1
+    assert cap["ok"]["session"]["session_id"] == "new_session"

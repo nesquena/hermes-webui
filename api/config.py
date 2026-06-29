@@ -7416,6 +7416,10 @@ def create_stream_channel() -> StreamChannel:
 
 STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
+# stream_id -> session_id owner, populated synchronously before worker startup so
+# stream-id authorization does not depend on worker lifecycle registration.
+STREAM_SESSION_OWNERS: dict = {}
+STREAM_SESSION_OWNERS_LOCK = threading.Lock()
 CANCEL_FLAGS: dict = {}
 AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propagation
 STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
@@ -7424,6 +7428,37 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+
+
+def register_stream_owner(stream_id: str, session_id: str) -> None:
+    """Record the session that owns a stream before worker startup."""
+    stream_id = str(stream_id or "").strip()
+    session_id = str(session_id or "").strip()
+    if not stream_id or not session_id:
+        return
+    with STREAM_SESSION_OWNERS_LOCK:
+        STREAM_SESSION_OWNERS[stream_id] = session_id
+
+
+def stream_owner_session_id(stream_id: str) -> str | None:
+    """Return the synchronously-recorded owner session for a stream, if any."""
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    with STREAM_SESSION_OWNERS_LOCK:
+        owner = STREAM_SESSION_OWNERS.get(stream_id)
+    owner = str(owner or "").strip()
+    return owner or None
+
+
+def unregister_stream_owner(stream_id: str) -> None:
+    """Forget the pre-worker stream owner once the stream has torn down."""
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return
+    with STREAM_SESSION_OWNERS_LOCK:
+        STREAM_SESSION_OWNERS.pop(stream_id, None)
+
 
 # ── Gateway capability cache ─────────────────────────────────────────────────
 # Probes /v1/capabilities once per base_url/api-key pair and caches the result
@@ -7608,6 +7643,7 @@ def unregister_active_run(stream_id: str) -> None:
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS.pop(stream_id, None)
         LAST_RUN_FINISHED_AT = time.time()
+    unregister_stream_owner(stream_id)
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's

@@ -512,7 +512,7 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     }
 
 
-def _session_id_visible_to_request_profile(handler, sid) -> bool:
+def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True) -> bool:
     """Return whether ``sid`` belongs to the active profile."""
     if not isinstance(sid, str) or not sid:
         return True
@@ -523,9 +523,55 @@ def _session_id_visible_to_request_profile(handler, sid) -> bool:
     except KeyError:
         return True
     if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
-        bad(handler, "Session not found", 404)
+        if emit_error:
+            bad(handler, "Session not found", 404)
         return False
     return True
+
+
+def _stream_id_owner_session_id(stream_id: str | None) -> str | None:
+    """Resolve stream owner session_id via active-run registry first, fallback to journal."""
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    try:
+        with ACTIVE_RUNS_LOCK:
+            raw = (ACTIVE_RUNS or {}).get(stream_id)
+        if isinstance(raw, dict):
+            owner = str(raw.get("session_id") or "").strip()
+            if owner:
+                return owner
+    except Exception:
+        logger.debug("Failed reading ACTIVE_RUNS owner for stream %s", stream_id, exc_info=True)
+    try:
+        owner = stream_owner_session_id(stream_id)
+        if owner:
+            return owner
+    except Exception:
+        logger.debug("Failed reading registered owner for stream %s", stream_id, exc_info=True)
+    if not is_safe_session_id(stream_id):
+        return None
+    try:
+        summary = find_run_summary(stream_id)
+        if isinstance(summary, dict):
+            owner = str(summary.get("session_id") or "").strip()
+            return owner or None
+    except Exception:
+        logger.debug("Failed reading run summary for stream %s", stream_id, exc_info=True)
+    return None
+
+
+def _stream_id_visible_to_request_profile(
+    handler,
+    stream_id: str | None,
+    *,
+    emit_error: bool = True,
+) -> bool:
+    """Return whether the stream owner is visible to the request's profile."""
+    owner_session_id = _stream_id_owner_session_id(stream_id)
+    if not owner_session_id:
+        return True
+    return _session_id_visible_to_request_profile(handler, owner_session_id, emit_error=emit_error)
 
 
 def _guard_request_session_visibility(handler, parsed, body=None, method="GET") -> bool:
@@ -2214,6 +2260,10 @@ from api.config import (
     MIME_MAP,
     MAX_FILE_BYTES,
     MAX_UPLOAD_BYTES,
+    ACTIVE_RUNS,
+    ACTIVE_RUNS_LOCK,
+    register_stream_owner,
+    stream_owner_session_id,
     CHAT_LOCK,
     _get_session_agent_lock,
     SESSION_AGENT_LOCKS,
@@ -2492,9 +2542,15 @@ def _truncate_journal_snapshot_value(value, *, limit: int = 120):
     return value
 
 
-def _run_journal_live_snapshot(stream_id: str | None) -> dict | None:
+def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
+        return None
+    if handler is not None and not _stream_id_visible_to_request_profile(
+        handler,
+        stream_id,
+        emit_error=False,
+    ):
         return None
     summary = find_run_summary(stream_id)
     if not summary:
@@ -9298,14 +9354,16 @@ def _run_lifecycle_health() -> dict:
     now = time.time()
     with _live_config.ACTIVE_RUNS_LOCK:
         runs = []
-        for stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
+        for _stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
             item = dict(raw or {})
+            item.pop("session_id", None)
+            item.pop("stream_id", None)
+            item.pop("workspace", None)
             started_at = item.get("started_at")
             try:
                 age = max(0.0, now - float(started_at))
             except Exception:
                 age = 0.0
-            item.setdefault("stream_id", stream_id)
             item["age_seconds"] = round(age, 1)
             runs.append(item)
         last_finished = _live_config.LAST_RUN_FINISHED_AT
@@ -10547,7 +10605,7 @@ def handle_get(handler, parsed) -> bool:
                     )
                     if journal_active:
                         try:
-                            snapshot = _run_journal_live_snapshot(original_stream_id)
+                            snapshot = _run_journal_live_snapshot(original_stream_id, handler=handler)
                         except Exception:
                             logger.debug(
                                 "Failed to build runtime journal snapshot for %s",
@@ -10959,6 +11017,8 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
+        if not _stream_id_visible_to_request_profile(handler, stream_id):
+            return True
         active = stream_id in STREAMS
         payload = {"active": active, "stream_id": stream_id, "replay_available": False}
         try:
@@ -10974,6 +11034,8 @@ def handle_get(handler, parsed) -> bool:
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         if not stream_id:
             return bad(handler, "stream_id required")
+        if not _stream_id_visible_to_request_profile(handler, stream_id):
+            return True
         from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
         if runtime_adapter_enabled():
@@ -11680,6 +11742,8 @@ def handle_post(handler, parsed) -> bool:
         # ── Memory lifecycle: commit the previous session before starting a new one ──
         prev_session_id = body.get("prev_session_id")
         if prev_session_id:
+            if not _session_id_visible_to_request_profile(handler, prev_session_id):
+                return True
             try:
                 from api.session_lifecycle import commit_session_memory
                 from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
@@ -14347,6 +14411,8 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
 def _handle_sse_stream(handler, parsed):
     qs = parse_qs(parsed.query)
     stream_id = qs.get("stream_id", [""])[0]
+    if not _stream_id_visible_to_request_profile(handler, stream_id):
+        return True
     stream = STREAMS.get(stream_id)
     if stream is None:
         if _stream_runner_run_events(handler, stream_id, _runner_stream_cursor_from_query(qs)):
@@ -17000,6 +17066,7 @@ def _handle_btw(handler, body):
     ephemeral.active_stream_id = stream_id
     ephemeral.save()
     stream = create_stream_channel()
+    register_stream_owner(stream_id, ephemeral.session_id)
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
     from api.background import track_btw
@@ -17046,6 +17113,7 @@ def _handle_background(handler, body):
     bg.active_stream_id = stream_id
     bg.save()
     stream = create_stream_channel()
+    register_stream_owner(stream_id, bg.session_id)
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
     task_id = uuid.uuid4().hex[:8]
@@ -17431,6 +17499,7 @@ def _start_chat_stream_for_session(
     set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
     stream = create_stream_channel()
+    register_stream_owner(stream_id, s.session_id)
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
     # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
