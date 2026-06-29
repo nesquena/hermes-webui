@@ -352,6 +352,56 @@ def test_terminal_error_restore_replaces_shorter_authoritative_snapshot_when_pre
     )
 
 
+def test_terminal_error_restore_does_not_preserve_from_historical_marker_on_older_turn(driver_path):
+    """An old terminal marker earlier in the session must not preserve a later unrelated live tail."""
+    outcome = _run_scenario(driver_path, {
+        "action": "restore_shorter_terminal",
+        "state": {
+            "session": {"session_id": "session-5224", "message_count": 7},
+            "messages": [
+                {"role": "user", "content": "Earlier question", "_ts": "u0"},
+                {"role": "assistant", "content": "Earlier answer", "_ts": "a0"},
+                {"role": "assistant", "content": "**Connection interrupted:** The browser lost the live SSE connection before the response finished.", "_ts": "err0"},
+                {"role": "user", "content": "Current question", "_ts": "u1"},
+                {"role": "assistant", "content": "Current fragment one", "_ts": "a1"},
+                {"role": "assistant", "content": "Current fragment two", "_ts": "a2"},
+            ],
+            "activeStreamId": "stream-5224",
+        },
+        "apiPayload": {
+            "session": {
+                "session_id": "session-5224",
+                "active_stream_id": None,
+                "pending_user_message": None,
+                "messages": [
+                    {"role": "user", "content": "Earlier question", "_ts": "u0"},
+                    {"role": "assistant", "content": "Earlier answer", "_ts": "a0"},
+                    {"role": "assistant", "content": "**Connection interrupted:** The browser lost the live SSE connection before the response finished.", "_ts": "err0"},
+                    {"role": "user", "content": "Current question", "_ts": "u1"},
+                    {"role": "assistant", "content": "Current fragment one", "_ts": "a1"},
+                ],
+            },
+        },
+        "activeSid": "session-5224",
+        "streamId": "stream-5224",
+        "isActiveSession": True,
+        "isSessionCurrentPane": True,
+        "isSessionActivelyViewed": False,
+    })
+
+    observed = [(item["role"], item["content"]) for item in outcome["messages"]]
+    assert observed == [
+        ("user", "Earlier question"),
+        ("assistant", "Earlier answer"),
+        ("assistant", "**Connection interrupted:** The browser lost the live SSE connection before the response finished."),
+        ("user", "Current question"),
+        ("assistant", "Current fragment one"),
+    ], f"historical marker should not preserve later unrelated tail: {observed}"
+    assert outcome["terminalMarkerCount"] == 1, (
+        f"historical marker count should stay unchanged, got {outcome['terminalMarkerCount']}"
+    )
+
+
 def test_terminal_error_marker_is_single_instance_and_not_duplicated(driver_path):
     """Appending terminal error marker repeatedly should keep one marker and remove duplicates."""
     outcome = _run_scenario(driver_path, {

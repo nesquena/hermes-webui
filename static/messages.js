@@ -5745,10 +5745,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
         const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);
+        const _currentVisibleEndsWithTerminalMarker=(
+          _currentVisibleMessages.length>0 &&
+          _isTerminalStreamErrorMarkerMessage(_currentVisibleMessages[_currentVisibleMessages.length-1])
+        );
         const _stagedMatchesCurrentPrefix=(
           _stagedMessages.length>0 &&
           _stagedMessages.length<_currentVisibleMessages.length &&
-          _currentVisibleMessages.some(_isTerminalStreamErrorMarkerMessage) &&
+          _currentVisibleEndsWithTerminalMarker &&
           _stagedMessages.every((message, idx)=>{
             const stagedKey=_messageIdentityKey(message);
             const currentKey=_messageIdentityKey(_currentVisibleMessages[idx]);
