@@ -7533,6 +7533,7 @@ from api.workspace import (
     load_workspaces,
     save_workspaces,
     get_last_workspace,
+    get_profile_default_workspace,
     set_last_workspace,
     git_info_for_workspace,
     authorize_escape_target,
@@ -11262,12 +11263,26 @@ def handle_get(handler, parsed) -> bool:
         )
 
         active_profile_name = get_active_profile_name()
+        # Resolve the ACTIVE PROFILE's configured workspace so a cold boot with a
+        # profile cookie shows the right composer workspace chip on a blank
+        # new-chat page (#5169). Use get_profile_default_workspace() (NOT
+        # get_last_workspace) so a named profile without its own last_workspace.txt
+        # resolves to its config.yaml workspace/terminal.cwd rather than leaking the
+        # GLOBAL last-workspace file (the #5169 regression Codex flagged). It is
+        # profile-scoped via the per-request hermes_profile cookie set in server.py.
+        # Fail open: a resolution error must never 500 this boot-critical endpoint.
+        try:
+            _profile_default_workspace = get_profile_default_workspace()
+        except Exception:
+            logger.debug("Failed to resolve profile default workspace for /api/profile/active", exc_info=True)
+            _profile_default_workspace = None
         return j(
             handler,
             {
                 "name": active_profile_name,
                 "path": str(get_active_hermes_home()),
                 "is_default": _is_root_profile(active_profile_name),
+                "default_workspace": _profile_default_workspace,
             },
         )
 

@@ -2609,6 +2609,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       const p = await loadActiveProfile();
       if (p && typeof p === 'object' && typeof p.name === 'string') {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+        if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
         return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
       }
       if (p === undefined && !alreadyAttempted) {
