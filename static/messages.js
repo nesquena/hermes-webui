@@ -3403,6 +3403,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
   }
+  function _anchorSceneHasWorklogWorthyRows(scene){
+    // A worklog (the collapsible "已处理 …" rail) is only meaningful when the turn
+    // actually DID worklog-worthy work — a tool call, a thinking/reasoning pass, or
+    // a compression lifecycle card. A turn that only streamed prose (e.g. a long
+    // plain-text answer, or a degeneration burst that flooded the body with repeated
+    // tokens) projects an activity scene whose rows are ALL `prose`/`terminal`. Folding
+    // such a turn into a collapsed worklog hides the whole answer and, at STREAM_DONE,
+    // shrinks the transcript by the full streamed height → the browser clamps a
+    // bottom-pinned viewport back to the top (the "jump back" report). Require at least
+    // one genuinely worklog-worthy row before promoting the turn to a worklog.
+    const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+    for(const row of rows){
+      if(!row||typeof row!=='object') continue;
+      const role=String(row.role||'');
+      if(role==='tool'||role==='thinking') return true;
+      if(role==='lifecycle'){
+        const source=String(row.source_event_type||'');
+        // compression cards are worklog-worthy; a bare terminal/done lifecycle is not.
+        if(source==='compressing'||source==='compressed') return true;
+      }
+    }
+    return false;
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=null;
@@ -3418,7 +3441,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
     const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
-    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length){
+    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length
+        &&_anchorSceneHasWorklogWorthyRows(scene)){
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
       _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);
@@ -5001,6 +5025,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
           ? _shouldFollowMessagesOnDomReplace()
           : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
+        const _settledStreamId=isActiveSession?(S.activeStreamId||(d&&d.stream_id)||''):'';
         if(isActiveSession){
           S.activeStreamId=null;
         }
@@ -5151,7 +5176,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // turn boundary so the following syncTopbar() refetches the authoritative
           // effort exactly once (not per-token — the storm short-circuit is intact).
           if(typeof _lastReasoningFetchKey!=='undefined') _lastReasoningFetchKey=null;
+          // Arm the one-shot keep-open token for JUST this settled turn so a
+          // pinned follower's worklog stays height-stable (no STREAM_DONE shrink
+          // jump); disarm right after the render so historical worklogs collapse
+          // compact as normal. Scoped to the just-settled stream id.
+          if(typeof _armKeepSettledWorklogOpen==='function') _armKeepSettledWorklogOpen(_settledStreamId);
           syncTopbar();renderMessages({preserveScroll:true});
+          if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
@@ -6319,6 +6350,96 @@ let _sessionStreamReconnectTimer = null;
 // Holds the session id across a hidden-tab close so the visibility handler can
 // reopen the per-session SSE on re-show (stopSessionStream nulls _sessionStreamSessionId).
 let _sessionStreamHiddenSid = null;
+// Hidden-tab active-stream poll (Defect B continuation): while the tab is
+// hidden we do NOT hold the persistent per-session SSE open (connection-pool
+// budget — see #3992/#4151). But a server-initiated turn (self-wake / cron /
+// restart hook) fans `server_turn_started` onto that channel, so a hidden tab
+// would miss it and only reconcile on the next interaction ("过了15秒没弹出来").
+// Bridge the gap with a lightweight poll of /api/session/status (a single
+// short-lived GET, NOT a held connection) that attaches the live renderer when
+// it sees an active_stream_id. Cleared on re-show (the real SSE takes over) and
+// on session switch.
+let _sessionStreamHiddenPollTimer = null;
+let _sessionStreamHiddenPollSid = null;
+
+// Attach the existing chat-stream renderer to a server-created stream. Shared
+// by the `server_turn_started` SSE handler (visible tab) and the hidden-tab
+// active-stream poll. Idempotent per (sid, streamId): bails if this tab is
+// already rendering that stream. `recovered` routes through the reconnecting
+// (replay) path so the renderer rebuilds from the run journal mid-flight.
+function _attachServerInitiatedStream(sid, streamId, recovered) {
+  try {
+    streamId = String(streamId || '');
+    if (!streamId) return;
+    const isCurrent = (typeof _isSessionCurrentPane === 'function')
+      ? _isSessionCurrentPane(sid)
+      : (S.session && S.session.session_id === sid);
+    if (!isCurrent) return;
+    if (S.activeStreamId === streamId) return;
+    const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
+    if (existingLive && existingLive.streamId === streamId) return;
+    S.busy = true;
+    S.activeStreamId = streamId;
+    if (S.session && S.session.session_id === sid) {
+      S.session.active_stream_id = streamId;
+      if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;
+    }
+    if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();
+    else if (typeof appendThinking === 'function') appendThinking();
+    if (typeof updateSendBtn === 'function') updateSendBtn();
+    if (typeof setComposerStatus === 'function') setComposerStatus('');
+    if (typeof syncTopbar === 'function') syncTopbar();
+    if (typeof startApprovalPolling === 'function') startApprovalPolling(sid);
+    if (typeof startClarifyPolling === 'function') startClarifyPolling(sid);
+    if (typeof attachLiveStream === 'function') {
+      attachLiveStream(
+        sid, streamId,
+        (S.session && S.session.pending_attachments) || [],
+        recovered ? {reconnecting: true} : {},
+      );
+    }
+    if (typeof renderSessionList === 'function') void renderSessionList();
+  } catch (_) {}
+}
+
+// Poll /api/session/status (~6s) for an active stream while the tab is hidden.
+// One short GET per tick — does not consume a persistent connection-pool slot.
+// On hit, attach via the reconnecting/replay path (the turn is already
+// mid-flight) and stop polling; the renderer owns it from here.
+function _startHiddenActiveStreamPoll(sid) {
+  if (!sid) return;
+  _stopHiddenActiveStreamPoll();
+  _sessionStreamHiddenPollSid = sid;
+  const tick = () => {
+    // Stop conditions: tab became visible (real SSE takes over), session
+    // switched, or we're already rendering a stream.
+    if (typeof document !== 'undefined' && !document.hidden) { _stopHiddenActiveStreamPoll(); return; }
+    if (_sessionStreamHiddenPollSid !== sid) { _stopHiddenActiveStreamPoll(); return; }
+    if (S.activeStreamId) return; // already rendering; wait it out
+    try {
+      fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+          if (!d || _sessionStreamHiddenPollSid !== sid) return;
+          const streamId = d.active_stream_id;
+          if (streamId && S.activeStreamId !== String(streamId)) {
+            // Server-initiated turn in flight while hidden → attach as replay.
+            _attachServerInitiatedStream(sid, streamId, true);
+          }
+        })
+        .catch(() => {});
+    } catch (_) {}
+  };
+  _sessionStreamHiddenPollTimer = setInterval(tick, 6000);
+  // Fire one immediately so a turn already running when we go hidden is caught
+  // without waiting a full interval.
+  tick();
+}
+
+function _stopHiddenActiveStreamPoll() {
+  if (_sessionStreamHiddenPollTimer) { clearInterval(_sessionStreamHiddenPollTimer); _sessionStreamHiddenPollTimer = null; }
+  _sessionStreamHiddenPollSid = null;
+}
 
 function startSessionStream(sid) {
   if (!sid) return;
@@ -6336,6 +6457,12 @@ function startSessionStream(sid) {
       if (document.hidden) {
         _sessionStreamHiddenSid = _sessionStreamSessionId;
         stopSessionStream();
+        // Tab went to background: don't hold the SSE, but bridge
+        // server-initiated turns (self-wake / cron / restart) with the
+        // lightweight status poll so they still render without interaction.
+        // (stopSessionStream cleared any prior poll; start a fresh one for the
+        // session we just hid.)
+        if (_sessionStreamHiddenSid) _startHiddenActiveStreamPoll(_sessionStreamHiddenSid);
       } else if (_sessionStreamHiddenSid) {
         const resumeSid = _sessionStreamHiddenSid;
         _sessionStreamHiddenSid = null;
@@ -6349,8 +6476,14 @@ function startSessionStream(sid) {
   // loaded/restored while the tab is already hidden must still reattach).
   if (typeof document !== 'undefined' && document.hidden) {
     _sessionStreamHiddenSid = sid;
+    // Don't hold the SSE open while hidden, but DO bridge server-initiated
+    // turns (self-wake / cron / restart) with a lightweight status poll so the
+    // turn renders without waiting for the user to interact.
+    _startHiddenActiveStreamPoll(sid);
     return;
   }
+  // Tab is visible — the real SSE owns live-view; ensure no stale hidden poll.
+  _stopHiddenActiveStreamPoll();
   try {
     const es = new EventSource(_apiUrl('api/session/stream?session_id=' + encodeURIComponent(sid)));
     _sessionEventSource = es;
@@ -6456,6 +6589,7 @@ function startSessionStream(sid) {
 
 function stopSessionStream() {
   if (_sessionStreamReconnectTimer) { clearTimeout(_sessionStreamReconnectTimer); _sessionStreamReconnectTimer = null; }
+  _stopHiddenActiveStreamPoll();
   if (_sessionEventSource) {
     try { if(_sessionEventSource.readyState!==2)_sessionEventSource.close(); } catch(_){}
     _sessionEventSource = null;
