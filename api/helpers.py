@@ -1,6 +1,7 @@
 """
 Hermes Web UI -- HTTP helper functions.
 """
+import functools
 import json as _json
 import logging
 import os
@@ -416,7 +417,25 @@ def _build_redact_fn():
     return _combined_redact
 
 
-_redact_fn_cached = _build_redact_fn()
+_redact_fn_uncached = _build_redact_fn()
+
+# Repeated dashboard polls re-request the same unchanged session payloads, so
+# the combined redactor (~15 regex passes per string) was the dominant CPU cost
+# under concurrent polling — enough to wedge the single-process server behind
+# the GIL and surface as "Mất kết nối" in the browser. The redactor is pure and
+# deterministic (force=True, fixed masking), so identical strings always map to
+# identical output and are safe to memoize without invalidation.
+_redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
+
+# Cap per-entry size so a handful of giant tool-output dumps can't evict the
+# thousands of small recurring strings that actually benefit, or balloon RSS.
+_REDACT_CACHE_MAX_TEXT_LEN = 16384
+
+
+def _redact_fn_cached(text):
+    if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
+        return _redact_fn_uncached(text)
+    return _redact_fn_lru(text)
 
 
 _SENSITIVE_CASE_MARKERS = (
