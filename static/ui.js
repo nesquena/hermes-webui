@@ -7790,9 +7790,28 @@ function _hideUpdateSummaryPanel(){
   const panel=$('updateSummaryPanel');
   const text=$('updateSummaryText');
   const links=$('updateSummaryDiffLinks');
-  if(panel) panel.style.display='none';
+  const toolbar=$('updateSummaryToolbar');
+  if(panel){
+    panel.style.display='none';
+    panel.classList.remove('update-summary-expanded');
+  }
+  if(toolbar) toolbar.style.display='none';
+  _syncUpdateSummaryExpandButton(false);
   if(text) text.textContent='';
   if(links){links.replaceChildren();links.style.display='none';}
+}
+function _syncUpdateSummaryExpandButton(expanded){
+  const btn=$('btnUpdateSummaryExpand');
+  if(!btn) return;
+  btn.setAttribute('aria-expanded',expanded?'true':'false');
+  btn.textContent=expanded?'Collapse summary':'Expand summary';
+}
+function toggleUpdateSummaryExpanded(){
+  const panel=$('updateSummaryPanel');
+  if(!panel||panel.style.display==='none') return;
+  const expanded=!panel.classList.contains('update-summary-expanded');
+  panel.classList.toggle('update-summary-expanded',expanded);
+  _syncUpdateSummaryExpandButton(expanded);
 }
 const WHATS_NEW_SUMMARY_STORAGE_KEY='hermes-whats-new-generated-summaries';
 function _loadStoredUpdateSummaries(){
@@ -7846,8 +7865,12 @@ function _renderUpdateSummaryPanel(payload,data,targetKey){
   const panel=$('updateSummaryPanel');
   const text=$('updateSummaryText');
   const links=$('updateSummaryDiffLinks');
+  const toolbar=$('updateSummaryToolbar');
   if(!panel||!text) return;
   panel.style.display='block';
+  panel.classList.remove('update-summary-expanded');
+  _syncUpdateSummaryExpandButton(false);
+  if(toolbar) toolbar.style.display='flex';
   const sections=Array.isArray(payload&&payload.summary_sections)?payload.summary_sections:null;
   text.replaceChildren();
   if(sections&&sections.length){

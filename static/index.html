@@ -398,8 +398,13 @@
         <span id="updateMsg"></span>
         <div id="updateWhatsNewLinks" style="display:none;font-size:11px;margin-left:8px;white-space:nowrap"></div>
         <div id="updateSummaryPanel" style="display:none;font-size:12px;line-height:1.45;margin-top:6px;padding:8px 10px;border:1px solid var(--border2);border-radius:8px;background:rgba(255,255,255,.04);max-width:720px;white-space:normal">
-          <div id="updateSummaryText"></div>
-          <div id="updateSummaryDiffLinks" style="display:none;font-size:11px;margin-top:8px"></div>
+          <div id="updateSummaryToolbar" style="display:none;justify-content:flex-end;margin-bottom:6px">
+            <button type="button" id="btnUpdateSummaryExpand" class="linklike update-summary-toggle" aria-expanded="false" onclick="toggleUpdateSummaryExpanded()">Expand summary</button>
+          </div>
+          <div id="updateSummaryScroll">
+            <div id="updateSummaryText"></div>
+            <div id="updateSummaryDiffLinks" style="display:none;font-size:11px;margin-top:8px"></div>
+          </div>
         </div>
         <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word"></div>
       </div>

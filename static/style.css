@@ -1783,8 +1783,11 @@
   /* ── Update banner ── */
   .update-banner{display:none;background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;width:calc(100% - 24px);box-sizing:border-box;font-size:13px;color:var(--accent-text);align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;overflow-wrap:anywhere;}
   .update-banner.visible{display:flex;}
-  #updateMsg,#updateWhatsNewLinks,#updateSummaryPanel,#updateSummaryDiffLinks{max-width:100%;overflow-wrap:anywhere;word-break:break-word;}
-  #updateSummaryPanel{max-height:min(34vh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:var(--accent) transparent;}
+  #updateMsg,#updateWhatsNewLinks,#updateSummaryPanel,#updateSummaryScroll,#updateSummaryDiffLinks{max-width:100%;overflow-wrap:anywhere;word-break:break-word;}
+  #updateSummaryScroll{max-height:min(34vh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:var(--accent) transparent;}
+  #updateSummaryPanel.update-summary-expanded #updateSummaryScroll{max-height:min(75vh,560px);}
+  @media (max-width:600px){#updateSummaryPanel.update-summary-expanded #updateSummaryScroll{max-height:min(82vh,640px);}}
+  .update-summary-toggle{font-size:11px;color:var(--accent);text-decoration:underline;background:none;border:0;padding:0;cursor:pointer;}
   #updateWhatsNewLinks{white-space:normal!important;margin-left:0!important;}
   .update-banner>div:last-child{margin-left:auto;}
   @media (max-width:600px){.update-banner{width:calc(100% - 16px);padding:10px 12px;gap:10px;}.update-banner>div:last-child{width:100%;justify-content:flex-end;}}

@@ -2120,7 +2120,8 @@ class TestWhatsNewSummaryToggle:
     def test_update_summary_panel_is_scrollable_for_long_summaries(self):
         style = read('static/style.css')
 
-        assert '#updateSummaryPanel{max-height:min(34vh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:var(--accent) transparent;}' in style
+        assert '#updateSummaryScroll{max-height:min(34vh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:var(--accent) transparent;}' in style
+        assert '#updateSummaryPanel.update-summary-expanded #updateSummaryScroll{max-height:min(75vh,560px);}' in style
 
     def test_update_summary_many_updates_caps_commit_input_and_discloses_scope(self, monkeypatch):
         import api.updates as upd
