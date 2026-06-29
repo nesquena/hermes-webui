@@ -21,6 +21,48 @@ def _client_anchor_scene_message_ref(message):
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _anchor_scene_visible_semantics(scene, *, include_terminal=False):
+    semantics = []
+    for row in scene.get("activity_rows") or []:
+        role = row.get("role")
+        if role == "terminal" and not include_terminal:
+            continue
+        if role in {"prose", "thinking"}:
+            semantics.append(
+                {
+                    "role": role,
+                    "kind": row.get("kind"),
+                    "text": " ".join(str(row.get("text") or "").split()),
+                }
+            )
+            continue
+        if role == "tool":
+            tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            semantics.append(
+                {
+                    "role": role,
+                    "kind": row.get("kind"),
+                    "status": row.get("status"),
+                    "tool_call_id": row.get("tool_call_id") or tool.get("id") or payload.get("tid"),
+                    "name": tool.get("name") or payload.get("name"),
+                    "args": tool.get("args") or payload.get("args") or {},
+                    "done": tool.get("done"),
+                }
+            )
+            continue
+        if role == "terminal":
+            semantics.append(
+                {
+                    "role": role,
+                    "kind": row.get("kind"),
+                    "source_event_type": row.get("source_event_type"),
+                    "status": row.get("status"),
+                }
+            )
+    return semantics
+
+
 def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path, monkeypatch):
     from api import models, routes
     from api.models import Session
@@ -2027,6 +2069,121 @@ def test_anchor_scene_hydration_seals_unmatched_live_running_activity_rows():
     activity_rows = [row for row in rows if row.get("role") in {"thinking", "prose", "tool"}]
     assert [row.get("status") for row in activity_rows] == ["completed", "completed", "completed"]
     assert [row.get("role") for row in activity_rows] == ["thinking", "prose", "tool"]
+
+
+def test_runtime_journal_anchor_scene_matches_settled_hydrated_visible_semantics(tmp_path, monkeypatch):
+    """Runtime journal replay and settled read hydration must preserve the same
+    visible anchor activity semantics for one turn.
+
+    Compared path:
+    _run_journal_live_snapshot(...).anchor_activity_scene
+    -> persisted anchor_activity_scenes record
+    -> _hydrate_anchor_activity_scenes(...)._anchor_activity_scene.
+    """
+    from api import models, routes
+    from api.run_journal import RunJournalWriter
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+
+    session_id = "anchorparity1"
+    stream_id = "stream-parity-1"
+    process_before_tool = "first progress"
+    thinking = "thinking through plan"
+    process_after_tool = "checkpoint tail"
+    final_answer = "Final answer: keep the activity above this answer."
+
+    writer = RunJournalWriter(session_id, stream_id, session_dir=session_dir)
+    writer.append_sse_event("token", {"text": process_before_tool})
+    writer.append_sse_event("reasoning", {"text": thinking})
+    writer.append_sse_event(
+        "tool",
+        {"name": "terminal", "tid": "call-1", "args": {"command": "pytest"}},
+    )
+    writer.append_sse_event(
+        "tool_complete",
+        {"name": "terminal", "tid": "call-1", "preview": "ok"},
+    )
+    writer.append_sse_event("token", {"text": f" {process_after_tool}"})
+
+    runtime_snapshot = routes._run_journal_live_snapshot(stream_id)
+    runtime_scene = runtime_snapshot["anchor_activity_scene"]
+    assert _anchor_scene_visible_semantics(runtime_scene) == [
+        {"role": "prose", "kind": "process_prose", "text": process_before_tool},
+        {"role": "thinking", "kind": "reasoning", "text": thinking},
+        {
+            "role": "tool",
+            "kind": "tool_completed",
+            "status": "completed",
+            "tool_call_id": "call-1",
+            "name": "terminal",
+            "args": {"command": "pytest"},
+            "done": True,
+        },
+        {"role": "prose", "kind": "process_prose", "text": process_after_tool},
+    ]
+
+    persisted_scene = json.loads(json.dumps(runtime_scene))
+    persisted_scene["activity_rows"].append(
+        {
+            "row_id": "terminal-done",
+            "role": "terminal",
+            "kind": "terminal_status",
+            "source_event_type": "done",
+            "status": "completed",
+            "text": "Response complete",
+        }
+    )
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": process_before_tool,
+            "reasoning": thinking,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "name": "terminal",
+                    "args": {"command": "pytest"},
+                    "preview": "pytest",
+                    "snippet": "ok",
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+        {"role": "assistant", "content": process_after_tool},
+        {"role": "assistant", "content": final_answer},
+    ]
+    records = {
+        "record": {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": 4,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[4]),
+            "stream_id": stream_id,
+            "scene": persisted_scene,
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records)
+    settled_scene = hydrated[4]["_anchor_activity_scene"]
+
+    assert settled_scene["final_answer"] == final_answer
+    assert final_answer not in [
+        row.get("text") for row in settled_scene["activity_rows"] if row.get("role") != "terminal"
+    ]
+    assert _anchor_scene_visible_semantics(settled_scene) == _anchor_scene_visible_semantics(runtime_scene)
+    assert _anchor_scene_visible_semantics(settled_scene, include_terminal=True)[-1] == {
+        "role": "terminal",
+        "kind": "terminal_status",
+        "source_event_type": "done",
+        "status": "completed",
+    }
+    assert not any(
+        row.get("role") in {"prose", "thinking", "tool"} and row.get("status") == "running"
+        for row in settled_scene["activity_rows"]
+    )
 
 
 def test_runtime_journal_snapshot_includes_live_anchor_activity_scene(monkeypatch):
