@@ -61,7 +61,7 @@ def test_session_stream_reopens_from_dedicated_var_not_nulled_id():
     )
 
     start_idx = MESSAGES_JS.find("function startSessionStream(sid)")
-    block = MESSAGES_JS[start_idx:start_idx + 1600]
+    block = MESSAGES_JS[start_idx:start_idx + 2200]
 
     # On hide: capture the id, then stop.
     assert "_sessionStreamHiddenSid = _sessionStreamSessionId" in block

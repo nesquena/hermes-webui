@@ -112,7 +112,7 @@ def test_external_active_refresh_defers_while_reader_is_manually_unpinned():
     assert "_deferActiveSessionExternalRefresh" in SESSIONS_JS
     assert "typeof _isMessageReaderUnpinned==='function'&&_isMessageReaderUnpinned()" in refresh
     assert "_deferActiveSessionExternalRefresh(reason||'poll');" in refresh
-    assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});" in refresh
+    assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll', keepStaleUntilLoaded:_keepStaleUntilLoaded});" in refresh
 
 
 def test_session_switch_clears_deferred_active_refresh_reason():

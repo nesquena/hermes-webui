@@ -10110,7 +10110,10 @@ function _anchorSceneWorklogGroup(blocks, opts){
   let group=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
   if(!group){
     group=ensureActivityGroup(blocks,{
-      collapsed:!live,
+      // Respect callers that need the settled activity group open. Round 6:
+      // pinned followers keep the just-settled worklog open so STREAM_DONE does
+      // not collapse hundreds of px of live worklog and visibly clamp the pane.
+      collapsed:(opts&&opts.collapsed!==undefined)?opts.collapsed:!live,
       live,
       activityKey,
       beforeAnchor:!!(opts&&opts.beforeAnchor),
@@ -10337,8 +10340,28 @@ if(typeof window!=='undefined'){
   window._projectLiveAnchorActivitySceneForStream=_projectLiveAnchorActivitySceneForStream;
   window.isLiveAnchorActivitySceneOwner=isLiveAnchorActivitySceneOwner;
 }
+function _anchorSceneSceneHasWorklogWorthyRows(scene){
+  // Mirror of messages.js _anchorSceneHasWorklogWorthyRows for the RENDER side:
+  // a settled scene that was persisted (or hydrated from the backend) before the
+  // generation-side guard existed can still be all-prose. Such a scene must NOT be
+  // promoted to a collapsed worklog at render time (it would hide the whole answer
+  // and shrink the transcript at settle → bottom-pinned jump-back). Require at least
+  // one tool/thinking/compression row. (defense-in-depth for already-persisted scenes)
+  const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+  for(const row of rows){
+    if(!row||typeof row!=='object') continue;
+    const role=String(row.role||'');
+    if(role==='tool'||role==='thinking') return true;
+    if(role==='lifecycle'){
+      const source=String(row.source_event_type||'');
+      if(source==='compressing'||source==='compressed') return true;
+    }
+  }
+  return false;
+}
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
@@ -10375,8 +10398,48 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   }
   return wrote;
 }
+// One-shot token: the stream id of the turn that JUST settled at STREAM_DONE.
+// The keep-open exception applies to ONLY this one turn's settled render, then
+// is cleared so every other (historical) settled worklog renders compact even
+// while the reader is pinned. Set right before the STREAM_DONE
+// renderMessages({preserveScroll:true}) call and cleared after the settled-scene
+// render pass; null at all other times.
+let _keepSettledWorklogOpenForStreamId=null;
+function _shouldKeepSettledWorklogOpenForPinnedFollow(streamId){
+  // Round 6 scroll-jump guard: while the reader is pinned at the live tail,
+  // collapsing the JUST-settled live worklog into a compact summary can shrink
+  // the transcript by hundreds of px at STREAM_DONE. The browser clamps scrollTop
+  // to the new max, which looks like a large backward jump even though pinned
+  // state is correct. Keep that one worklog open for pinned followers so the
+  // live->settled DOM swap is height-stable; unpinned readers still get compact
+  // settled worklogs and preserve their viewport normally. This intentionally
+  // wins over a transient user-collapsed live worklog while the reader remains
+  // pinned: avoiding the visible STREAM_DONE jump takes precedence for followers.
+  // SCOPING: the exception is gated on the one-shot token matching this turn's
+  // stream id, so it applies ONLY to the turn that just settled — not to every
+  // historical settled worklog on every pinned re-render (which would defeat the
+  // compact-worklog default for past turns). Pin flags use the sticky pin state
+  // because during live DOM rebuilds the raw bottom distance can transiently
+  // exceed a threshold even for a pinned follower.
+  if(!streamId||_keepSettledWorklogOpenForStreamId!==streamId) return false;
+  return !!(_scrollPinned && !_messageUserUnpinned);
+}
+// One-shot token set/clear API used by the STREAM_DONE handler (messages.js):
+// arm the keep-open exception for exactly the turn that just settled, render,
+// then disarm so subsequent re-renders collapse historical worklogs as normal.
+function _armKeepSettledWorklogOpen(streamId){
+  _keepSettledWorklogOpenForStreamId=streamId?String(streamId):null;
+}
+function _disarmKeepSettledWorklogOpen(){
+  _keepSettledWorklogOpenForStreamId=null;
+}
+if(typeof window!=='undefined'){
+  window._armKeepSettledWorklogOpen=_armKeepSettledWorklogOpen;
+  window._disarmKeepSettledWorklogOpen=_disarmKeepSettledWorklogOpen;
+}
 function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
     return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
   }
@@ -10396,13 +10459,14 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   });
   blocks.querySelectorAll('.tool-worklog-group:not([data-anchor-scene-owner="1"]),.tool-call-group:not([data-anchor-scene-owner="1"]),.agent-activity-thinking:not([data-anchor-scene-row="1"]),.wl-reason').forEach(el=>el.remove());
   const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');
+  const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForPinnedFollow(streamId);
   const activityKey=`anchor-scene:${rawIdx}`;
   if(streamId&&!_readActivityDisclosureState(activityKey)){
     _copyActivityDisclosureState(`live:${streamId}`, activityKey);
   }
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
-    collapsed:true,
+    collapsed:!keepSettledWorklogOpen,
     beforeAnchor:true,
     anchor:segment,
     activityKey,
