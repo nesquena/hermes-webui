@@ -1708,6 +1708,7 @@ def _build_session_list_cache_payload(
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
+    show_webhook_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
@@ -1765,6 +1766,7 @@ def _build_session_list_cache_payload(
     show_cli_sessions = bool(show_cli_sessions)
     show_previous_messaging_sessions = bool(show_previous_messaging_sessions)
     show_cron_sessions = bool(show_cron_sessions)
+    show_webhook_sessions = bool(show_webhook_sessions)
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
@@ -1854,6 +1856,7 @@ def _build_session_list_cache_payload(
             cli,
             represented_webui_ids,
             show_cron_sessions=show_cron_sessions,
+            show_webhook_sessions=show_webhook_sessions,
         )
     else:
         diag_stage("filter_webui_sessions")
@@ -1987,6 +1990,7 @@ def _build_session_list_cache_payload(
             "show_cli_sessions": show_cli_sessions,
             "show_previous_messaging_sessions": show_previous_messaging_sessions,
             "show_cron_sessions": show_cron_sessions,
+            "show_webhook_sessions": show_webhook_sessions,
         },
     }
 
@@ -7251,16 +7255,22 @@ def _is_duplicate_webui_state_projection(session: dict, represented_webui_ids: s
     return bool(_session_lineage_ids(session) & represented_webui_ids)
 
 
-def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids: set[str], *, show_cron_sessions: bool = False) -> list[dict]:
-    """Return CLI/state sidebar rows while preserving project-hidden cron rows.
+def _dedupe_cli_sidebar_sessions_for_api(
+    cli: list[dict],
+    represented_webui_ids: set[str],
+    *,
+    show_cron_sessions: bool = False,
+    show_webhook_sessions: bool = False,
+) -> list[dict]:
+    """Return state sidebar rows while preserving project-hidden background rows.
 
-    Agent-side cron sessions come from state.db rather than the WebUI session
-    store. They should stay hidden from the default sidebar, but project-assigned
-    messageful rows must remain in the `/api/sessions` payload with
-    `default_hidden` so the matching project chip can reveal them (#3134).
+    Agent-side cron and webhook sessions come from state.db rather than the WebUI
+    session store. They should stay hidden from the default sidebar, but
+    project-assigned messageful rows must remain in the `/api/sessions` payload
+    with `default_hidden` so the matching project chip can reveal them (#3134).
     """
     from api.models import (
-        _hide_from_default_sidebar as _cron_hide,
+        _hide_from_default_sidebar as _hide_background,
         _include_project_hidden_background_sidebar_sessions,
     )
 
@@ -7270,7 +7280,14 @@ def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids:
         and not _is_duplicate_webui_state_projection(s, represented_webui_ids)
         and is_cli_session_row_visible(s)
     ]
-    visible = [s for s in candidates if not _cron_hide(s, show_cron=show_cron_sessions)]
+    visible = [
+        s for s in candidates
+        if not _hide_background(
+            s,
+            show_cron=show_cron_sessions,
+            show_webhook=show_webhook_sessions,
+        )
+    ]
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
 
 
@@ -10773,6 +10790,7 @@ def handle_get(handler, parsed) -> bool:
                 settings.get("show_previous_messaging_sessions")
             )
             show_cron_sessions = bool(settings.get("show_cron_sessions"))
+            show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
             agent_session_source_filter = settings.get("agent_session_source_filter")
             active_profile = get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
@@ -10794,6 +10812,7 @@ def handle_get(handler, parsed) -> bool:
                 include_archived=include_archived,
                 exclude_hidden=exclude_hidden,
                 visible_only=True,
+                show_webhook_sessions=show_webhook_sessions,
                 source_filter=agent_session_source_filter,
                 sidebar_source=sidebar_source,
                 archived_limit=archived_limit,
@@ -10814,6 +10833,7 @@ def handle_get(handler, parsed) -> bool:
                     include_archived=include_archived,
                     exclude_hidden=exclude_hidden,
                     visible_only=True,
+                    show_webhook_sessions=show_webhook_sessions,
                     source_filter=agent_session_source_filter,
                     sidebar_source=sidebar_source,
                     archived_limit=archived_limit,
@@ -12986,6 +13006,7 @@ def handle_post(handler, parsed) -> bool:
             for k in (
                 "show_cli_sessions",
                 "show_cron_sessions",
+                "show_webhook_sessions",
                 "show_previous_messaging_sessions",
             )
         ):

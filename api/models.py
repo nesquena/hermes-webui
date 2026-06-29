@@ -37,6 +37,7 @@ CLI_VISIBLE_SESSION_LIMIT = 20
 # addressable even when many newer non-cron sessions dominate the default
 # sidebar window (#3172).
 CRON_PROJECT_CHIP_LIMIT = 200
+WEBHOOK_PROJECT_CHIP_LIMIT = 200
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -2906,11 +2907,18 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         s.save()
     return s
 
-def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False) -> bool:
+def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_webhook: bool = False) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
     sid = str(session.get('session_id') or '')
-    source = session.get('source_tag') or session.get('source')
+    source = (
+        session.get('source_tag')
+        or session.get('source')
+        or session.get('raw_source')
+        or session.get('session_source')
+    )
     if not show_cron and (source == 'cron' or sid.startswith('cron_')):
+        return True
+    if not show_webhook and source == 'webhook':
         return True
     if bool(session.get('pre_compression_snapshot')):
         return not bool(session.get('_show_pre_compression_snapshot'))
@@ -2959,8 +2967,13 @@ def _has_live_sidebar_state(session: dict) -> bool:
 
 def _is_intentionally_background_sidebar_session(session: dict) -> bool:
     sid = str(session.get('session_id') or '')
-    source = session.get('source_tag') or session.get('source')
-    return source == 'cron' or sid.startswith('cron_')
+    source = (
+        session.get('source_tag')
+        or session.get('source')
+        or session.get('raw_source')
+        or session.get('session_source')
+    )
+    return source in {'cron', 'webhook'} or sid.startswith('cron_')
 
 
 def _include_project_hidden_background_sidebar_sessions(
@@ -2969,9 +2982,9 @@ def _include_project_hidden_background_sidebar_sessions(
 ) -> list[dict]:
     """Keep project-assigned background sessions addressable by project chips.
 
-    Cron sessions stay hidden from the default sidebar, but if they have a
-    project assignment they must still be present in the client cache so the
-    dedicated project chip can reveal them (#3019).
+    Cron and webhook sessions stay hidden from the default sidebar, but if they
+    have a project assignment they must still be present in the client cache so
+    their dedicated project chips can reveal them (#3019).
     """
     visible_ids = {
         str(session.get('session_id'))
@@ -4133,12 +4146,53 @@ def ensure_cron_project() -> str:
         return project_id
 
 
-def is_cron_session(session_id: str, source_tag: str = None) -> bool:
+WEBHOOK_PROJECT_NAME = 'Webhooks'
+_WEBHOOK_PROJECT_LOCK = threading.Lock()
+
+
+def ensure_webhook_project() -> str:
+    """Return the project_id of the system "Webhooks" project for the active profile."""
+    from api.profiles import get_active_profile_name, _is_root_profile
+
+    active = get_active_profile_name() or 'default'
+    with _WEBHOOK_PROJECT_LOCK:
+        projects = load_projects()
+        for p in projects:
+            if p.get('name') != WEBHOOK_PROJECT_NAME:
+                continue
+            row_profile = p.get('profile')
+            if row_profile == active:
+                return p['project_id']
+            if _is_root_profile(row_profile or 'default') and _is_root_profile(active):
+                return p['project_id']
+        for p in projects:
+            if p.get('name') == WEBHOOK_PROJECT_NAME and not p.get('profile'):
+                p['profile'] = active
+                save_projects(projects)
+                return p['project_id']
+        project_id = uuid.uuid4().hex[:12]
+        projects.append({
+            'project_id': project_id,
+            'name': WEBHOOK_PROJECT_NAME,
+            'color': '#0ea5e9',
+            'profile': active,
+            'created_at': time.time(),
+        })
+        save_projects(projects)
+        return project_id
+
+
+def is_cron_session(session_id: str, source_tag: str | None = None) -> bool:
     """Return True if a session originates from a cron job."""
     if source_tag == 'cron':
         return True
     sid = str(session_id or '')
     return sid.startswith('cron_')
+
+
+def is_webhook_session(session_id: str, source_tag: str | None = None) -> bool:
+    """Return True if a session originates from a webhook route."""
+    return str(source_tag or '').strip().lower() == 'webhook'
 
 
 
@@ -4978,6 +5032,7 @@ def _load_cli_sessions_uncached(
     *,
     visible_session_limit: int | None = None,
     cron_project_limit: int | None | bool = CRON_PROJECT_CHIP_LIMIT,
+    webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
 ) -> list:
     cli_sessions = []
@@ -5045,12 +5100,29 @@ def _load_cli_sessions_uncached(
             _cli_workspace_cache[0] = str(get_last_workspace())
         return _cli_workspace_cache[0]
 
+    _webhook_pid_cache: list[str | None] = [None]
+    def _webhook_pid():
+        if _webhook_pid_cache[0] is None:
+            _webhook_pid_cache[0] = ensure_webhook_project()
+        return _webhook_pid_cache[0]
+
+    def _state_row_project_id(sid: str, source: str | None) -> str | None:
+        if is_cron_session(sid, source):
+            return _cron_pid()
+        if is_webhook_session(sid, source):
+            return _webhook_pid()
+        return None
+
     profile_value = _cli_profile or 'default'
     for row in read_importable_agent_session_rows(
         db_path,
-        limit=visible_session_limit if visible_session_limit is not None else (CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron' else CLI_VISIBLE_SESSION_LIMIT),
+        limit=visible_session_limit if visible_session_limit is not None else (
+            CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron'
+            else WEBHOOK_PROJECT_CHIP_LIMIT if source_filter == 'webhook'
+            else CLI_VISIBLE_SESSION_LIMIT
+        ),
         log=logger,
-        exclude_sources=("cron",) if source_filter is None else None,
+        exclude_sources=("cron", "webhook") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
     ):
         sid = row['id']
@@ -5060,6 +5132,7 @@ def _load_cli_sessions_uncached(
         profile = profile_value  # CLI DB has no profile column; use active profile
 
         _source = row['source'] or 'cli'
+        _source_meta = normalize_agent_session_source(_source)
         _title = row['title']
         if not _title and _source == 'cron':
             # Look up the human-friendly cron job name (cron_{job_id}_{ts}) from
@@ -5085,18 +5158,18 @@ def _load_cli_sessions_uncached(
             'updated_at': raw_ts,
             'pinned': False,
             'archived': _archived,
-            'project_id': _cron_pid() if is_cron_session(sid, _source) else None,
+            'project_id': _state_row_project_id(sid, _source),
             'profile': profile,
             'source_tag': _source,
-            'raw_source': row.get('raw_source'),
+            'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
             'user_id': row.get('user_id'),
             'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
             'chat_type': row.get('chat_type'),
             'thread_id': row.get('thread_id'),
             'session_key': row.get('session_key'),
             'platform': row.get('platform'),
-            'session_source': row.get('session_source'),
-            'source_label': row.get('source_label'),
+            'session_source': row.get('session_source') or _source_meta.get('session_source'),
+            'source_label': row.get('source_label') or _source_meta.get('source_label'),
             'parent_session_id': row.get('parent_session_id'),
             'parent_title': row.get('parent_title'),
             'parent_source': row.get('parent_source'),
@@ -5108,7 +5181,7 @@ def _load_cli_sessions_uncached(
             '_lineage_root_id': row.get('_lineage_root_id'),
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
-            'is_cli_session': is_cli_session_row(row),
+            'is_cli_session': is_cli_session_row({**row, **_source_meta}),
         })
 
     if source_filter is not None:
@@ -5186,6 +5259,72 @@ def _load_cli_sessions_uncached(
         except Exception:
             logger.debug("Cron project-chip second pass failed", exc_info=True)
 
+    # --- Second pass: fetch webhook sessions that may have been squeezed out
+    # of the default window. They stay hidden from the default sidebar but must
+    # remain addressable under the Webhooks project chip.
+    if webhook_project_limit is not False:
+        existing_sids = {s['session_id'] for s in cli_sessions}
+        try:
+            for row in read_importable_agent_session_rows(
+                db_path,
+                limit=webhook_project_limit,
+                log=logger,
+                exclude_sources=None,
+                include_sources=("webhook",),
+            ):
+                sid = row['id']
+                if sid in existing_sids:
+                    continue
+                _source = row['source'] or 'webhook'
+                if _source != 'webhook':
+                    continue
+                _source_meta = normalize_agent_session_source(_source)
+                raw_ts = row['last_activity'] or row['started_at']
+                _title = row['title']
+                _sidecar_meta = _state_projection_sidecar_metadata(sid)
+                if _sidecar_meta.get('title'):
+                    _title = _sidecar_meta['title']
+                _archived = bool(_sidecar_meta.get('archived'))
+                _display_title = _title or 'Webhook Session'
+                cli_sessions.append({
+                    'session_id': sid,
+                    'title': _display_title,
+                    'workspace': str(get_last_workspace()),
+                    'model': row['model'] or None,
+                    'message_count': row['message_count'] or row['actual_message_count'] or 0,
+                    'created_at': row['started_at'],
+                    'updated_at': raw_ts,
+                    'pinned': False,
+                    'archived': _archived,
+                    'project_id': _webhook_pid(),
+                    'profile': profile_value,
+                    'source_tag': 'webhook',
+                    'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
+                    'user_id': row.get('user_id'),
+                    'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
+                    'chat_type': row.get('chat_type'),
+                    'thread_id': row.get('thread_id'),
+                    'session_key': row.get('session_key'),
+                    'platform': row.get('platform'),
+                    'session_source': row.get('session_source') or _source_meta.get('session_source'),
+                    'source_label': row.get('source_label') or _source_meta.get('source_label'),
+                    'parent_session_id': row.get('parent_session_id'),
+                    'parent_title': row.get('parent_title'),
+                    'parent_source': row.get('parent_source'),
+                    'relationship_type': row.get('relationship_type'),
+                    '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
+                    'end_reason': row.get('end_reason'),
+                    'actual_message_count': row.get('actual_message_count'),
+                    'user_message_count': row.get('actual_user_message_count'),
+                    '_lineage_root_id': row.get('_lineage_root_id'),
+                    '_lineage_tip_id': row.get('_lineage_tip_id'),
+                    '_compression_segment_count': row.get('_compression_segment_count'),
+                    'is_cli_session': is_cli_session_row({**row, **_source_meta}),
+                })
+                existing_sids.add(sid)
+        except Exception:
+            logger.debug("Webhook project-chip second pass failed", exc_info=True)
+
     return cli_sessions
 
 
@@ -5231,6 +5370,7 @@ def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
                         source_filter=source_filter,
                         visible_session_limit=None,
                         cron_project_limit=None,
+                        webhook_project_limit=None,
                         include_claude_code=(idx == 0),
                     )
                 )
