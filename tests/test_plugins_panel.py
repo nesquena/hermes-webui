@@ -299,6 +299,10 @@ class TestDashboardPluginsSecurity:
         assert "allow-scripts" in js
         assert "allow-forms" in js
         assert "allow-popups" in js
+        # External links a plugin opens via target="_blank" must escape the
+        # iframe sandbox, else they inherit it (opaque origin, no cookies) and
+        # render blank. See routes.py plugin-page CSP for the matching token.
+        assert "allow-popups-to-escape-sandbox" in js
 
     def test_plugins_api_returns_per_plugin_enabled_state(self):
         import api.routes as routes
@@ -415,6 +419,19 @@ class TestPluginAssetIsolationHardening:
         assert "sandbox allow-scripts" in seg
         assert "X-Content-Type-Options" in seg and "nosniff" in seg
 
+    def test_plugin_page_csp_allows_popups_to_escape_sandbox(self):
+        # The CSP sandbox on plugin-page HTML and the iframe sandbox attribute
+        # both gate the same flags. target="_blank" links to external sites
+        # (workplus/gitlab) must escape the sandbox in BOTH, else the popped-out
+        # window inherits an opaque origin and renders blank.
+        routes = read("api/routes.py")
+        start = routes.find("# ── Plugin pages")
+        seg = routes[start:routes.find("# ── GET route helpers", start)]
+        csp_lines = [line for line in seg.splitlines() if "sandbox allow-scripts" in line]
+        assert csp_lines, "expected plugin-page CSP sandbox headers"
+        for csp in csp_lines:
+            assert "allow-popups-to-escape-sandbox" in csp
+
     def test_both_plugin_routes_enforce_enable_gate_server_side(self):
         # Both the asset route and the page route must 404 a disabled plugin —
         # "disabled" cannot be UI-only.
@@ -423,6 +440,24 @@ class TestPluginAssetIsolationHardening:
         page_seg = routes[routes.find("# ── Plugin pages"):routes.find("# ── Plugin pages") + 2000]
         assert "_dashboard_plugin_enabled" in asset_seg
         assert "_dashboard_plugin_enabled" in page_seg
+
+    def test_api_plugin_routes_enforce_enable_gate_server_side(self):
+        # The /api/plugins/<name>/<sub> backend routes (GET + POST) must also
+        # 404 a disabled plugin, otherwise disabling a plugin in the UI leaves
+        # its API endpoints reachable. Both blocks must gate before dispatch.
+        routes = read("api/routes.py")
+        blocks = []
+        start = 0
+        marker = 'if parsed.path.startswith("/api/plugins/"):'
+        while (idx := routes.find(marker, start)) != -1:
+            blocks.append(routes[idx:idx + 600])
+            start = idx + len(marker)
+        assert len(blocks) >= 2, "expected both GET and POST /api/plugins/ blocks"
+        for seg in blocks:
+            gate = seg.find("_dashboard_plugin_enabled")
+            dispatch = seg.find("_dispatch_plugin_subprocess")
+            assert gate != -1, "API plugin route missing enable gate"
+            assert gate < dispatch, "enable gate must run before dispatch"
 
 
 class TestSettingsAllowlistGuard:

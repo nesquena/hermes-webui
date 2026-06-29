@@ -9165,11 +9165,18 @@ async function _loadPluginPage(path, label) {
   // Use an iframe for full isolation (styles, scripts, modals stay sandboxed).
   // Security note: plugins are locally-installed (~/.hermes/plugins/), similar
   // trust model to VS Code extensions — only install plugins you trust.
+  //
+  // allow-popups-to-escape-sandbox: without it, links a plugin opens via
+  // target="_blank" (e.g. an external workplus/gitlab URL) inherit this
+  // iframe's sandbox flags — they open in a forced opaque origin with no
+  // cookies or storage, so a real site renders blank/broken. The token lets
+  // popped-out windows load as normal top-level pages while the plugin's own
+  // document stays sandboxed.
   const iframe = document.createElement('iframe');
   iframe.src = path;
   iframe.style.cssText = 'width:100%;height:100%;border:none;display:block;';
   iframe.setAttribute('title', label || 'Plugin');
-  iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups');
+  iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals');
   container.appendChild(iframe);
   _currentPluginPage = { path, label };
 }

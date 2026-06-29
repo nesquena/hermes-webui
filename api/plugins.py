@@ -1,5 +1,5 @@
 """
-Plugin discovery and static serving for Hermes Web UI.
+Plugin discovery, static serving, and subprocess management for Hermes Web UI.
 
 Scans ~/.hermes/plugins/<name>/dashboard/ for manifest.json files,
 matching the official Hermes dashboard plugin format.
@@ -11,7 +11,13 @@ Each plugin may have:
       index.js      -- plugin JS bundle (IIFE)
       style.css     -- optional plugin stylesheet
     plugin_api.py   -- optional backend API (not used in WebUI MVP)
+
+Each plugin runs in its own subprocess (stdin/stdout JSON protocol).
+The plugin's __init__.py must define a register() function that returns
+a route map. WebUI serves plugin API traffic under the unified path
+prefix /api/plugins/<plugin_name>/<sub_route>.
 """
+
 import json
 import logging
 import os
@@ -35,6 +41,14 @@ PLUGIN_MANIFESTS: dict[str, dict] = {}
 
 # plugin_name -> resolved static root dir
 _PLUGIN_STATIC_ROOTS: dict[str, Path] = {}
+
+
+def get_plugin_root(plugin_name: str) -> Path | None:
+    """Return the root directory (parent of dashboard/) for a plugin."""
+    base = _PLUGIN_STATIC_ROOTS.get(plugin_name)
+    if base:
+        return base.parent
+    return None
 
 
 def _get_plugin_base() -> Path:
@@ -95,6 +109,26 @@ def load_plugins() -> None:
         dashboard_dir = entry / "dashboard"
         if dashboard_dir.is_dir():
             _PLUGIN_STATIC_ROOTS[name] = dashboard_dir.resolve()
+
+
+def load_plugin_api_routes() -> None:
+    """Spawn subprocesses for each plugin that has an __init__.py."""
+    for plugin_name in list(PLUGIN_MANIFESTS):
+        base = _PLUGIN_STATIC_ROOTS.get(plugin_name)
+        if not base:
+            continue
+        init_file = base.parent / "__init__.py"
+        if not init_file.exists():
+            logger.debug("Plugin %s has no __init__.py, skipping API routes", plugin_name)
+            continue
+
+        from api.plugin_manager import spawn_plugin
+        plugin_root = base.parent
+        proc = spawn_plugin(plugin_name, plugin_root)
+        if proc is None:
+            logger.warning("Plugin %s: subprocess failed to spawn (dir=%s)", plugin_name, plugin_root)
+        else:
+            logger.info("Plugin %s: spawned subprocess (dir=%s)", plugin_name, plugin_root)
 
 
 def serve_plugin_static(plugin_name: str, rel_path: str) -> tuple[bytes, str] | None:
