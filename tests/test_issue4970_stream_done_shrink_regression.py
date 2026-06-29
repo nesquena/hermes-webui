@@ -1,8 +1,23 @@
-"""Regression locks for #4970 round 6: stream-end worklog collapse shrink jump."""
+"""Regression locks for #4970 round 6: stream-end worklog collapse shrink jump.
+
+Round 7 (scoping fix): the keep-open exception must apply to ONLY the turn that
+just settled, gated on a one-shot stream-id token, NOT to every historical
+settled worklog on every pinned re-render. These tests are BEHAVIORAL: they
+extract the real `_shouldKeepSettledWorklogOpenForPinnedFollow` helper plus its
+arm/disarm token API from static/ui.js and execute them in Node, then drive two
+settled turns while pinned and assert the second (historical) turn collapses.
+"""
+import json
+import shutil
+import subprocess
+import textwrap
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 def _function_body(src: str, name: str) -> str:
@@ -21,34 +36,60 @@ def _function_body(src: str, name: str) -> str:
     raise AssertionError(f"function {name} body not found")
 
 
-def test_pinned_follow_keeps_settled_worklog_open_to_avoid_stream_done_shrink():
-    """A pinned reader must not see a huge upward clamp when live worklog settles.
+def _extract(name: str) -> str:
+    """Return the full `function name(...){...}` text from ui.js."""
+    marker = f"function {name}"
+    start = UI_JS.index(marker)
+    body = _function_body(UI_JS, name)
+    sig = UI_JS[start : UI_JS.index("{", start)]
+    return f"{sig}{{{body}}}"
 
-    The live worklog can be hundreds of px tall. If the settled worklog is forced
-    collapsed at STREAM_DONE, scrollHeight shrinks and the browser clamps
-    scrollTop, which looks like a large backward jump even though pinned state is
-    correct. Pinned followers keep the settled worklog open for this turn; users
-    who scrolled away still get compact/collapsed settled worklogs.
-    """
-    assert "function _shouldKeepSettledWorklogOpenForPinnedFollow" in UI_JS
+
+def test_helper_and_token_threaded_through_render():
+    # Structural: the helper takes a streamId and gates on the one-shot token,
+    # and the call site threads the message's stream id (not a no-arg call).
     helper = _function_body(UI_JS, "_shouldKeepSettledWorklogOpenForPinnedFollow")
-    assert "_scrollPinned" in helper
-    assert "!_messageUserUnpinned" in helper
-    assert "bottom distance can transiently exceed" in helper
-    assert "avoiding the visible STREAM_DONE jump takes precedence" in helper
-
+    assert "_keepSettledWorklogOpenForStreamId" in helper
+    assert "_scrollPinned" in helper and "!_messageUserUnpinned" in helper
     render_fn = _function_body(UI_JS, "_renderSettledAnchorSceneForMessage")
-    assert "const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForPinnedFollow();" in render_fn
+    assert "_shouldKeepSettledWorklogOpenForPinnedFollow(streamId)" in render_fn
     assert "collapsed:!keepSettledWorklogOpen" in render_fn
-
     group_fn = _function_body(UI_JS, "_anchorSceneWorklogGroup")
-    assert "opts&&opts.collapsed!==undefined" in group_fn
     assert "collapsed:(opts&&opts.collapsed!==undefined)?opts.collapsed:!live" in group_fn
+    # The STREAM_DONE handler arms one-shot then disarms around the render.
+    assert "_armKeepSettledWorklogOpen(_settledStreamId)" in MESSAGES_JS
+    assert "_disarmKeepSettledWorklogOpen()" in MESSAGES_JS
 
 
-def test_unpinned_reader_still_gets_compact_settled_worklog():
-    helper = _function_body(UI_JS, "_shouldKeepSettledWorklogOpenForPinnedFollow")
-    assert "!_messageUserUnpinned" in helper, (
-        "The keep-open exception must be limited to pinned followers; unpinned "
-        "readers should not get their viewport or settled worklog state changed."
-    )
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
+def test_only_just_settled_turn_stays_open_pinned_history_collapses():
+    """Drive two settled turns while pinned; only the just-settled one stays open."""
+    helper = _extract("_shouldKeepSettledWorklogOpenForPinnedFollow")
+    arm = _extract("_armKeepSettledWorklogOpen")
+    disarm = _extract("_disarmKeepSettledWorklogOpen")
+    harness = textwrap.dedent(f"""
+        let _keepSettledWorklogOpenForStreamId=null;
+        let _scrollPinned=true, _messageUserUnpinned=false;  // pinned follower
+        {helper}
+        {arm}
+        {disarm}
+        const out={{}};
+        // Turn A just settled: arm A, render A (open), render historical B (collapsed), disarm.
+        _armKeepSettledWorklogOpen('streamA');
+        out.A_open = _shouldKeepSettledWorklogOpenForPinnedFollow('streamA');      // expect true
+        out.B_history = _shouldKeepSettledWorklogOpenForPinnedFollow('streamB');   // expect false
+        _disarmKeepSettledWorklogOpen();
+        // After disarm, even A collapses on a later pinned re-render.
+        out.A_after_disarm = _shouldKeepSettledWorklogOpenForPinnedFollow('streamA'); // false
+        // Unpinned reader never keeps open even for the armed turn.
+        _armKeepSettledWorklogOpen('streamA'); _messageUserUnpinned=true; _scrollPinned=false;
+        out.unpinned = _shouldKeepSettledWorklogOpenForPinnedFollow('streamA');     // false
+        console.log(JSON.stringify(out));
+    """)
+    res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip())
+    assert out["A_open"] is True, "just-settled turn must keep worklog open for pinned follower"
+    assert out["B_history"] is False, "historical settled worklog must stay collapsed while pinned"
+    assert out["A_after_disarm"] is False, "exception must be one-shot, cleared after the render"
+    assert out["unpinned"] is False, "unpinned reader always gets compact settled worklog"
