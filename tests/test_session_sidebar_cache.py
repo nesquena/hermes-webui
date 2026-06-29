@@ -198,7 +198,7 @@ def test_session_list_cache_follower_wait_stage_when_rebuild_inflight(monkeypatc
     assert "session_list_cache_hit" in owner_diag.stages or "session_list_cache_stored" in owner_diag.stages
 
 
-def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild(monkeypatch):
+def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_stale(monkeypatch):
     routes._session_list_cache_clear()
 
     key = routes._session_list_cache_key(
@@ -216,10 +216,10 @@ def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild(mo
             stamp,
             payload,
         )
-    # Simulate the #4834 path: state.db/WAL/fingerprint changes after the
-    # stale payload was cached. Followers must still be able to use that stale
-    # payload while the owner rebuild is blocked; otherwise sidebar polling can
-    # pile up behind a slow rebuild.
+    # Simulate state.db/WAL/fingerprint changing after the stale payload was
+    # cached. The owner must rebuild synchronously so committed external state is
+    # visible immediately, but followers can still use stale while that rebuild
+    # is blocked; otherwise sidebar polling can pile up behind a slow rebuild.
     monkeypatch.setattr(
         routes,
         "_session_list_cache_source_stamp",
@@ -265,17 +265,15 @@ def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild(mo
         owner_thread.join(2.0)
         follower_thread.join(2.0)
 
-    assert owner_result["payload"] == _session_cache_payload("stale")
+    assert owner_result["payload"] == _session_cache_payload("fresh")
     assert follower_result["payload"] == _session_cache_payload("stale")
-    assert "session_list_cache_stale_background_rebuild" in owner_diag.stages
-    assert (
-        "session_list_cache_stale_return" in follower_diag.stages
-        or "session_list_cache_stale_background_rebuild" in follower_diag.stages
-    )
+    assert "session_list_cache_rebuild_owner" in owner_diag.stages
+    assert "session_list_cache_wait_stale_fallback" in follower_diag.stages
 
 
 def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monkeypatch):
     routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
 
     key = routes._session_list_cache_key(
         active_profile="default",
@@ -292,8 +290,6 @@ def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monke
             stamp,
             payload,
         )
-    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("changed",))
-
     started = threading.Event()
     release = threading.Event()
     diag = _StageRecorder()
@@ -327,6 +323,7 @@ def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monke
 
 def test_session_list_cache_stale_background_rebuild_failure_releases_owner(monkeypatch):
     routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
 
     key = routes._session_list_cache_key(
         active_profile="default",
@@ -343,8 +340,6 @@ def test_session_list_cache_stale_background_rebuild_failure_releases_owner(monk
             stamp,
             payload,
         )
-    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("changed",))
-
     started = threading.Event()
     logged = []
 

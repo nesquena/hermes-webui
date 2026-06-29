@@ -452,6 +452,10 @@ def test_session_stream_pauses_while_chat_stream_is_active():
     assert "_sessionStreamHiddenSid = null;" in resume_src
     assert "startSessionStream(sid);" in resume_src
 
+    suspend_src = _js_function_decl(js, "_suspendSessionStreamForLiveChat")
+    assert "if (_sessionStreamSessionId !== sid) return;" in suspend_src
+    assert "stopSessionStream();" in suspend_src
+
 
 def test_frontend_busy_race_gate_obsoleted_by_option_z_pivot():
     """Per the Option Z PIVOT note baked into the handler body, the browser

@@ -6335,7 +6335,7 @@ function _chatStreamActiveForSession(sid) {
 
 function _suspendSessionStreamForLiveChat(sid) {
   if (!sid) return;
-  if (_sessionStreamSessionId !== sid && !_sessionEventSource) return;
+  if (_sessionStreamSessionId !== sid) return;
   _sessionStreamHiddenSid = sid;
   stopSessionStream();
 }

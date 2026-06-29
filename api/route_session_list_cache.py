@@ -175,6 +175,25 @@ def _session_list_cache_get(
         return None, False
 
 
+def _session_list_cache_stale_reason(key: tuple) -> str | None:
+    """Return why an existing cache entry is stale, if it is stale."""
+    now = time.monotonic()
+    current_stamp = _session_list_cache_resolved_source_stamp(key)
+    with _SESSIONS_CACHE_LOCK:
+        entry = _SESSIONS_CACHE.get(key)
+        if not entry:
+            return None
+        ts, stamp, _payload = entry
+        if stamp != current_stamp:
+            return "source"
+        ttl = _SESSIONS_CACHE_TTL_SECONDS
+        if _session_list_cache_streaming_freeze_marker() is not None:
+            ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
+        if (now - ts) >= ttl:
+            return "age"
+        return None
+
+
 def _session_list_cache_set(key: tuple, payload: dict) -> None:
     if not isinstance(payload, dict):
         return

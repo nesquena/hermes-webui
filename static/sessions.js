@@ -4264,13 +4264,13 @@ async function _runRenderSessionListRefresh(opts, _gen){
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const sessionListQS = _sessionListQueryString();
-    const sessionRequestOpts={
-      timeoutToast:false,
-      timeoutMs:_sessionListHasLoadedOnce?30000:_SESSION_LIST_BOOT_TIMEOUT_MS,
-      retries:1,
-      retryTimeouts:true,
-      retryStatuses:[502,503,504],
-    };
+    const sessionRequestOpts={timeoutToast:false};
+    if(!_sessionListHasLoadedOnce){
+      sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;
+      sessionRequestOpts.retries=1;
+      sessionRequestOpts.retryTimeouts=true;
+      sessionRequestOpts.retryStatuses=[502,503,504];
+    }
     const {sessData, projData}=await _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;

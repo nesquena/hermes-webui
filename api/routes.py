@@ -1668,6 +1668,7 @@ _session_list_runtime_sort_key = _route_session_list_cache._session_list_runtime
 _session_list_cache_set = _route_session_list_cache._session_list_cache_set
 _session_list_cache_source_stamp = _route_session_list_cache._session_list_cache_source_stamp
 _session_list_cache_state_db_fingerprint = _route_session_list_cache._session_list_cache_state_db_fingerprint
+_session_list_cache_stale_reason = _route_session_list_cache._session_list_cache_stale_reason
 _session_list_cache_streaming_freeze_marker = _route_session_list_cache._session_list_cache_streaming_freeze_marker
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
@@ -2068,7 +2069,8 @@ def _get_cached_session_list_payload(
         return cached
 
     stale = cached  # now actually a stale payload when one exists, else None
-    if stale is not None:
+    stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
+    if stale is not None and stale_reason != "source":
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
             if diag is not None:
