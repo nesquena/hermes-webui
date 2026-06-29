@@ -1465,6 +1465,17 @@ window._hermesTtsSynth=function(id, text, opts){
   window._voiceModeDeactivate=_deactivate;
   window._voiceModeImmediateSend=_voiceModeSend;
 })();
+function _currentSessionIsReusableEmptyChat(){
+  if(!S.session) return false;
+  const hasVisibleMessages=Array.isArray(S.messages)
+    && S.messages.some(m=>m&&m.role&&m.role!=='tool');
+  return (S.session.message_count||0)===0
+    && !hasVisibleMessages
+    && !S.busy
+    && !S.session.active_stream_id
+    && !S.session.pending_user_message;
+}
+
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{
   // If the current session has no messages AND nothing is in flight, just focus
@@ -1478,11 +1489,7 @@ $('btnNewChat').onclick=async()=>{
   // couldn't actually start a parallel chat. Use the same in-flight signal as
   // `_restoreSettledSession()` in messages.js: an active stream id or a queued
   // pending user message means the session is real, not empty.
-  if(S.session
-     && (S.session.message_count||0)===0
-     && !S.busy
-     && !S.session.active_stream_id
-     && !S.session.pending_user_message){
+  if(_currentSessionIsReusableEmptyChat()){
     $('msg').focus();closeMobileSidebar();return;
   }
   if(typeof _restoreRememberedNewChatDraftSession==='function'
@@ -1746,11 +1753,7 @@ document.addEventListener('keydown',async e=>{
     // the composer rather than creating another empty session that will clutter
     // the sidebar list (#1171). See the matching guard in $('btnNewChat').onclick
     // and bug #1432 for why the in-flight check is needed.
-    if(S.session
-       && (S.session.message_count||0)===0
-       && !S.busy
-       && !S.session.active_stream_id
-       && !S.session.pending_user_message){
+    if(_currentSessionIsReusableEmptyChat()){
       $('msg').focus();return;
     }
     // Cmd/Ctrl+K should always create a new conversation, even while the current
