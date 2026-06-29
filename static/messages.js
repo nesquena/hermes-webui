@@ -3403,6 +3403,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
   }
+  function _anchorSceneHasWorklogWorthyRows(scene){
+    // A worklog (the collapsible "已处理 …" rail) is only meaningful when the turn
+    // actually DID worklog-worthy work — a tool call, a thinking/reasoning pass, or
+    // a compression lifecycle card. A turn that only streamed prose (e.g. a long
+    // plain-text answer, or a degeneration burst that flooded the body with repeated
+    // tokens) projects an activity scene whose rows are ALL `prose`/`terminal`. Folding
+    // such a turn into a collapsed worklog hides the whole answer and, at STREAM_DONE,
+    // shrinks the transcript by the full streamed height → the browser clamps a
+    // bottom-pinned viewport back to the top (the "jump back" report). Require at least
+    // one genuinely worklog-worthy row before promoting the turn to a worklog.
+    const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+    for(const row of rows){
+      if(!row||typeof row!=='object') continue;
+      const role=String(row.role||'');
+      if(role==='tool'||role==='thinking') return true;
+      if(role==='lifecycle'){
+        const source=String(row.source_event_type||'');
+        // compression cards are worklog-worthy; a bare terminal/done lifecycle is not.
+        if(source==='compressing'||source==='compressed') return true;
+      }
+    }
+    return false;
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=null;
@@ -3418,7 +3441,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
     const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
-    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length){
+    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length
+        &&_anchorSceneHasWorklogWorthyRows(scene)){
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
       _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);

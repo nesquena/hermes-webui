@@ -10330,8 +10330,28 @@ if(typeof window!=='undefined'){
   window._projectLiveAnchorActivitySceneForStream=_projectLiveAnchorActivitySceneForStream;
   window.isLiveAnchorActivitySceneOwner=isLiveAnchorActivitySceneOwner;
 }
+function _anchorSceneSceneHasWorklogWorthyRows(scene){
+  // Mirror of messages.js _anchorSceneHasWorklogWorthyRows for the RENDER side:
+  // a settled scene that was persisted (or hydrated from the backend) before the
+  // generation-side guard existed can still be all-prose. Such a scene must NOT be
+  // promoted to a collapsed worklog at render time (it would hide the whole answer
+  // and shrink the transcript at settle → bottom-pinned jump-back). Require at least
+  // one tool/thinking/compression row. (defense-in-depth for already-persisted scenes)
+  const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+  for(const row of rows){
+    if(!row||typeof row!=='object') continue;
+    const role=String(row.role||'');
+    if(role==='tool'||role==='thinking') return true;
+    if(role==='lifecycle'){
+      const source=String(row.source_event_type||'');
+      if(source==='compressing'||source==='compressed') return true;
+    }
+  }
+  return false;
+}
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
@@ -10409,6 +10429,7 @@ if(typeof window!=='undefined'){
 }
 function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
     return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
   }
