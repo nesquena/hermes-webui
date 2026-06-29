@@ -529,7 +529,11 @@ def _session_id_visible_to_request_profile(handler, sid) -> bool:
 
 
 def _guard_request_session_visibility(handler, parsed, body=None, method="GET") -> bool:
-    """Apply request session-profile visibility check to request-supplied IDs."""
+    """Apply request session-profile visibility check to request-supplied IDs.
+
+    Covers top-level `session_id` in the query/body. Routes that accept session
+    IDs under other keys must enforce their own visibility checks.
+    """
     method = str(method).upper()
     if _request_session_visibility_exempt(method, getattr(parsed, "path", "")):
         return True
