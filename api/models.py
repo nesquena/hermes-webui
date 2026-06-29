@@ -3358,20 +3358,29 @@ class _ExternalSessionView:
 
 
 def get_session_for_file_ops(sid: str):
-    """Return a session-like object for file-manager handlers.
+    """Return a profile-authorized session-like object for file-manager handlers.
 
     Tries ``get_session`` first (preserves all existing behavior for WebUI
-    sessions). If that raises ``KeyError``, checks state.db; when the session
-    exists there, returns an ``_ExternalSessionView`` whose ``workspace`` is
-    the active WebUI workspace. If neither has the session, re-raises
+    sessions) and only returns that session when its stored profile belongs to
+    the active request profile.  If that lookup fails, checks state.db; when the
+    session exists there, returns an ``_ExternalSessionView`` whose ``workspace``
+    is the active WebUI workspace. If neither has the session, re-raises
     ``KeyError`` so callers continue to return their existing 404.
     """
     try:
-        return get_session(sid, metadata_only=True)
+        session = get_session(sid, metadata_only=True)
     except KeyError:
         if state_db_has_session(sid):
             return _ExternalSessionView(str(sid), str(get_last_workspace()))
         raise
+
+    from api.profiles import _profiles_match, get_active_profile_name
+
+    if not _profiles_match(
+        getattr(session, 'profile', None), get_active_profile_name()
+    ):
+        raise KeyError(sid)
+    return session
 
 
 def _active_state_db_path() -> Path:
