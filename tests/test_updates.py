@@ -288,7 +288,8 @@ def test_update_cache_is_scoped_by_agent_inclusion(tmp_path):
 
 def test_run_git_returns_stderr_on_failure(tmp_path):
     """When a git command fails, _run_git should return stderr (not empty string)."""
-    with patch('subprocess.run') as mock_run:
+    with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
+         patch('subprocess.run') as mock_run:
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout='',
@@ -302,7 +303,8 @@ def test_run_git_returns_stderr_on_failure(tmp_path):
 
 def test_run_git_returns_stdout_when_no_stderr(tmp_path):
     """If stderr is empty on failure, fall back to stdout."""
-    with patch('subprocess.run') as mock_run:
+    with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
+         patch('subprocess.run') as mock_run:
         mock_run.return_value = MagicMock(
             returncode=128,
             stdout='Already up to date.',
@@ -316,7 +318,8 @@ def test_run_git_returns_stdout_when_no_stderr(tmp_path):
 
 def test_run_git_returns_exit_code_when_no_output(tmp_path):
     """If both stdout and stderr are empty, report the exit code."""
-    with patch('subprocess.run') as mock_run:
+    with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
+         patch('subprocess.run') as mock_run:
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout='',
@@ -330,7 +333,8 @@ def test_run_git_returns_exit_code_when_no_output(tmp_path):
 
 def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):
     """Git output can contain Unicode even when Windows' active code page cannot."""
-    with patch('subprocess.run') as mock_run:
+    with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
+         patch('subprocess.run') as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout='v0.51.184\n', stderr=None)
 
         out, ok = updates._run_git(['describe', '--tags'], tmp_path)
@@ -344,7 +348,8 @@ def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):
 
 def test_run_git_handles_missing_stdout_after_decode_thread_failure(tmp_path):
     """A subprocess reader failure must not make version detection crash on import."""
-    with patch('subprocess.run') as mock_run:
+    with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
+         patch('subprocess.run') as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=None, stderr=None)
 
         out, ok = updates._run_git(['diff', '--binary', 'HEAD', '--'], tmp_path)

@@ -133,8 +133,12 @@ class TestParallelizedFetches:
         fn = self._get_switch_fn()
         assert "awaitWorkspaceLoad: workspaceVisible" in fn
         sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-        assert "if(options&&options.awaitWorkspaceLoad) await dirLoad" in sessions_js
-        assert "loadDir('.') is fire-and-forget while the workspace panel is closed" in sessions_js
+        assert "if(options&&options.awaitWorkspaceLoad){" in sessions_js
+        assert "await loadDir('.')" in sessions_js
+        assert "typeof _deferWorkspaceRefreshForSession==='function'" in sessions_js
+        assert "_deferWorkspaceRefreshForSession(S.session.session_id)" in sessions_js
+        assert "const _dirP=loadDir('.')" in sessions_js
+        assert "Keep new-chat first paint instant" in sessions_js
 
 
 class TestSpinnerCss:

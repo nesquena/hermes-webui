@@ -205,9 +205,18 @@ def test_boot_js_recognition_config():
 
 
 def test_boot_js_recognition_not_continuous():
-    """recognition.continuous must be false (auto-stop after silence)."""
+    """recognition.continuous must DEFAULT to false (auto-stop after silence).
+
+    As of #5176 the value is sourced from the `hermes-voice-continuous` localStorage
+    key (opt-in), but the default remains false: the expression only evaluates true
+    when the key is explicitly "true", so an unset/absent key keeps auto-stop behavior.
+    """
     js, _ = get_text("/static/boot.js")
-    assert 'recognition.continuous=false' in js or 'recognition.continuous = false' in js
+    assert (
+        'recognition.continuous=false' in js
+        or 'recognition.continuous = false' in js
+        or "recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true'" in js
+    )
 
 
 def test_boot_js_recognition_interim_results():

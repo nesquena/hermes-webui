@@ -77,14 +77,14 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.11', '3.12', '3.13']
-        # Split the suite across 3 parallel shards per Python version. pytest-shard
+        # Split the suite across 5 parallel shards per Python version. pytest-shard
         # partitions tests deterministically by test-id hash; the suite was made
         # shard-safe (no cross-test state leakage) so every shard passes
         # independently. See docs/agent-memory note on test-suite shard-safety.
         # NOTE: pytest-shard is 0-indexed — shard ids must be 0..num_shards-1.
         # Using 1-based ids would crash the out-of-range job AND silently skip
         # shard 0's tests.
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3, 4]
 
     steps:
       - uses: actions/checkout@v4
@@ -116,5 +116,5 @@ jobs:
           # importorskip and the matrix stays green.
           pip install mcp || echo "mcp install failed — test_mcp_server.py will importorskip"
 
-      - name: Run tests (shard ${{ matrix.shard }} of 3)
-        run: pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=3
+      - name: Run tests (shard ${{ matrix.shard }} of 5)
+        run: pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5

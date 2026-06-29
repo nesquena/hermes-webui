@@ -86,6 +86,7 @@ function renderMessages(options) {{
 }}
 {_function_body(UI_JS, "_restoreMessageViewportAnchor")}
 {_function_body(UI_JS, "_remountMessageViewportAnchor")}
+{_function_body(UI_JS, "_restorePinnedMessageScrollSnapshot")}
 {_function_body(UI_JS, "_restoreMessageScrollSnapshot")}
 _restoreMessageScrollSnapshot({{
   anchor: {{ rawIdx: 20, topOffset: 15 }},
@@ -235,6 +236,7 @@ function _messageVirtualScrollTopForVisibleIdx() {{ throw new Error('not expecte
 function renderMessages() {{ throw new Error('not expected'); }}
 {_function_body(UI_JS, "_restoreMessageViewportAnchor")}
 {_function_body(UI_JS, "_remountMessageViewportAnchor")}
+{_function_body(UI_JS, "_restorePinnedMessageScrollSnapshot")}
 {_function_body(UI_JS, "_restoreMessageScrollSnapshot")}
 _restoreMessageScrollSnapshot({{
   anchor: null,

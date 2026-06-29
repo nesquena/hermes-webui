@@ -198,7 +198,7 @@ def test_session_list_cache_follower_wait_stage_when_rebuild_inflight(monkeypatc
     assert "session_list_cache_hit" in owner_diag.stages or "session_list_cache_stored" in owner_diag.stages
 
 
-def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild(monkeypatch):
+def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_stale(monkeypatch):
     routes._session_list_cache_clear()
 
     key = routes._session_list_cache_key(
@@ -216,10 +216,10 @@ def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild(mo
             stamp,
             payload,
         )
-    # Simulate the #4834 path: state.db/WAL/fingerprint changes after the
-    # stale payload was cached. Followers must still be able to use that stale
-    # payload while the owner rebuild is blocked; otherwise sidebar polling can
-    # pile up behind a slow rebuild.
+    # Simulate state.db/WAL/fingerprint changing after the stale payload was
+    # cached. The owner must rebuild synchronously so committed external state is
+    # visible immediately, but followers can still use stale while that rebuild
+    # is blocked; otherwise sidebar polling can pile up behind a slow rebuild.
     monkeypatch.setattr(
         routes,
         "_session_list_cache_source_stamp",
@@ -265,10 +265,121 @@ def test_session_list_cache_follower_reuses_stale_payload_during_slow_rebuild(mo
         owner_thread.join(2.0)
         follower_thread.join(2.0)
 
-    assert follower_result["payload"] == _session_cache_payload("stale")
     assert owner_result["payload"] == _session_cache_payload("fresh")
-    assert "session_list_cache_wait_stale" in follower_diag.stages
+    assert follower_result["payload"] == _session_cache_payload("stale")
+    assert "session_list_cache_rebuild_owner" in owner_diag.stages
     assert "session_list_cache_wait_stale_fallback" in follower_diag.stages
+
+
+def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monkeypatch):
+    routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    with routes._SESSIONS_CACHE_LOCK:
+        ts, stamp, payload = routes._SESSIONS_CACHE[key]
+        routes._SESSIONS_CACHE[key] = (
+            ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0,
+            stamp,
+            payload,
+        )
+    started = threading.Event()
+    release = threading.Event()
+    diag = _StageRecorder()
+
+    def builder():
+        started.set()
+        release.wait()
+        return _session_cache_payload("fresh")
+
+    try:
+        result = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+        assert result == _session_cache_payload("stale")
+        assert started.wait(1.0), "stale owner should kick off a background rebuild"
+        assert "session_list_cache_stale_background_rebuild" in diag.stages
+        # While background rebuild is still blocked, stale is still returned.
+        cached, fresh = routes._session_list_cache_get(key, allow_stale=True)
+        assert cached == _session_cache_payload("stale")
+        assert fresh is False
+    finally:
+        release.set()
+
+    # The background owner should eventually populate fresh cache.
+    deadline = threading.Event()
+    for _ in range(20):
+        cached, fresh = routes._session_list_cache_get(key, allow_stale=True)
+        if cached == _session_cache_payload("fresh"):
+            break
+        deadline.wait(0.05)
+    assert cached == _session_cache_payload("fresh")
+
+
+def test_session_list_cache_stale_background_rebuild_failure_releases_owner(monkeypatch):
+    routes._session_list_cache_clear()
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    routes._session_list_cache_set(key, _session_cache_payload("stale"))
+    with routes._SESSIONS_CACHE_LOCK:
+        ts, stamp, payload = routes._SESSIONS_CACHE[key]
+        routes._SESSIONS_CACHE[key] = (
+            ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0,
+            stamp,
+            payload,
+        )
+    started = threading.Event()
+    logged = []
+
+    def record_exception(message):
+        logged.append(message)
+
+    monkeypatch.setattr(routes.logger, "exception", record_exception)
+
+    def failing_builder():
+        started.set()
+        raise RuntimeError("boom")
+
+    result = routes._get_cached_session_list_payload(key=key, builder=failing_builder)
+
+    assert result == _session_cache_payload("stale")
+    assert started.wait(1.0), "background rebuild should have attempted the builder"
+    for _ in range(20):
+        with routes._SESSIONS_CACHE_LOCK:
+            inflight_empty = key not in routes._SESSIONS_CACHE_INFLIGHT
+        if inflight_empty:
+            break
+        threading.Event().wait(0.05)
+    assert inflight_empty, "failed background rebuild must release the singleflight owner"
+    assert logged == ["session list stale-cache background rebuild failed"]
+    cached, fresh = routes._session_list_cache_get(key, allow_stale=True)
+    assert cached == _session_cache_payload("stale")
+    assert fresh is False
+
+    def recovery_builder():
+        return _session_cache_payload("fresh")
+
+    # Once the failed owner releases, a later request can retry instead of being
+    # pinned behind the dead background rebuild.
+    routes._get_cached_session_list_payload(key=key, builder=recovery_builder)
+    for _ in range(20):
+        cached, _fresh = routes._session_list_cache_get(key, allow_stale=True)
+        if cached == _session_cache_payload("fresh"):
+            break
+        threading.Event().wait(0.05)
+    assert cached == _session_cache_payload("fresh")
 
 
 def test_session_list_cache_invalidated_on_session_list_publish():

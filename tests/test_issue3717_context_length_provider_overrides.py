@@ -193,6 +193,9 @@ def test_streaming_fallbacks_use_shared_provider_context_helper():
 
 def test_route_helper_keeps_all_context_length_sources_aligned():
     assert "def _context_length_lookup_inputs_for_model" in ROUTES_PY
-    assert 'cfg.get("providers", {})' in ROUTES_PY
+    # Hardened against an explicit null ``providers:`` key (salvage of #3967):
+    # ``cfg.get("providers") or {}`` instead of ``cfg.get("providers", {})`` so
+    # a config.yaml with ``providers:`` (None) degrades to an empty mapping.
+    assert 'cfg.get("providers") or {}' in ROUTES_PY
     assert 'cfg.get("custom_providers")' in ROUTES_PY
     assert "_model_matches_configured_default" in ROUTES_PY

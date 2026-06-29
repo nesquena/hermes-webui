@@ -128,6 +128,67 @@ def test_sessions_api_fetches_archived_rows_only_when_requested(monkeypatch):
     assert enriched_batches == [["visible-active", "archived-history"]]
 
 
+def test_sessions_api_can_limit_archived_rows_without_hiding_visible_rows(monkeypatch):
+    rows = [
+        {"session_id": "visible-a", "title": "Visible A", "profile": "default", "archived": False, "message_count": 1, "updated_at": 50, "last_message_at": 50},
+        {"session_id": "visible-b", "title": "Visible B", "profile": "default", "archived": False, "message_count": 1, "updated_at": 40, "last_message_at": 40},
+        {"session_id": "archived-new", "title": "Archived New", "profile": "default", "archived": True, "message_count": 1, "updated_at": 30, "last_message_at": 30},
+        {"session_id": "archived-mid", "title": "Archived Mid", "profile": "default", "archived": True, "message_count": 1, "updated_at": 20, "last_message_at": 20},
+        {"session_id": "archived-old", "title": "Archived Old", "profile": "default", "archived": True, "message_count": 1, "updated_at": 10, "last_message_at": 10},
+    ]
+    enriched_batches = []
+
+    monkeypatch.setattr(routes, "all_sessions", lambda **_kwargs: rows)
+    monkeypatch.setattr(
+        routes,
+        "_enrich_sidebar_lineage_metadata",
+        lambda batch: enriched_batches.append([row["session_id"] for row in batch]),
+    )
+    monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda rows: False)
+    monkeypatch.setattr(routes, "load_settings", lambda: {"show_cli_sessions": False})
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    routes._session_list_cache_clear()
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/sessions?include_archived=1&archived_limit=2"))
+
+    assert handler.status == 200
+    body = handler.json_body()
+    assert [row["session_id"] for row in body["sessions"]] == [
+        "visible-a",
+        "visible-b",
+        "archived-new",
+        "archived-mid",
+    ]
+    assert body["archived_count"] == 3
+    assert body["webui_session_count"] == 5
+    assert body["archived_limit"] == 2
+    assert enriched_batches == [["visible-a", "visible-b", "archived-new", "archived-mid"]]
+
+
+def test_archived_limit_varies_session_list_cache_key():
+    base = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        include_archived=True,
+        archived_limit=100,
+    )
+    larger = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        include_archived=True,
+        archived_limit=200,
+    )
+
+    assert base != larger
+
+
 def test_sessions_api_legacy_all_sessions_monkeypatch_fallback_is_narrow(monkeypatch):
     calls = []
 
@@ -170,9 +231,15 @@ def test_sessions_api_internal_typeerror_is_not_hidden_by_legacy_fallback(monkey
 def test_session_list_fetch_adds_include_archived_only_when_toggle_is_on():
     src = (pathlib.Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
 
-    assert "if(_showArchived) qs.set('include_archived','1');" in src
+    assert "qs.set('include_archived','1');" in src
+    assert "const archiveLimit=Math.min(" in src
+    assert "SESSION_ARCHIVED_MAX_LOADED_LIMIT" in src
+    assert "qs.set('archived_limit', String(archiveLimit));" in src
     assert "api('/api/sessions' + sessionListQS" in src
-    assert "toggle.onclick=()=>{_showArchived=!_showArchived;renderSessionList();};" in src
+    assert "if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;" in src
+    assert "className='session-archive-more'" in src
+    assert "_archivedRowsLoadedLimit=Math.min(" in src
+    assert "Math.max(SESSION_ARCHIVED_PAGE_SIZE, Number(_archivedRowsLoadedLimit)||SESSION_ARCHIVED_PAGE_SIZE)+SESSION_ARCHIVED_PAGE_SIZE" in src
     assert "_archivedWebuiCount" in src
     assert "sessData.archived_webui_count ?? sessData.archived_count ?? 0" in src
     assert "archived_webui_count" in src

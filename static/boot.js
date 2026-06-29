@@ -81,13 +81,20 @@ async function cancelSessionStream(session){
 }
 
 async function _savedSessionShouldStaySidebarOnly(sid){
+  const state = await _savedSessionSidebarOnlyState(sid);
+  return !!(state&&state.sidebarOnly);
+}
+
+async function _savedSessionSidebarOnlyState(sid){
   if(!sid) return false;
   try{
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
     const session = data&&data.session;
-    return !!(session&&(session.active_stream_id||session.pending_user_message));
+    const archived = !!(session&&session.archived);
+    const running = !!(session&&(session.active_stream_id||session.pending_user_message));
+    return {sidebarOnly:archived||running, archived};
   }catch(e){
-    return false;
+    return null;
   }
 }
 
@@ -96,6 +103,29 @@ let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 
 function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
+}
+
+function _isPhoneWidthViewport(){
+  return window.matchMedia('(max-width: 640px)').matches;
+}
+
+// Mobile PWA viewport reflow guard. When the on-screen keyboard / browser
+// chrome shows or hides, visualViewport (or a plain resize on browsers without
+// it) changes height without a layout invalidation, leaving the phone layout
+// painted against stale geometry. Toggling a one-frame `viewport-reflow` class
+// (which applies a cheap GPU-promotion transform under the @media(max-width:640px)
+// rule) forces a repaint, then we resync the workspace panel + sidebar aria.
+function _forceMobileViewportReflow(){
+  if(!_isPhoneWidthViewport()) return;
+  const layout=document.querySelector('.layout');
+  if(!layout) return;
+  document.documentElement.classList.add('viewport-reflow');
+  void layout.offsetWidth;
+  requestAnimationFrame(()=>{
+    document.documentElement.classList.remove('viewport-reflow');
+    try{ syncWorkspacePanelState(); }catch(_){ }
+    try{ if(typeof _syncSidebarAria==='function') _syncSidebarAria(); }catch(_){ }
+  });
 }
 
 function _syncWorkspacePanelInlineWidth(){
@@ -996,7 +1026,13 @@ window._hermesTtsSynth=function(id, text, opts){
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
-  const SILENCE_MS=1800; // auto-send after 1.8s silence
+  // Configurable via localStorage keys (set from dev console or a future settings panel).
+  //   hermes-voice-silence-ms   — pause duration before auto-send (ms, default 1800)
+  //   hermes-voice-continuous   — keep mic open across natural pauses ("true"/"false", default false)
+  const _silenceMsRaw=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
+  // Fall back to 1800 for missing/NaN/non-positive values, and floor at 200ms so a
+  // mistyped tiny/negative value can't make the recognizer auto-send instantly.
+  const SILENCE_MS=(Number.isFinite(_silenceMsRaw)&&_silenceMsRaw>0)?Math.max(200,_silenceMsRaw):1800;
 
   function _clearBrowserTtsRecovery(){
     if(_browserTtsKeepAlive){
@@ -1056,7 +1092,7 @@ window._hermesTtsSynth=function(id, text, opts){
     _setState('listening');
 
     _recognition=new SpeechRecognition();
-    _recognition.continuous=false;
+    _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
     _recognition.interimResults=true;
     _recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
@@ -1435,6 +1471,17 @@ window._hermesTtsSynth=function(id, text, opts){
   window._voiceModeDeactivate=_deactivate;
   window._voiceModeImmediateSend=_voiceModeSend;
 })();
+function _currentSessionIsReusableEmptyChat(){
+  if(!S.session) return false;
+  const hasVisibleMessages=Array.isArray(S.messages)
+    && S.messages.some(m=>m&&m.role&&m.role!=='tool');
+  return (S.session.message_count||0)===0
+    && !hasVisibleMessages
+    && !S.busy
+    && !S.session.active_stream_id
+    && !S.session.pending_user_message;
+}
+
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{
   // If the current session has no messages AND nothing is in flight, just focus
@@ -1448,11 +1495,7 @@ $('btnNewChat').onclick=async()=>{
   // couldn't actually start a parallel chat. Use the same in-flight signal as
   // `_restoreSettledSession()` in messages.js: an active stream id or a queued
   // pending user message means the session is real, not empty.
-  if(S.session
-     && (S.session.message_count||0)===0
-     && !S.busy
-     && !S.session.active_stream_id
-     && !S.session.pending_user_message){
+  if(_currentSessionIsReusableEmptyChat()){
     $('msg').focus();closeMobileSidebar();return;
   }
   if(typeof _restoreRememberedNewChatDraftSession==='function'
@@ -1708,16 +1751,15 @@ document.addEventListener('keydown',async e=>{
     }
   }
   if((e.metaKey||e.ctrlKey)&&e.key==='k'){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(isText) return;
     e.preventDefault();
     // If the current session has no messages AND nothing is in flight, just focus
     // the composer rather than creating another empty session that will clutter
     // the sidebar list (#1171). See the matching guard in $('btnNewChat').onclick
     // and bug #1432 for why the in-flight check is needed.
-    if(S.session
-       && (S.session.message_count||0)===0
-       && !S.busy
-       && !S.session.active_stream_id
-       && !S.session.pending_user_message){
+    if(_currentSessionIsReusableEmptyChat()){
       $('msg').focus();return;
     }
     // Cmd/Ctrl+K should always create a new conversation, even while the current
@@ -1838,7 +1880,24 @@ function applyEmptyStateSuggestionPref(){
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
+  if(!window.visualViewport) _forceMobileViewportReflow();
 });
+
+// On PWAs / mobile browsers that expose visualViewport, keyboard show/hide and
+// URL-bar collapse fire visualViewport resize/scroll rather than window resize.
+// Debounce a reflow so the phone layout repaints against the new geometry.
+if(window.visualViewport){
+  let _mobileViewportReflowTimer=0;
+  const _scheduleMobileViewportReflow=()=>{
+    if(_mobileViewportReflowTimer) clearTimeout(_mobileViewportReflowTimer);
+    _mobileViewportReflowTimer=setTimeout(()=>{
+      _mobileViewportReflowTimer=0;
+      _forceMobileViewportReflow();
+    },60);
+  };
+  window.visualViewport.addEventListener('resize', _scheduleMobileViewportReflow);
+  window.visualViewport.addEventListener('scroll', _scheduleMobileViewportReflow);
+}
 
 // Boot: restore last session or start fresh
 // ── Resizable panels ──────────────────────────────────────────────────────
@@ -2248,7 +2307,7 @@ const _COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=[
   {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill']},
   {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge']},
   {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn']},
-  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip']},
+  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip','#composerMobileQuotaAction']},
   {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap']},
   {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus']},
 ];
@@ -2562,6 +2621,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       const p = await loadActiveProfile();
       if (p && typeof p === 'object' && typeof p.name === 'string') {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+        if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
         return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
       }
       if (p === undefined && !alreadyAttempted) {
@@ -2708,7 +2768,13 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   const saved=urlSession||savedLocal;
   if(saved){
     try{
-      if(!urlSession&&savedLocal&&await _savedSessionShouldStaySidebarOnly(savedLocal)){
+      const savedSidebarOnlyState=(!urlSession&&savedLocal)
+        ? await _savedSessionSidebarOnlyState(savedLocal)
+        : null;
+      if(savedSidebarOnlyState&&savedSidebarOnlyState.sidebarOnly){
+        if(savedSidebarOnlyState.archived){
+          try{localStorage.removeItem('hermes-webui-session');}catch(_){}
+        }
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
