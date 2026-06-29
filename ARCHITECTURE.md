@@ -1502,7 +1502,7 @@ B10: `es.addEventListener('tool', ...)` now calls `removeThinking()` before upda
      also removes `#toolRunningRow` when first token arrives.
 
 B14: `document.addEventListener('keydown', ...)` at global scope catches Cmd/Ctrl+Shift+O
-and calls `newSession()` if not busy.
+     and calls `newSession()` if not busy.
 
 
 ### Sprint 4 (March 30, 2026): Relocation + Session Power Features + Phase A/B
