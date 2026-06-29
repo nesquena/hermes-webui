@@ -478,6 +478,7 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
 
     fake = FakeSession()
     monkeypatch.setattr(routes, "get_session", lambda sid: fake)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: tmp_path)
     monkeypatch.setattr(
         routes,
