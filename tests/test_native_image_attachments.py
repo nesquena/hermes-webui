@@ -143,7 +143,9 @@ class TestBuildNativeMultimodalMessage:
             result = _build_native_multimodal_message('[WS]\n', 'look', atts, str(root))
             assert isinstance(result, list)
             assert result[0]['type'] == 'text'
-            assert result[0]['text'].startswith('[WS]\nlook')
+            assert result[0]['text'].startswith('[WEBUI_IMAGE_ATTACHMENT_NOTICE]')
+            assert '画像が添付されています' in result[0]['text']
+            assert '[WS]\nlook' in result[0]['text']
             assert f'[Image attached at: {img}]' in result[0]['text']
             assert f'vision_analyze with image_url: {img}' in result[0]['text']
             assert len(result) == 2
@@ -231,6 +233,46 @@ class TestBuildNativeMultimodalMessage:
             assert 'Tool iteration limit reached' in result
             assert result.index('Tool iteration limit reached') < result.index('これどうにかならん？')
             assert f'vision_analyze with image_url: {img}' in result
+
+    def test_native_mode_can_auto_analyze_image_before_agent_input(self, monkeypatch):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            img = root / 'screenshot.png'
+            _make_png(img)
+            atts = _normalize_chat_attachments([{
+                'name': 'screenshot.png',
+                'path': str(img),
+                'mime': 'image/png',
+                'size': img.stat().st_size,
+                'is_image': True,
+            }])
+            calls = []
+
+            async def fake_vision_analyze_tool(*, image_url, user_prompt):
+                calls.append((image_url, user_prompt))
+                return json.dumps({
+                    'success': True,
+                    'analysis': 'The screenshot shows a purple error toast with Copy and Dismiss buttons.',
+                })
+
+            monkeypatch.setattr('tools.vision_tools.vision_analyze_tool', fake_vision_analyze_tool)
+
+            result = _build_native_multimodal_message(
+                '',
+                'ある？',
+                atts,
+                str(root),
+                cfg={'agent': {'image_input_mode': 'native'}},
+                auto_analyze_image_attachments=True,
+            )
+
+            assert isinstance(result, list)
+            assert calls and calls[0][0] == str(img)
+            assert result[0]['type'] == 'text'
+            assert 'The user sent an image' in result[0]['text']
+            assert 'purple error toast' in result[0]['text']
+            assert result[0]['text'].index('purple error toast') < result[0]['text'].index('ある？')
+            assert any(part.get('type') == 'image_url' for part in result)
 
     def test_text_mode_failed_auto_analysis_requires_vision_before_answer(self, monkeypatch):
         with TemporaryDirectory() as d:

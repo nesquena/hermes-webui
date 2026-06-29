@@ -291,23 +291,38 @@ def _run_gateway_runs_api_streaming(
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
     message_content: Any = str(msg_text or "")
-    if attachments:
-        try:
-            from api.streaming import _build_native_multimodal_message
+    try:
+        from api.streaming import (
+            _build_native_multimodal_message,
+            _effective_stream_attachments,
+            _force_image_attachment_notice_on_agent_message,
+            _run_image_attachment_notice_hook,
+        )
 
+        _agent_attachments = _effective_stream_attachments(attachments, session, session_id=session_id, stream_id=stream_id)
+        if _agent_attachments:
             message_content = _build_native_multimodal_message(
                 "",
                 str(msg_text or ""),
-                attachments,
+                _agent_attachments,
                 str(workspace),
                 cfg=cfg or {},
                 provider=str((body_extras or {}).get("provider") or ''),
                 model=model or '',
                 auto_analyze_text_mode_images=True,
+                auto_analyze_image_attachments=True,
+                session_id=session_id,
             )
-        except Exception:
-            logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
-            message_content = str(msg_text or "")
+            message_content = _force_image_attachment_notice_on_agent_message(message_content, _agent_attachments)
+            message_content = _run_image_attachment_notice_hook(
+                message_content,
+                _agent_attachments,
+                str(workspace),
+                session_id=session_id,
+            )
+    except Exception:
+        logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
+        message_content = str(msg_text or "")
     instructions_parts = []
     conversation_history = []
     for entry in getattr(session, "context_messages", None) or []:
@@ -653,23 +668,38 @@ def _run_gateway_chat_streaming(
                 # without exposing the browser's auth cookie or CSRF material.
                 headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
             message_content: Any = str(msg_text or "")
-            if attachments:
-                try:
-                    from api.streaming import _build_native_multimodal_message
+            try:
+                from api.streaming import (
+                    _build_native_multimodal_message,
+                    _effective_stream_attachments,
+                    _force_image_attachment_notice_on_agent_message,
+                    _run_image_attachment_notice_hook,
+                )
 
+                _agent_attachments = _effective_stream_attachments(attachments, s, session_id=session_id, stream_id=stream_id)
+                if _agent_attachments:
                     message_content = _build_native_multimodal_message(
                         "",
                         str(msg_text or ""),
-                        attachments,
+                        _agent_attachments,
                         str(workspace),
                         cfg=cfg or {},
                         provider=model_provider or '',
                         model=model or '',
                         auto_analyze_text_mode_images=True,
+                        auto_analyze_image_attachments=True,
+                        session_id=session_id,
                     )
-                except Exception:
-                    logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
-                    message_content = str(msg_text or "")
+                    message_content = _force_image_attachment_notice_on_agent_message(message_content, _agent_attachments)
+                    message_content = _run_image_attachment_notice_hook(
+                        message_content,
+                        _agent_attachments,
+                        str(workspace),
+                        session_id=session_id,
+                    )
+            except Exception:
+                logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
+                message_content = str(msg_text or "")
             body = {
                 "model": model or "default",
                 "stream": True,

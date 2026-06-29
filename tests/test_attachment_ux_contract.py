@@ -16,6 +16,23 @@ def test_frontend_does_not_append_internal_attachment_paths_to_user_text():
     assert "attachments:uploaded.length?uploaded:undefined" in src
 
 
+def test_frontend_does_not_send_text_only_payload_after_upload_failure():
+    """A failed upload must stop send(), even when the composer has text.
+
+    The old guard only returned on upload failure when ``!text``. With a pasted
+    screenshot plus typed text, that let /api/chat/start receive a text-only
+    payload with ``attachments`` omitted.
+    """
+    src = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+    start = src.index("try{uploaded=await uploadPendingFiles();}")
+    end = src.index("// Clear the uploading status now that upload is done", start)
+    block = src[start:end]
+
+    assert "if(!text)" not in block
+    assert "setComposerStatus(`Upload error:" in block
+    assert "return;" in block
+
+
 def test_backend_adds_agent_only_hint_for_non_image_file_attachments():
     """If frontend no longer injects paths, backend must still tell the agent about files."""
     with TemporaryDirectory() as d:

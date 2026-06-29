@@ -1263,7 +1263,14 @@ async function send(options={}){
   setComposerStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles();}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){
+    // Never continue to /api/chat/start after an attachment upload failure.
+    // Otherwise a pasted screenshot can be dropped while the typed text still
+    // sends, making the agent see a text-only payload.
+    const uploadError=e&&e.message?e.message:e;
+    setComposerStatus(`Upload error: ${uploadError}`);
+    return;
+  }
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).

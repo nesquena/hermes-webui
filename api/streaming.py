@@ -2026,6 +2026,7 @@ def _text_mode_image_analysis_note(path: str) -> str:
         if description:
             description = sanitize_context(description)
             return (
+                f"[WEBUI_IMAGE_CONTEXT path={path}]\n"
                 f"[The user sent an image at: {path}. Here's what it contains:\n"
                 f"{description}]\n"
                 f"[If you need a closer look, use vision_analyze with image_url: {path}]"
@@ -2033,10 +2034,163 @@ def _text_mode_image_analysis_note(path: str) -> str:
     except Exception:
         logger.debug("Failed to auto-analyze WebUI image attachment %s", path, exc_info=True)
     return (
+        f"[WEBUI_IMAGE_CONTEXT path={path}]\n"
         f"[The user sent an image at: {path}, but automatic image analysis failed. "
         f"You MUST call vision_analyze with image_url: {path} before answering. "
         f"Do not say the screenshot/image was not provided unless that tool call also cannot load it.]"
     )
+
+
+def _agent_message_has_image_context(message) -> bool:
+    if isinstance(message, str):
+        return '[WEBUI_IMAGE_CONTEXT' in message or 'The user sent an image at:' in message
+    if isinstance(message, list):
+        for part in message:
+            if isinstance(part, dict):
+                text = str(part.get('text') or part.get('content') or '')
+                if '[WEBUI_IMAGE_CONTEXT' in text or 'The user sent an image at:' in text:
+                    return True
+    return False
+
+
+_IMAGE_ATTACHMENT_NOTICE_TRIGGER = 'The user attached image file(s) to this message.'
+
+
+def _agent_message_contains_text(message, needle: str) -> bool:
+    target = str(needle or '')
+    if not target:
+        return False
+    if isinstance(message, str):
+        return target in message
+    if isinstance(message, list):
+        for part in message:
+            if isinstance(part, dict):
+                text = str(part.get('text') or part.get('content') or '')
+                if target in text:
+                    return True
+    return False
+
+
+def _is_image_attachment_metadata(att) -> bool:
+    if not isinstance(att, dict):
+        return False
+    if bool(att.get('is_image')):
+        return True
+    mime = str(att.get('mime') or '').strip().lower()
+    return mime.startswith('image/')
+
+
+def _image_attachment_notice(attachments) -> str:
+    """Return the non-negotiable model-input marker for image attachments.
+
+    This is based on WebUI upload metadata, not on filename/extension guessing,
+    image validation, or vision success. If the WebUI received an attachment
+    with ``is_image`` or ``mime: image/*``, the model-facing user message must
+    say so even when later image decoding or analysis fails.
+    """
+    image_attachments = [att for att in (attachments or []) if _is_image_attachment_metadata(att)]
+    if not image_attachments:
+        return ''
+    lines = [
+        '[WEBUI_IMAGE_ATTACHMENT_NOTICE]',
+        '画像が添付されています / The user attached image file(s) to this message.',
+        'Do not say no image/screenshot/file was provided for this turn.',
+        'If the visual content is not already described below, call vision_analyze with the image_url path before answering.',
+        'Attached image file(s):',
+    ]
+    for att in image_attachments:
+        name = str(att.get('name') or att.get('filename') or '').strip()
+        path = str(att.get('path') or '').strip()
+        mime = str(att.get('mime') or '').strip()
+        target = path or name or '(unknown image attachment)'
+        label = name or Path(target).name or target
+        suffix = f' mime={mime}' if mime else ''
+        lines.append(f'- {label}: {target}{suffix}')
+    return '\n'.join(lines)
+
+
+def _agent_message_has_image_attachment_notice(message) -> bool:
+    if isinstance(message, str):
+        return '[WEBUI_IMAGE_ATTACHMENT_NOTICE]' in message or '画像が添付されています' in message
+    if isinstance(message, list):
+        for part in message:
+            if isinstance(part, dict):
+                text = str(part.get('text') or part.get('content') or '')
+                if '[WEBUI_IMAGE_ATTACHMENT_NOTICE]' in text or '画像が添付されています' in text:
+                    return True
+    return False
+
+
+def _prepend_image_attachment_notice_text(text: str, attachments) -> str:
+    notice = _image_attachment_notice(attachments)
+    base = str(text or '')
+    if not notice or '[WEBUI_IMAGE_ATTACHMENT_NOTICE]' in base or '画像が添付されています' in base:
+        return base
+    return f"{notice}\n\n{base}" if base else notice
+
+
+def _force_image_attachment_notice_on_agent_message(message, attachments):
+    notice = _image_attachment_notice(attachments)
+    if not notice or _agent_message_has_image_attachment_notice(message):
+        return message
+    if isinstance(message, list):
+        return [{'type': 'text', 'text': notice}, *message]
+    base = str(message or '')
+    return f"{notice}\n\n{base}" if base else notice
+
+
+def _force_image_context_on_agent_message(message, image_paths):
+    """Fail closed: image attachments must become explicit agent input text."""
+    if not image_paths or _agent_message_has_image_context(message):
+        return message
+    prefix = _prepend_text_mode_image_analysis('', image_paths).strip()
+    if not prefix:
+        return message
+    if isinstance(message, list):
+        return [{'type': 'text', 'text': prefix}, *message]
+    base = str(message or '').strip()
+    return f"{prefix}\n\n{base}" if base else prefix
+
+
+def _image_attachment_paths_for_notice_hook(attachments, workspace: str, *, session_id: str = ''):
+    """Return safe image attachment paths for the notice-triggered vision hook.
+
+    Uses WebUI upload metadata (is_image / mime:image/*), not filename guessing.
+    """
+    if not attachments:
+        return []
+    allowed_roots = _attachment_allowed_roots(workspace)
+    paths = []
+    for att in _coerce_attachments_for_agent(attachments, session_id=session_id):
+        if not _is_image_attachment_metadata(att):
+            continue
+        raw_path = str(att.get('path') or '').strip()
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path).expanduser().resolve()
+            if not any(path.is_relative_to(r) for r in allowed_roots):
+                continue
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if size <= 0 or size > _NATIVE_IMAGE_MAX_BYTES:
+                continue
+            mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
+            if mime and not mime.lower().startswith('image/'):
+                continue
+        except Exception:
+            continue
+        paths.append((str(path), mime.split(';', 1)[0] if mime else ''))
+    return paths
+
+
+def _run_image_attachment_notice_hook(message, attachments, workspace: str, *, session_id: str = ''):
+    """Run the forced-vision hook when the image attachment notice is present."""
+    if not _agent_message_contains_text(message, _IMAGE_ATTACHMENT_NOTICE_TRIGGER):
+        return message
+    image_paths = _image_attachment_paths_for_notice_hook(attachments, workspace, session_id=session_id)
+    return _force_image_context_on_agent_message(message, image_paths)
 
 
 def _prepend_text_mode_image_analysis(text: str, image_paths) -> str:
@@ -2061,12 +2215,90 @@ def _attachment_allowed_roots(workspace: str):
         return (workspace_root,)
 
 
-def _valid_image_attachment_paths(attachments, workspace: str):
+def _coerce_attachment_for_agent(att, *, session_id: str = ''):
+    """Normalize current or persisted attachment metadata for agent input."""
+    explicit_mime = ''
+    explicit_is_image = None
+    if isinstance(att, dict):
+        if str(att.get('path') or '').strip():
+            return dict(att)
+        raw_name = str(att.get('name') or att.get('filename') or '').strip()
+        explicit_mime = str(att.get('mime') or '').strip()
+        if 'is_image' in att:
+            explicit_is_image = bool(att.get('is_image'))
+    else:
+        raw_name = str(att or '').strip()
+    if not raw_name:
+        return None
+    candidate = Path(raw_name).expanduser()
+    if candidate.is_absolute():
+        path = candidate
+        name = candidate.name
+    else:
+        name = Path(raw_name).name
+        if not name:
+            return None
+        try:
+            from api.upload import _session_attachment_dir
+            path = _session_attachment_dir(session_id) / name
+        except Exception:
+            return None
+    result: dict[str, object] = {'name': name, 'path': str(path)}
+    if explicit_mime:
+        result['mime'] = explicit_mime
+    if explicit_is_image is not None:
+        result['is_image'] = explicit_is_image
+    elif explicit_mime:
+        result['is_image'] = explicit_mime.lower().startswith('image/')
+    return result
+
+
+def _coerce_attachments_for_agent(attachments, *, session_id: str = ''):
+    result = []
+    for att in attachments or []:
+        coerced = _coerce_attachment_for_agent(att, session_id=session_id)
+        if coerced:
+            result.append(coerced)
+    return result
+
+
+def _attachments_from_turn_journal(session_id: str, stream_id: str):
+    """Recover submitted attachments when runtime/pending state was cleared."""
+    sid = str(session_id or '').strip()
+    stream = str(stream_id or '').strip()
+    if not sid or not stream:
+        return []
+    try:
+        from api.turn_journal import read_turn_journal
+
+        events = read_turn_journal(sid).get('events') or []
+        for event in reversed(events):
+            if not isinstance(event, dict):
+                continue
+            if str(event.get('stream_id') or '') != stream:
+                continue
+            if str(event.get('event') or '') != 'submitted':
+                continue
+            return _coerce_attachments_for_agent(event.get('attachments') or [], session_id=sid)
+    except Exception:
+        logger.debug("Failed to recover WebUI attachments from turn journal", exc_info=True)
+    return []
+
+
+def _effective_stream_attachments(attachments, session, *, session_id: str = '', stream_id: str = ''):
+    for raw in (attachments, getattr(session, 'pending_attachments', None)):
+        coerced = _coerce_attachments_for_agent(raw or [], session_id=session_id)
+        if coerced:
+            return coerced
+    return _attachments_from_turn_journal(session_id, stream_id)
+
+
+def _valid_image_attachment_paths(attachments, workspace: str, *, session_id: str = ''):
     if not attachments:
         return []
     allowed_roots = _attachment_allowed_roots(workspace)
     image_paths = []
-    for att in attachments or []:
+    for att in _coerce_attachments_for_agent(attachments, session_id=session_id):
         if not isinstance(att, dict):
             continue
         raw_path = str(att.get('path') or '').strip()
@@ -2093,14 +2325,15 @@ def _valid_image_attachment_paths(attachments, workspace: str):
     return image_paths
 
 
-def _valid_file_attachment_paths(attachments, workspace: str):
+def _valid_file_attachment_paths(attachments, workspace: str, *, session_id: str = ''):
     """Return safe non-image attachment paths for agent-only file hints."""
     if not attachments:
         return []
     allowed_roots = _attachment_allowed_roots(workspace)
-    image_path_set = {path for path, _mime in _valid_image_attachment_paths(attachments, workspace)}
+    coerced_attachments = _coerce_attachments_for_agent(attachments, session_id=session_id)
+    image_path_set = {path for path, _mime in _valid_image_attachment_paths(coerced_attachments, workspace, session_id=session_id)}
     file_paths = []
-    for att in attachments or []:
+    for att in coerced_attachments:
         if not isinstance(att, dict):
             continue
         raw_path = str(att.get('path') or '').strip()
@@ -2134,6 +2367,8 @@ def _build_native_multimodal_message(
     provider: str = '',
     model: str = '',
     auto_analyze_text_mode_images: bool = False,
+    auto_analyze_image_attachments: bool = False,
+    session_id: str = '',
 ):
     """Build native multimodal content parts for current-turn image uploads.
 
@@ -2145,24 +2380,37 @@ def _build_native_multimodal_message(
     When *cfg* is provided, respects ``agent.image_input_mode``. If the resolved
     mode is ``"text"`` and ``auto_analyze_text_mode_images`` is true, WebUI
     pre-analyzes image attachments with ``vision_analyze`` and prepends the
-    description to the agent-only input. Without that flag, the legacy text hint
-    fallback is returned.
+    description to the agent-only input. When ``auto_analyze_image_attachments``
+    is true, WebUI performs that pre-analysis even for native-vision routes while
+    still sending image_url parts, so the agent gets explicit visual evidence
+    instead of relying only on the model noticing the attachment.
     """
     if not attachments:
         return workspace_ctx + msg_text
 
-    image_paths = _valid_image_attachment_paths(attachments, workspace)
-    file_paths = _valid_file_attachment_paths(attachments, workspace)
+    attachments = _coerce_attachments_for_agent(attachments, session_id=session_id)
+    image_paths = _valid_image_attachment_paths(attachments, workspace, session_id=session_id)
+    file_paths = _valid_file_attachment_paths(attachments, workspace, session_id=session_id)
+    analyzed_text = None
+    if auto_analyze_image_attachments:
+        analyzed_text = _prepend_text_mode_image_analysis(workspace_ctx + msg_text, image_paths)
 
     # ── Check image_input_mode before embedding anything ──
     if cfg is not None and _resolve_image_input_mode(cfg, provider=provider, model=model) == "text":
-        text = workspace_ctx + msg_text
-        if auto_analyze_text_mode_images:
+        text = analyzed_text if analyzed_text is not None else workspace_ctx + msg_text
+        text = _prepend_image_attachment_notice_text(text, attachments)
+        if analyzed_text is None and auto_analyze_text_mode_images:
             text = _prepend_text_mode_image_analysis(text, image_paths)
             return _append_attachment_hints(text, image_paths=[], file_paths=file_paths)
-        return _append_attachment_hints(text, image_paths=image_paths, file_paths=file_paths)
+        return _append_attachment_hints(
+            text,
+            image_paths=[] if analyzed_text is not None or auto_analyze_text_mode_images else image_paths,
+            file_paths=file_paths,
+        )
 
-    parts = [{'type': 'text', 'text': _append_attachment_hints(workspace_ctx + msg_text, image_paths=image_paths, file_paths=file_paths)}]
+    text_payload = analyzed_text if analyzed_text is not None else workspace_ctx + msg_text
+    text_payload = _prepend_image_attachment_notice_text(text_payload, attachments)
+    parts = [{'type': 'text', 'text': _append_attachment_hints(text_payload, image_paths=image_paths, file_paths=file_paths)}]
     image_count = 0
 
     for item in image_paths:
@@ -2180,7 +2428,7 @@ def _build_native_multimodal_message(
         image_count += 1
 
     return parts if image_count else _append_attachment_hints(
-        workspace_ctx + msg_text,
+        _prepend_image_attachment_notice_text(workspace_ctx + msg_text, attachments),
         image_paths=image_paths,
         file_paths=file_paths,
     )
@@ -7757,23 +8005,46 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
+            _agent_attachments = _effective_stream_attachments(
+                attachments,
+                s,
+                session_id=session_id,
+                stream_id=stream_id,
+            )
             user_message = _build_native_multimodal_message(
                 workspace_ctx,
                 _agent_msg_text,
-                attachments,
+                _agent_attachments,
                 workspace,
                 cfg=_cfg,
                 provider=resolved_provider,
                 model=resolved_model,
                 auto_analyze_text_mode_images=True,
+                auto_analyze_image_attachments=True,
+                session_id=session_id,
             )
+            user_message = _force_image_attachment_notice_on_agent_message(user_message, _agent_attachments)
+            user_message = _run_image_attachment_notice_hook(
+                user_message,
+                _agent_attachments,
+                workspace,
+                session_id=session_id,
+            )
+            # Hermes core applies persist_user_message immediately during early
+            # crash-resilience persistence.  For text-mode image turns that would
+            # overwrite the API-facing WEBUI_IMAGE_CONTEXT before the model sees it
+            # and before WebUI saves model-facing context_messages.  Keep the clean
+            # msg_text for the visible transcript via WebUI's display merge, but do
+            # not pass a persistence override when attachments were recovered for
+            # this agent turn.
+            _persist_user_message_for_agent = None if _agent_attachments else msg_text
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             result = agent.run_conversation(
                 user_message=user_message,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                 task_id=session_id,
-                persist_user_message=msg_text,
+                persist_user_message=_persist_user_message_for_agent,
             )
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
@@ -8153,7 +8424,7 @@ def _run_agent_streaming(
                                     system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                                     task_id=session_id,
-                                    persist_user_message=msg_text,
+                                    persist_user_message=_persist_user_message_for_agent,
                                 )
                                 _heal_all_msgs = _heal_result.get('messages') or []
                                 _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent

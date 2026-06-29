@@ -782,6 +782,14 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     image_path = tmp_path / "photo.png"
     image_path.write_bytes(image_bytes)
     captured = {}
+    calls = []
+
+    async def fake_vision_analyze_tool(*, image_url, user_prompt):
+        calls.append((image_url, user_prompt))
+        return json.dumps({
+            "success": True,
+            "analysis": "The screenshot shows a tiny test image.",
+        })
 
     class FakeResponse:
         def __enter__(self):
@@ -803,6 +811,7 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [{"role": "user", "content": "webui session context"}])
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("tools.vision_tools.vision_analyze_tool", fake_vision_analyze_tool)
 
     s = new_session()
     stream_id = "stream-gateway-image-test"
@@ -825,10 +834,14 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     image_payload = captured["body"]["messages"][1]
     assert image_payload["role"] == "user"
     assert image_payload["content"][0]["type"] == "text"
-    assert image_payload["content"][0]["text"].startswith("What is in this image?")
+    assert calls and calls[0][0] == str(image_path)
+    assert "The user sent an image" in image_payload["content"][0]["text"]
+    assert "tiny test image" in image_payload["content"][0]["text"]
+    assert image_payload["content"][0]["text"].index("tiny test image") < image_payload["content"][0]["text"].index("What is in this image?")
     assert f"[Image attached at: {image_path}]" in image_payload["content"][0]["text"]
     assert content[0]["type"] == "text"
-    assert content[0]["text"].startswith("What is in this image?")
+    assert "tiny test image" in content[0]["text"]
+    assert content[0]["text"].index("tiny test image") < content[0]["text"].index("What is in this image?")
     assert f"vision_analyze with image_url: {image_path}" in content[0]["text"]
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
