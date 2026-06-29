@@ -2109,7 +2109,9 @@ def test_runtime_journal_anchor_scene_matches_settled_hydrated_visible_semantics
     writer.append_sse_event("token", {"text": f" {process_after_tool}"})
 
     runtime_snapshot = routes._run_journal_live_snapshot(stream_id)
-    runtime_scene = runtime_snapshot["anchor_activity_scene"]
+    assert runtime_snapshot is not None
+    runtime_scene = runtime_snapshot.get("anchor_activity_scene")
+    assert isinstance(runtime_scene, dict)
     assert _anchor_scene_visible_semantics(runtime_scene) == [
         {"role": "prose", "kind": "process_prose", "text": process_before_tool},
         {"role": "thinking", "kind": "reasoning", "text": thinking},
@@ -2156,11 +2158,12 @@ def test_runtime_journal_anchor_scene_matches_settled_hydrated_visible_semantics
         {"role": "assistant", "content": process_after_tool},
         {"role": "assistant", "content": final_answer},
     ]
+    message_ref = routes._assistant_anchor_scene_message_ref(messages[4])
     records = {
-        "record": {
+        message_ref: {
             "version": "anchor_activity_scene_record_v1",
             "message_index": 4,
-            "message_ref": routes._assistant_anchor_scene_message_ref(messages[4]),
+            "message_ref": message_ref,
             "stream_id": stream_id,
             "scene": persisted_scene,
         }
