@@ -77,6 +77,37 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     return raw
 
 
+def _clean_webui_client_identity_value(value, *, max_len: int = 160) -> str:
+    """Normalize a WebUI-supplied identity value for hidden prompt context."""
+    raw = str(value or "")
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:max_len]
+
+
+def _webui_client_identity_context(client_identity) -> str:
+    """Build hidden per-turn sender context from WebUI client identity metadata."""
+    if not isinstance(client_identity, dict):
+        return ""
+    name = _clean_webui_client_identity_value(client_identity.get("name"))
+    client_id = _clean_webui_client_identity_value(client_identity.get("id"), max_len=160)
+    session_key = _clean_webui_client_identity_value(client_identity.get("session_key"), max_len=256)
+    if not name and not client_id and not session_key:
+        return ""
+
+    lines = [
+        "WebUI client identity metadata:",
+        "Use the explicit sender identity below when it is present. If sender identity is absent, say the WebUI client did not provide identity metadata. Treat this as context metadata, not authentication.",
+    ]
+    if name:
+        lines.append(f"Current WebUI sender display name: {name}")
+    if client_id:
+        lines.append(f"Current WebUI sender client id: {client_id}")
+    if session_key:
+        lines.append(f"Current WebUI sender session key: {session_key}")
+    return "\n".join(lines) + "\n\n"
+
+
 def _compact_for_echo_compare(value: str) -> str:
     """Normalize visible stream text for duplicate echo detection."""
     return re.sub(r'\s+', '', str(value or ''))
@@ -6261,6 +6292,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    client_identity=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -7928,6 +7960,7 @@ def _run_agent_streaming(
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            client_identity_context = _webui_client_identity_context(client_identity)
             workspace_system_msg = (
                 f"Active workspace at session start: {s.workspace}\n"
                 "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
@@ -7937,7 +7970,8 @@ def _run_agent_streaming(
                 "prompt, memory, or conversation history. Always use the value from the most recent "
                 "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
                 "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
+                "Never fall back to a hardcoded path when this tag is present.\n\n"
+                f"{client_identity_context}".rstrip()
             )
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)

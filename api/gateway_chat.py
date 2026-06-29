@@ -506,6 +506,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    client_identity=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -585,6 +586,7 @@ def _run_gateway_chat_streaming(
                 _prefill_messages_with_webui_context,
                 _normalize_prefill_messages_before_user_turn,
                 _public_prefill_context_status,
+                _webui_client_identity_context,
                 _webui_ephemeral_system_prompt,
             )
 
@@ -604,6 +606,9 @@ def _run_gateway_chat_streaming(
                 },
                 config_data=cfg,
             )
+            identity_context = _webui_client_identity_context(client_identity)
+            if identity_context:
+                _gateway_system_prompt = f"{_gateway_system_prompt}\n\n{identity_context}".rstrip()
             prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
             prefill_messages = [
@@ -683,11 +688,21 @@ def _run_gateway_chat_streaming(
                 "Accept": "text/event-stream",
                 "X-Hermes-Session-Id": session_id,
             }
+            if isinstance(client_identity, dict):
+                client_name = str(client_identity.get("name") or "").strip()
+                client_id = str(client_identity.get("id") or "").strip()
+                client_session_key = str(client_identity.get("session_key") or "").strip()
+                if client_name:
+                    headers["X-Hermes-Client-Name"] = client_name
+                if client_id:
+                    headers["X-Hermes-Client-Id"] = client_id
+                if client_session_key:
+                    headers["X-Hermes-Session-Key"] = client_session_key
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
-                headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+                headers.setdefault("X-Hermes-Session-Key", f"webui:{session_id}")
             message_content: Any = str(msg_text or "")
             if attachments:
                 try:

@@ -81,3 +81,46 @@ locally and want browser-originated chat to use the same runtime/tool path as
 messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
 still follow WebUI's current compatibility path and may not match every messaging
 surface until the runtime-adapter migration is complete.
+
+## Client identity metadata
+
+Shared WebUI deployments sometimes have more than one person or device talking to
+the same agent runtime. A mobile app, desktop wrapper, or reverse proxy can attach
+optional client identity metadata to `/api/chat/start` so the agent knows which
+client sent the current turn.
+
+Header form:
+
+```http
+X-Hermes-Client-Name: Person A
+X-Hermes-Client-Id: person-a-ios
+X-Hermes-Session-Key: team:person-a:ios
+```
+
+JSON body form:
+
+```json
+{
+  "session_id": "...",
+  "message": "What's next on my list?",
+  "client_identity": {
+    "name": "Person A",
+    "id": "person-a-ios",
+    "session_key": "team:person-a:ios"
+  }
+}
+```
+
+Headers take precedence when both forms are present. WebUI sanitizes the values,
+strips control characters, caps their length, and passes them as hidden runtime
+context for that turn. The visible transcript keeps the original user message;
+WebUI does not add a fake user message for identity metadata.
+
+This metadata is not authentication. It is an agent-context hint for deployments
+that already trust the calling client, connection, or reverse proxy. Keep using
+WebUI auth, TLS, and normal access controls for security decisions.
+
+`X-Hermes-Session-Key` is also forwarded when browser chat is routed through the
+Gateway-backed chat bridge. That lets downstream runtimes use the same stable
+per-client memory scope when they support it. If a client does not provide a
+session key, the bridge keeps the existing WebUI conversation scoped fallback.
