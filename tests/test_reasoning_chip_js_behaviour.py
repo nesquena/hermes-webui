@@ -29,8 +29,11 @@ const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 
 function makeEl() {
-  return {
+    return {
     style: {},
+    _attrs: {},
+    setAttribute(k, v){this._attrs[k] = String(v)},
+    getAttribute(k){return this._attrs[k]},
     classList: {
       _set: new Set(),
       add(c){this._set.add(c)},
@@ -149,12 +152,13 @@ class TestChipAlwaysVisible:
     def test_low_shows_chip_active(self, driver_path):
         out = _apply(driver_path, "low")
         assert out["display"] == ""
-        assert out["label"] == "low"
+        assert out["label"] == "Low"
         assert out["inactive"] is False
 
     def test_high_shows_chip_active(self, driver_path):
         out = _apply(driver_path, "high")
         assert out["display"] == ""
+        assert out["label"] == "High"
         assert out["inactive"] is False
 
 
@@ -178,7 +182,7 @@ class TestNormalizationEdgeCases:
         # Defensive: unknown effort still shows the chip rather than hiding.
         out = _apply(driver_path, "banana")
         assert out["display"] == ""
-        assert out["label"] == "banana"
+        assert out["label"] == "Banana"
         assert out["inactive"] is False
 
 
@@ -196,4 +200,4 @@ class TestTitleAttributeAccessibility:
 
     def test_title_has_active_label_for_high(self, driver_path):
         out = _apply(driver_path, "high")
-        assert out["title"] == "Reasoning effort: high"
+        assert out["title"] == "Reasoning effort: High"

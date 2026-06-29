@@ -1624,7 +1624,7 @@ function _providerQuotaIndicatorText(status){
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
     const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
     const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:provider+' '+remaining, title:(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
   }
   const quota=status.quota||null;
   if(quota){
@@ -1635,7 +1635,7 @@ function _providerQuotaIndicatorText(status){
       const parts=[];
       if(used) parts.push('used '+used);
       if(limit) parts.push('limit '+limit);
-      return {label:provider+' '+remaining, title:(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
+      return {label:remaining, title:provider+' — '+(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
     }
   }
   return null;
@@ -1643,14 +1643,17 @@ function _providerQuotaIndicatorText(status){
 function renderProviderQuotaIndicator(status){
   const chip=$('providerQuotaChip');
   const label=$('providerQuotaChipLabel');
+  const mobileAction=$('composerMobileQuotaAction');
+  const mobileLabel=$('composerMobileQuotaLabel');
   if(!chip||!label) return;
   // Hide entirely when the user has disabled the ambient quota chip in Settings.
-  // Default is off (window._showQuotaChip defaults to false in boot.js) so users
-  // never see the chip unless they opt in.
+  // Boot defaults this on; an explicit false preference suppresses it.
   if(window._showQuotaChip!==true){
     chip.hidden=true;
     label.textContent='';
     chip.removeAttribute('title');
+    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
+    if(mobileLabel) mobileLabel.textContent='';
     return;
   }
   const text=_providerQuotaIndicatorText(status);
@@ -1658,11 +1661,15 @@ function renderProviderQuotaIndicator(status){
     chip.hidden=true;
     label.textContent='';
     chip.removeAttribute('title');
+    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
+    if(mobileLabel) mobileLabel.textContent='';
     return;
   }
   label.textContent=text.label;
   chip.title=text.title;
   chip.hidden=false;
+  if(mobileAction){mobileAction.style.display='';mobileAction.title=text.title;}
+  if(mobileLabel) mobileLabel.textContent=text.label;
 }
 async function refreshProviderQuotaIndicator(){
   // Short-circuit before the fetch when the chip is disabled — no point asking
@@ -1670,6 +1677,10 @@ async function refreshProviderQuotaIndicator(){
   if(window._showQuotaChip!==true){
     const chip=$('providerQuotaChip');
     if(chip){chip.hidden=true;chip.removeAttribute('title');}
+    const mobileAction=$('composerMobileQuotaAction');
+    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
+    const mobileLabel=$('composerMobileQuotaLabel');
+    if(mobileLabel) mobileLabel.textContent='';
     return;
   }
   if(_providerQuotaRefreshInFlight) return;
@@ -2385,6 +2396,37 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   return matches[0];
 }
 
+function _compactComposerModelChipLabel(modelId,labelText){
+  const id=String(modelId||'').trim();
+  const raw=String(labelText||'').trim();
+  if(!raw) return getModelLabel(id);
+  const idLower=id.toLowerCase();
+  const rawLower=raw.toLowerCase();
+  const slash=id.indexOf('/');
+  if(slash>0){
+    const provider=id.slice(0,slash).toLowerCase();
+    if(rawLower.startsWith(provider+'/')){
+      return raw.slice(provider.length+1).trim();
+    }
+  }
+  if(id&&rawLower===idLower&&raw.includes('/')){
+    return raw.slice(raw.indexOf('/')+1).trim();
+  }
+  if(raw.includes('/') && !/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)){
+    const parts=raw.split('/').map(s=>s.trim()).filter(Boolean);
+    if(parts.length>=2){
+      const tail=parts[parts.length-1];
+      const tailLower=tail.toLowerCase();
+      if(idLower && (tailLower===idLower || idLower.endsWith('/'+tailLower))) return tail;
+      if(parts.length===2){
+        const leadLower=parts[0].toLowerCase();
+        if(tailLower.startsWith(leadLower+'-')) return tail;
+      }
+    }
+  }
+  return raw;
+}
+
 function syncModelChip(){
   const sel=$('modelSelect');
   const chip=$('composerModelChip');
@@ -2402,8 +2444,9 @@ function syncModelChip(){
   }
   const opt=_selectedModelOption();
   const text=opt?opt.textContent:getModelLabel(sel.value||'');
+  const compactText=_compactComposerModelChipLabel(sel.value||'', text);
   const gatewayRouting=_latestGatewayRoutingForSession(S.session);
-  const displayText=_formatGatewayModelLabel(sel.value||'',text,gatewayRouting)||text;
+  const displayText=_formatGatewayModelLabel(sel.value||'',compactText,gatewayRouting)||compactText;
   label.textContent=displayText;
   if(mobileLabel) mobileLabel.textContent=displayText;
   chip.title=gatewayRouting?`${sel.value||'Conversation model'} ${_gatewayRoutingLabel(gatewayRouting)}`:(sel.value||'Conversation model');
@@ -3220,6 +3263,84 @@ window.addEventListener('resize',()=>{
   }
 });
 
+// ── Fit-based composer footer collapse ──────────────────────────────────────
+// Stage classes on .composer-footer:
+//   (none) full labels · .cf-icons icon chips · .cf-icons.cf-burger hamburger.
+let _composerFitScheduled=false;
+let _composerFitResizeObserver=null;
+let _composerFitMutationObserver=null;
+let _composerFitObservedFooter=null;
+let _composerFitResizeListenerBound=false;
+
+function _fitComposerFooter(){
+  const footer=document.querySelector('.composer-footer');
+  if(!footer) return;
+  const left=footer.querySelector('.composer-left');
+  if(!left) return;
+  if(!left.clientWidth) return;
+  const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  footer.classList.remove('cf-icons','cf-burger');
+  if(!overflows()) return;
+  footer.classList.add('cf-icons');
+  if(!overflows()) return;
+  footer.classList.add('cf-burger');
+}
+window._fitComposerFooter=_fitComposerFooter;
+
+function _scheduleComposerFit(){
+  if(_composerFitScheduled) return;
+  _composerFitScheduled=true;
+  requestAnimationFrame(function(){
+    _composerFitScheduled=false;
+    try{_fitComposerFooter();}catch(_){ }
+  });
+}
+window._scheduleComposerFit=_scheduleComposerFit;
+
+function _initComposerFooterFit(){
+  const footer=document.querySelector('.composer-footer');
+  const left=footer&&footer.querySelector('.composer-left');
+  if(!footer||!left) return;
+  _scheduleComposerFit();
+  if(_composerFitObservedFooter===footer) return;
+  if(_composerFitResizeObserver){try{_composerFitResizeObserver.disconnect();}catch(_){ }}
+  if(_composerFitMutationObserver){try{_composerFitMutationObserver.disconnect();}catch(_){ }}
+  _composerFitResizeObserver=null;
+  _composerFitMutationObserver=null;
+  _composerFitObservedFooter=footer;
+  if(window.ResizeObserver){
+    try{
+      _composerFitResizeObserver=new ResizeObserver(_scheduleComposerFit);
+      _composerFitResizeObserver.observe(footer);
+      // Also observe the left control group directly: the footer's outer width
+      // may not change when right-side controls (status/context chips) appear or
+      // resize, but that shrinks .composer-left's available room and must
+      // retrigger a refit. (Codex gate #4657.)
+      if(left && left!==footer){try{_composerFitResizeObserver.observe(left);}catch(_){ }}
+    }catch(_){ }
+  }
+  if(window.MutationObserver){
+    try{
+      _composerFitMutationObserver=new MutationObserver(_scheduleComposerFit);
+      _composerFitMutationObserver.observe(left,{
+        childList:true,subtree:true,characterData:true,
+        attributes:true,attributeFilter:['class','style','hidden']
+      });
+    }catch(_){ }
+  }
+  if(!_composerFitResizeListenerBound){
+    window.addEventListener('resize',_scheduleComposerFit);
+    _composerFitResizeListenerBound=true;
+  }
+}
+window._initComposerFooterFit=_initComposerFooterFit;
+
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',_initComposerFooterFit);
+}else{
+  _initComposerFooterFit();
+}
+
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
 let _currentReasoningEffortsSupported=null;
@@ -3231,7 +3352,12 @@ function _normalizeReasoningEffort(eff){
 function _formatReasoningEffortLabel(effort){
   if(effort==='none') return 'None';
   if(!effort) return 'Default';
-  return effort;
+  if(effort==='minimal') return 'Minimal';
+  if(effort==='low') return 'Low';
+  if(effort==='medium') return 'Medium';
+  if(effort==='high') return 'High';
+  if(effort==='xhigh') return 'XHigh';
+  return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
 function _reasoningEffortContext(){
@@ -3304,7 +3430,9 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    chip.title='Reasoning effort: '+text;
+    const labelText='Reasoning effort: '+text;
+    chip.title=labelText;
+    chip.setAttribute('aria-label',labelText);
   }
   if(mobileAction) mobileAction.classList.toggle('inactive',!effort||effort==='none');
   _highlightReasoningOption(effort);
@@ -3790,6 +3918,18 @@ function closeMobileComposerConfig(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
 }
 
+function openMobileComposerConfig(){
+  const panel=$('composerMobileConfigPanel');
+  if(!panel) return;
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  closeModelDropdown();
+  closeReasoningDropdown();
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  panel.classList.add('open');
+  _syncMobileComposerConfigButton(true);
+}
+
 function toggleMobileComposerConfig(){
   const panel=$('composerMobileConfigPanel');
   if(!panel) return;
@@ -3801,14 +3941,22 @@ function toggleMobileComposerConfig(){
     if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
     return;
   }
-  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
-  if(typeof closeWsDropdown==='function') closeWsDropdown();
-  closeModelDropdown();
-  closeReasoningDropdown();
-  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
-  panel.classList.add('open');
-  _syncMobileComposerConfigButton(true);
+  openMobileComposerConfig();
 }
+
+function openComposerContextMenu(e){
+  if(e){
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  const tooltip=$('ctxTooltip');
+  if(tooltip){
+    tooltip.classList.remove('ctx-tooltip-active');
+    tooltip.setAttribute('aria-hidden','true');
+  }
+  openMobileComposerConfig();
+}
+window.openComposerContextMenu=openComposerContextMenu;
 
 document.addEventListener('click',function(e){
   if(
@@ -4469,7 +4617,7 @@ function _clearActivityElapsedTimer(){
   _activityElapsedTimerGroup=null;
 }
 
-const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, reasoning, and context settings';
+const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, quota, reasoning, and context settings';
 
 function _setCtxCompressButton(btn,text){
   if(!btn)return;
@@ -4699,20 +4847,16 @@ function _syncCtxIndicator(usage){
 }
 
 // ── Touch support: toggle context tooltip on tap (#524) ──
-// On mobile, hover doesn't work — allow tap on the context ring button
-// to toggle the tooltip visibility so the compress affordance is reachable.
+// Hover/focus still exposes the compact tooltip, but a click/tap now opens the
+// shared composer config menu used by the phone footer so the richer context
+// details and compress action have one interaction path.
 document.addEventListener('DOMContentLoaded',function(){
   const wrap=document.getElementById('ctxIndicatorWrap');
   const tooltip=document.getElementById('ctxTooltip');
   if(!wrap||!tooltip)return;
   const btn=document.getElementById('ctxIndicator');
   if(!btn)return;
-  btn.addEventListener('click',function(e){
-    e.stopPropagation();
-    const isOpen=tooltip.classList.contains('ctx-tooltip-active');
-    tooltip.classList.toggle('ctx-tooltip-active',!isOpen);
-    tooltip.setAttribute('aria-hidden',String(isOpen));
-  });
+  btn.addEventListener('click',openComposerContextMenu);
   // Close on outside tap
   document.addEventListener('click',function(){
     tooltip.classList.remove('ctx-tooltip-active');
@@ -5002,7 +5146,9 @@ function _gatewayRoutingLabel(routing){
 function _formatGatewayModelLabel(modelId,labelText,routing){
   if(!routing)return'';
   const usedModel=String(routing.used_model||'').trim();
-  const base=usedModel?getModelLabel(usedModel):(labelText||getModelLabel(modelId));
+  const base=usedModel
+    ?_compactComposerModelChipLabel(usedModel,getModelLabel(usedModel))
+    :_compactComposerModelChipLabel(modelId,labelText||getModelLabel(modelId));
   const via=_gatewayRoutingLabel(routing);
   return via?`${base} ${via}`:base;
 }
