@@ -30,7 +30,7 @@ from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
