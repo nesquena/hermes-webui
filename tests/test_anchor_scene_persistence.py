@@ -39,6 +39,9 @@ def _anchor_scene_visible_semantics(scene, *, include_terminal=False):
         if role == "tool":
             tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
             payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            args = tool.get("args") if "args" in tool else payload.get("args")
+            if args is None:
+                args = {}
             semantics.append(
                 {
                     "role": role,
@@ -46,7 +49,7 @@ def _anchor_scene_visible_semantics(scene, *, include_terminal=False):
                     "status": row.get("status"),
                     "tool_call_id": row.get("tool_call_id") or tool.get("id") or payload.get("tid"),
                     "name": tool.get("name") or payload.get("name"),
-                    "args": tool.get("args") or payload.get("args") or {},
+                    "args": args,
                     "done": tool.get("done"),
                 }
             )
@@ -61,6 +64,23 @@ def _anchor_scene_visible_semantics(scene, *, include_terminal=False):
                 }
             )
     return semantics
+
+
+def test_anchor_scene_visible_semantics_preserves_empty_tool_args():
+    scene = {
+        "activity_rows": [
+            {
+                "role": "tool",
+                "kind": "tool_completed",
+                "status": "completed",
+                "tool_call_id": "call-1",
+                "tool": {"id": "call-1", "name": "terminal", "args": {}},
+                "payload": {"tid": "call-1", "name": "terminal", "args": {"command": "stale"}},
+            }
+        ]
+    }
+
+    assert _anchor_scene_visible_semantics(scene)[0]["args"] == {}
 
 
 def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path, monkeypatch):
