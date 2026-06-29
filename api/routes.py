@@ -533,7 +533,7 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
     method = str(method).upper()
     if _request_session_visibility_exempt(method, getattr(parsed, "path", "")):
         return True
-    sid = parse_qs(parsed.query).get("session_id", [None])[0]
+    sid = parse_qs(getattr(parsed, "query", "") or "").get("session_id", [None])[0]
     if not _session_id_visible_to_request_profile(handler, sid):
         return False
     if isinstance(body, dict) and not _session_id_visible_to_request_profile(handler, body.get("session_id")):
