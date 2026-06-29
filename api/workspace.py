@@ -1471,9 +1471,9 @@ def read_file_content(workspace: Path, rel: str) -> dict:
         if st.st_size > MAX_FILE_BYTES:
             raise ValueError(f"File too large ({st.st_size} bytes, max {MAX_FILE_BYTES})")
         raw = fh.read(MAX_FILE_BYTES + 1)
-    from api.office_documents import is_claimed_office_path, preview_office_document
+    if Path(str(rel)).suffix.lower() in {".docx", ".xlsx", ".pptx"}:
+        from api.office_documents import preview_office_document
 
-    if is_claimed_office_path(rel):
         return preview_office_document(rel, raw)
     content = raw.decode('utf-8', errors='replace')
     return {'path': rel, 'content': content, 'size': len(raw), 'lines': content.count('\n') + 1}

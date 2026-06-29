@@ -12,6 +12,7 @@ import pytest
 from docx import Document as DocxDocument
 from openpyxl import Workbook
 
+import api.office_documents as office_documents
 import api.routes as routes
 
 
@@ -109,6 +110,22 @@ def test_file_read_returns_office_preview_payload_for_docx(tmp_path, monkeypatch
     assert payload["content"] == "alpha\nbeta"
 
 
+def test_file_read_returns_503_when_office_parsers_are_missing(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "story.docx").write_bytes(_simple_docx_bytes("alpha"))
+    captured = _patch_file_ops(monkeypatch, workspace)
+
+    def fail_read(*_args, **_kwargs):
+        raise ImportError(office_documents.OFFICE_DEPENDENCY_HINT)
+
+    monkeypatch.setattr(routes, "read_file_content", fail_read)
+
+    routes._handle_file_read(object(), urlparse("/api/file?session_id=sid&path=story.docx"))
+
+    assert captured["bad"] == (office_documents.OFFICE_DEPENDENCY_HINT, 503)
+
+
 def test_office_save_route_accepts_safe_docx_and_rejects_preview_only_formats(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -141,6 +158,25 @@ def test_office_save_route_accepts_safe_docx_and_rejects_preview_only_formats(tm
     )
     assert captured["bad"][1] == 400
     assert "preview-only" in captured["bad"][0]
+
+
+def test_office_save_route_returns_503_when_office_parsers_are_missing(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "story.docx").write_bytes(_simple_docx_bytes("alpha"))
+    captured = _patch_file_ops(monkeypatch, workspace)
+
+    def fail_save(*_args, **_kwargs):
+        raise ImportError(office_documents.OFFICE_DEPENDENCY_HINT)
+
+    monkeypatch.setattr(office_documents, "save_office_document", fail_save)
+
+    routes._handle_office_file_save(
+        object(),
+        {"session_id": "sid", "path": "story.docx", "content": "beta"},
+    )
+
+    assert captured["bad"] == (office_documents.OFFICE_DEPENDENCY_HINT, 503)
 
 
 def test_workspace_js_docx_routes_through_file_read_not_download():

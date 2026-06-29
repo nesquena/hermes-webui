@@ -14,6 +14,7 @@ from openpyxl import Workbook
 from pptx import Presentation
 from pptx.util import Inches
 
+import api.office_documents as office_documents
 from api.office_documents import (
     CLAIMED_OFFICE_EXTENSIONS,
     is_claimed_office_path,
@@ -109,6 +110,17 @@ def _simple_pptx_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _multi_slide_pptx_bytes() -> bytes:
+    presentation = Presentation()
+    for index in range(2):
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))
+        box.text = f"Slide {index + 1}"
+    buffer = io.BytesIO()
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
 def test_office_registry_claims_docx_xlsx_pptx():
     assert CLAIMED_OFFICE_EXTENSIONS == {".docx", ".xlsx", ".pptx"}
     assert is_claimed_office_path("report.docx")
@@ -176,6 +188,17 @@ def test_docx_with_non_default_paragraph_style_stays_preview_only():
     assert preview.get("edit_blocked_reason")
 
 
+def test_docx_preview_truncation_disables_editing(monkeypatch):
+    monkeypatch.setattr(office_documents, "MAX_DOCX_PREVIEW_BLOCKS", 1)
+
+    preview = preview_office_document("story.docx", _simple_docx_bytes("alpha", "beta"))
+
+    assert preview["truncated"] is True
+    assert preview["editable"] is False
+    assert preview["edit_blocked_reason"] == "docx preview exceeds safe limits"
+    assert office_documents.OFFICE_PREVIEW_TRUNCATED_NOTICE in preview["content"]
+
+
 def _office_state_block() -> str:
     marker = "if(data.preview_kind==='office'){"
     start = WORKSPACE_JS.find(marker)
@@ -223,6 +246,15 @@ def test_xlsx_stays_preview_only():
         save_office_document(path, raw, "edited text")
 
 
+def test_xlsx_preview_is_bounded(monkeypatch):
+    monkeypatch.setattr(office_documents, "MAX_XLSX_PREVIEW_ROWS_PER_SHEET", 1)
+
+    preview = preview_office_document("budget.xlsx", _simple_xlsx_bytes())
+
+    assert preview["truncated"] is True
+    assert office_documents.OFFICE_PREVIEW_TRUNCATED_NOTICE in preview["content"]
+
+
 def test_pptx_stays_preview_only():
     path = "deck.pptx"
     raw = _simple_pptx_bytes()
@@ -235,6 +267,15 @@ def test_pptx_stays_preview_only():
 
     with pytest.raises(ValueError):
         save_office_document(path, raw, "edited text")
+
+
+def test_pptx_preview_is_bounded(monkeypatch):
+    monkeypatch.setattr(office_documents, "MAX_PPTX_PREVIEW_SLIDES", 1)
+
+    preview = preview_office_document("deck.pptx", _multi_slide_pptx_bytes())
+
+    assert preview["truncated"] is True
+    assert office_documents.OFFICE_PREVIEW_TRUNCATED_NOTICE in preview["content"]
 
 
 def test_rich_docx_stays_preview_only():
