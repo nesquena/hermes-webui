@@ -118,6 +118,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
     daemon_threads = True
     request_queue_size = 64
+    # Thread ceiling only; large-session latency/load remains separate follow-up work (#4765, #5201).
     max_request_workers = 128
     max_overflow_reject_workers = 16
     _OVERFLOW_RESPONSE = (
