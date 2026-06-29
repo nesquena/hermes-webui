@@ -6,6 +6,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 import html as _html
 import copy
 import hashlib
+import inspect
 import errno
 import io
 import gzip
@@ -1781,6 +1782,19 @@ _session_list_cache_stale_reason = _route_session_list_cache._session_list_cache
 _session_list_cache_streaming_freeze_marker = _route_session_list_cache._session_list_cache_streaming_freeze_marker
 
 
+def _callable_accepts_kwarg(callable_obj, kwarg_name: str) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    if kwarg_name in signature.parameters:
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
 def _session_list_cache_key(
     active_profile: str | None,
     all_profiles: bool,
@@ -1792,7 +1806,7 @@ def _session_list_cache_key(
     visible_only: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
-    show_claude_code_sessions: bool = False,
+    show_claude_code_sessions: bool = True,
 ) -> tuple:
     return _route_session_list_cache_key(
         active_profile=active_profile,
@@ -2080,18 +2094,11 @@ def _build_session_list_cache_payload(
         )
 
     def _all_sessions_for_sidebar():
-        try:
+        if _callable_accepts_kwarg(all_sessions, "include_lineage_metadata"):
             return all_sessions(diag=diag, include_lineage_metadata=False)
-        except TypeError as exc:
-            message = str(exc)
-            if (
-                "unexpected keyword argument" not in message
-                or "include_lineage_metadata" not in message
-            ):
-                raise
-            # Focused tests and third-party callers sometimes monkeypatch
-            # routes.all_sessions with the historical diag-only signature.
-            return all_sessions(diag=diag)
+        # Focused tests and third-party callers sometimes monkeypatch
+        # routes.all_sessions with the historical diag-only signature.
+        return all_sessions(diag=diag)
 
     diag_stage("all_sessions")
     webui_sessions = _all_sessions_for_sidebar()
@@ -2107,19 +2114,13 @@ def _build_session_list_cache_payload(
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
-        try:
+        if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
             cli = get_cli_sessions(
                 source_filter=source_filter,
                 all_profiles=all_profiles,
                 include_claude_code=show_claude_code_sessions,
             )
-        except TypeError as exc:
-            message = str(exc)
-            if (
-                "unexpected keyword argument" not in message
-                or "include_claude_code" not in message
-            ):
-                raise
+        else:
             # Focused tests sometimes monkeypatch routes.get_cli_sessions with
             # the historical two-keyword signature.
             cli = get_cli_sessions(

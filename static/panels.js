@@ -8225,17 +8225,17 @@ async function loadSettingsPanel(){
       showClaudeCodeCb.disabled=showCliCb?!showCliCb.checked:true;
       showClaudeCodeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
+    if(showCliCb){showCliCb.addEventListener('change',function(){
+      const enabled=!!showCliCb.checked;
+      if(showCronCb) showCronCb.disabled=!enabled;
+      if(showClaudeCodeCb) showClaudeCodeCb.disabled=!enabled;
+      _schedulePreferencesAutosave();
+    },{once:false});}
     const showCronCb=$('settingsShowCronSessions');
     if(showCronCb){
       showCronCb.checked=!!settings.show_cron_sessions;
       showCronCb.disabled=showCliCb?!showCliCb.checked:true;
       showCronCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-      if(showCliCb){showCliCb.addEventListener('change',function(){
-        const enabled=!!showCliCb.checked;
-        showCronCb.disabled=!enabled;
-        if(showClaudeCodeCb) showClaudeCodeCb.disabled=!enabled;
-        _schedulePreferencesAutosave();
-      },{once:false});}
     }
     const showWebhookCb=$('settingsShowWebhookSessions');
     if(showWebhookCb){

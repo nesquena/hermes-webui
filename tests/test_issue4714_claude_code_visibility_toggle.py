@@ -213,6 +213,26 @@ def test_session_list_cache_key_changes_with_claude_code_toggle():
     assert key_false != key_true
 
 
+def test_session_list_cache_key_default_keeps_claude_code_enabled():
+    """Helper callers that omit the flag should match the config default."""
+    key_default = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    key_true = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_claude_code_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    assert key_default == key_true
+
+
 def test_cli_sessions_cache_key_varies_with_claude_code_toggle(monkeypatch):
     """The lower CLI-session cache must also key on the Claude Code toggle."""
     calls = []
@@ -236,6 +256,26 @@ def test_cli_sessions_cache_key_varies_with_claude_code_toggle(monkeypatch):
     assert calls == [True, False]
     assert visible == [{"session_id": "claude"}]
     assert hidden == [{"session_id": "plain"}]
+
+
+def test_sessions_route_supports_historical_get_cli_sessions_signature(monkeypatch):
+    """Route compatibility should not rely on swallowing internal TypeErrors."""
+    rows = _rows_webui()
+    _common_monkeypatches(monkeypatch, rows, [])
+    calls = []
+
+    def historical_get_cli_sessions(source_filter=None, all_profiles=False):
+        calls.append((source_filter, all_profiles))
+        return [_row("external-cli", "cli", "cli")]
+
+    monkeypatch.setattr(routes, "get_cli_sessions", historical_get_cli_sessions)
+
+    handler = _handle_sessions("http://example.com/api/sessions")
+    body = handler.json_body()
+
+    assert handler.status == 200
+    assert calls == [(None, False)]
+    assert {row["session_id"] for row in body["sessions"]} == {"webui-1", "external-cli"}
 
 
 def test_all_profiles_scans_claude_code_only_once(monkeypatch):
@@ -361,6 +401,57 @@ console.log(JSON.stringify({{
     assert payload["after"] == {
         "claudeDisabled": True,
         "cronDisabled": True,
+        "autosaveCalls": 1,
+    }
+
+
+def test_claude_code_checkbox_parent_listener_does_not_depend_on_cron_checkbox():
+    """The Claude child checkbox must still follow the parent without the cron node."""
+    settings_block = _extract_between(
+        PANELS_JS.read_text(encoding="utf-8"),
+        "    const showCliCb=$('settingsShowCliSessions');",
+        "    const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');",
+    )
+    script = f"""
+const block = {json.dumps(settings_block)};
+function makeCheckbox(checked) {{
+  return {{
+    checked,
+    disabled: false,
+    listeners: {{}},
+    addEventListener(name, fn) {{
+      this.listeners[name] = fn;
+    }},
+  }};
+}}
+const elements = {{
+  settingsShowCliSessions: makeCheckbox(true),
+  settingsShowClaudeCodeSessions: makeCheckbox(true),
+}};
+const settings = {{
+  show_cli_sessions: true,
+  show_claude_code_sessions: true,
+}};
+let autosaveCalls = 0;
+function _schedulePreferencesAutosave() {{
+  autosaveCalls += 1;
+}}
+function $(id) {{
+  return elements[id] || null;
+}}
+eval(block);
+elements.settingsShowCliSessions.checked = false;
+elements.settingsShowCliSessions.listeners.change();
+console.log(JSON.stringify({{
+  claudeDisabled: elements.settingsShowClaudeCodeSessions.disabled,
+  autosaveCalls,
+}}));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    payload = json.loads(result.stdout)
+
+    assert payload == {
+        "claudeDisabled": True,
         "autosaveCalls": 1,
     }
 
