@@ -1026,7 +1026,10 @@ window._hermesTtsSynth=function(id, text, opts){
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
-  const SILENCE_MS=1800; // auto-send after 1.8s silence
+  // Configurable via localStorage keys (set from dev console or a future settings panel).
+  //   hermes-voice-silence-ms   — pause duration before auto-send (ms, default 1800)
+  //   hermes-voice-continuous   — keep mic open across natural pauses ("true"/"false", default false)
+  const SILENCE_MS=parseInt(localStorage.getItem('hermes-voice-silence-ms'))||1800;
 
   function _clearBrowserTtsRecovery(){
     if(_browserTtsKeepAlive){
@@ -1086,7 +1089,7 @@ window._hermesTtsSynth=function(id, text, opts){
     _setState('listening');
 
     _recognition=new SpeechRecognition();
-    _recognition.continuous=false;
+    _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
     _recognition.interimResults=true;
     _recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
