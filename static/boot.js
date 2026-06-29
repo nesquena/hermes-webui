@@ -2609,7 +2609,18 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       const p = await loadActiveProfile();
       if (p && typeof p === 'object' && typeof p.name === 'string') {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
-        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+        return {
+          status: 'resolved',
+          profile: p.name || 'default',
+          isDefault: !!p.is_default,
+          // Profile-scoped workspace resolved by the backend (#5169). When set,
+          // this OVERRIDES the global value sourced from GET /api/settings so a
+          // cold boot with a profile cookie shows the active profile's configured
+          // workspace on the blank new-chat composer chip + inherit chain.
+          defaultWorkspace: (typeof p.default_workspace === 'string' && p.default_workspace)
+            ? p.default_workspace
+            : null,
+        };
       }
       if (p === undefined && !alreadyAttempted) {
         if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
@@ -2638,6 +2649,16 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   if (activeProfileState.status === 'recovery-redirect') return;
   S.activeProfile = activeProfileState.profile;
   S.activeProfileIsDefault = activeProfileState.isDefault;
+  // #5169: the active profile's workspace OVERRIDES the global default that was
+  // sourced from GET /api/settings above. GET /api/settings only ever returns the
+  // global settings.json default (it must NOT carry a profile workspace — the
+  // settings UI would POST it back and clobber the global default for all
+  // profiles), so on a cold load with a named-profile cookie the blank new-chat
+  // composer chip and the newSession inherit chain would otherwise show the wrong
+  // workspace (or 'No workspace'). Apply the profile-scoped value when present.
+  if (activeProfileState.defaultWorkspace) {
+    S._profileDefaultWorkspace = activeProfileState.defaultWorkspace;
+  }
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');

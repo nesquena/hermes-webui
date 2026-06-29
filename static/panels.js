@@ -5196,7 +5196,10 @@ function toggleWsDropdown(){
   else{
     closeProfileDropdown(); // close profile dropdown if open
     loadWorkspaceList().then(data=>{
-      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
+      // #5169: on a blank new-chat page (no active session) highlight the active
+      // profile's configured workspace, falling back to the server's last
+      // workspace, so the dropdown's active row matches the composer chip.
+      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last);
       dd.classList.add('open');
     });
   }
@@ -5216,7 +5219,10 @@ function toggleComposerWsDropdown(){
     if(typeof closeModelDropdown==='function') closeModelDropdown();
     if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
     loadWorkspaceList().then(data=>{
-      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
+      // #5169: on a blank new-chat page (no active session) highlight the active
+      // profile's configured workspace, falling back to the server's last
+      // workspace, so the dropdown's active row matches the composer chip.
+      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last);
       dd.classList.add('open');
       _positionComposerWsDropdown();
       if(chip) chip.classList.add('active');
