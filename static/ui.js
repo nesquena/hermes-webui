@@ -7215,7 +7215,7 @@ function clearInflightState(sid){
 //      `S.session = ...` settle point so cross-session navigation never
 //      leaves a stale list visible.
 //
-// The hash is keyed on (id, content, status); the render itself uses
+// The hash is keyed on (id, content/text, status); the render itself uses
 // `esc()` for any user-controlled string, so XSS surface is the same as
 // any other innerHTML path in this file.
 let _todosLastRenderedHash=null;
@@ -7232,9 +7232,72 @@ function _todosHash(items){
   let h=items.length+'|';
   for(let i=0;i<items.length;i++){
     const t=items[i]||{};
-    h+=String(t.id==null?'':t.id)+'\x1f'+String(t.content==null?'':t.content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
+    const content=t.content==null?(t.text==null?'':t.text):t.content;
+    h+=String(t.id==null?'':t.id)+'\x1f'+String(content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
   }
   return h;
+}
+
+const TODO_STATUS_RENDERING=Object.freeze({
+  pending:Object.freeze({icon:'square',color:'var(--muted)'}),
+  in_progress:Object.freeze({icon:'loader',color:'var(--blue)'}),
+  completed:Object.freeze({icon:'check',color:'rgba(100,200,100,.8)'}),
+  cancelled:Object.freeze({icon:'x',color:'rgba(200,100,100,.5)'}),
+});
+
+function todoStatusKey(status){
+  const key=String(status||'pending');
+  return Object.prototype.hasOwnProperty.call(TODO_STATUS_RENDERING,key)?key:'pending';
+}
+
+function todoStatusVisual(status){
+  const key=todoStatusKey(status);
+  return TODO_STATUS_RENDERING[key];
+}
+
+function renderTodoStatusIcon(status,size=14){
+  const visual=todoStatusVisual(status);
+  return typeof li==='function'?li(visual.icon,size):'';
+}
+
+function todoContent(todo){
+  if(!todo) return '';
+  return todo.content==null?(todo.text==null?'':todo.text):todo.content;
+}
+
+function renderTodoEmptyState(options={}){
+  const centered=!!(options&&options.centered);
+  const style=centered
+    ? 'padding:24px 12px;text-align:center;color:var(--muted);font-size:12px'
+    : 'color:var(--muted);font-size:12px;padding:4px 0';
+  return `<div style="${style}">${esc(t('todos_no_active'))}</div>`;
+}
+
+function renderTodoRow(todo,options={}){
+  const td=todo||{};
+  const status=todoStatusKey(td.status);
+  const visual=todoStatusVisual(status);
+  const showMetadata=!(options&&options.metadata===false);
+  const isCompleted=status==='completed';
+  const isCancelled=status==='cancelled';
+  const contentColor=(isCompleted||isCancelled)?'var(--muted)':'var(--text)';
+  const completedStyle=(isCompleted||isCancelled)?'text-decoration:line-through;opacity:.5':'';
+  const metadata=showMetadata
+    ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(status)}</div>`
+    : '';
+  return `
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${visual.color}">${renderTodoStatusIcon(status,14)}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;color:${contentColor};${completedStyle};line-height:1.4">${esc(todoContent(td))}</div>
+        ${metadata}
+      </div>
+    </div>`;
+}
+
+function renderTodoRows(todos,options={}){
+  const items=Array.isArray(todos)?todos:[];
+  return items.map(td=>renderTodoRow(td,options)).join('');
 }
 
 function _todosPanelIsActive(){
