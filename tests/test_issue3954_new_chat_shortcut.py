@@ -3,13 +3,19 @@
 import base64
 import json
 import os
+import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 ARCH = (REPO / "ARCHITECTURE.md").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
 _B14_MARKER = "if((e.metaKey||e.ctrlKey)&&e.shiftKey&&!e.altKey&&(e.key==='o'||e.key==='O'))"
@@ -31,13 +37,15 @@ def _extract_block(source: str, marker: str, *, label: str) -> str:
     return source[start : index]
 
 
-_B14_STATEMENT = _extract_block(BOOT_JS, _B14_MARKER, label="B14")
+@lru_cache(maxsize=1)
+def _b14_statement() -> str:
+    return _extract_block(BOOT_JS, _B14_MARKER, label="B14")
 
 
 def _run_b14_handler(cases):
     payload = {
         "cases": cases,
-        "block_b64": base64.b64encode(_B14_STATEMENT.encode("utf-8")).decode("ascii"),
+        "block_b64": base64.b64encode(_b14_statement().encode("utf-8")).decode("ascii"),
     }
 
     script = r'''
@@ -74,6 +82,7 @@ const block = Buffer.from(payload.block_b64, "base64").toString("utf-8");
       "newSession",
       "renderSessionList",
       "closeMobileSidebar",
+      "_restoreRememberedNewChatDraftSession",
       "return (async () => {" + block + "})();"
     );
 
@@ -84,7 +93,14 @@ const block = Buffer.from(payload.block_b64, "base64").toString("utf-8");
         $,
         async () => calls.push("newSession"),
         async () => calls.push("renderSessionList"),
-        () => calls.push("closeMobileSidebar")
+        () => calls.push("closeMobileSidebar"),
+        async () => {
+          if (scenario.restoreRememberedDraft) {
+            calls.push("restoreRememberedDraft");
+            return true;
+          }
+          return false;
+        }
       );
       results.push({
         name: scenario.name,
@@ -108,7 +124,7 @@ const block = Buffer.from(payload.block_b64, "base64").toString("utf-8");
 
     env = os.environ.copy()
     env["B14_PAYLOAD"] = json.dumps(payload)
-    out = subprocess.check_output(["node", "-e", script], text=True, env=env)
+    out = subprocess.check_output([NODE, "-e", script], text=True, env=env)
     return json.loads(out)
 
 
@@ -227,6 +243,27 @@ def test_ctrl_shift_o_keeps_empty_idle_guard():
         assert row["error"] is None, f"{name}: handler crashed {row['error']}"
         assert row["prevented"], f"{name}: should prevent default before guard returns"
         assert row["calls"] == expected, f"{name}: expected {expected}, got {row['calls']}"
+
+
+def test_ctrl_shift_o_restores_remembered_draft_before_new_session():
+    """The shortcut should match the New Conversation button's draft restore path."""
+    results = _run_b14_handler([
+        {
+            **_scenario(
+                "ctrl_shift_o_restore",
+                event=_event(ctrl_key=True, meta_key=False, shift_key=True, key="o"),
+                include_busy=True,
+            ),
+            "restoreRememberedDraft": True,
+        },
+    ])
+    row = results[0]
+    assert row["error"] is None, f"ctrl_shift_o_restore: handler crashed {row['error']}"
+    assert row["prevented"], "ctrl_shift_o_restore: must call e.preventDefault()"
+    _expect_order(
+        row,
+        ["preventDefault", "restoreRememberedDraft", "renderSessionList", "closeMobileSidebar", "focus"],
+    )
 
 
 def test_new_chat_tooltip_advertises_shift_o():

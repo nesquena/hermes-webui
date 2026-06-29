@@ -1750,6 +1750,10 @@ document.addEventListener('keydown',async e=>{
        && !S.session.pending_user_message){
       $('msg').focus();return;
     }
+    if(typeof _restoreRememberedNewChatDraftSession==='function'
+       && await _restoreRememberedNewChatDraftSession()){
+      await renderSessionList();closeMobileSidebar();$('msg').focus();return;
+    }
     // Cmd/Ctrl+Shift+O should always create a new conversation, even while the current
     // one is still streaming. The old !S.busy guard meant users had to wait for
     // a long generation to finish before they could start something new — exactly
