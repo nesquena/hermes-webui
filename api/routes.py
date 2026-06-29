@@ -4867,8 +4867,50 @@ def _clean_session_model_provider(value: str | None) -> str | None:
     return provider or None
 
 
+# Synthetic / virtual provider ids that may appear in the WebUI picker
+# without the leading ``@`` qualifier. Keep this set conservative: adding
+# a new entry means a picker-emitted id of ``<virtual>:<name>`` on that
+# provider will roundtrip cleanly through ``_split_provider_qualified_model``
+# and ``_session_model_identity_matches``. Real provider/model ids never
+# use these prefixes today, so the false-positive risk is limited.
+_VIRTUAL_PICKER_PROVIDERS = frozenset({"moa", "mix", "hybrid"})
+
+
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
+    """Split a picker-supplied ``provider:model`` string into ``(model, provider)``.
+
+    Recognised shapes — try in order, return on first match:
+
+      - ``@provider:model``     e.g. ``@anthropic:claude-opus-4.8``
+      - ``provider:model``      e.g. ``moa:ai-council-lite`` — the Mixture-of-
+        Agents picker emits its synthetic-providers under a
+        colon-prefixed-but-no-@ form because ``resolve_provider_qualified_model``
+        already strips the leading ``moa:`` cleanly downstream. Without this
+        branch, picking ``MoA: ai-council-lite`` from the WebUI sent the
+        literal string ``moa:ai-council-lite`` as the model id; downstream
+        had no mapping for that and surfaced ``Error: 'moa:ai-council-lite'``.
+
+    Both shapes split at the FIRST ``:`` (rsplit-from-the-right doesn't help
+    here — preset names never contain ``:`` so it's safe to split from the
+    left and the rule remains unambiguous). Returns ``(model, provider)``
+    when both halves are non-empty after cleaning, otherwise
+    ``(model, None)`` to signal a non-qualified name.
+    """
     model = str(model or "").strip()
+    if not model:
+        return model, None
+    # MoA picker form: ``moa:preset-name`` (no leading ``@``). Limit the
+    # no-at form to known synthetic / virtual providers so we don't
+    # accidentally split real model ids that happen to contain a colon
+    # (none today, but defensive). Virtual providers currently shipped in
+    # this codebase: ``moa``, ``mix``, ``hybrid``.
+    if not model.startswith("@") and ":" in model:
+        prefix = model.split(":", 1)[0].strip()
+        if prefix in _VIRTUAL_PICKER_PROVIDERS:
+            bare = model.split(":", 1)[1].strip()
+            if prefix and bare:
+                return bare, prefix
+    # Standard form: ``@provider:model``.
     if model.startswith("@") and ":" in model:
         provider_hint, bare_model = model[1:].rsplit(":", 1)
         provider = _clean_session_model_provider(provider_hint)
