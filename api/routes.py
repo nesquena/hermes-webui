@@ -481,6 +481,21 @@ def _query_flag(parsed_url, name: str) -> bool:
     return raw in ('1', 'true', 'yes', 'on')
 
 
+def _query_positive_int(parsed_url, name: str, *, default=None, maximum: int | None = None):
+    """Return a non-negative integer query parameter, or default when absent/invalid."""
+    qs = parse_qs(parsed_url.query)
+    raw = qs.get(name, [''])[0]
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    if value < 0:
+        return default
+    if maximum is not None:
+        value = min(value, int(maximum))
+    return value
+
+
 def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     """Return whether a detail-load session belongs to the active profile.
 
@@ -1694,6 +1709,8 @@ def _build_session_list_cache_payload(
     visible_only: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
+    archived_limit: int | None = None,
+    archived_offset: int = 0,
     diag=None,
 ) -> dict:
     diag_stage = diag.stage if diag is not None else lambda *_a, **_k: None
@@ -1900,15 +1917,6 @@ def _build_session_list_cache_payload(
         if s.get("archived") and _is_cli_session_for_settings(s)
     )
     archived_count = archived_webui_count + archived_cli_count
-    scoped = archived_scoped if include_archived else visible_scoped
-    webui_session_count = sum(
-        1 for s in scoped
-        if not _is_cli_session_for_settings(s)
-    )
-    cli_session_count = sum(
-        1 for s in scoped
-        if _is_cli_session_for_settings(s)
-    )
     def _filter_sidebar_source(rows: list[dict]) -> list[dict]:
         if sidebar_source == "webui":
             return [s for s in rows if not _is_cli_session_for_settings(s)]
@@ -1916,12 +1924,38 @@ def _build_session_list_cache_payload(
             return [s for s in rows if _is_cli_session_for_settings(s)]
         return list(rows)
 
-    scoped = _filter_sidebar_source(scoped)
+    full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
+    webui_session_count = sum(
+        1 for s in full_scoped_all_sources
+        if not _is_cli_session_for_settings(s)
+    )
+    cli_session_count = sum(
+        1 for s in full_scoped_all_sources
+        if _is_cli_session_for_settings(s)
+    )
+    visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
+    archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
+    scoped = _filter_sidebar_source(full_scoped_all_sources)
+    if include_archived and archived_limit is not None:
+        try:
+            normalized_archived_limit = max(0, int(archived_limit))
+        except (TypeError, ValueError):
+            normalized_archived_limit = None
+        try:
+            normalized_archived_offset = max(0, int(archived_offset or 0))
+        except (TypeError, ValueError):
+            normalized_archived_offset = 0
+        if normalized_archived_limit is not None:
+            visible_rows_for_page = [s for s in visible_scoped_filtered if not s.get("archived")]
+            archived_rows_for_page = [s for s in archived_scoped_filtered if s.get("archived")]
+            scoped = visible_rows_for_page + archived_rows_for_page[
+                normalized_archived_offset: normalized_archived_offset + normalized_archived_limit
+            ]
     sidebar_reference_sessions: list[dict] = []
     if not include_archived:
         sidebar_reference_sessions = _hidden_archived_sidebar_reference_sessions(
-            _filter_sidebar_source(visible_scoped),
-            _filter_sidebar_source(archived_scoped),
+            visible_scoped_filtered,
+            archived_scoped_filtered,
         )
     if not include_archived:
         diag_stage("filter_archived_sessions")
@@ -1943,6 +1977,8 @@ def _build_session_list_cache_payload(
         "webui_session_count": webui_session_count,
         "cli_session_count": cli_session_count,
         "include_archived": include_archived,
+        "archived_limit": archived_limit,
+        "archived_offset": archived_offset,
         "all_profiles": all_profiles,
         "active_profile": active_profile,
         "other_profile_count": other_profile_count,
@@ -1996,6 +2032,9 @@ def _session_list_payload_to_response(payload: dict) -> dict:
         response["webui_session_count"] = int(payload.get("webui_session_count", 0))
     if "cli_session_count" in payload:
         response["cli_session_count"] = int(payload.get("cli_session_count", 0))
+    if payload.get("archived_limit") is not None:
+        response["archived_limit"] = int(payload.get("archived_limit") or 0)
+        response["archived_offset"] = int(payload.get("archived_offset") or 0)
     return response
 
 
@@ -10691,6 +10730,8 @@ def handle_get(handler, parsed) -> bool:
             all_profiles = _all_profiles_enabled(parsed)
             include_archived = _query_flag(parsed, "include_archived")
             exclude_hidden = _query_flag(parsed, "exclude_hidden")
+            archived_limit = _query_positive_int(parsed, "archived_limit", default=None, maximum=2000)
+            archived_offset = _query_positive_int(parsed, "archived_offset", default=0, maximum=200000)
             sidebar_source = parse_qs(parsed.query).get("sidebar_source", [""])[0].strip().lower() or None
             if sidebar_source not in ("webui", "cli"):
                 sidebar_source = None
@@ -10707,6 +10748,8 @@ def handle_get(handler, parsed) -> bool:
                 visible_only=True,
                 source_filter=agent_session_source_filter,
                 sidebar_source=sidebar_source,
+                archived_limit=archived_limit,
+                archived_offset=archived_offset,
             )
             # Keep the visible /api/sessions contract unchanged even though the
             # heavy lifting now lives in the cache builder: profile scoping via
@@ -10725,6 +10768,8 @@ def handle_get(handler, parsed) -> bool:
                     visible_only=True,
                     source_filter=agent_session_source_filter,
                     sidebar_source=sidebar_source,
+                    archived_limit=archived_limit,
+                    archived_offset=archived_offset,
                     diag=diag,
                 ),
                 diag=diag,

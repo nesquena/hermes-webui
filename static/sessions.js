@@ -1819,12 +1819,30 @@ function _sessionListExcludeHiddenEnabled() {
   return _activeProject===null || _activeProject===NO_PROJECT_FILTER;
 }
 
+function _sessionArchivePagingFilterActive() {
+  let searchActive=false;
+  try{
+    const searchEl=typeof $==='function' ? $('sessionSearch') : null;
+    searchActive=Boolean(searchEl&&String(searchEl.value||'').trim());
+  }catch(_e){ searchActive=false; }
+  return Boolean(searchActive||_activeProject);
+}
+
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
   qs.set('sidebar_source', _requestedSessionSidebarSource());
   if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
-  if(_showArchived) qs.set('include_archived','1');
+  if(_showArchived){
+    qs.set('include_archived','1');
+    if(!_sessionArchivePagingFilterActive()){
+      const archiveLimit=Math.min(
+        SESSION_ARCHIVED_MAX_LOADED_LIMIT,
+        Math.max(SESSION_ARCHIVED_PAGE_SIZE, Number(_archivedRowsLoadedLimit)||SESSION_ARCHIVED_PAGE_SIZE)
+      );
+      qs.set('archived_limit', String(archiveLimit));
+    }
+  }
   return `?${qs.toString()}`;
 }
 
@@ -3023,6 +3041,8 @@ async function _ensureAllMessagesLoaded() {
   }
 }
 
+const SESSION_ARCHIVED_PAGE_SIZE = 100;
+const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 2000;
 let _allSessions = [];  // cached for search filter
 let _sidebarReferenceSessions = [];  // hidden archived ancestor rows used only for nesting/suppression
 let _allSessionsScope = null;  // {profile, allProfiles} the cache was loaded under (#4167)
@@ -3045,6 +3065,7 @@ let _showAllProfiles = false;  // false = filter to active profile only
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
 let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested
+let _archivedRowsLoadedLimit = SESSION_ARCHIVED_PAGE_SIZE;
 let _serverWebuiSessionCount = null;  // explicit server count for WebUI sessions
 let _serverCliSessionCount = null;    // explicit server count for CLI sessions
 let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
@@ -4905,6 +4926,7 @@ let _searchDebounceTimer = null;
 let _contentSearchResults = [];  // results from /api/sessions/search content scan
 let _lastSessionSearchQuery = '';
 let _hideSearchPreviewsAfterSelect = false;
+let _archivedSearchPagingQueryActive = false;
 let _serverTimeDelta = 0;       // ms offset: client clock - server clock (for clock-skew compensation)
 let _serverTz = '';              // server timezone offset string (e.g. "+0800", "+0000", "-0500")
 
@@ -5069,11 +5091,23 @@ function clearSessionSearch(focusInput=true){
   if(focusInput) input.focus();
 }
 
+function _syncArchivedSearchPagingRefresh(query){
+  const queryActive=Boolean(String(query||'').trim());
+  const previous=_archivedSearchPagingQueryActive;
+  _archivedSearchPagingQueryActive=queryActive;
+  if(!_showArchived||queryActive===previous) return;
+  // Archived title/id filtering is client-side. When search becomes active,
+  // refetch without archived_limit so matches beyond the first archived page are
+  // reachable; when search clears, refetch again to restore normal archive paging.
+  if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false});
+}
+
 function filterSessions(){
   // Immediate client-side title filter (no flicker)
   // Debounced content search via API for message text
   syncSessionSearchClear();
   const q = ($('sessionSearch').value || '').trim();
+  _syncArchivedSearchPagingRefresh(q);
   if(q!==_lastSessionSearchQuery){
     _lastSessionSearchQuery=q;
     _hideSearchPreviewsAfterSelect=false;
@@ -6063,8 +6097,16 @@ function renderSessionListFromCache(){
   const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
   const isCliView=_sessionSourceFilter==='cli';
   const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
-  const renderedWebuiSessionCount=_renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length;
-  const renderedCliSessionCount=_renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length;
+  // Server-provided source bucket counts are authoritative for the current
+  // payload. When present, skip the expensive cross-bucket render/count pass;
+  // null is a deliberate "not computed" sentinel consumed only by
+  // _sessionSourceTabCount's fallback path below.
+  const renderedWebuiSessionCount=_serverWebuiSessionCount===null
+    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length
+    : null;
+  const renderedCliSessionCount=_serverCliSessionCount===null
+    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length
+    : null;
   const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);
   const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
@@ -6261,7 +6303,11 @@ function renderSessionListFromCache(){
     const toggle=document.createElement('div');
     toggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     toggle.textContent=_showArchived?'Hide archived':'Show '+archivedCount+' archived';
-    toggle.onclick=()=>{_showArchived=!_showArchived;renderSessionList();};
+    toggle.onclick=()=>{
+      _showArchived=!_showArchived;
+      if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;
+      renderSessionList();
+    };
     list.appendChild(toggle);
   }
   // Empty state for active project filter
@@ -6409,6 +6455,27 @@ function renderSessionListFromCache(){
     // when the list scrolls naturally. Fixed for #1669 follow-up.
     list.scrollTop=listScrollTopBeforeRender;
     _resyncSessionVirtualWindowAfterRender(list, listScrollTopBeforeRender, virtualWindow);
+  }
+  const archivePagingFilterActive=_sessionArchivePagingFilterActive();
+  if(_showArchived&&!archivePagingFilterActive){
+    const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;
+    const loadedArchivedCount=sidebarRows.filter(s=>s&&s.archived&&(_sessionSourceFilter==='cli'?_isCliSession(s):!_isCliSession(s))).length;
+    const archiveLoadCapReached=Number(_archivedRowsLoadedLimit||0)>=SESSION_ARCHIVED_MAX_LOADED_LIMIT;
+    const remainingArchived=archiveLoadCapReached?0:Math.max(0, Number(activeArchivedTotal||0)-loadedArchivedCount);
+    if(remainingArchived>0){
+      const more=document.createElement('div');
+      more.className='session-archive-more';
+      more.style.cssText='font-size:10px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.8;';
+      more.textContent='Load '+Math.min(SESSION_ARCHIVED_PAGE_SIZE, remainingArchived)+' more archived ('+remainingArchived+' remaining)';
+      more.onclick=()=>{
+        _archivedRowsLoadedLimit=Math.min(
+          SESSION_ARCHIVED_MAX_LOADED_LIMIT,
+          Math.max(SESSION_ARCHIVED_PAGE_SIZE, Number(_archivedRowsLoadedLimit)||SESSION_ARCHIVED_PAGE_SIZE)+SESSION_ARCHIVED_PAGE_SIZE
+        );
+        renderSessionList();
+      };
+      list.appendChild(more);
+    }
   }
   // Select mode toggle button (only when NOT in select mode)
   if(!_sessionSelectMode){
