@@ -588,6 +588,7 @@ def _run_gateway_chat_streaming(
                 _public_prefill_context_status,
                 _webui_client_identity_context,
                 _webui_ephemeral_system_prompt,
+                _webui_system_prompt_with_client_identity,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
@@ -606,9 +607,10 @@ def _run_gateway_chat_streaming(
                 },
                 config_data=cfg,
             )
-            identity_context = _webui_client_identity_context(client_identity)
-            if identity_context:
-                _gateway_system_prompt = f"{_gateway_system_prompt}\n\n{identity_context}".rstrip()
+            _gateway_system_prompt = _webui_system_prompt_with_client_identity(
+                _gateway_system_prompt,
+                client_identity,
+            )
             prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
             prefill_messages = [
@@ -689,9 +691,11 @@ def _run_gateway_chat_streaming(
                 "X-Hermes-Session-Id": session_id,
             }
             if isinstance(client_identity, dict):
-                client_name = str(client_identity.get("name") or "").strip()
-                client_id = str(client_identity.get("id") or "").strip()
-                client_session_key = str(client_identity.get("session_key") or "").strip()
+                from api.streaming import _clean_webui_client_identity_value
+
+                client_name = _clean_webui_client_identity_value(client_identity.get("name"))
+                client_id = _clean_webui_client_identity_value(client_identity.get("id"), max_len=160)
+                client_session_key = _clean_webui_client_identity_value(client_identity.get("session_key"), max_len=256)
                 if client_name:
                     headers["X-Hermes-Client-Name"] = client_name
                 if client_id:

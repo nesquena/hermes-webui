@@ -105,7 +105,16 @@ def _webui_client_identity_context(client_identity) -> str:
         lines.append(f"Current WebUI sender client id: {client_id}")
     if session_key:
         lines.append(f"Current WebUI sender session key: {session_key}")
-    return "\n".join(lines) + "\n\n"
+    return "\n".join(lines)
+
+
+def _webui_system_prompt_with_client_identity(system_prompt: str, client_identity) -> str:
+    """Append client identity context only when metadata is present."""
+    base = str(system_prompt or "")
+    identity_context = _webui_client_identity_context(client_identity)
+    if not identity_context:
+        return base
+    return f"{base.rstrip()}\n\n{identity_context}"
 
 
 def _compact_for_echo_compare(value: str) -> str:
@@ -7960,7 +7969,6 @@ def _run_agent_streaming(
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
-            client_identity_context = _webui_client_identity_context(client_identity)
             workspace_system_msg = (
                 f"Active workspace at session start: {s.workspace}\n"
                 "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
@@ -7970,8 +7978,11 @@ def _run_agent_streaming(
                 "prompt, memory, or conversation history. Always use the value from the most recent "
                 "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
                 "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present.\n\n"
-                f"{client_identity_context}".rstrip()
+                "Never fall back to a hardcoded path when this tag is present."
+            )
+            workspace_system_msg = _webui_system_prompt_with_client_identity(
+                workspace_system_msg,
+                client_identity,
             )
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)

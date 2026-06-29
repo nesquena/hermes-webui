@@ -1,7 +1,7 @@
 from email.message import Message
 
 from api.routes import _webui_client_identity_from_request
-from api.streaming import _webui_client_identity_context
+from api.streaming import _webui_client_identity_context, _webui_system_prompt_with_client_identity
 
 
 class _Handler:
@@ -29,6 +29,24 @@ def test_webui_client_identity_context_includes_sanitized_metadata():
 def test_webui_client_identity_context_empty_without_identity():
     assert _webui_client_identity_context(None) == ""
     assert _webui_client_identity_context({}) == ""
+
+
+def test_webui_system_prompt_with_client_identity_does_not_change_prompt_without_identity():
+    prompt = "Base system prompt."
+
+    assert _webui_system_prompt_with_client_identity(prompt, None) == prompt
+    assert _webui_system_prompt_with_client_identity(prompt, {}) == prompt
+
+
+def test_webui_system_prompt_with_client_identity_appends_metadata_when_present():
+    prompt = "Base system prompt."
+    result = _webui_system_prompt_with_client_identity(
+        prompt,
+        {"name": "Person A", "session_key": "team:person-a:ios"},
+    )
+
+    assert result.startswith("Base system prompt.\n\nWebUI client identity metadata:")
+    assert result.endswith("Current WebUI sender session key: team:person-a:ios")
 
 
 def test_webui_client_identity_from_request_prefers_headers_over_body():

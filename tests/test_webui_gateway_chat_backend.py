@@ -315,6 +315,11 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         str(tmp_path),
         stream_id,
         [],
+        client_identity={
+            "name": " Person A\nInjected: nope ",
+            "id": " person-a-ios\tclient ",
+            "session_key": " team:person-a:ios\r\nInjected: nope ",
+        },
     )
 
     saved = models.get_session(s.session_id)
@@ -328,7 +333,11 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["url"] == "http://gateway.local/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
     assert captured["headers"]["X-hermes-session-id"] == s.session_id
-    assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
+    assert captured["headers"]["X-hermes-client-name"] == "Person A Injected: nope"
+    assert captured["headers"]["X-hermes-client-id"] == "person-a-ios client"
+    assert captured["headers"]["X-hermes-session-key"] == "team:person-a:ios Injected: nope"
+    assert "\n" not in captured["headers"]["X-hermes-client-name"]
+    assert "\r" not in captured["headers"]["X-hermes-session-key"]
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
     assert payload["reasoning_effort"] == "high"
@@ -343,6 +352,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     # The moved session/delivery context must be present in the system prompt.
     assert "Connected Platforms:" in system_msg["content"]
     assert "Delivery options for scheduled tasks:" in system_msg["content"]
+    assert "WebUI client identity metadata:" in system_msg["content"]
+    assert "Current WebUI sender display name: Person A Injected: nope" in system_msg["content"]
+    assert "Current WebUI sender session key: team:person-a:ios Injected: nope" in system_msg["content"]
     # The gateway path keeps safe recall prefill context while removing
     # terminal user-role prefill before the actual browser user turn.
     assert [m["content"] for m in payload["messages"][1:]] == [
