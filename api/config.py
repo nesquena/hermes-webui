@@ -1748,10 +1748,21 @@ _PROVIDER_MODELS = {
     ],
     # NVIDIA NIM — NVIDIA's inference platform
     "nvidia": [
-        {"id": "nvidia/nemotron-3-super-120b-a12b", "label": "Nemotron 3 Super 120B"},
-        {"id": "nvidia/nemotron-3-nano-30b-a3b", "label": "Nemotron 3 Nano 30B"},
+        # Ahmed's active NIM models (synced with config.yaml providers.nvidia.models)
+        {"id": "minimaxai/minimax-m3",                     "label": "MiniMax M3"},
+        {"id": "moonshotai/kimi-k2.6",                     "label": "Kimi K2.6"},
+        {"id": "qwen/qwen3.5-397b-a17b",                  "label": "Qwen 3.5 397B MoE"},
+        {"id": "deepseek-ai/deepseek-v4-pro",              "label": "DeepSeek V4 Pro"},
+        {"id": "nvidia/nemotron-3-ultra-550b-a55b",        "label": "Nemotron 3 Ultra 550B"},
+        {"id": "deepseek-ai/deepseek-v4-flash",            "label": "DeepSeek V4 Flash"},
+        {"id": "z-ai/glm-5.1",                             "label": "GLM-5.1"},
+        {"id": "mistralai/mistral-medium-3.5-128b",        "label": "Mistral Medium 3.5"},
+        {"id": "stepfun-ai/step-3.7-flash",                "label": "Step 3.7 Flash"},
+        # Community / reference models available on NIM
+        {"id": "nvidia/nemotron-3-super-120b-a12b",        "label": "Nemotron 3 Super 120B"},
+        {"id": "nvidia/nemotron-3-nano-30b-a3b",           "label": "Nemotron 3 Nano 30B"},
         {"id": "nvidia/llama-3.3-nemotron-super-49b-v1.5", "label": "Llama 3.3 Nemotron Super 49B"},
-        {"id": "qwen/qwen3-next-80b-a3b-instruct", "label": "Qwen3 Next 80B"},
+        {"id": "qwen/qwen3-next-80b-a3b-instruct",         "label": "Qwen3 Next 80B"},
     ],
     # Xiaomi MiMo — direct API via api.xiaomimimo.com
     "xiaomi": [
@@ -4371,6 +4382,34 @@ def _static_models_catalog_without_live_probes() -> dict:
             if canonical and _provider_has_key(canonical):
                 detected_providers.add(canonical)
 
+        # ── WebUI parity with all other Hermes channels ────────────────────
+        # Same rationale as the matching block in
+        # ``_build_available_models_uncached``: every other Hermes surface
+        # surfaces the full curated ``_PROVIDER_MODELS`` catalog in its
+        # picker. The network-free path (``prefer_cache=True`` paths and the
+        # wakeup Option-Z handler) previously mirrored WebUI's broken
+        # credential-only behaviour -- apply the same union here so the
+        # cold/wakeup paths also match. (WebUI picker parity)
+        # WebUI picker parity with desktop/CLI:  only surface providers that
+        # actually have credentials configured.  The previous "all_catalog"
+        # union polluted the picker with every entry in ``_PROVIDER_MODELS``
+        # even when no API key was set; gated on ``_provider_has_key`` so
+        # credential-less providers stay hidden in WebUI.
+        try:
+            for _catalog_pid in list(_PROVIDER_MODELS.keys()) + list(_PROVIDER_DISPLAY.keys()):
+                try:
+                    _canon_pid = _canonicalise_provider_id(_catalog_pid)
+                except Exception:
+                    _canon_pid = str(_catalog_pid or "").strip().lower()
+                if (
+                    _canon_pid
+                    and not _canon_pid.startswith("custom:")
+                    and _provider_has_key(_canon_pid)
+                ):
+                    detected_providers.add(_canon_pid)
+        except Exception:
+            logger.debug("Failed to seed catalog into detected_providers (offline path)", exc_info=True)
+
         fallback_cfg = cfg.get("fallback_providers", []) if isinstance(cfg, dict) else []
         if isinstance(fallback_cfg, list):
             for entry in fallback_cfg:
@@ -4434,6 +4473,16 @@ def _static_models_catalog_without_live_probes() -> dict:
                 for provider_id in detected_providers
                 if provider_id
             }
+
+        # Union in all static-catalog providers so the WebUI model picker
+        # shows the same full list as CLI/Desktop/Telegram (which use
+        # _PROVIDER_MODELS directly).  Catalog-only providers (no API key or
+        # config entry) still appear; their models get @provider: prefix so
+        # the user knows they'd need to configure credentials to use them.
+        for _catalog_pid in _PROVIDER_MODELS:
+            _canonical_cat = _canonicalise_provider_id(_catalog_pid)
+            if _canonical_cat:
+                detected_providers.add(_canonical_cat)
 
         groups: list[dict] = []
         for pid in sorted(detected_providers):
@@ -4504,6 +4553,20 @@ def _static_models_catalog_without_live_probes() -> dict:
                             raw_models.append({"id": item, "label": item})
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
+            else:
+                # Merge static catalog models not already present from config.
+                # This ensures parity with CLI/Desktop/Telegram which use the
+                # full _PROVIDER_MODELS catalog, even when config.yaml lists
+                # only a subset of models for the active provider.
+                catalog = _PROVIDER_MODELS.get(pid, [])
+                if catalog:
+                    existing_ids = {
+                        m.get("id") for m in raw_models if m.get("id")
+                    }
+                    for cm in catalog:
+                        if cm.get("id") and cm["id"] not in existing_ids:
+                            raw_models.append(copy.deepcopy(cm))
+                            existing_ids.add(cm["id"])
             for model_id in configured_model_ids.get(pid, []):
                 if model_id and not any(m.get("id") == model_id for m in raw_models):
                     raw_models.append(
@@ -4582,6 +4645,78 @@ def _static_models_catalog_without_live_probes() -> dict:
             return (3, provider_id)
 
         groups.sort(key=_group_sort_key)
+
+        # ── Inject MoA (Mixture-of-Agents) presets into the picker ──
+        # WebUI may pre-create a single-entry "Default" group for the active
+        # moa preset when top-level model.provider is "moa".  Merge all known
+        # presets into that group (or create a new one if none exists) so the
+        # picker exposes every preset, not just whichever was the default.
+        try:
+            moa_cfg = cfg.get("moa", {})
+            moa_presets = moa_cfg.get("presets", {}) if isinstance(moa_cfg, dict) else {}
+            if isinstance(moa_presets, dict) and moa_presets:
+                moa_models = []
+                for preset_name in moa_presets:
+                    preset_label = (
+                        f"MoA: {preset_name}"
+                        if preset_name != "default"
+                        else "MoA (Mixture-of-Agents)"
+                    )
+                    moa_models.append({"id": f"@moa:{preset_name}", "label": preset_label})
+                existing = next(
+                    (g for g in groups if g.get("provider_id") == "moa"), None
+                )
+                if existing is not None and isinstance(existing.get("models"), list):
+                    # Replace any pre-existing entry whose id (with or without
+                    # the "moa:" prefix) matches one of our preset names so we
+                    # don't end up with both ``efficient_daily`` and
+                    # ``moa:efficient_daily`` in the picker.
+                    existing_ids = {
+                        str(m.get("id", "")).split(":", 1)[-1]
+                        for m in existing["models"]
+                        if isinstance(m, dict)
+                    }
+                    filtered = [
+                        m for m in existing["models"]
+                        if str(m.get("id", "")).split(":", 1)[-1]
+                        not in {str(n) for n in moa_presets.keys()}
+                    ]
+                    # Re-prepend the default-model entry under the prefixed
+                    # form when the existing group was the auto-created
+                    # "Default" group (active = model.default preset).
+                    if (
+                        str(default_model)
+                        and str(default_model).split(":", 1)[-1]
+                        in {str(n) for n in moa_presets.keys()}
+                        and not any(
+                            str(y.get("id", "")).split(":", 1)[-1] == str(default_model).split(":", 1)[-1]
+                            for y in filtered
+                        )
+                    ):
+                        _default_label = _get_label_for_model(default_model, groups)
+                        # Normalize to the @provider:model convention used
+                        # throughout the picker. ``default_model`` may
+                        # already be prefixed (e.g. ``@moa:default`` from
+                        # an earlier catalog build); leave that alone,
+                        # otherwise prepend the leading ``@moa:`` so the
+                        # entry survives ``_split_provider_qualified_model``.
+                        _dm = str(default_model)
+                        _id = _dm if _dm.startswith("@") else f"@moa:{_dm.lstrip('@')}"
+                        filtered.insert(
+                            0,
+                            {"id": _id, "label": _default_label},
+                        )
+                    existing["models"] = filtered + moa_models
+                    if existing.get("provider") == "Default":
+                        existing["provider"] = "MoA"
+                else:
+                    groups.append({
+                        "provider": "MoA",
+                        "provider_id": "moa",
+                        "models": moa_models,
+                    })
+        except Exception:
+            logger.debug("MoA group injection failed", exc_info=True)
 
         model_aliases: dict[str, str] = {}
         try:
@@ -4776,7 +4911,7 @@ def _current_webui_version() -> str | None:
 # guarantees that even if a future release accidentally reuses the same
 # WebUI version string (or a debug build doesn't have a version), a structural
 # change still invalidates the cache.
-_MODELS_CACHE_SCHEMA_VERSION = 3
+_MODELS_CACHE_SCHEMA_VERSION = 4
 
 
 _models_cache_path = STATE_DIR / "models_cache.json"
@@ -5547,6 +5682,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
     def _build_available_models_uncached() -> dict:
+        _provider_has_key = lambda pid: False  # default: deny; replaced if api.providers imports
+        try:
+            from api.providers import _provider_has_key as _ext_phk  # noqa: F401 — used by catalog-gate block below
+            _provider_has_key = _ext_phk
+        except Exception:
+            pass
         active_provider = None
         default_model = get_effective_default_model(cfg)
         groups = []
@@ -5901,6 +6042,38 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if all_env.get("LM_API_KEY") and all_env.get("LM_BASE_URL"):
                 detected_providers.add("lmstudio")
 
+        # ── WebUI parity with all other Hermes channels ────────────────────
+        # Every other surface (CLI, Desktop App, Dashboard, Discord, Telegram)
+        # shows the FULL curated ``_PROVIDER_MODELS`` catalog from hermes_cli
+        # in its model picker -- not just the providers that happen to be
+        # credentialed on this machine. The WebUI picked up only the active
+        # provider because the detected-sets above are credential-driven,
+        # leaving 270+ models (Anthropic / OpenAI / Google / DeepSeek / xAI /
+        # Mistral / Qwen / etc.) hidden. Union every known catalog provider
+        # back into detected_providers so the picker matches the rest of
+        # Hermes. Cross-provider ID collisions are already resolved by
+        # ``_deduplicate_model_ids`` and routing uses ``@provider:`` prefixes
+        # via ``_apply_provider_prefix`` for non-active groups, so this is a
+        # pure additive change. (WebUI picker parity)
+        # WebUI picker parity with desktop/CLI: gate the catalog union on
+        # ``_provider_has_key`` so credential-less providers stay hidden in
+        # WebUI. (Live-rebuild mirror of the offline-fallback edit at
+        # line ~4394.)
+        try:
+            for _catalog_pid in list(_PROVIDER_MODELS.keys()) + list(_PROVIDER_DISPLAY.keys()):
+                try:
+                    _canon_pid = _canonicalise_provider_id(_catalog_pid)
+                except Exception:
+                    _canon_pid = str(_catalog_pid or "").strip().lower()
+                if (
+                    _canon_pid
+                    and not _canon_pid.startswith("custom:")
+                    and _provider_has_key(_canon_pid)
+                ):
+                    detected_providers.add(_canon_pid)
+        except Exception:
+            logger.debug("Failed to seed catalog into detected_providers (live rebuild)", exc_info=True)
+
         # Also detect providers explicitly listed in config.yaml providers section.
         # A user may configure a provider key via config.yaml providers.<name>.api_key
         # without setting the corresponding env var. (#604)
@@ -5943,7 +6116,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     continue
 
                 _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
-                detected_providers.add(_canonical)
+                # WebUI picker parity with desktop/CLI: only add to
+                # detected_providers when the provider actually has credentials
+                # configured.  Catalog-only membership is NOT enough — that
+                # bloats the picker with credential-less providers.
+                if _is_provider_config or _provider_has_key(_canonical):
+                    detected_providers.add(_canonical)
 
         def _configured_provider_for_base_url(base_url: object) -> str:
             target = _normalize_base_url_for_match(base_url)
@@ -6928,6 +7106,41 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         except Exception:
             pass
 
+        # ── Inject MoA presets into the picker (live-rebuild path) ──
+        # Same merge-into-existing logic as the offline-fallback MoA block
+        # above (~line 4649).  When ``model.provider == "moa"`` WebUI may
+        # pre-create a single-entry "Default" moa group; merge so the
+        # picker exposes every preset, not just whichever was the default.
+        try:
+            moa_cfg = cfg.get("moa", {})
+            moa_presets = moa_cfg.get("presets", {}) if isinstance(moa_cfg, dict) else {}
+            if isinstance(moa_presets, dict) and moa_presets:
+                moa_models = []
+                for preset_name in moa_presets:
+                    preset_label = (
+                        f"MoA: {preset_name}"
+                        if preset_name != "default"
+                        else "MoA (Mixture-of-Agents)"
+                    )
+                    moa_models.append({"id": f"@moa:{preset_name}", "label": preset_label})
+                existing = next(
+                    (g for g in groups if g.get("provider_id") == "moa"), None
+                )
+                if existing is not None and isinstance(existing.get("models"), list):
+                    for m in moa_models:
+                        if not any(x.get("id") == m["id"] for x in existing["models"]):
+                            existing["models"].append(m)
+                    if existing.get("provider") == "Default":
+                        existing["provider"] = "MoA"
+                else:
+                    groups.append({
+                        "provider": "MoA",
+                        "provider_id": "moa",
+                        "models": moa_models,
+                    })
+        except Exception:
+            logger.debug("MoA group injection failed (live rebuild)", exc_info=True)
+
         return {
             "active_provider": active_provider,
             "default_model": default_model,
@@ -6935,6 +7148,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             "groups": groups,
             "aliases": model_aliases,
         }
+
+    # ── Inject MoA in the live-rebuild path ───────────────────────────────────
+    # Stub kept for backwards compat; the actual injection is performed inside
+    # _build_available_models_uncached immediately above this line so the
+    # closure's ``groups`` list is still in scope.
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
     # Mark that a build may be in progress BEFORE acquiring the lock.
