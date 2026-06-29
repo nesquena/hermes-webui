@@ -11200,6 +11200,7 @@ def handle_get(handler, parsed) -> bool:
                 "name": active_profile_name,
                 "path": str(get_active_hermes_home()),
                 "is_default": _is_root_profile(active_profile_name),
+                "default_workspace": get_last_workspace(),
             },
         )
 
