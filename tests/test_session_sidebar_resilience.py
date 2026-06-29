@@ -59,8 +59,15 @@ def test_sessions_and_projects_load_independently_so_projects_failure_cannot_bla
 def test_sessions_api_uses_longer_timeout_and_timeout_retry_for_boot_refresh():
     sessions_src = _sessions_js()
     workspace_src = _workspace_js()
+    helper_start = sessions_src.find("async function _loadSidebarSessionListPayload")
+    assert helper_start > 0
+    helper_end = sessions_src.find("async function _drainRenderSessionListQueue", helper_start)
+    assert helper_end > helper_start
+    helper = sessions_src[helper_start:helper_end]
 
     assert "timeoutMs:_sessionListHasLoadedOnce?30000:_SESSION_LIST_BOOT_TIMEOUT_MS" in sessions_src
+    assert "const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);" in helper
+    assert "api('/api/sessions' + sessionListQS,{timeoutToast:false})" not in helper
     assert "retryTimeouts:true" in sessions_src
     assert "retryStatuses:[502,503,504]" in sessions_src
     assert "retryTimeouts" in workspace_src

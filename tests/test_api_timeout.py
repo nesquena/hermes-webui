@@ -217,6 +217,29 @@ def test_update_flows_keep_explicit_longer_timeouts():
     assert "api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000})" in src
 
 
+def test_session_message_loads_keep_explicit_longer_timeouts():
+    """Large state.db installs can take longer than the generic 30s API timeout."""
+    src = _source(SESSIONS_JS)
+    assert (
+        "api(\n"
+        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,\n"
+        "      {timeoutMs:120000}\n"
+        "    )"
+    ) in src
+    assert (
+        "api(\n"
+        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,\n"
+        "      {timeoutMs:120000}\n"
+        "    )"
+    ) in src
+    assert (
+        "api(\n"
+        "        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,\n"
+        "        {timeoutMs:120000}\n"
+        "      )"
+    ) in src
+
+
 def test_passive_background_polls_suppress_timeout_toasts():
     """Passive refreshes should be best-effort and not emit generic timeout toasts."""
     workspace = _source(WORKSPACE_JS)
@@ -226,7 +249,9 @@ def test_passive_background_polls_suppress_timeout_toasts():
     panels = _source(PANELS_JS)
 
     assert "api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false})" in workspace
-    assert "api('/api/sessions' + sessionListQS,{timeoutToast:false})" in sessions
+    assert "const sessionRequestOpts={" in sessions
+    assert "timeoutToast:false" in sessions
+    assert "api('/api/sessions' + sessionListQS,sessionRequestOpts)" in sessions
     assert "api('/api/projects' + projectQS,{timeoutToast:false})" in sessions
     assert "api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false})" in sessions
     assert 'api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false})' in messages

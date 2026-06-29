@@ -1911,6 +1911,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const _startedAt=(S.session&&S.session.pending_started_at)||Date.now()/1000;
     showLiveRunStatus(activeSid,{startedAt:_startedAt});
   }
+  _suspendSessionStreamForLiveChat(activeSid);
 
   // On reconnect, restore accumulated text from INFLIGHT so we don't lose
   // progress made before the session switch. Without this the closure starts
@@ -2018,6 +2019,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
+    _resumeSessionStreamAfterLiveChat(activeSid);
   }
   function _isMarkerOnlyAssistantMessage(m){
     if(!m||m.role!=='assistant') return false;
@@ -6320,11 +6322,47 @@ let _sessionStreamReconnectTimer = null;
 // reopen the per-session SSE on re-show (stopSessionStream nulls _sessionStreamSessionId).
 let _sessionStreamHiddenSid = null;
 
+function _chatStreamActiveForSession(sid) {
+  if (!sid) return false;
+  if (typeof LIVE_STREAMS !== 'undefined' && LIVE_STREAMS[sid]) return true;
+  return !!(
+    S &&
+    S.session &&
+    S.session.session_id === sid &&
+    S.activeStreamId
+  );
+}
+
+function _suspendSessionStreamForLiveChat(sid) {
+  if (!sid) return;
+  if (_sessionStreamSessionId !== sid && !_sessionEventSource) return;
+  _sessionStreamHiddenSid = sid;
+  stopSessionStream();
+}
+
+function _resumeSessionStreamAfterLiveChat(sid) {
+  if (!sid) return;
+  setTimeout(() => {
+    if (!S || !S.session || S.session.session_id !== sid) return;
+    if (_chatStreamActiveForSession(sid)) return;
+    _sessionStreamHiddenSid = null;
+    startSessionStream(sid);
+  }, 0);
+}
+
 function startSessionStream(sid) {
   if (!sid) return;
   // Already on this session? No-op (loadSession is a no-op when re-selecting
   // the same session; this defends against external re-callers).
   if (_sessionStreamSessionId === sid && _sessionEventSource) return;
+  // While the visible conversation has a live token stream, /api/chat/stream
+  // already carries bg_task_complete and terminal events for this turn. Keeping
+  // /api/session/stream open at the same time burns one of Chrome's six
+  // same-origin HTTP/1.1 sockets and can starve ordinary /api/session fetches.
+  if (_chatStreamActiveForSession(sid)) {
+    _sessionStreamHiddenSid = sid;
+    return;
+  }
   stopSessionStream();
   _sessionStreamSessionId = sid;
   // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern.

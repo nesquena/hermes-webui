@@ -24,12 +24,15 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
 const OFFLINE_RECHECK_MS=2500;
+const OFFLINE_HEALTH_TIMEOUT_MS=10000;
+const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;
 let _offlineVisible=false;
 let _offlineReason='browser';
 let _offlineProbeTimer=null;
 let _offlineChecking=false;
 let _offlineProbePromise=null;
 let _offlineHealthProbePromise=null;
+let _offlineFetchProbeFailures=0;
 let _offlineRawFetch=null;
 let _offlineFetchPatched=false;
 function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLine!==false;}
@@ -82,7 +85,7 @@ async function _probeOfflineRecovery(){
     // the initial banner display on the offline-event/startup paths.
     let ctrl=null,timer=null;
     try{ctrl=(typeof AbortController!=='undefined')?new AbortController():null;}catch(_){ctrl=null;}
-    if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},3000);
+    if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},OFFLINE_HEALTH_TIMEOUT_MS);
     try{
       const opts={cache:'no-store',credentials:'include'};
       if(ctrl)opts.signal=ctrl.signal;
@@ -94,14 +97,21 @@ async function _probeOfflineRecovery(){
   try{return await _offlineHealthProbePromise;}
   finally{_offlineHealthProbePromise=null;}
 }
-async function _showOfflineBannerIfProbeFails(reason){
+async function _showOfflineBannerIfProbeFails(reason,opts){
+  opts=opts||{};
   const visibleAtStart=_offlineVisible;
+  const requireConsecutiveFailures=opts.requireConsecutiveFailures!==false;
   if(visibleAtStart)_setOfflineChecking(true);
   const ok=await _probeOfflineRecovery();
   if(visibleAtStart)_setOfflineChecking(false);
   if(ok){
+    _offlineFetchProbeFailures=0;
     if(_offlineVisible){_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();}
     return true;
+  }
+  if(!visibleAtStart&&requireConsecutiveFailures){
+    _offlineFetchProbeFailures+=1;
+    if(_offlineFetchProbeFailures<OFFLINE_FETCH_FAILURES_BEFORE_BANNER)return false;
   }
   showOfflineBanner(reason||(_browserReportsOnline()?'network':'browser'));
   return false;
@@ -113,7 +123,7 @@ async function checkOfflineRecoveryNow(){
     _setOfflineChecking(true);
     const ok=await _probeOfflineRecovery();
     _setOfflineChecking(false);
-    if(ok){if(!_offlineVisible)return true;_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
+    if(ok){_offlineFetchProbeFailures=0;if(!_offlineVisible)return true;_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
     showOfflineBanner(_browserReportsOnline()?'network':'browser');
     return false;
   })();
@@ -182,9 +192,9 @@ function _patchOfflineFetch(){
 }
 function initOfflineMonitor(){
   _patchOfflineFetch();
-  window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');});
+  window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});});
   window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
-  if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser');
+  if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
 else initOfflineMonitor();

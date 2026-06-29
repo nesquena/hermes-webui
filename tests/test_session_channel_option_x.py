@@ -20,6 +20,37 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _js_function_decl(src: str, name: str) -> str:
+    marker = f"function {name}("
+    start = src.find(marker)
+    assert start != -1, f"{name}() not found"
+    brace = src.find("){", start)
+    assert brace != -1, f"{name}() body not found"
+    brace += 1
+    depth = 1
+    i = brace + 1
+    in_str = None
+    escaped = False
+    while i < len(src) and depth:
+        ch = src[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_str:
+                in_str = None
+        elif ch in ('"', "'", "`"):
+            in_str = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"{name}() body did not close"
+    return src[start:i]
+
+
 # ---------------------------------------------------------------------------
 # Module surface
 # ---------------------------------------------------------------------------
@@ -390,6 +421,36 @@ def test_frontend_opens_session_stream():
     assert "api/session/stream?session_id=" in js
     assert "startSessionStream" in js
     assert "stopSessionStream" in js
+
+
+def test_session_stream_pauses_while_chat_stream_is_active():
+    """The active turn's chat SSE already carries live events for that session.
+
+    Keeping /api/session/stream open for the same sid at the same time burns a
+    Chrome same-origin connection slot and can starve ordinary /api/session
+    fetches on HTTP/1.1.
+    """
+    js = (REPO_ROOT / "static" / "messages.js").read_text()
+    assert "function _chatStreamActiveForSession(sid)" in js
+    assert "function _suspendSessionStreamForLiveChat(sid)" in js
+    assert "function _resumeSessionStreamAfterLiveChat(sid)" in js
+
+    start_src = _js_function_decl(js, "startSessionStream")
+    assert "if (_chatStreamActiveForSession(sid))" in start_src
+    assert "_sessionStreamHiddenSid = sid;" in start_src
+    assert "return;" in start_src
+    assert start_src.index("if (_chatStreamActiveForSession(sid))") < start_src.index("new EventSource(")
+
+    attach_ix = js.index("function attachLiveStream")
+    attach_src = js[attach_ix:js.index("function transcript()", attach_ix)]
+    assert "_suspendSessionStreamForLiveChat(activeSid);" in attach_src
+    assert attach_src.index("_suspendSessionStreamForLiveChat(activeSid);") < attach_src.index("new EventSource(")
+
+    resume_src = _js_function_decl(js, "_resumeSessionStreamAfterLiveChat")
+    assert "S.session.session_id !== sid" in resume_src
+    assert "if (_chatStreamActiveForSession(sid)) return;" in resume_src
+    assert "_sessionStreamHiddenSid = null;" in resume_src
+    assert "startSessionStream(sid);" in resume_src
 
 
 def test_frontend_busy_race_gate_obsoleted_by_option_z_pivot():

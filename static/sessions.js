@@ -2351,7 +2351,10 @@ async function _ensureMessagesLoaded(sid) {
   const expandParam = reloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`);
+    data = await api(
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+      {timeoutMs:120000}
+    );
   } finally {
     _clearSameSessionForceReloadHint(sid);
   }
@@ -2835,7 +2838,10 @@ async function _loadOlderMessages() {
     // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
     // newly exposed head is what we expose to the user.
     const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`);
+    const data = await api(
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`,
+      {timeoutMs:120000}
+    );
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
     //  - response shape sane
@@ -2879,7 +2885,10 @@ async function _loadOlderMessages() {
       // Race fallback: keep the legacy index-page request as the
       // correctness-preserving alternative. Same guards reapplied because
       // we just awaited again.
-      const fallback = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
+      const fallback = await api(
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+        {timeoutMs:120000}
+      );
       if (!fallback || !fallback.session) { _loadingOlder = false; return; }
       if (!S.session || S.session.session_id !== sid) return;
       if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
@@ -4328,9 +4337,7 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)
     }
   })();
 
-  const sessData = _sessionListHasLoadedOnce
-    ? await api('/api/sessions' + sessionListQS,{timeoutToast:false})
-    : await api('/api/sessions' + sessionListQS,sessionRequestOpts);
+  const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
   const projData = await projectPromise;
 
   return {sessData,projData};
@@ -4373,7 +4380,7 @@ let _gatewayPollTimer = null;
 let _gatewayProbeInFlight = false;
 let _gatewaySSEWarningShown = false;
 const _gatewayFallbackPollMs = 30000;
-const _streamingPollMs = 5000;
+const _streamingPollMs = 30000;
 const _sessionTimeRefreshMs = 60000;
 // #3107: the active-session "is it externally updated?" poll used to fire
 // every 5 s. On long sessions this caused visible scroll jitter and a
