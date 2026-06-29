@@ -497,6 +497,50 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     return _profiles_match(session_profile, active_profile)
 
 
+def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
+    if not path:
+        return False
+    if method != "POST":
+        return False
+    # Import routes create/claim sessions before normal ownership exists, and
+    # chat/start has inline placeholder-retag rules that must run before the
+    # generic request-session guard.
+    return path in {
+        "/api/session/import",
+        "/api/session/import_cli",
+        "/api/chat/start",
+    }
+
+
+def _session_id_visible_to_request_profile(handler, sid) -> bool:
+    """Return whether ``sid`` belongs to the active profile."""
+    if not isinstance(sid, str) or not sid:
+        return True
+    if not is_safe_session_id(sid):
+        return True
+    try:
+        session = get_session(sid, metadata_only=True)
+    except KeyError:
+        return True
+    if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+        bad(handler, "Session not found", 404)
+        return False
+    return True
+
+
+def _guard_request_session_visibility(handler, parsed, body=None, method="GET") -> bool:
+    """Apply request session-profile visibility check to request-supplied IDs."""
+    method = str(method).upper()
+    if _request_session_visibility_exempt(method, getattr(parsed, "path", "")):
+        return True
+    sid = parse_qs(parsed.query).get("session_id", [None])[0]
+    if not _session_id_visible_to_request_profile(handler, sid):
+        return False
+    if isinstance(body, dict) and not _session_id_visible_to_request_profile(handler, body.get("session_id")):
+        return False
+    return True
+
+
 def _active_skills_dir() -> Path:
     """Return the skills directory for the request's active Hermes profile.
 
@@ -9907,6 +9951,9 @@ def handle_get(handler, parsed) -> bool:
             handler.end_headers()
         return True
 
+    if parsed.path.startswith("/api/") and not _guard_request_session_visibility(handler, parsed, method="GET"):
+        return True
+
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
@@ -11494,6 +11541,10 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+    if not _guard_request_session_visibility(handler, parsed, body=body, method="POST"):
+        if diag:
+            diag.finish()
+        return True
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
@@ -13647,6 +13698,8 @@ def handle_patch(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
+    if not _guard_request_session_visibility(handler, parsed, body=body, method="PATCH"):
+        return True
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_toggle(handler, name, body)
@@ -13665,6 +13718,8 @@ def handle_delete(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
+    if not _guard_request_session_visibility(handler, parsed, body=body, method="DELETE"):
+        return True
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
@@ -13691,6 +13746,8 @@ def handle_put(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
+    if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
+        return True
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
@@ -17938,6 +17995,7 @@ def _handle_chat_start(handler, body, diag=None):
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
+        active_profile = _get_active_profile_name()
         if requested_profile:
             try:
                 from api.profiles import _PROFILE_ID_RE
@@ -17946,17 +18004,34 @@ def _handle_chat_start(handler, body, diag=None):
                     return bad(handler, "invalid profile", 400)
             except ImportError:
                 requested_profile = ""
-        if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-            has_persisted_turns = bool(
-                getattr(s, "messages", None)
-                or getattr(s, "context_messages", None)
-                or getattr(s, "pending_user_message", None)
-            )
+        session_profile = getattr(s, "profile", None)
+        has_persisted_turns = bool(
+            getattr(s, "messages", None)
+            or getattr(s, "context_messages", None)
+            or getattr(s, "pending_user_message", None)
+        )
+        if not _session_visible_to_active_profile(session_profile, handler):
+            if (
+                requested_profile
+                and _profiles_match(requested_profile, active_profile)
+                and not has_persisted_turns
+            ):
+                # Empty placeholders can still be retagged when the
+                # requested profile matches the active request profile.
+                s.profile = requested_profile
+            else:
+                return bad(handler, "Session not found", 404)
+        elif (
+            requested_profile
+            and _profiles_match(requested_profile, active_profile)
+            and not _profiles_match(session_profile, requested_profile)
+        ):
+            # Empty sessions are placeholders. If the user switches profiles
+            # before sending the first turn, run the placeholder under the
+            # active request profile instead of the stale one stamped at
+            # creation time. The request body alone must not retag a session to
+            # a different profile than the server-selected active profile.
             if not has_persisted_turns:
-                # Empty sessions are placeholders. If the user switches profiles
-                # before sending the first turn, run the placeholder under the
-                # currently-selected profile instead of the stale one stamped at
-                # creation time.
                 s.profile = requested_profile
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
