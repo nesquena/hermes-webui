@@ -4808,6 +4808,67 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     return model, None
 
 
+def _validate_resolved_model(model: str, model_provider: str | None) -> str:
+    """Fall back to the configured default model if the resolved model is unknown.
+
+    The fast path in _resolve_compatible_session_model_state passes bare model
+    ids through without checking them against the configured providers. A
+    truncated id like "e2b" (from "gemma4:e2b" after a frontend ":" split)
+    would be sent to the upstream API and cause a 404. This guard catches that
+    by checking the resolved model against the configured provider's model
+    list. If not found, returns the default model.
+
+    Only validates when the requested provider is a local/custom endpoint
+    that exists in the configured providers dict. Models from cloud providers
+    (openai, anthropic, openrouter, ...) pass through untouched.
+    """
+    if not model:
+        return model
+    try:
+        from api.config import cfg as _active_cfg
+        providers_cfg = _active_cfg.get("providers") if isinstance(_active_cfg, dict) else {}
+    except Exception:
+        providers_cfg = {}
+    if not isinstance(providers_cfg, dict):
+        return model
+    # Only validate against configured (local) providers. The frontend sends
+    # model_provider as the configured provider key (e.g. "ollama"). If the
+    # requested provider does not match any configured key, it is a cloud
+    # provider — pass through without validation.
+    _requested = str(model_provider or "").strip().lower()
+    if not _requested:
+        return model
+    _matched_key = None
+    for _cfg_key in providers_cfg:
+        if _cfg_key.strip().lower() == _requested:
+            _matched_key = _cfg_key
+            break
+    if _matched_key is None:
+        return model  # cloud provider — pass through
+    _pcfg = providers_cfg[_matched_key]
+    if not isinstance(_pcfg, dict):
+        return model
+    _normalized = str(model).strip().lower()
+    for _m in _pcfg.get("models", []):
+        if isinstance(_m, str) and _m.strip().lower() == _normalized:
+            return model
+        if isinstance(_m, dict):
+            _mid = str(_m.get("id") or _m.get("name") or "").strip().lower()
+            if _mid == _normalized:
+                return model
+    # Not found in this provider's configured models — use the default
+    _default = _pcfg.get("default_model")
+    if not _default:
+        try:
+            from api.config import get_config as _get_cfg
+            _cfg = _get_cfg()
+            _mdl = _cfg.get("model", {})
+            _default = _mdl.get("default") if isinstance(_mdl, dict) else None
+        except Exception:
+            pass
+    return _default or model
+
+
 def _model_matches_configured_default(
     session_model: str | None,
     cfg_default: str | None,
@@ -17573,6 +17634,12 @@ def _handle_chat_start(handler, body, diag=None):
             profile_default_model=_pp_default,
             explicit_model_pick=explicit_model_pick,
         )
+        # Validate the resolved model against configured providers. A truncated
+        # or malformed id (e.g. "e2b" from "gemma4:e2b" after a frontend ":"
+        # split) passes through _resolve_compatible_session_model_state's fast
+        # path without validation and would 404 at the upstream API. Fall back
+        # to the configured default when the model is not known.
+        model = _validate_resolved_model(model, model_provider)
         # NOTE: runtime-adapter selection is delegated to _start_run (shared
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
