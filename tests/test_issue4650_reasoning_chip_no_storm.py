@@ -30,9 +30,13 @@ const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 
 function makeEl() {
+  const attrs = {};
   return {
     style: {}, dataset: {}, title: '', textContent: '', value: '',
     classList: { add(){}, remove(){}, toggle(){}, contains(){return false} },
+    setAttribute(name, value){ attrs[name] = String(value); },
+    getAttribute(name){ return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null; },
+    removeAttribute(name){ delete attrs[name]; },
     querySelectorAll(){return []}, querySelector(){return null},
     getBoundingClientRect(){return {left:0,top:0,width:0,height:0}},
   };

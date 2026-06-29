@@ -165,6 +165,65 @@ Loopback sidecars do **not** change asset injection behavior. They are only
 reported by diagnostics so an operator can see that a local companion service was
 declared and optionally check its health from the browser.
 
+Extension entries may declare browser-local settings when they also request
+extension-owned storage:
+
+```json
+{
+  "id": "desktop-companion",
+  "permissions": {
+    "storage": {
+      "owned": true
+    }
+  },
+  "settings_schema": [
+    {
+      "key": "show_badge",
+      "type": "boolean",
+      "label": "Show badge",
+      "default": true
+    },
+    {
+      "key": "mode",
+      "type": "enum",
+      "label": "Mode",
+      "options": [
+        {"value": "compact", "label": "Compact"},
+        {"value": "full", "label": "Full"}
+      ],
+      "default": "compact"
+    }
+  ]
+}
+```
+
+Settings are a first-pass browser feature. WebUI sanitizes the manifest schema, injects the accepted schema before extension scripts, and leaves persistence to the browser. The backend does not store extension settings or expose a generic settings write route, and it does not treat these values as secrets.
+
+The sanitizer accepts only `boolean`, `string`, `number`, `integer`, and `enum`
+fields. It drops `sensitive: true` fields, unsupported types, malformed enum
+options, duplicate keys after the first valid field, and defaults that do not
+match the declared type. `settings_schema` is honored only when
+`permissions.storage.owned` is exactly `true`.
+
+Extension scripts can use the sanctioned browser accessors:
+
+```js
+const settings = window.HermesExtensionSettings.settingsForExtension("desktop-companion");
+const value = settings.get("show_badge");
+settings.set("show_badge", false);
+
+const storage = window.HermesExtensionSettings.storageForExtension("desktop-companion");
+storage.set("lastPanel", "settings");
+
+const sameSettings = window.hermesExt.settings.forExtension("desktop-companion");
+const sameStorage = window.hermesExt.storage.forExtension("desktop-companion");
+```
+
+Settings persist only non-default overrides. Resetting settings removes those
+overrides and returns schema defaults. Extension-owned storage uses a separate
+browser-local namespace, and clearing storage removes that namespace without
+changing settings.
+
 ## URL rules
 
 Injected asset URLs are deliberately restricted:
@@ -552,3 +611,8 @@ allowlisted scalar fields such as `sidecar`, `native_host`, `bridge`,
 `last_seen_at`, and `webui_origin`. This keeps sidecar-specific diagnostics
 machine-readable without making WebUI depend on any one extension's private
 payload shape.
+
+When sanitized settings are present, Settings -> Extensions renders
+browser-local controls for installed manifest entries. Save, reset, and clear
+storage actions call `window.HermesExtensionSettings`; they do not call backend
+storage routes and do not write WebUI settings.

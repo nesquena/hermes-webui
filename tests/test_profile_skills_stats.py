@@ -144,6 +144,17 @@ def test_skills_stats_cache(tmp_path):
     # Adding a skill bumps the skills-dir mtime; the cheap probe detects it on
     # the very next call and the counts update immediately (no stale TTL window).
     _write_skill(tmp_path, "beta")
+    # Guarantee the skills-dir mtime is STRICTLY newer than the cached probe value.
+    # A real FS-backed skill-add always advances the dir mtime, but two writes inside
+    # the same coarse mtime tick can leave it byte-identical under full-suite timing —
+    # the source of this test's intermittent flake (order-dependent: passes in
+    # isolation, fails ~intermittently under full-suite ordering). Forcing it forward
+    # keeps the assertion honest (the probe must recompute on a genuine mtime change)
+    # without racing the filesystem's mtime granularity.
+    import os as _os, time as _time
+    _skills_dir = tmp_path / "skills"
+    _future = _time.time() + 5
+    _os.utime(_skills_dir, (_future, _future))
     enabled, compat = profiles._get_profile_skills_stats(tmp_path)
     assert enabled == 2 and compat == 2
 

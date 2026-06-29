@@ -2295,7 +2295,7 @@ const _COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=[
   {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill']},
   {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge']},
   {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn']},
-  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip']},
+  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip','#composerMobileQuotaAction']},
   {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap']},
   {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus']},
 ];
@@ -2609,6 +2609,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       const p = await loadActiveProfile();
       if (p && typeof p === 'object' && typeof p.name === 'string') {
         _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+        if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
         return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
       }
       if (p === undefined && !alreadyAttempted) {

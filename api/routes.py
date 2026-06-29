@@ -43,6 +43,7 @@ from api.session_events import (
     subscribe_session_events,
     unsubscribe_session_events,
 )
+from api.gateway_restart import restart_active_profile_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -1908,10 +1909,20 @@ def _build_session_list_cache_payload(
         1 for s in scoped
         if _is_cli_session_for_settings(s)
     )
-    if sidebar_source == "webui":
-        scoped = [s for s in scoped if not _is_cli_session_for_settings(s)]
-    elif sidebar_source == "cli":
-        scoped = [s for s in scoped if _is_cli_session_for_settings(s)]
+    def _filter_sidebar_source(rows: list[dict]) -> list[dict]:
+        if sidebar_source == "webui":
+            return [s for s in rows if not _is_cli_session_for_settings(s)]
+        if sidebar_source == "cli":
+            return [s for s in rows if _is_cli_session_for_settings(s)]
+        return list(rows)
+
+    scoped = _filter_sidebar_source(scoped)
+    sidebar_reference_sessions: list[dict] = []
+    if not include_archived:
+        sidebar_reference_sessions = _hidden_archived_sidebar_reference_sessions(
+            _filter_sidebar_source(visible_scoped),
+            _filter_sidebar_source(archived_scoped),
+        )
     if not include_archived:
         diag_stage("filter_archived_sessions")
     diag_stage("visible_lineage_metadata")
@@ -1920,6 +1931,10 @@ def _build_session_list_cache_payload(
         "sessions": [
             dict(s) if isinstance(s, dict) else {}
             for s in scoped
+        ],
+        "sidebar_reference_sessions": [
+            dict(s) if isinstance(s, dict) else {}
+            for s in sidebar_reference_sessions
         ],
         "cli_count": len(deduped_cli),
         "archived_count": archived_count,
@@ -1957,8 +1972,15 @@ def _session_list_payload_to_response(payload: dict) -> dict:
     for s in runtime_rows:
         item = _sidebar_session_response_item(s, redact_enabled=_redact_enabled) if isinstance(s, dict) else {}
         safe_merged.append(item)
+    safe_reference = []
+    for s in payload.get("sidebar_reference_sessions", []) or []:
+        item = _sidebar_session_response_item(s, redact_enabled=_redact_enabled) if isinstance(s, dict) else {}
+        if item:
+            item["_sidebar_reference_only"] = True
+        safe_reference.append(item)
     response = {
         "sessions": safe_merged,
+        "sidebar_reference_sessions": safe_reference,
         "cli_count": int(payload.get("cli_count", 0)),
         "archived_count": int(payload.get("archived_count", 0)),
         "archived_webui_count": int(payload.get("archived_webui_count", 0)),
@@ -1975,6 +1997,53 @@ def _session_list_payload_to_response(payload: dict) -> dict:
     if "cli_session_count" in payload:
         response["cli_session_count"] = int(payload.get("cli_session_count", 0))
     return response
+
+
+def _hidden_archived_sidebar_reference_sessions(
+    visible_rows: list[dict],
+    archived_rows: list[dict],
+) -> list[dict]:
+    """Return hidden archived ancestors needed for client-side sidebar nesting.
+
+    The default sidebar payload intentionally omits archived sessions. The
+    browser still needs a tiny reference row for an archived parent/ancestor so
+    `_attachChildSessionsToSidebarRows()` can suppress its visible child rows
+    instead of rendering them as orphan top-level conversations (#4293).
+    """
+    archived_by_id = {
+        str(row.get("session_id")): row
+        for row in archived_rows
+        if isinstance(row, dict) and row.get("archived") and row.get("session_id")
+    }
+    if not archived_by_id:
+        return []
+
+    references: list[dict] = []
+    added: set[str] = set()
+    visible_ids = {
+        str(row.get("session_id"))
+        for row in visible_rows
+        if isinstance(row, dict) and row.get("session_id")
+    }
+
+    for row in visible_rows:
+        if not isinstance(row, dict):
+            continue
+        parent_id = str(row.get("parent_session_id") or "").strip()
+        seen: set[str] = set()
+        while parent_id and parent_id not in seen:
+            seen.add(parent_id)
+            if parent_id in visible_ids:
+                break
+            parent = archived_by_id.get(parent_id)
+            if not parent:
+                break
+            if parent_id not in added:
+                references.append(parent)
+                added.add(parent_id)
+            parent_id = str(parent.get("parent_session_id") or "").strip()
+
+    return references
 
 
 def _get_cached_session_list_payload(
@@ -5215,30 +5284,51 @@ def _read_profile_model_config(
 ) -> tuple[str | None, str | None]:
     """Read model.provider and model.default from the session's profile config.
 
-    Returns (profile_provider, profile_default_model). Both are None when
-    the session has no profile, the profile config is unreadable, or an
-    explicit ``requested_provider`` is already set (profile should not
-    override explicit selections).
+    Returns (profile_provider, profile_default_model). Both are None when the
+    session has no profile or the profile config is unreadable.
+
+    When the session already has an explicit ``requested_provider``, the profile
+    ``model.provider`` is not returned (first tuple element is None) so profile
+    does not override the session provider. ``profile_default_model`` is still
+    returned for suffix repair (#5127) only when the profile's configured
+    provider matches ``requested_provider`` after normalization.
     """
-    if _clean_session_model_provider(requested_provider) or not getattr(session, "profile", None):
+    if not getattr(session, "profile", None):
         return None, None
+
     try:
         from api.profiles import get_hermes_home_for_profile
+
         _profile_home = get_hermes_home_for_profile(session.profile)
         _profile_cfg_path = os.path.join(str(_profile_home), "config.yaml")
         if not os.path.isfile(_profile_cfg_path):
             return None, None
         import yaml
+
         with open(_profile_cfg_path, encoding="utf-8") as _f:
             _pcfg = yaml.safe_load(_f) or {}
         if not isinstance(_pcfg, dict):
             return None, None
-        _provider = (_pcfg.get("model", {}).get("provider") or "").strip() or None
-        _default = (_pcfg.get("model", {}).get("default") or "").strip() or None
-        return _provider, _default
+        _model_cfg = _pcfg.get("model") or {}
+        if not isinstance(_model_cfg, dict):
+            return None, None
+        _provider = (_model_cfg.get("provider") or "").strip() or None
+        _default = (_model_cfg.get("default") or "").strip() or None
     except Exception:
-        logger.warning("profile provider read failed for %r", getattr(session, "profile", None), exc_info=True)
+        logger.warning(
+            "profile provider read failed for %r",
+            getattr(session, "profile", None),
+            exc_info=True,
+        )
         return None, None
+
+    _requested = _clean_session_model_provider(requested_provider)
+    if _requested:
+        _profile_prov = _clean_session_model_provider(_provider)
+        if _profile_prov != _requested:
+            return None, None
+        return None, _default
+    return _provider, _default
 
 
 def _resolve_compatible_session_model_state(
@@ -5303,6 +5393,23 @@ def _resolve_compatible_session_model_state(
             and model_prefix == "openai"
         )
         if not explicit_provider and not stale_codex_openai_slash_id:
+            _profile_default = str(profile_default_model or "").strip()
+            _profile_prov = _clean_session_model_provider(profile_provider)
+            _providers_match_for_repair = (
+                _profile_prov is None or _profile_prov == requested_provider
+            )
+            if (
+                _profile_default
+                and "/" in _profile_default
+                and "/" not in model
+                and _profile_default.rsplit("/", 1)[-1] == model
+                and _providers_match_for_repair
+                and (
+                    requested_provider == "custom"
+                    or str(requested_provider).startswith("custom:")
+                )
+            ):
+                return _profile_default, requested_provider, True
             return model, requested_provider, False
 
     # Default (human chat/start) path calls get_available_models() with NO
@@ -7427,6 +7534,7 @@ from api.workspace import (
     load_workspaces,
     save_workspaces,
     get_last_workspace,
+    get_profile_default_workspace,
     set_last_workspace,
     git_info_for_workspace,
     authorize_escape_target,
@@ -9547,120 +9655,28 @@ def _handle_shutdown(handler) -> bool:
     return True
 
 
-_RESTART_LOCK = threading.Lock()
-
-
 def _handle_health_restart(handler) -> bool:
     """Restart the Hermes messaging gateway service."""
-    # Acquire the lock to prevent concurrent restart invocations
-    if not _RESTART_LOCK.acquire(blocking=False):
-        logger.warning("Gateway restart already in progress, rejecting concurrent request.")
+    outcome = restart_active_profile_gateway()
+
+    if outcome.get("status") == "completed":
+        return j(handler, {"ok": True, "message": "Gateway service restarted successfully"})
+
+    if outcome.get("status") == "in_progress":
+        return j(handler, {"ok": True, "message": "Gateway service restart initiated (in progress)"})
+
+    if outcome.get("status") == "busy":
         return j(
             handler,
-            {"ok": False, "error": "Restart already in progress. Please wait a moment and try again."},
-            status=429
+            {"ok": False, "error": outcome.get("message", "Restart already in progress. Please wait a moment and try again.")},
+            status=429,
         )
 
-    lock_released = False
-    try:
-        # 1. Resolve HERMES_HOME for the active profile
-        active_home = get_active_hermes_home()
-
-        # 2. Build the environment dictionary with the correct HERMES_HOME
-        env = os.environ.copy()
-        env["HERMES_HOME"] = str(active_home)
-
-        # 3. Resolve the path to the hermes CLI binary
-        hermes_cmd = shutil.which("hermes")
-        if not hermes_cmd:
-            sys_exe = Path(sys.executable)
-            sibling = sys_exe.parent / "hermes"
-            if sibling.exists():
-                hermes_cmd = str(sibling)
-            else:
-                hermes_cmd = "hermes"
-
-        # 4. Run the restart command
-        logger.info("Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)", hermes_cmd, active_home)
-        
-        proc = subprocess.Popen(
-            [hermes_cmd, "gateway", "restart"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env
-        )
-        try:
-            # Wait up to 2.0 seconds for the restart command to complete quickly
-            stdout, stderr = proc.communicate(timeout=2.0)
-            # Since it finished quickly, we can release the lock now
-            _RESTART_LOCK.release()
-            lock_released = True
-
-            if proc.returncode == 0:
-                logger.info("Gateway service restarted successfully: %s", stdout)
-                return j(handler, {"ok": True, "message": "Gateway service restarted successfully"})
-            else:
-                logger.error("Gateway service restart failed with code %d: %s", proc.returncode, stderr)
-                return j(
-                    handler,
-                    {"ok": False, "error": f"Restart failed: {stderr.strip() or stdout.strip()}"},
-                    status=500
-                )
-        except subprocess.TimeoutExpired:
-            # If the process doesn't finish within 2 seconds, it is likely draining
-            # in-flight agent runs. We let it continue running in the background.
-            logger.info("Gateway restart is taking longer than 2.0s (likely draining in-flight runs). Letting it run in the background.")
-
-            # Start background threads to consume the stdout/stderr streams to prevent
-            # the child process from blocking on pipe buffer limits when printing logs.
-            import threading
-
-            def consume_stream(stream):
-                try:
-                    while stream.read(4096):
-                        pass
-                except Exception:
-                    pass
-
-            def wait_and_release():
-                try:
-                    proc.wait(timeout=240.0)
-                except subprocess.TimeoutExpired:
-                    logger.error("Gateway restart process timed out after 240.0s. Terminating process.")
-                    try:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=5.0)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                            try:
-                                proc.wait(timeout=5.0)
-                            except subprocess.TimeoutExpired:
-                                logger.error("Gateway restart process refused to die even after SIGKILL.")
-                    except Exception as e:
-                        logger.exception("Failed to terminate timed out gateway restart process: %s", e)
-                finally:
-                    try:
-                        _RESTART_LOCK.release()
-                    except RuntimeError:
-                        # Already released or similar
-                        pass
-
-            threading.Thread(target=consume_stream, args=(proc.stdout,), daemon=True).start()
-            threading.Thread(target=consume_stream, args=(proc.stderr,), daemon=True).start()
-            # This thread will release the lock when the child process exits
-            threading.Thread(target=wait_and_release, daemon=True).start()
-            
-            # Lock will be released by wait_and_release thread
-            lock_released = True
-
-            return j(handler, {"ok": True, "message": "Gateway service restart initiated (in progress)"})
-    except Exception as exc:
-        if not lock_released:
-            _RESTART_LOCK.release()
-        logger.exception("Failed to run gateway restart command")
-        return j(handler, {"ok": False, "error": f"Internal error running restart: {type(exc).__name__}: {exc}"}, status=500)
+    return j(
+        handler,
+        {"ok": False, "error": outcome.get("message", "Internal error running restart")},
+        status=500,
+    )
 
 
 def _serve_manifest(handler) -> bool:
@@ -11164,12 +11180,26 @@ def handle_get(handler, parsed) -> bool:
         )
 
         active_profile_name = get_active_profile_name()
+        # Resolve the ACTIVE PROFILE's configured workspace so a cold boot with a
+        # profile cookie shows the right composer workspace chip on a blank
+        # new-chat page (#5169). Use get_profile_default_workspace() (NOT
+        # get_last_workspace) so a named profile without its own last_workspace.txt
+        # resolves to its config.yaml workspace/terminal.cwd rather than leaking the
+        # GLOBAL last-workspace file (the #5169 regression Codex flagged). It is
+        # profile-scoped via the per-request hermes_profile cookie set in server.py.
+        # Fail open: a resolution error must never 500 this boot-critical endpoint.
+        try:
+            _profile_default_workspace = get_profile_default_workspace()
+        except Exception:
+            logger.debug("Failed to resolve profile default workspace for /api/profile/active", exc_info=True)
+            _profile_default_workspace = None
         return j(
             handler,
             {
                 "name": active_profile_name,
                 "path": str(get_active_hermes_home()),
                 "is_default": _is_root_profile(active_profile_name),
+                "default_workspace": _profile_default_workspace,
             },
         )
 
@@ -15169,13 +15199,13 @@ def _message_content_text(content) -> str:
     return str(content or "")
 
 
-def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: set[str]) -> bool:
-    """Allow exact MEDIA:image paths already present in the requested session."""
+def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[str]) -> bool:
+    """Allow exact safe MEDIA: paths already present in the requested session."""
     sid = str(sid or "").strip()
     if not sid:
         return False
     mime = MIME_MAP.get(target.suffix.lower(), "application/octet-stream")
-    if mime not in image_mimes:
+    if mime not in allowed_mimes:
         return False
     try:
         target_resolved = target.resolve()
@@ -15210,6 +15240,11 @@ def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: 
     return False
 
 
+def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: set[str]) -> bool:
+    """Backward-compatible image-only wrapper for existing callers/tests."""
+    return _session_media_token_allows_path(sid, target, image_mimes)
+
+
 def _path_is_within_root(child: Path, root: Path) -> bool:
     """Return True when ``child`` is inside ``root`` without crashing on Windows drives."""
     try:
@@ -15224,7 +15259,7 @@ def _handle_media(handler, parsed):
     Security:
     - Path must resolve to an allowed root (hermes home, /tmp, common dirs)
     - Auth-gated when auth is enabled
-    - Only image MIME types are served inline; all others force download
+    - Safe preview MIME types can render inline when requested; SVG always downloads
     - SVG always served as attachment (XSS risk)
     - No path traversal: resolved path must stay within an allowed root
     - Additional roots can be added via MEDIA_ALLOWED_ROOTS env var
@@ -15298,10 +15333,17 @@ def _handle_media(handler, parsed):
         for root in allowed_roots
         if root.exists()
     )
-    session_media_allowed = _session_media_token_allows_image_path(
+    _AUDIO_VIDEO_PDF_TYPES = {
+        "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
+        "audio/ogg", "audio/opus", "audio/flac",
+        "video/mp4", "video/quicktime", "video/webm", "video/ogg",
+        "application/pdf",
+    }
+    _SESSION_MEDIA_TOKEN_TYPES = _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | {"text/html"}
+    session_media_allowed = _session_media_token_allows_path(
         qs.get("session_id", [""])[0],
         target,
-        _INLINE_IMAGE_TYPES,
+        _SESSION_MEDIA_TOKEN_TYPES,
     )
 
     # ── #3234: hard-deny Hermes's own state + secret/config files ────────────
@@ -15487,12 +15529,7 @@ def _handle_media(handler, parsed):
     # Only serve safe media/PDF types inline when explicitly requested. HTML is
     # allowed inline only with a CSP sandbox so "open full page" can work without
     # granting same-origin access to the WebUI. SVG is always a download (XSS risk).
-    _INLINE_PREVIEW_TYPES = _INLINE_IMAGE_TYPES | {
-        "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
-        "audio/ogg", "audio/opus", "audio/flac",
-        "video/mp4", "video/quicktime", "video/webm", "video/ogg",
-        "application/pdf",
-    }
+    _INLINE_PREVIEW_TYPES = _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES
     _DOWNLOAD_TYPES = {"image/svg+xml"}  # SVG: XSS risk, force download
     inline_preview = qs.get("inline", [""])[0] == "1"
     html_inline_ok = inline_preview and mime == "text/html"

@@ -32,6 +32,7 @@ let _pendingCarryForwardSnapshot = null;
 let _draftSaveTimer = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
+const _composerDraftKnownPayloadSessions = new Set();
 
 function _profileMatchesActiveProfile(profile, activeProfile){
   const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
@@ -98,21 +99,64 @@ async function _restoreRememberedNewChatDraftSession() {
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  const normalizedText = String(text || '');
+  const normalizedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
+    _composerDraftKnownPayloadSessions.add(sid);
+  }
   _draftSaveTimer = setTimeout(() => {
     api('/api/session/draft', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sid, text: text || '', files: files || [] }),
+      body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
+    }).then(() => {
+      _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
     }).catch(() => {});
   }, _DRAFT_SAVE_DELAY_MS);
 }
 
+function _composerDraftHasPayload(text, files) {
+  return !!(String(text || '') || (Array.isArray(files) && files.filter(Boolean).length));
+}
+
+function _sessionComposerDraftHasPayload(session) {
+  const draft = session && session.composer_draft;
+  return !!(draft && _composerDraftHasPayload(draft.text, draft.files));
+}
+
+function _rememberComposerDraftPayloadState(sid, text, files) {
+  if (!sid) return;
+  const normalizedText = String(text || '');
+  const normalizedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
+    _composerDraftKnownPayloadSessions.add(sid);
+  } else {
+    _composerDraftKnownPayloadSessions.delete(sid);
+  }
+  if (S.session && S.session.session_id === sid) {
+    S.session.composer_draft = { text: normalizedText, files: normalizedFiles };
+  }
+}
+
 // Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files) {
-  if (!sid) return;
+  if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
+  const normalizedText = String(text || '');
+  const normalizedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  // Most chat switches leave an empty composer. Avoid putting the switch path
+  // behind a network POST unless there is new local draft content or an existing
+  // server draft that must be cleared.
+  if (!_composerDraftHasPayload(normalizedText, normalizedFiles)
+      && S.session && S.session.session_id === sid
+      && !_sessionComposerDraftHasPayload(S.session)
+      && !_composerDraftKnownPayloadSessions.has(sid)) {
+    return Promise.resolve();
+  }
   return api('/api/session/draft', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: text || '', files: files || [] }),
+    body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
+  }).then(() => {
+    _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
   }).catch(() => {});
 }
 
@@ -161,9 +205,11 @@ function _clearComposerDraft(sid) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
   _clearRememberedNewChatDraftSession(sid);
-  api('/api/session/draft', {
+  return api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify({ session_id: sid, text: '' }),
+  }).then(() => {
+    _rememberComposerDraftPayloadState(sid, '', []);
   }).catch(() => {});
 }
 
@@ -1021,11 +1067,17 @@ async function newSession(flash, options={}){
     }
     updateQueueBadge(S.session.session_id);
     syncTopbar();renderMessages();
-    const dirLoad=loadDir('.');
-    // loadDir('.') is fire-and-forget while the workspace panel is closed:
-    // waiting would block new-chat/profile-switch flow for users who never open
-    // the file tree. When visible, wait so the file list lands with the session.
-    if(options&&options.awaitWorkspaceLoad) await dirLoad;
+    // Keep new-chat first paint instant. The workspace tree / git badge can
+    // refresh right after paint unless this caller explicitly needs it loaded
+    // before continuing (profile/default-workspace binding path).
+    if(options&&options.awaitWorkspaceLoad){
+      await loadDir('.');
+    }else if(typeof _deferWorkspaceRefreshForSession==='function'){
+      _deferWorkspaceRefreshForSession(S.session.session_id);
+    }else{
+      const _dirP=loadDir('.');
+      if(_dirP&&typeof _dirP.catch==='function') _dirP.catch(()=>{});
+    }
     // don't call renderSessionList here - callers do it when needed
   })();
   try{
@@ -1308,14 +1360,15 @@ async function loadSession(sid){
   S._pendingSessionToolsets=null;
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
+    const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
     if(!S._bootReady&&typeof window!=='undefined'&&typeof window._startBootModelDropdown==='function'){
       Promise.resolve().then(()=>{
-        if(_loadingSessionId!==modelRefreshSid) return;
+        if(!isActiveModelRefreshSession()) return undefined;
         return window._startBootModelDropdown();
       }).catch(()=>{});
     }else{
-      const modelRefreshPromise=Promise.resolve().then(()=>{
-        if(_loadingSessionId!==modelRefreshSid) return;
+      const modelRefreshPromise=_deferSessionSideEffect(modelRefreshSid,()=>{
+        if(!isActiveModelRefreshSession()) return undefined;
         return populateModelDropdown({freshness:'session_visit'});
       }).catch(()=>{});
       if(typeof window!=='undefined') window._modelDropdownReady=modelRefreshPromise;
@@ -1521,7 +1574,7 @@ async function loadSession(sid){
       const liveTurn=document.getElementById('liveAssistantTurn');
       if(!liveTurn||!liveTurn.querySelector('.tool-call-group[data-tool-worklog-group="1"]')) ensureLiveWorklogShell();
     }
-    loadDir('.');
+    _deferWorkspaceRefreshForSession(sid);
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -1600,7 +1653,7 @@ async function loadSession(sid){
         if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
         else appendThinking();
       }
-      loadDir('.');
+      _deferWorkspaceRefreshForSession(sid);
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -1614,11 +1667,10 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
-      const _dirP=loadDir('.');
-      // Workspace refresh is guarded by session id inside loadDir(); do not
-      // block session-load completion, draft restore, or model resolution on
-      // file-tree IO for users focused on the chat.
-      if(_dirP&&typeof _dirP.catch==='function') _dirP.catch(()=>{});
+      // Workspace refresh is guarded by session id inside loadDir(); keep it
+      // after the transcript's first paint so chat switching is not competing
+      // with file-tree / git badge IO.
+      _deferWorkspaceRefreshForSession(sid);
     }
   }
 
@@ -2116,9 +2168,45 @@ async function _generateHandoffSummary(sid, rounds) {
   // retry.
 }
 
+function _afterSessionFirstPaint(fn, delayMs=0){
+  return new Promise((resolve)=>{
+    const invoke=()=>{
+      try{ resolve(typeof fn==='function' ? fn() : undefined); }
+      catch(_){ resolve(undefined); }
+    };
+    const run=()=>{
+      if(typeof requestIdleCallback==='function'){
+        requestIdleCallback(invoke,{timeout:1500});
+      }else{
+        setTimeout(invoke, delayMs);
+      }
+    };
+    if(typeof requestAnimationFrame==='function'){
+      requestAnimationFrame(()=>requestAnimationFrame(run));
+    }else{
+      setTimeout(run, delayMs);
+    }
+  });
+}
+
+function _deferSessionSideEffect(sid, fn, delayMs=0){
+  if(!sid||typeof fn!=='function') return Promise.resolve();
+  return _afterSessionFirstPaint(()=>{
+    if(!S.session||S.session.session_id!==sid) return undefined;
+    return fn();
+  },delayMs);
+}
+
+function _deferWorkspaceRefreshForSession(sid, opts={}){
+  _deferSessionSideEffect(sid,()=>{
+    const load=loadDir('.', opts);
+    if(load&&typeof load.catch==='function') load.catch(()=>{});
+  },150);
+}
+
 function _resolveSessionModelForDisplaySoon(sid){
   if(!sid) return;
-  setTimeout(async()=>{
+  _deferSessionSideEffect(sid,async()=>{
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=1`);
       const model=data&&data.session&&data.session.model;
@@ -2936,6 +3024,7 @@ async function _ensureAllMessagesLoaded() {
 }
 
 let _allSessions = [];  // cached for search filter
+let _sidebarReferenceSessions = [];  // hidden archived ancestor rows used only for nesting/suppression
 let _allSessionsScope = null;  // {profile, allProfiles} the cache was loaded under (#4167)
 let _sessionAttentionSoundPrimed = false;
 const _sessionAttentionSoundState = new Map();
@@ -4081,6 +4170,9 @@ function _applySessionListPayload(sessData, projData){
   const serverSessions=_optimisticallyRemovedSessionIds.size
     ? (sessData.sessions||[]).filter(s=>s&&!_optimisticallyRemovedSessionIds.has(s.session_id))
     : (sessData.sessions||[]);
+  _sidebarReferenceSessions = Array.isArray(sessData.sidebar_reference_sessions)
+    ? sessData.sidebar_reference_sessions
+    : [];
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
   // Tag the cache with the scope it was loaded under (active profile +
@@ -4217,6 +4309,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
       renderSessionListFromCache();
     } else {
       _allSessions = [];
+      _sidebarReferenceSessions = [];
       _allSessionsScope = _curScope;
       _clearSessionSourceTabCounts();
       renderSessionListFromCache();
@@ -5900,6 +5993,27 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   };
 }
 
+// Hidden archived-ancestor reference rows (sidebar_reference_sessions) arrive
+// from /api/sessions WITHOUT the client-side project/source scoping that
+// _partitionSidebarSessionRows applies to the visible rows. Appending them to
+// EVERY render unconditionally let an archived parent from a DIFFERENT project
+// (or the other source bucket) enter a project/source-filtered render's
+// suppression context — silently hiding a visible child/fork whose archived
+// ancestor lives outside the current view. Scope the references to the same
+// project + source bucket as the render they feed before using them.
+function _scopedSidebarReferenceRows(isCli){
+  if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
+  return _sidebarReferenceSessions.filter(s=>{
+    if(!s) return false;
+    // Source scope: only references in the same webui/cli bucket as this render.
+    if(_isCliSession(s)!==!!isCli) return false;
+    // Project scope: mirror _partitionSidebarSessionRows exactly.
+    if(_activeProject===NO_PROJECT_FILTER){ if(s.project_id) return false; }
+    else if(_activeProject){ if(s.project_id!==_activeProject) return false; }
+    return true;
+  });
+}
+
 function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
@@ -5947,9 +6061,10 @@ function renderSessionListFromCache(){
     cliSessionsRaw,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, referenceRaw);
-  const renderedWebuiSessionCount=_renderSidebarRowsFromRawSessions(webuiSessionsRaw, webuiReferenceRaw).length;
-  const renderedCliSessionCount=_renderSidebarRowsFromRawSessions(cliSessionsRaw, cliReferenceRaw).length;
+  const isCliView=_sessionSourceFilter==='cli';
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  const renderedWebuiSessionCount=_renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length;
+  const renderedCliSessionCount=_renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length;
   const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);
   const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);

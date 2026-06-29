@@ -1100,13 +1100,61 @@ def _cancelled_turn_hint(agent_name: str | None = None) -> str:
     return f'The run was cancelled by the user before {name} finished. No provider failure occurred.'
 
 
+def _provider_error_probe_text(value) -> tuple[str, int | None]:
+    """Flatten structured provider-error payloads into searchable text."""
+    _texts: list[str] = []
+    _status_code: int | None = None
+    _seen: set[int] = set()
+
+    def _walk(node):
+        nonlocal _status_code
+        if node is None:
+            return
+        if isinstance(node, (dict, list, tuple, set)):
+            _node_id = id(node)
+            if _node_id in _seen:
+                return
+            _seen.add(_node_id)
+        if isinstance(node, dict):
+            for _key in ('type', 'code', 'message', 'detail', 'details', 'name', 'status', 'status_code'):
+                _val = node.get(_key)
+                if _val is None:
+                    continue
+                if _key in ('status', 'status_code') and _status_code is None:
+                    try:
+                        _status_code = int(_val)
+                    except Exception:
+                        pass
+                _texts.append(str(_val))
+            for _key, _val in node.items():
+                if _key in ('type', 'code', 'message', 'detail', 'details', 'name', 'status', 'status_code'):
+                    continue
+                _walk(_val)
+            return
+        if isinstance(node, (list, tuple, set)):
+            for _item in node:
+                _walk(_item)
+            return
+        _texts.append(str(node))
+
+    _walk(value)
+    return ' '.join(t for t in _texts if t).strip(), _status_code
+
+
 def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
     """Classify provider/agent failure text for WebUI apperror UX.
 
     Keep this string-based until hermes-agent exposes stable structured
     provider error classes for Codex OAuth plan limits.
     """
-    err_str = str(err_str or '')
+    _probe_text, _probe_status_code = _provider_error_probe_text(err_str)
+    if exc is not None:
+        _exc_probe_text, _exc_status_code = _provider_error_probe_text(exc)
+        if _exc_probe_text:
+            _probe_text = f"{_probe_text} {_exc_probe_text}".strip()
+        if _probe_status_code is None:
+            _probe_status_code = _exc_status_code
+    err_str = str(_probe_text or err_str or '')
     _err_lower = err_str.lower()
     _exc_name = type(exc).__name__ if exc is not None else ''
     _is_cancelled = (
@@ -1147,6 +1195,8 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
     _is_quota = _is_quota_error_text(err_str)
     _is_auth = (
         not _is_quota and (
+            _probe_status_code == 401
+            or
             '401' in err_str
             or (exc is not None and 'AuthenticationError' in _exc_name)
             or 'authentication' in _err_lower
@@ -4890,8 +4940,22 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                 previous_user_tail,
                 previous_context=previous_context,
             )
-        candidates = _strip_replayed_prefix(previous_display, candidates)
-        candidates = _strip_replayed_prefix(previous_context, candidates)
+        current_user_key = _message_identity({'role': 'user', 'content': msg_text})
+        current_user_in_candidates = any(
+            _message_identity(m) == current_user_key or _looks_like_current_user_turn(m, msg_text)
+            for m in candidates
+        )
+        assistant_or_tool_only_candidates = bool(candidates) and all(
+            _is_context_compression_marker(m)
+            or (
+                isinstance(m, dict)
+                and m.get('role') in ('assistant', 'tool')
+            )
+            for m in candidates
+        )
+        if not (assistant_or_tool_only_candidates and not current_user_in_candidates):
+            candidates = _strip_replayed_prefix(previous_display, candidates)
+            candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
@@ -5054,6 +5118,64 @@ def _session_lacks_final_assistant_answer(messages) -> bool:
         if role == 'user':
             return True
     return True
+
+
+def _merged_transcript_lacks_final_assistant_answer(
+    previous_display,
+    previous_context,
+    result_messages,
+    msg_text,
+    source: str = "webui",
+    drop_replayed_assistant: bool = False,
+) -> bool:
+    """Return True when the current turn still lacks a final assistant answer."""
+    previous_display = list(previous_display or [])
+    merged_messages = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        _restore_reasoning_metadata(previous_display, result_messages),
+        msg_text,
+        source=source,
+    )
+    current_user_idx = _find_current_user_turn(merged_messages, msg_text)
+    if current_user_idx is None or current_user_idx < len(previous_display):
+        # The active turn lives after the durable transcript boundary. If the
+        # merged display only exposes an older user row, materialize the pending
+        # prompt so a replayed assistant row cannot satisfy the wrong turn.
+        pending_user = {
+            'role': 'user',
+            'content': msg_text,
+        }
+        if source and source != 'webui':
+            pending_user['_source'] = source
+        merged_messages.append(pending_user)
+        current_user_idx = len(merged_messages) - 1
+
+    current_user_key = _message_identity(merged_messages[current_user_idx])
+    filtered_messages = merged_messages[:current_user_idx + 1]
+    if drop_replayed_assistant:
+        prior_id_set = {
+            _message_identity(msg)
+            for msg in merged_messages[:current_user_idx]
+            if isinstance(msg, dict)
+        }
+        for msg in merged_messages[current_user_idx + 1:]:
+            if not isinstance(msg, dict):
+                filtered_messages.append(msg)
+                continue
+            if msg.get('role') == 'assistant':
+                key = _message_identity(msg)
+                if key is not None and key in prior_id_set:
+                    continue
+            filtered_messages.append(msg)
+    else:
+        filtered_messages.extend(merged_messages[current_user_idx + 1:])
+    if current_user_key is not None:
+        filtered_messages = [
+            msg for msg in filtered_messages
+            if _message_identity(msg) != current_user_key or msg is merged_messages[current_user_idx]
+        ]
+    return _session_lacks_final_assistant_answer(filtered_messages)
 
 
 def _agent_result_terminal_failure(result) -> bool:
@@ -7973,15 +8095,32 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     msg_text,
                 )
+                _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
+                _classification = _classify_provider_error(
+                    str(_last_err) if _last_err else '',
+                    _last_err,
+                    silent_failure=not bool(_last_err),
+                )
+                _is_quota = _classification['type'] == 'quota_exhausted'
+                _is_auth = _classification['type'] == 'auth_mismatch'
+                _drop_replayed_assistant = (
+                    _agent_result_terminal_failure(result)
+                    or bool(getattr(agent, '_last_error', None))
+                    or ('error' in result and result.get('error') is not None)
+                )
+                _saved_transcript_lacks_final_answer = _merged_transcript_lacks_final_assistant_answer(
+                    _previous_messages,
+                    _previous_context_messages,
+                    _all_result_messages,
+                    msg_text,
+                    source=getattr(s, 'pending_user_source', None) or 'webui',
+                    drop_replayed_assistant=_drop_replayed_assistant,
+                )
                 _terminal_failure = (
                     _agent_result_terminal_failure(result)
                     or (
-                        _tool_limit_reached
-                        and _session_lacks_final_assistant_answer(_all_result_messages)
-                    )
-                    or (
-                        not _token_sent
-                        and _session_lacks_final_assistant_answer(_all_result_messages)
+                        _saved_transcript_lacks_final_answer
+                        and _classification['type'] not in {'cancelled', 'interrupted'}
                     )
                 )
                 if _terminal_failure:
@@ -8007,15 +8146,7 @@ def _run_agent_streaming(
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
-                    _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                     _err_str = str(_last_err) if _last_err else ''
-                    _classification = _classify_provider_error(
-                        _err_str,
-                        _last_err,
-                        silent_failure=not bool(_err_str),
-                    )
-                    _is_quota = _classification['type'] == 'quota_exhausted'
-                    _is_auth = _classification['type'] == 'auth_mismatch'
                     if _is_quota:
                         _err_label = _classification['label']
                         _err_type = _classification['type']
