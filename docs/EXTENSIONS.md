@@ -165,6 +165,65 @@ Loopback sidecars do **not** change asset injection behavior. They are only
 reported by diagnostics so an operator can see that a local companion service was
 declared and optionally check its health from the browser.
 
+Extension entries may declare browser-local settings when they also request
+extension-owned storage:
+
+```json
+{
+  "id": "desktop-companion",
+  "permissions": {
+    "storage": {
+      "owned": true
+    }
+  },
+  "settings_schema": [
+    {
+      "key": "show_badge",
+      "type": "boolean",
+      "label": "Show badge",
+      "default": true
+    },
+    {
+      "key": "mode",
+      "type": "enum",
+      "label": "Mode",
+      "options": [
+        {"value": "compact", "label": "Compact"},
+        {"value": "full", "label": "Full"}
+      ],
+      "default": "compact"
+    }
+  ]
+}
+```
+
+Settings are a first-pass browser feature. WebUI sanitizes the manifest schema, injects the accepted schema before extension scripts, and leaves persistence to the browser. The backend does not store extension settings or expose a generic settings write route, and it does not treat these values as secrets.
+
+The sanitizer accepts only `boolean`, `string`, `number`, `integer`, and `enum`
+fields. It drops `sensitive: true` fields, unsupported types, malformed enum
+options, duplicate keys after the first valid field, and defaults that do not
+match the declared type. `settings_schema` is honored only when
+`permissions.storage.owned` is exactly `true`.
+
+Extension scripts can use the sanctioned browser accessors:
+
+```js
+const settings = window.HermesExtensionSettings.settingsForExtension("desktop-companion");
+const value = settings.get("show_badge");
+settings.set("show_badge", false);
+
+const storage = window.HermesExtensionSettings.storageForExtension("desktop-companion");
+storage.set("lastPanel", "settings");
+
+const sameSettings = window.hermesExt.settings.forExtension("desktop-companion");
+const sameStorage = window.hermesExt.storage.forExtension("desktop-companion");
+```
+
+Settings persist only non-default overrides. Resetting settings removes those
+overrides and returns schema defaults. Extension-owned storage uses a separate
+browser-local namespace, and clearing storage removes that namespace without
+changing settings.
+
 ## URL rules
 
 Injected asset URLs are deliberately restricted:
@@ -251,6 +310,37 @@ paths are never returned by the status endpoint. If `health_path` is omitted,
 diagnostics use `/health`; if `health_path` is present but invalid, the sidecar is
 skipped rather than probed.
 
+## Embedding an external web app in an iframe
+
+By default the WebUI's Content-Security-Policy only allows it to embed
+**same-origin** content in an `<iframe>` (the `frame-src` directive falls back to
+`'self'`). An extension that wants to pin an external self-hosted web app — a
+Grafana board, Vaultwarden, a personal dashboard — as a tab therefore needs the
+operator to widen `frame-src`, opt-in, via an environment variable:
+
+```bash
+# space-separated http(s) origins; optional *. subdomain wildcard and port.
+export HERMES_WEBUI_CSP_FRAME_EXTRA="https://grafana.example.com https://*.dash.example.com:8443"
+```
+
+Rules and guarantees:
+
+- Only `http(s)` origins are accepted (an iframe `src` is always http(s)).
+  Entries may include a `*.` subdomain wildcard and a port or `*` port; a path,
+  a `ws://`/`wss://` scheme, an invalid port, or any attempt to inject another
+  directive is rejected and the whole value is ignored (with a logged warning).
+- This mirrors the existing `HERMES_WEBUI_CSP_CONNECT_EXTRA` knob (which widens
+  `connect-src` for `fetch`/WebSocket); the two are independent.
+- It only governs what the WebUI page may **embed**. It does **not** touch
+  `frame-ancestors`, which stays `'none'` — so widening `frame-src` never lets
+  another site embed the WebUI itself.
+- Default-off: with the variable unset, the policy is unchanged (same-origin
+  iframes only).
+
+An "external app tab" extension should document the exact origin(s) it needs so
+the operator can set this knob deliberately, rather than assuming a wide-open
+policy.
+
 ## Static file serving
 
 When `HERMES_WEBUI_EXTENSION_DIR` points at an existing directory, files under
@@ -284,6 +374,100 @@ For shared or remotely exposed installations:
 - review extension code before enabling it
 - prefer small, auditable extension files
 - avoid serving generated or user-writable directories as extension roots
+
+## Registering a custom theme (skin)
+
+Extensions can contribute a custom **skin** that appears in the native
+**Settings → Appearance** skin picker, instead of bolting on a parallel theme
+switcher. Call `window.registerHermesSkin(descriptor)` from your extension
+script:
+
+```javascript
+window.registerHermesSkin({
+  name: 'E-Ink',            // display name (also the picker label)
+  value: 'e-ink',           // optional stable key; slugified from name if omitted
+  label: 'E-Ink',           // optional explicit picker label
+  colors: ['#000000', '#ffffff', '#555555'],  // up to 3 preview swatches
+  tokens: {                 // CSS design-token overrides for this skin
+    '--bg': '#ffffff',
+    '--surface': '#ffffff',
+    '--text': '#000000',
+    '--accent': '#000000',
+    '--border': '#000000'
+    // ...any of the allowed tokens below
+  }
+});
+```
+
+The call returns `true` on success and `false` if the descriptor was rejected
+(so an extension can detect and log a bad theme). Once registered, the skin
+shows up in the picker, can be selected, and persists across reloads exactly
+like a built-in skin. Registering the same key again updates it in place
+(idempotent), which is what a live theme editor relies on while the user edits.
+
+**Core does the security-sensitive work for you.** Because token values are
+written into CSS, every value is sanitized in core, once, so every theme
+extension inherits the guard:
+
+- **Allowed token names** (anything else is dropped): `--bg`, `--surface`,
+  `--surface2`, `--surface-subtle`, `--text`, `--text2`, `--muted`, `--accent`,
+  `--accent2`, `--accent3`, `--accent-contrast`, `--accent-hover`,
+  `--accent-text`, `--accent-bg`, `--accent-bg-strong`, `--accent-rgb`,
+  `--border`, `--border2`, `--hover-bg`, `--code-bg`, `--code-text`,
+  `--sidebar`, `--sidebar-text`, `--user-bubble`, `--assistant-bubble`,
+  `--success`, `--warning`, `--danger`, `--info`, `--link`.
+- **Allowed value shapes** (anything else is dropped): hex colors, `rgb()` /
+  `rgba()`, `hsl()` / `hsla()`, CSS color keywords, simple numeric-with-unit
+  values (`px`/`em`/`rem`/`%`), and a bare RGB triple (e.g. `0, 0, 0` for
+  `--accent-rgb`, which the app consumes inside `rgba(...)`). Values containing
+  `url()`, `expression()`, semicolons, braces, or other CSS-injection vectors
+  are rejected.
+- **Reserved keys are protected** — an extension cannot overwrite a built-in
+  skin key (e.g. `default`, `ares`, `graphite`).
+- A descriptor with no valid tokens after sanitization is rejected entirely.
+
+This is the supported, forward-looking way for theme-pack and theme-creator
+extensions to integrate with the built-in appearance system.
+
+## Registering a custom TTS engine
+
+Extensions can contribute a **text-to-speech engine** that appears in the
+**Settings → TTS Engine** dropdown alongside the built-ins (Browser / Edge /
+ElevenLabs) and is used by **both** playback paths — the hands-free voice-mode
+auto-read and the per-message "Listen" button. Call
+`window.registerHermesTtsEngine(descriptor)`:
+
+```javascript
+window.registerHermesTtsEngine({
+  id: 'voicevox',                 // [a-z0-9_-], not a built-in
+  label: 'VOICEVOX (local)',      // shown in the dropdown (textContent — escaped)
+  // synthesize(text, opts) -> Promise<ArrayBuffer | Blob | TypedArray> of audio.
+  // opts carries the user's saved { voice, rate, pitch } (engine may ignore).
+  synthesize(text, opts) {
+    return fetch('http://127.0.0.1:50021/...', { /* ... */ })
+      .then(r => r.arrayBuffer());
+  }
+});  // -> true on success, false if rejected
+```
+
+Rules and guarantees:
+
+- **id** must be slug-safe (`[a-z0-9][a-z0-9_-]{0,31}`) and may **not** shadow a
+  built-in engine (`browser`, `edge`, `elevenlabs`) — those are reserved.
+- **label** is inserted with `textContent`, never `innerHTML` (no markup
+  injection into the dropdown).
+- `synthesize` must return audio bytes (`ArrayBuffer`, `Blob`, or a typed array);
+  core coerces to an `ArrayBuffer` and plays it through the same `<audio>`
+  lifecycle as the Edge engine (including stop/rearm in voice mode). A rejected
+  promise or empty/invalid result fails gracefully (toast on the Listen button;
+  re-listen in voice mode).
+- Core owns selection, the dropdown option, and playback; the extension only
+  produces audio. Re-registering the same id updates it in place.
+- **Network note:** if your engine calls a local server (e.g. VOICEVOX on
+  `http://127.0.0.1:50021`), that request is a same-origin-policy / CSP
+  `connect-src` concern like any extension network call — loopback is already in
+  the default `connect-src`. Declare `permissions.network_external` honestly
+  based on where it calls.
 
 ## Extension authoring guidance
 
@@ -427,3 +611,8 @@ allowlisted scalar fields such as `sidecar`, `native_host`, `bridge`,
 `last_seen_at`, and `webui_origin`. This keeps sidecar-specific diagnostics
 machine-readable without making WebUI depend on any one extension's private
 payload shape.
+
+When sanitized settings are present, Settings -> Extensions renders
+browser-local controls for installed manifest entries. Save, reset, and clear
+storage actions call `window.HermesExtensionSettings`; they do not call backend
+storage routes and do not write WebUI settings.

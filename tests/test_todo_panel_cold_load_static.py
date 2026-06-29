@@ -52,3 +52,19 @@ def test_workspace_todos_tab_prefers_live_sse_snapshot_before_cold_load_sidecar(
         "Workspace Todos must prefer the live S.todos snapshot so opening the tab "
         "after todo_state SSE updates does not render the stale cold-load sidecar"
     )
+
+
+def test_workspace_todos_render_uses_separate_hash_cache():
+    src = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    start = src.find("function _loadWorkspacePanelTodos()")
+    end = src.find("function _escHtml", start)
+
+    assert "let _workspaceTodosLastRenderedHash = null;" in src
+    assert "function _resetWorkspaceTodosRenderCache()" in src
+    assert start != -1
+    assert end != -1
+    helper = src[start:end]
+
+    assert "_workspaceTodosLastRenderedHash === '__empty__'" in helper
+    assert "_workspaceTodosHash(todos)" in helper
+    assert "if(hash === _workspaceTodosLastRenderedHash) return;" in helper

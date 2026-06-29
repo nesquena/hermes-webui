@@ -17,6 +17,7 @@ import logging
 import os
 import queue
 import re
+import socket
 import sys
 import threading
 import time
@@ -7433,6 +7434,15 @@ _GATEWAY_CAPS_LOCK = threading.Lock()
 _GATEWAY_CAPS_TTL_S: float = 60.0
 
 
+def _gateway_caps_probe_timed_out(exc: BaseException) -> bool:
+    """Keep slow capability probes on the legacy reachable-but-unsupported path."""
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return True
+    reason_text = str(reason).lower()
+    return "timed out" in reason_text or "timeout" in reason_text
+
+
 def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
     """Return cached gateway capability flags, probing /v1/capabilities if stale."""
     base_url = str(base_url or "").rstrip("/")
@@ -7443,21 +7453,40 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         cached = _GATEWAY_CAPS_CACHE.get(cache_key)
         if cached and now - cached.get("fetched_at", 0) < _GATEWAY_CAPS_TTL_S:
             return cached
-    caps = {"approval_events": False, "run_approval_response": False, "fetched_at": 0.0}
+    caps = {
+        "approval_events": False,
+        "run_approval_response": False,
+        "capabilities_reachable": False,
+        "probe_error": None,
+        "fetched_at": 0.0,
+    }
     try:
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         req = urllib.request.Request(f"{base_url}/v1/capabilities", headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
+            caps["capabilities_reachable"] = True
             body = json.loads(resp.read(65536))
         features = body.get("features") if isinstance(body, dict) else {}
         if not isinstance(features, dict):
             features = {}
         caps["approval_events"] = bool(features.get("approval_events"))
         caps["run_approval_response"] = bool(features.get("run_approval_response"))
-    except Exception:
-        pass
+    except urllib.error.HTTPError as exc:
+        caps["capabilities_reachable"] = True
+        caps["probe_error"] = f"{type(exc).__name__}: {exc}"
+    except urllib.error.URLError as exc:
+        if _gateway_caps_probe_timed_out(exc):
+            caps["capabilities_reachable"] = True
+        caps["probe_error"] = f"{type(exc).__name__}: {exc}"
+    except (TimeoutError, socket.timeout) as exc:
+        caps["capabilities_reachable"] = True
+        caps["probe_error"] = f"{type(exc).__name__}: {exc}"
+    except OSError as exc:
+        caps["probe_error"] = f"{type(exc).__name__}: {exc}"
+    except Exception as exc:
+        caps["probe_error"] = f"{type(exc).__name__}: {exc}"
     with _GATEWAY_CAPS_LOCK:
         current = _GATEWAY_CAPS_CACHE.get(cache_key)
         if current and current.get("fetched_at", 0) > probe_started_at:
@@ -7465,6 +7494,16 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         caps["fetched_at"] = time.time()
         _GATEWAY_CAPS_CACHE[cache_key] = caps
     return caps
+
+
+def gateway_approval_unavailable_reason(base_url: str, api_key: str = "") -> str | None:
+    """Return why approval support is unavailable, if it is unavailable."""
+    caps = get_gateway_caps(base_url, api_key)
+    if bool(caps.get("approval_events") and caps.get("run_approval_response")):
+        return None
+    if not caps.get("capabilities_reachable"):
+        return "unreachable"
+    return "unsupported"
 
 
 def gateway_supports_approval(base_url: str, api_key: str = "") -> bool:
@@ -7602,6 +7641,25 @@ def _evict_session_agent(session_id: str) -> None:
         if entry is not None:
             agent = entry[0] if isinstance(entry, tuple) else None
     if agent is None:
+        return
+    # A live run for this session may still hold this agent's _session_db (the
+    # worker assigns agent._session_db at run start). Never close it out from
+    # under an in-flight turn — ACTIVE_RUNS is the authoritative liveness signal
+    # (mirrors the worker's own LRU-eviction guard in streaming.py). When a run
+    # is live we still drop the cache handle above (harmless — the worker holds
+    # a local ref), but skip the lifecycle commit + _session_db.close() so the
+    # running turn can finish persisting. Hardens /clear + model-switch eviction
+    # too, not just truncate (#5096 Bug D).
+    _run_active = False
+    try:
+        with ACTIVE_RUNS_LOCK:
+            for _entry in (ACTIVE_RUNS or {}).values():
+                if (_entry or {}).get("session_id") == session_id:
+                    _run_active = True
+                    break
+    except Exception:
+        _run_active = False
+    if _run_active:
         return
     should_close = True
     try:

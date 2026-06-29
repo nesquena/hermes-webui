@@ -7,6 +7,7 @@ It is disabled by default and never executes or fetches third-party URLs.
 
 import html
 import json
+import math
 import logging
 import os
 import re
@@ -72,8 +73,10 @@ _EXTENSION_STATE_FILENAME = "extension-overrides.json"
 _MAX_EXTENSION_STATE_BYTES = 32 * 1024
 _MAX_DISABLED_EXTENSION_IDS = 512
 _EXTENSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_EXTENSION_SETTINGS_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,63}$")
 _EXTENSION_STATE_WARNING_SOURCE = "extension_state"
 _EXTENSION_STATE_LOCK = threading.Lock()
+_EXTENSION_SETTING_TYPES = {"boolean", "string", "number", "integer", "enum"}
 
 _GALLERY_INSTALL_STATE_FILENAME = "extension-install-manifest.json"
 _MAX_INSTALL_MANIFEST_BYTES = 128 * 1024
@@ -521,6 +524,122 @@ def _manifest_entry_text(entry: Dict[str, object], key: str) -> str:
         return ""
     return value.strip()
 
+def _manifest_entry_storage_owned(entry: Dict[str, object]) -> bool:
+    permissions = entry.get("permissions")
+    if not isinstance(permissions, dict):
+        return False
+    storage = permissions.get("storage")
+    return isinstance(storage, dict) and storage.get("owned") is True
+
+def _settings_text(value: object, *, max_len: int = 160) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    return text[:max_len]
+
+def _normalize_enum_options(options: object) -> Optional[List[Dict[str, str]]]:
+    if not isinstance(options, list) or not options:
+        return None
+    normalized: List[Dict[str, str]] = []
+    seen: Set[str] = set()
+    for option in options:
+        if isinstance(option, str):
+            value = option.strip()
+            label = value
+        elif isinstance(option, dict):
+            raw_value = option.get("value")
+            if not isinstance(raw_value, str):
+                return None
+            value = raw_value.strip()
+            label = _settings_text(option.get("label")) or value
+        else:
+            return None
+        if not value or value in seen:
+            return None
+        seen.add(value)
+        normalized.append({"value": value, "label": label})
+    return normalized
+
+_SETTINGS_DEFAULT_MISSING = object()
+
+def _normalize_settings_default(field_type: str, raw_default: object, options: Optional[List[Dict[str, str]]] = None) -> Tuple[bool, object]:
+    if field_type == "boolean":
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, False
+        return (True, raw_default) if isinstance(raw_default, bool) else (False, None)
+    if field_type == "string":
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, ""
+        return (True, raw_default) if isinstance(raw_default, str) else (False, None)
+    if field_type == "number":
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, 0
+        return (
+            (True, raw_default)
+            if isinstance(raw_default, (int, float)) and not isinstance(raw_default, bool) and math.isfinite(raw_default)
+            else (False, None)
+        )
+    if field_type == "integer":
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, 0
+        return (True, raw_default) if isinstance(raw_default, int) and not isinstance(raw_default, bool) else (False, None)
+    if field_type == "enum" and options:
+        values = [option["value"] for option in options]
+        if raw_default is _SETTINGS_DEFAULT_MISSING:
+            return True, values[0]
+        return (True, raw_default) if isinstance(raw_default, str) and raw_default in values else (False, None)
+    return False, None
+
+def _settings_schema_values(raw_schema: object) -> List[object]:
+    if isinstance(raw_schema, list):
+        return raw_schema
+    if isinstance(raw_schema, dict) and isinstance(raw_schema.get("fields"), list):
+        return raw_schema["fields"]
+    return []
+
+def _sanitize_settings_schema(entry: Dict[str, object]) -> List[Dict[str, object]]:
+    if not _manifest_entry_storage_owned(entry):
+        return []
+    fields: List[Dict[str, object]] = []
+    seen_keys: Set[str] = set()
+    for raw_field in _settings_schema_values(entry.get("settings_schema")):
+        if not isinstance(raw_field, dict):
+            continue
+        if raw_field.get("sensitive") is True:
+            continue
+        key = raw_field.get("key")
+        if not isinstance(key, str):
+            continue
+        key = key.strip()
+        if not _EXTENSION_SETTINGS_KEY_RE.fullmatch(key):
+            continue
+        field_type = raw_field.get("type")
+        if not isinstance(field_type, str):
+            continue
+        field_type = field_type.strip().lower()
+        if field_type not in _EXTENSION_SETTING_TYPES:
+            continue
+        options = _normalize_enum_options(raw_field.get("options")) if field_type == "enum" else None
+        if field_type == "enum" and options is None:
+            continue
+        ok, default = _normalize_settings_default(field_type, raw_field.get("default", _SETTINGS_DEFAULT_MISSING), options)
+        if not ok:
+            continue
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        field: Dict[str, object] = {
+            "key": key,
+            "type": field_type,
+            "label": _settings_text(raw_field.get("label")) or key,
+            "description": _settings_text(raw_field.get("description"), max_len=300),
+            "default": default,
+        }
+        if options is not None:
+            field["options"] = options
+        fields.append(field)
+    return fields
+
 
 def _normalize_loopback_sidecar_origin(value: object) -> Optional[str]:
     """Return a canonical loopback origin or None when unsafe.
@@ -735,10 +854,13 @@ def _gallery_installed_runtime_manifest(
         asset_base = ext_id
         if isinstance(manifest, dict):
             top_entry: Dict[str, object] = {"id": ext_id}
-            for key in ("name", "enabled", "scripts", "stylesheets", "sidecar"):
+            for key in ("name", "enabled", "scripts", "stylesheets", "sidecar", "permissions", "settings_schema"):
                 if key in manifest:
                     top_entry[key] = manifest[key]
-            if any(key in top_entry for key in ("scripts", "stylesheets", "sidecar")):
+            if any(
+                key in top_entry
+                for key in ("scripts", "stylesheets", "sidecar", "permissions", "settings_schema")
+            ):
                 entries.append(_copy_manifest_entry_with_asset_base(top_entry, asset_base))
         for _source, _index, entry in _manifest_extension_entries(manifest):
             copied = _copy_manifest_entry_with_asset_base(entry, asset_base)
@@ -836,6 +958,7 @@ def _manifest_extension_state(
         effective_enabled = manifest_enabled and not user_disabled
         if not manifest_enabled:
             manifest_disabled_ids.add(ext_id)
+        settings_schema = _sanitize_settings_schema(entry)
         extension_entries.append(
             {
                 "id": ext_id,
@@ -846,6 +969,8 @@ def _manifest_extension_state(
                 "effective_enabled": effective_enabled,
                 "can_toggle": can_toggle,
                 "reload_required": True,
+                "storage_owned": _manifest_entry_storage_owned(entry),
+                "settings_schema": settings_schema,
                 "status": (
                     "manifest_disabled"
                     if not manifest_enabled
@@ -865,6 +990,33 @@ def _manifest_extension_state(
         "known_ids": known_ids,
         "manifest_disabled_ids": manifest_disabled_ids,
     }
+
+def _extension_runtime_entries(
+    manifest: object, disabled_ids: Optional[Set[str]] = None
+) -> List[Dict[str, object]]:
+    """Return enabled extension metadata injected before extension scripts run."""
+    disabled_ids = disabled_ids or set()
+    extensions: List[Dict[str, object]] = []
+    seen_ids: Set[str] = set()
+    for _source, _index, entry in _manifest_extension_entries(manifest):
+        raw_id = _manifest_entry_text(entry, "id")
+        if not _valid_extension_id(raw_id):
+            continue
+        ext_id = raw_id.strip()
+        if ext_id in seen_ids:
+            continue
+        seen_ids.add(ext_id)
+        if entry.get("enabled", True) is False or ext_id in disabled_ids:
+            continue
+        extensions.append(
+            {
+                "id": ext_id,
+                "name": _manifest_entry_text(entry, "name") or ext_id,
+                "storage_owned": _manifest_entry_storage_owned(entry),
+                "settings_schema": _sanitize_settings_schema(entry),
+            }
+        )
+    return extensions
 
 
 def _read_manifest_urls_with_diagnostics(
@@ -950,8 +1102,14 @@ def get_extension_config() -> Dict[str, Any]:
         return {"enabled": False, "script_urls": [], "stylesheet_urls": []}
     state = _load_extension_state()
     disabled_ids = set(state.get("disabled_extensions") or [])
-    manifest_scripts, manifest_stylesheets = _read_manifest_urls(root, disabled_ids=disabled_ids)
-    return {
+    manifest, manifest_status = _load_manifest_with_status(root)
+    manifest_scripts, manifest_stylesheets, _, _ = _read_manifest_urls_with_diagnostics(
+        root,
+        disabled_ids=disabled_ids,
+        manifest=manifest,
+        manifest_status=manifest_status,
+    )
+    config = {
         "enabled": True,
         "script_urls": _read_url_list(
             _EXTENSION_SCRIPT_URLS_ENV, manifest_scripts or None
@@ -960,6 +1118,10 @@ def get_extension_config() -> Dict[str, Any]:
             _EXTENSION_STYLESHEET_URLS_ENV, manifest_stylesheets or None
         ),
     }
+    runtime_entries = _extension_runtime_entries(manifest, disabled_ids) if manifest is not None else []
+    if runtime_entries:
+        config["extensions"] = runtime_entries
+    return config
 
 
 
@@ -1387,6 +1549,15 @@ def inject_extension_tags(index_html: str) -> str:
         '<script src="{}" defer></script>'.format(html.escape(url, quote=True))
         for url in config["script_urls"]
     ]
+    runtime_config = {
+        "extensions": config.get("extensions", []),
+    }
+    runtime_json = json.dumps(runtime_config, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+    runtime_tag = (
+        "<script>window.__HERMES_EXTENSION_CONFIG__={};"
+        "if(window.HermesExtensionSettings)window.HermesExtensionSettings.primeFromStatus(window.__HERMES_EXTENSION_CONFIG__);"
+        "</script>"
+    ).format(runtime_json)
 
     if stylesheet_tags:
         head_marker = "</head>"
@@ -1396,9 +1567,11 @@ def inject_extension_tags(index_html: str) -> str:
         else:
             result = block + result
 
-    if script_tags:
+    if runtime_config["extensions"] or script_tags:
         body_marker = "</body>"
-        block = "\n".join(script_tags) + "\n"
+        block = runtime_tag + "\n"
+        if script_tags:
+            block += "\n".join(script_tags) + "\n"
         if body_marker in result:
             result = result.replace(body_marker, block + body_marker, 1)
         else:

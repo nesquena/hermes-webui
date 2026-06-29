@@ -6,8 +6,8 @@ source documents and it does not mark proposals as implemented. Follow each
 linked document's status and scope.
 
 Use this file when starting a change so the relevant public contract is visible
-before code is edited. This first version focuses on documentation routing; it
-does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
+before code is edited. This index focuses on documentation routing and
+contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Start here
 
@@ -17,8 +17,9 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   PR description expectations, UI evidence, and project-specific constraints.
 - [`README.md`](../README.md): product overview, quick start, architecture map,
   feature inventory, and docs index.
-- [`CHANGELOG.md`](../CHANGELOG.md): release-note-ready history. Update it when
-  maintainers should carry the change into release notes.
+- [`CHANGELOG.md`](../CHANGELOG.md): release history maintained by the release
+  workflow. Read it for context, but do not edit it in ordinary contributor PRs;
+  put release-note-ready wording in the PR body instead.
 
 ## Runtime, durability, and state contracts
 
@@ -168,7 +169,8 @@ Required checks:
 - Onboarding/setup validation used isolated `HERMES_HOME` and
   `HERMES_WEBUI_STATE_DIR`, unless the human operator explicitly requested real
   state.
-- Docs and `CHANGELOG.md` updates are either included or explicitly not needed.
+- Docs updates are included or explicitly not needed, and release-note-worthy
+  changes are described in the PR body rather than by editing `CHANGELOG.md`.
 - After the GitHub write, read the PR back and verify the headings rendered as
   intended.
 
@@ -200,7 +202,8 @@ Before opening a change for review, confirm:
 - `AGENTS.md`, this index, and any linked contract for the touched subsystem were
   read before editing.
 - Behavior, setup, architecture, testing, or workflow changes update the relevant
-  docs; release-note-ready changes update `CHANGELOG.md`.
+  docs; release-note-ready changes include PR-body release-note wording while
+  `CHANGELOG.md` is left to release commits.
 - UI/UX changes include before/after evidence and cover relevant desktop,
   narrow, and mobile states.
 - Runtime, streaming, recovery, replay, compression, or sidebar changes state

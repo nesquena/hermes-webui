@@ -421,6 +421,100 @@ console.log(JSON.stringify(rows));
     assert "_child_sessions" not in rows[0]
 
 
+def test_sidebar_reference_rows_suppress_source_filtered_archived_parent_child():
+    """Source-filtered payloads keep archived parents as non-rendered references.
+
+    The hidden archived parent reaches the render via the scoped reference helper
+    (`_scopedSidebarReferenceRows`), mirroring how renderSessionListFromCache feeds
+    project/source-scoped references into _renderSidebarRowsFromRawSessions.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+var NO_PROJECT_FILTER = '__none__';
+var _activeProject;
+var _sidebarReferenceSessions = [{{session_id:'parent', title:'Archived parent', archived:true, updated_at:10, last_message_at:10, source:'webui'}}];
+function _isMessagingSession(s) {{ return false; }}
+function _isCliSession(s) {{ return !!(s && (s.source === 'cli' || s.raw_source === 'cli')); }}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_scopedSidebarReferenceRows'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+const child = {{session_id:'child', title:'Subagent', parent_session_id:'parent', relationship_type:'child_session', updated_at:20, last_message_at:20, source:'webui'}};
+const refs = _scopedSidebarReferenceRows(false);
+const rows = _renderSidebarRowsFromRawSessions([child], [child, ...refs]);
+console.log(JSON.stringify(rows));
+"""
+    assert json.loads(_run_node(source)) == []
+
+
+def test_sidebar_reference_rows_do_not_suppress_cross_project_child():
+    """A cross-project archived parent must NOT hide a visible child in another project.
+
+    Regression for the silent project-scope leak: sidebar_reference_sessions arrive
+    project-unscoped from /api/sessions, so an archived parent in project B must not
+    enter a project-A-filtered render's suppression context and erase a visible
+    project-A fork. _scopedSidebarReferenceRows filters references to the active
+    project/source before they feed the render.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+var NO_PROJECT_FILTER = '__none__';
+var _activeProject = 'projA';
+var _sidebarReferenceSessions = [{{session_id:'parent', title:'Archived parent (projB)', archived:true, project_id:'projB', updated_at:10, last_message_at:10, source:'webui'}}];
+function _isMessagingSession(s) {{ return false; }}
+function _isCliSession(s) {{ return !!(s && (s.source === 'cli' || s.raw_source === 'cli')); }}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_scopedSidebarReferenceRows'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+const child = {{session_id:'child', title:'Fork in projA', parent_session_id:'parent', relationship_type:'child_session', project_id:'projA', message_count:3, updated_at:20, last_message_at:20, source:'webui'}};
+const refs = _scopedSidebarReferenceRows(false);
+const rows = _renderSidebarRowsFromRawSessions([child], [child, ...refs]);
+console.log(JSON.stringify(rows.map(r => r.session_id)));
+"""
+    assert json.loads(_run_node(source)) == ["child"]
+
+
 def test_archived_hidden_parent_suppresses_child_and_fork_orphans():
     """Archived parents should not leave child/delegate clutter behind (#4293)."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")

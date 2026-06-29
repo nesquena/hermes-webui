@@ -1048,7 +1048,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
         active_provider = str(model_cfg.get("provider") or "").strip().lower()
         if active_provider == provider_id:
             values.append(model_cfg.get("api_key"))
-    providers_cfg = cfg.get("providers", {})
+    providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         provider_cfg = providers_cfg.get(provider_id, {})
         if isinstance(provider_cfg, dict):
@@ -1216,7 +1216,7 @@ def _provider_has_key(provider_id: str) -> bool:
             if _provider_value_counts_as_api_key(provider_id, model_cfg.get("api_key")):
                 return True
     # Check providers.<id>.api_key
-    providers_cfg = cfg.get("providers", {})
+    providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         provider_cfg = providers_cfg.get(provider_id, {})
         if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
@@ -1262,7 +1262,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         if model_key and active_provider == provider_id and _provider_value_counts_as_api_key(provider_id, model_key):
             return model_key
 
-    providers_cfg = cfg.get("providers", {})
+    providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         provider_cfg = providers_cfg.get(provider_id, {})
         if isinstance(provider_cfg, dict):
@@ -2345,7 +2345,7 @@ def get_providers() -> dict[str, Any]:
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
-    providers_cfg = cfg.get("providers", {})
+    providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         known_ids.update(providers_cfg.keys())
 
@@ -2778,7 +2778,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
                 return
 
             # 1. Clean providers.<id>.api_key
-            providers_cfg = cfg.get("providers", {})
+            providers_cfg = cfg.get("providers") or {}
             if isinstance(providers_cfg, dict):
                 provider_cfg = providers_cfg.get(provider_id, {})
                 if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
