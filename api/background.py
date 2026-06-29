@@ -322,6 +322,48 @@ def append_or_queue_background_parent_update(parent_sid: str, task_id: str, upda
     return written_status
 
 
+def drain_pending_background_parent_updates(parent_session) -> int:
+    """Materialize pending background cards/results into an idle parent session.
+
+    Streaming finalization calls this after clearing ``active_stream_id`` and
+    after the foreground assistant merge, but before saving the final parent
+    session. This avoids loading an older session file and overwriting the just-
+    completed turn while still making background cards durable at the first safe
+    active-turn boundary.
+    """
+    parent_sid = str(getattr(parent_session, "session_id", "") or "")
+    if not parent_sid or _parent_has_live_turn(parent_session):
+        return 0
+    with _lock:
+        pending_tasks = [
+            dict(task) for task in _read_durable_tasks_unlocked(parent_sid)
+            if task.get("parent_append_status") in {"card_pending", "result_pending"}
+        ]
+    if not pending_tasks:
+        return 0
+
+    applied = 0
+    updates: list[tuple[str, dict[str, Any]]] = []
+    for task in pending_tasks:
+        task_id = str(task.get("task_id") or "")
+        if not task_id:
+            continue
+        update_kind = "running" if task.get("parent_append_status") == "card_pending" else "done"
+        if _apply_parent_update(parent_session, task, update_kind):
+            applied += 1
+        updates.append((task_id, {
+            "parent_append_status": "card_written" if update_kind == "running" else "result_written",
+            "parent_card_message_id": _task_card_message_id(task_id),
+            "parent_result_message_id": _task_result_message_id(task_id) if update_kind != "running" else None,
+        }))
+
+    if updates:
+        with _lock:
+            for task_id, update in updates:
+                _upsert_durable_task_unlocked(parent_sid, task_id, update)
+    return applied
+
+
 def list_durable_background_tasks(parent_sid: str) -> list[dict[str, Any]]:
     """Return durable background task records for a parent session.
 

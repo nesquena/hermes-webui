@@ -9490,6 +9490,11 @@ def _run_agent_streaming(
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
+                    try:
+                        from api.background import drain_pending_background_parent_updates
+                        drain_pending_background_parent_updates(s)
+                    except Exception:
+                        logger.debug("Failed to drain pending background parent updates for %s", s.session_id, exc_info=True)
                     s.save()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
@@ -9517,7 +9522,11 @@ def _run_agent_streaming(
                                 "created_at": time.time(),
                                 "assistant_message_index": next(
                                     (idx for idx in range(len(s.messages) - 1, -1, -1)
-                                     if isinstance(s.messages[idx], dict) and s.messages[idx].get('role') == 'assistant'),
+                                     if (
+                                         isinstance(s.messages[idx], dict)
+                                         and s.messages[idx].get('role') == 'assistant'
+                                         and not s.messages[idx].get('_background')
+                                     )),
                                     None,
                                 ),
                             },

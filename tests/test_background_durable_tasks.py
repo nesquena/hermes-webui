@@ -165,3 +165,42 @@ def test_background_parent_append_defers_while_parent_stream_is_live(tmp_path, m
     message_ids = [m.get("_message_id") for m in reloaded.messages if isinstance(m, dict)]
     assert "bgcard_task-live" in message_ids
     assert "bgresult_task-live" in message_ids
+
+
+def test_background_parent_pending_drain_preserves_current_foreground_turn(tmp_path, monkeypatch):
+    bg, cfg, models = _prepare_isolated_session_store(tmp_path, monkeypatch)
+
+    parent = models.Session(
+        session_id="parent-session-drain",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "keep chatting"}],
+        active_stream_id="parent-live-stream",
+    )
+    parent.save()
+    cfg.STREAMS["parent-live-stream"] = object()
+
+    bg.track_background(parent.session_id, "bg-session", "stream-1", "task-drain", "deep follow-up")
+    bg.complete_background(parent.session_id, "task-drain", "deeper answer")
+    assert bg.get_durable_background_task(parent.session_id, "task-drain")["parent_append_status"] == "result_pending"
+
+    # Simulate the streaming finalizer's in-memory foreground merge before the
+    # final save: loading from disk inside the drain would drop this answer.
+    finalizing = models.Session.load(parent.session_id)
+    assert finalizing is not None
+    cfg.STREAMS.clear()
+    finalizing.active_stream_id = None
+    finalizing.messages.append({"role": "assistant", "content": "Foreground answer."})
+
+    assert bg.drain_pending_background_parent_updates(finalizing) == 1
+    finalizing.save()
+
+    reloaded = models.Session.load(parent.session_id)
+    assert reloaded is not None
+    contents = [m.get("content") for m in reloaded.messages if isinstance(m, dict)]
+    assert "Foreground answer." in contents
+    message_ids = [m.get("_message_id") for m in reloaded.messages if isinstance(m, dict)]
+    assert message_ids.count("bgcard_task-drain") == 1
+    assert message_ids.count("bgresult_task-drain") == 1
+    assert bg.get_durable_background_task(parent.session_id, "task-drain")["parent_append_status"] == "result_written"
+
+    assert bg.drain_pending_background_parent_updates(reloaded) == 0
