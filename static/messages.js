@@ -1890,10 +1890,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _schedulePostDoneCanonicalReload(completedSid){
     const sid=String(completedSid||activeSid||'').trim();
-    if(!sid||typeof loadSession!=='function') return;
-    setTimeout(()=>{
+    if(!sid||typeof loadSession!=='function'||typeof api!=='function') return;
+    const _renderableCount=()=>{
+      if(typeof _messageRenderableMessageCount==='function'){
+        try{return Math.max(0,Number(_messageRenderableMessageCount())||0);}catch(_){}
+      }
+      let count=0;
+      for(const m of (Array.isArray(S.messages)?S.messages:[])){
+        if(m&&m.role&&m.role!=='tool') count++;
+      }
+      return count;
+    };
+    const _sessionCount=()=>Number(S.session&&S.session.session_id===sid&&S.session.message_count)||0;
+    const expectedCount=Math.max(_sessionCount(),_renderableCount());
+    setTimeout(async()=>{
       if(!S.session||S.session.session_id!==sid) return;
       if(S.busy||S.activeStreamId) return;
+      let data=null;
+      try{
+        data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+      }catch(_){return;}
+      if(!S.session||S.session.session_id!==sid) return;
+      if(S.busy||S.activeStreamId) return;
+      const session=data&&data.session;
+      if(!session) return;
+      if(session.active_stream_id||session.pending_user_message||session.has_pending_user_message||session.pending_started_at) return;
+      const serverCount=Number(session.message_count||0);
+      const currentCount=Math.max(expectedCount,_sessionCount(),_renderableCount());
+      if(!Number.isFinite(serverCount)||serverCount<=currentCount) return;
       try{ loadSession(sid,{force:true,reason:'post-done-canonical'}); }
       catch(_){}
     },500);

@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- **Completed replies no longer disappear from the live WebUI until a manual refresh.** The post-`done` canonical transcript reload now first verifies that the server is idle and its `message_count` is ahead of what the tab already rendered, instead of immediately force-reloading the active session and risking a stale pending snapshot that leaves only the processed status visible.
 - **Reply with Selection now returns keyboard focus to the composer immediately after adding a selected-context chip.** After clicking the floating selection action, WebUI clears the chat text selection, focuses `#msg` with `preventScroll`, moves the caret to the end, and repeats once on the next animation frame so the next keystroke goes straight into the message box.
 - **Switching between idle, unchanged sessions no longer reloads the transcript every time.** WebUI now snapshots the fully-rendered idle session state in browser memory before switching away, then restores it immediately on A → B → A navigation when the sidebar fingerprint (`message_count` / `last_message_at` and idle flags) still matches. Force refreshes, streaming sessions, pending turns, and changed sessions still fall back to the authoritative `/api/session` load.
 - **Screenshot paste now works from the wider WebUI, not only when the composer textarea is focused.** Ctrl/Cmd+V with image clipboard data attaches the screenshot to the composer from the chat surface, while normal form fields are ignored so settings/login inputs keep their native paste behavior.

@@ -143,21 +143,25 @@ def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
     )
 
 
-def test_done_handler_schedules_canonical_reload_after_payload_settle():
-    """The open tab must converge on /api/session truth after done.
+def test_done_handler_schedules_safe_canonical_reload_after_payload_settle():
+    """The open tab should converge on newer /api/session truth after done.
 
-    A done payload can be shorter than the persisted/canonical transcript after
-    process restart, recovery, or state-db reconciliation. A fresh window loads
-    the canonical transcript; the already-open tab must do the same without the
-    user needing a new window.
+    The post-done reload is allowed only when the server is idle and its
+    transcript count is ahead of what the tab already rendered. Otherwise a
+    delayed metadata response from the just-finished turn can blank the visible
+    final answer even though a hard refresh later loads it from disk.
     """
     attach_body = _function_body("attachLiveStream")
     done_body = _event_body("done")
     helper_idx = attach_body.find("function _schedulePostDoneCanonicalReload")
     assert helper_idx != -1
     helper_body = _function_body("_schedulePostDoneCanonicalReload")
+    compact = helper_body.replace(" ", "").replace("\n", "")
+    assert "messages=0&resolve_model=0" in helper_body
+    assert "if(S.busy||S.activeStreamId)return;" in compact
+    assert "session.active_stream_id||session.pending_user_message||session.has_pending_user_message||session.pending_started_at" in compact
+    assert "serverCount<=currentCount" in compact
     assert "loadSession(sid,{force:true,reason:'post-done-canonical'})" in helper_body
-    assert "if(S.busy||S.activeStreamId) return;" in helper_body
     assert "_schedulePostDoneCanonicalReload(completedSid);" in done_body
     assert done_body.find("renderMessages({preserveScroll:true});") < done_body.find("_schedulePostDoneCanonicalReload(completedSid);")
 
