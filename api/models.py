@@ -105,6 +105,40 @@ _SIDECAR_METADATA_CACHE_MAX = 2000
 
 _STALE_TMP_AGE_SECONDS = 3600  # 1 hour
 
+
+# ---------------------------------------------------------------------------
+# Windows-safe os.replace() with retry
+# ---------------------------------------------------------------------------
+# On Windows, os.replace() raises WinError 5 (ERROR_ACCESS_DENIED) when the
+# target file is momentarily locked by another process (antivirus scanner,
+# browser polling the session JSON, etc.).  This helper retries with
+# exponential backoff on PermissionError, which is the Python exception
+# mapped from WinError 5.  On non-Windows platforms it is a thin wrapper
+# (one attempt, no delay).
+# ---------------------------------------------------------------------------
+
+_WINDOWS_REPLACE_MAX_RETRIES = 5
+_WINDOWS_REPLACE_INITIAL_DELAY = 0.05  # 50 ms
+
+
+def _safe_replace(src: Path, dst: Path) -> None:
+    """Atomic replace with retries on Windows file-locking errors."""
+    if os.name != 'nt':
+        os.replace(src, dst)
+        return
+
+    delay = _WINDOWS_REPLACE_INITIAL_DELAY
+    for attempt in range(_WINDOWS_REPLACE_MAX_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _WINDOWS_REPLACE_MAX_RETRIES - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2  # 50 -> 100 -> 200 -> 400 -> 800 ms
+
+
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
@@ -325,7 +359,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, session_index_file)
+                _safe_replace(_tmp, session_index_file)
             except Exception:
                 # Best-effort cleanup of stale tmp on failure
                 try:
@@ -372,7 +406,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, session_index_file)
+                _safe_replace(_tmp, session_index_file)
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
@@ -419,7 +453,7 @@ def prune_session_from_index(session_id: str) -> None:
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, SESSION_INDEX_FILE)
+                _safe_replace(_tmp, SESSION_INDEX_FILE)
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
@@ -905,7 +939,7 @@ class Session:
                             bf.write(existing_text)
                             bf.flush()
                             os.fsync(bf.fileno())
-                        os.replace(bak_tmp, bak_path)
+                        _safe_replace(bak_tmp, bak_path)
                     except OSError:
                         # Backup is best-effort; main save proceeds regardless.
                         try:
@@ -921,7 +955,7 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, self.path)
+            _safe_replace(tmp, self.path)
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
