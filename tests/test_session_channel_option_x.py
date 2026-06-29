@@ -457,6 +457,30 @@ def test_session_stream_pauses_while_chat_stream_is_active():
     assert "stopSessionStream();" in suspend_src
 
 
+def test_session_stream_resume_rearms_when_live_stream_registry_clears():
+    """The done event can arrive before stream_end closes /api/chat/stream.
+
+    If the first resume attempt sees LIVE_STREAMS[sid] still present, the
+    stream_end teardown must re-attempt resume after deleting that owner entry.
+    """
+    js = (REPO_ROOT / "static" / "messages.js").read_text()
+    close_src = _js_function_decl(js, "closeLiveStream")
+
+    delete_idx = close_src.index("delete LIVE_STREAMS[sessionId];")
+    resume_idx = close_src.index("_resumeSessionStreamAfterLiveChat(sessionId);")
+    assert delete_idx < resume_idx, (
+        "closeLiveStream must retry session-stream resume after LIVE_STREAMS is "
+        "cleared, otherwise done-before-stream_end can leave /api/session/stream closed"
+    )
+
+    resume_src = _js_function_decl(js, "_resumeSessionStreamAfterLiveChat")
+    assert "S.session.session_id !== sid" in resume_src, (
+        "the closeLiveStream retry relies on the visible-session guard to avoid "
+        "reopening a session stream for a background session-switch teardown"
+    )
+    assert "if (_chatStreamActiveForSession(sid)) return;" in resume_src
+
+
 def test_frontend_busy_race_gate_obsoleted_by_option_z_pivot():
     """Per the Option Z PIVOT note baked into the handler body, the browser
     is no longer in the wakeup path at all — the server-side drain owns

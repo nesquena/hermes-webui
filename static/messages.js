@@ -1809,6 +1809,7 @@ function closeLiveStream(sessionId, streamId, source){
   if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
+  _resumeSessionStreamAfterLiveChat(sessionId);
   // closeLiveStream() is called during session-switch teardown for any session
   // the user is no longer viewing. The stream is still active on the server,
   // so mark the in-memory INFLIGHT entry for reattach — otherwise
