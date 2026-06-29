@@ -18021,18 +18021,6 @@ def _handle_chat_start(handler, body, diag=None):
                 s.profile = requested_profile
             else:
                 return bad(handler, "Session not found", 404)
-        elif (
-            requested_profile
-            and _profiles_match(requested_profile, active_profile)
-            and not _profiles_match(session_profile, requested_profile)
-        ):
-            # Empty sessions are placeholders. If the user switches profiles
-            # before sending the first turn, run the placeholder under the
-            # active request profile instead of the stale one stamped at
-            # creation time. The request body alone must not retag a session to
-            # a different profile than the server-selected active profile.
-            if not has_persisted_turns:
-                s.profile = requested_profile
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
         if not msg:
