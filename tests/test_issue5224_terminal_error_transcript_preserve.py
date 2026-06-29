@@ -63,7 +63,7 @@ function installRuntimeHelpers() {
     "_messageIdentityKey",
     "_carryForwardEphemeralTurnFields",
     "_isTerminalStreamErrorMarkerMessage",
-    "_appendTerminalStreamErrorMarkerIfMissing",
+    "_ensureSingleTerminalStreamErrorMarker",
     "_restoreSettledSession",
     "_handleStreamError",
   ];
@@ -183,8 +183,8 @@ function buildRuntime() {
 
   if (scenario.action === 'terminal_marker_idempotent') {
     const messages = JSON.parse(JSON.stringify(scenario.messages || []));
-    _appendTerminalStreamErrorMarkerIfMissing(messages);
-    _appendTerminalStreamErrorMarkerIfMissing(messages);
+    _ensureSingleTerminalStreamErrorMarker(messages);
+    _ensureSingleTerminalStreamErrorMarker(messages);
     const terminalMarkerCount = messages.filter(_isTerminalStreamErrorMarkerMessage).length;
     console.log(JSON.stringify({
       action: scenario.action,

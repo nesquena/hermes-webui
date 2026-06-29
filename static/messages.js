@@ -2062,7 +2062,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return message&&message.role==='assistant'&&typeof message.content==='string'&&
       message.content.startsWith('**Connection interrupted:** The browser lost the live SSE connection before the response finished.');
   }
-  function _appendTerminalStreamErrorMarkerIfMissing(messages){
+  function _ensureSingleTerminalStreamErrorMarker(messages){
     if(!Array.isArray(messages)) return;
     while(messages.length && _isTerminalStreamErrorMarkerMessage(messages[messages.length-1])){
       messages.pop();
@@ -5831,7 +5831,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         session_id:activeSid,
       },null);
       clearLiveToolCards();if(!assistantText)removeThinking();
-      _appendTerminalStreamErrorMarkerIfMissing(S.messages);
+      _ensureSingleTerminalStreamErrorMarker(S.messages);
       _attachProjectedAnchorSceneToLastAssistant(S.messages);
       renderMessages({preserveScroll:true});
       _markSessionViewed(activeSid, S.messages.length);

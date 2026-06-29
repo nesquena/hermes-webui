@@ -657,7 +657,7 @@ def test_connection_error_terminal_message_attaches_projected_anchor_scene_befor
     error = _function_body(MESSAGES_JS, "_handleStreamError")
 
     assert "_applyToAnchor('error'" in error
-    push_idx = error.index("_appendTerminalStreamErrorMarkerIfMissing(S.messages);")
+    push_idx = error.index("_ensureSingleTerminalStreamErrorMarker(S.messages);")
     attach_idx = error.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
     render_idx = error.index("renderMessages({preserveScroll:true});")
     assert push_idx < attach_idx < render_idx
