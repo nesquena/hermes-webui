@@ -42,8 +42,12 @@ class TestSettingsSearch:
         assert "function _buildSettingsIndex()" in PANELS_JS, (
             "panels.js must contain _buildSettingsIndex() function"
         )
-        assert "settingsPaneConversation" in PANELS_JS[PANELS_JS.find("function _buildSettingsIndex()"):], (
+        body = PANELS_JS[PANELS_JS.find("function _buildSettingsIndex()"):]
+        assert "settingsPaneConversation" in body, (
             "_buildSettingsIndex must reference settingsPaneConversation pane"
+        )
+        assert "searchBlob" in body, (
+            "_buildSettingsIndex must store a searchBlob for settings fields"
         )
 
     def test_panels_js_has_filter_settings_function(self):
@@ -51,8 +55,12 @@ class TestSettingsSearch:
         assert "function filterSettings(query)" in PANELS_JS, (
             "panels.js must contain filterSettings(query) function"
         )
-        assert "toLowerCase().includes(q)" in PANELS_JS, (
-            "filterSettings must do case-insensitive substring matching"
+        body = PANELS_JS[PANELS_JS.find("function filterSettings(query)"):]
+        assert "(entry.searchBlob || entry.label).toLowerCase().includes(q)" in body, (
+            "filterSettings must do case-insensitive substring matching over the search blob"
+        )
+        assert "esc(m.label)" in body, (
+            "filterSettings must keep rendering the visible label text"
         )
 
     def test_panels_js_has_navigate_to_field_function(self):

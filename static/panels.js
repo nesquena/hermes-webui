@@ -6953,7 +6953,14 @@ async function _buildSettingsIndex() {
         if (!labelEl) return;
         const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
         const label = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
-        if (label) index.push({ label, sectionKey, i18nKey, el: field });
+        if (label) {
+          const searchBlob = [label, field.textContent, field.dataset ? field.dataset.settingsSearch : '']
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          index.push({ label, searchBlob, sectionKey, i18nKey, el: field });
+        }
       });
       if (sectionKey === 'providers') {
         pane.querySelectorAll('.provider-card').forEach(card => {
@@ -7001,7 +7008,7 @@ async function filterSettings(query) {
     help: t('settings_tab_help') || 'Help',
   };
   const matches = (_settingsIndex || []).filter(entry =>
-    entry.label.toLowerCase().includes(q)
+    (entry.searchBlob || entry.label).toLowerCase().includes(q)
   );
   if (!matches.length) {
     resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
