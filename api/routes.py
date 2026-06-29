@@ -30,7 +30,7 @@ from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
@@ -4412,6 +4412,53 @@ def _is_browser_unsafe_request(handler) -> bool:
     return bool(handler.headers.get("Origin") or handler.headers.get("Referer"))
 
 
+def _check_same_origin_browser_request(handler) -> bool:
+    _clear_csrf_failure_reason(handler)
+    origin = handler.headers.get("Origin", "")
+    referer = handler.headers.get("Referer", "")
+    host = handler.headers.get("Host", "")
+    sec_fetch_site = handler.headers.get("Sec-Fetch-Site", "").strip().lower()
+    if not (origin or referer or sec_fetch_site):
+        return True
+    if sec_fetch_site == "cross-site":
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
+    target = origin or referer
+    if not target:
+        return sec_fetch_site in {"none", "same-origin"} or _set_csrf_failure_reason(
+            handler, "origin_mismatch"
+        )
+    m = _re.match(r"^https?://([^/]+)", target)
+    if not m:
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
+    origin_host = m.group(1)
+    origin_scheme = m.group(0).split('://')[0].lower()
+    origin_name, origin_port = _normalize_host_port(origin_host)
+    origin_allowed = False
+    origin_value = m.group(0).rstrip('/').lower()
+    if origin_value in _allowed_public_origins():
+        origin_allowed = True
+    if not origin_allowed:
+        allowed_hosts = [h.strip() for h in [host] if h.strip()]
+        trust_forwarded_host = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "").strip().lower()
+        if trust_forwarded_host in ("1", "true", "yes", "on"):
+            allowed_hosts.extend(
+                h.strip()
+                for h in [
+                    handler.headers.get("X-Forwarded-Host", ""),
+                    handler.headers.get("X-Real-Host", ""),
+                ]
+                if h.strip()
+            )
+        for allowed in allowed_hosts:
+            allowed_name, allowed_port = _normalize_host_port(allowed)
+            if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
+                origin_allowed = True
+                break
+    if not origin_allowed:
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
+    return True
+
+
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
     return path in {
@@ -4452,50 +4499,10 @@ def _csrf_rejection_error(handler) -> str:
 
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
-    _clear_csrf_failure_reason(handler)
-    origin = handler.headers.get("Origin", "")
-    referer = handler.headers.get("Referer", "")
-    host = handler.headers.get("Host", "")
+    if not _check_same_origin_browser_request(handler):
+        return False
     if not _is_browser_unsafe_request(handler):
-        return True  # non-browser clients (curl, MCP, agent) have no Origin
-    target = origin or referer
-    # Extract host:port from origin/referer
-    m = _re.match(r"^https?://([^/]+)", target)
-    if not m:
-        return _set_csrf_failure_reason(handler, "origin_mismatch")
-    origin_host = m.group(1)
-    origin_scheme = m.group(0).split('://')[0].lower()  # 'http' or 'https'
-    origin_name, origin_port = _normalize_host_port(origin_host)
-    origin_allowed = False
-    # Check against explicitly allowed public origins (env var)
-    origin_value = m.group(0).rstrip('/').lower()
-    if origin_value in _allowed_public_origins():
-        origin_allowed = True
-    if not origin_allowed:
-        # Allow same-origin Host by default. Forwarded host headers are only
-        # trustworthy behind a proxy that strips untrusted inbound copies.
-        allowed_hosts = [
-            h.strip()
-            for h in [host]
-            if h.strip()
-        ]
-        trust_forwarded_host = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "").strip().lower()
-        if trust_forwarded_host in ("1", "true", "yes", "on"):
-            allowed_hosts.extend(
-                h.strip()
-                for h in [
-                    handler.headers.get("X-Forwarded-Host", ""),
-                    handler.headers.get("X-Real-Host", ""),
-                ]
-                if h.strip()
-            )
-        for allowed in allowed_hosts:
-            allowed_name, allowed_port = _normalize_host_port(allowed)
-            if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
-                origin_allowed = True
-                break
-    if not origin_allowed:
-        return _set_csrf_failure_reason(handler, "origin_mismatch")
+        return True  # non-browser clients (curl, MCP, agent) have no Origin/Referer
 
     from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
 
@@ -4652,7 +4659,7 @@ def _extension_sidecar_proxy_same_origin_opener(allowed_origin: str):
                 raise URLError("Extension sidecar redirect crossed declared origin")
             return super().redirect_request(req, fp, code, msg, headers, resolved)
 
-    return build_opener(_SameOriginRedirectHandler)
+    return build_opener(ProxyHandler({}), _SameOriginRedirectHandler)
 
 
 def _handle_extension_sidecar_proxy(
@@ -4665,6 +4672,8 @@ def _handle_extension_sidecar_proxy(
     matched = _match_extension_sidecar_proxy_path(parsed.path)
     if matched is None:
         return False
+    if method == "GET" and not _check_same_origin_browser_request(handler):
+        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     try:
         request_body = _read_body_bytes(handler) if read_request_body else None
     except ValueError as exc:

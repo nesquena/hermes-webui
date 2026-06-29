@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 import io
 import json
+import urllib.request
 
 import pytest
 
@@ -390,6 +391,89 @@ def test_extension_sidecar_proxy_route_uses_shared_resolver_and_strips_headers(m
     assert handler.header("X-Upstream-Hop") is None
 
 
+def test_extension_sidecar_proxy_get_rejects_cross_site_browser_request(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr(
+        "api.extensions.resolve_extension_sidecar_proxy_target",
+        lambda extension_id, proxy_path, query="": {
+            "extension_id": extension_id,
+            "origin": "http://127.0.0.1:17787",
+            "proxy_path": "/api/extensions/templates/sidecar/",
+            "upstream_url": "http://127.0.0.1:17787/v1/ping",
+        },
+    )
+
+    handler = FakeHandler()
+    handler.headers = {
+        "Origin": "https://evil.example",
+        "Host": "webui.local",
+        "Sec-Fetch-Site": "cross-site",
+    }
+
+    result = routes.handle_get(
+        handler,
+        SimpleNamespace(path="/api/extensions/templates/sidecar/v1/ping", query=""),
+    )
+    assert result is None
+    assert handler.status == 403
+    assert json.loads(handler.body.decode("utf-8")) == {
+        "error": "Cross-origin mismatch - check reverse proxy headers"
+    }
+
+
+def test_extension_sidecar_proxy_get_allows_same_origin_browser_request_without_csrf_token(monkeypatch):
+    from api import routes
+
+    class FakeResponse:
+        def __init__(self):
+            self.status = 200
+            self.headers = {"Content-Type": "application/json"}
+
+        def read(self):
+            return b'{"ok":true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeOpener:
+        def open(self, request, timeout=10):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "api.extensions.resolve_extension_sidecar_proxy_target",
+        lambda extension_id, proxy_path, query="": {
+            "extension_id": extension_id,
+            "origin": "http://127.0.0.1:17787",
+            "proxy_path": "/api/extensions/templates/sidecar/",
+            "upstream_url": "http://127.0.0.1:17787/v1/ping",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_extension_sidecar_proxy_same_origin_opener",
+        lambda allowed_origin: FakeOpener(),
+    )
+
+    handler = FakeHandler()
+    handler.headers = {
+        "Origin": "http://webui.local",
+        "Host": "webui.local",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
+    result = routes.handle_get(
+        handler,
+        SimpleNamespace(path="/api/extensions/templates/sidecar/v1/ping", query=""),
+    )
+    assert result is True
+    assert handler.status == 200
+    assert json.loads(handler.body.decode("utf-8")) == {"ok": True}
+
+
 def test_extension_sidecar_proxy_route_preserves_upstream_http_errors(monkeypatch):
     from api import routes
     from urllib.error import HTTPError
@@ -555,6 +639,27 @@ def test_extension_sidecar_proxy_route_uses_same_origin_redirect_opener(monkeypa
     }
     assert handler.status == 200
     assert handler.body == b'{"ok":true}'
+
+
+def test_extension_sidecar_proxy_opener_disables_ambient_proxies(monkeypatch):
+    from api import routes
+
+    captured = {}
+
+    def fake_build_opener(*handlers):
+        captured["handlers"] = handlers
+        return object()
+
+    monkeypatch.setattr(routes, "build_opener", fake_build_opener)
+    opener = routes._extension_sidecar_proxy_same_origin_opener("http://127.0.0.1:17787")
+    assert opener is not None
+    proxy_handlers = [
+        handler
+        for handler in captured["handlers"]
+        if isinstance(handler, urllib.request.ProxyHandler)
+    ]
+    assert len(proxy_handlers) == 1
+    assert proxy_handlers[0].proxies == {}
 
 
 def test_extension_sidecar_proxy_consent_route_is_wired(monkeypatch):
