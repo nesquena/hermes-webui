@@ -264,6 +264,7 @@ _CLIENT_EVENT_RATE_LIMIT_LOCK = threading.Lock()
 _CLIENT_EVENT_RATE_LIMIT_WINDOW_SECONDS = 60
 _CLIENT_EVENT_RATE_LIMIT_MAX = 30
 _CLIENT_EVENT_MAX_BODY_BYTES = 4 * 1024
+_EXTENSION_SIDECAR_PROXY_MAX_RESPONSE_BYTES = 512 * 1024
 _CLIENT_EVENT_ALLOWED_FIELDS = {
     "event": 64,
     "source": 80,
@@ -4424,9 +4425,13 @@ def _check_same_origin_browser_request(handler, *, require_provenance: bool = Fa
         return _set_csrf_failure_reason(handler, "origin_mismatch")
     target = origin or referer
     if not target:
-        return sec_fetch_site in {"none", "same-origin"} or _set_csrf_failure_reason(
-            handler, "origin_mismatch"
-        )
+        if sec_fetch_site == "none":
+            return True
+        if sec_fetch_site == "same-origin":
+            return not require_provenance or _set_csrf_failure_reason(
+                handler, "origin_mismatch"
+            )
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
     m = _re.match(r"^https?://([^/]+)", target)
     if not m:
         return _set_csrf_failure_reason(handler, "origin_mismatch")
@@ -4622,6 +4627,13 @@ def _send_extension_sidecar_proxy_response(handler, status: int, body: bytes, he
     return True
 
 
+def _read_extension_sidecar_proxy_body(stream) -> bytes:
+    body = stream.read(_EXTENSION_SIDECAR_PROXY_MAX_RESPONSE_BYTES + 1)
+    if len(body) > _EXTENSION_SIDECAR_PROXY_MAX_RESPONSE_BYTES:
+        raise ValueError("Extension sidecar response too large")
+    return body
+
+
 def _extension_sidecar_proxy_redirect_url(
     allowed_origin: str,
     request_url: str,
@@ -4701,16 +4713,22 @@ def _handle_extension_sidecar_proxy(
         )
         opener = _extension_sidecar_proxy_same_origin_opener(target["origin"])
         with opener.open(request, timeout=10) as response:
+            body = _read_extension_sidecar_proxy_body(response)
             return _send_extension_sidecar_proxy_response(
                 handler,
                 getattr(response, "status", 200),
-                response.read(),
+                body,
                 response.headers,
             )
     except ExtensionSidecarProxyError as exc:
         return bad(handler, str(exc), status=exc.status)
+    except ValueError as exc:
+        return bad(handler, str(exc), status=502)
     except HTTPError as exc:
-        body = exc.read()
+        try:
+            body = _read_extension_sidecar_proxy_body(exc)
+        except ValueError as read_exc:
+            return bad(handler, str(read_exc), status=502)
         return _send_extension_sidecar_proxy_response(
             handler,
             exc.code,

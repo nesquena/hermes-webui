@@ -773,6 +773,22 @@ def _normalize_sidecar_health_path(value: object) -> Optional[str]:
     return decoded_path
 
 
+def _is_valid_sidecar_proxy_path(decoded_path: str) -> bool:
+    if any(ch in decoded_path for ch in ("?", "#")):
+        return False
+    if any(ch.isspace() for ch in decoded_path):
+        return False
+    if not decoded_path.startswith("/") or decoded_path.startswith("//"):
+        return False
+    segments = decoded_path.split("/")[1:]
+    if not segments:
+        return False
+    for segment in segments:
+        if not segment or segment in (".", ".."):
+            return False
+    return True
+
+
 def _sidecar_from_manifest_entry(
     entry: Dict[str, object], diagnostics: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, str]]:
@@ -1140,10 +1156,12 @@ def _normalize_sidecar_proxy_path(value: object) -> Optional[str]:
     raw = str(value)
     if raw == "":
         return "/"
-    decoded = unquote(raw)
-    if not decoded or decoded.startswith("/"):
+    if raw.startswith("/"):
         return None
-    return _normalize_sidecar_health_path(f"/{decoded}")
+    candidate = f"/{raw}"
+    if not _is_valid_sidecar_proxy_path(_fully_unquote_path(candidate)):
+        return None
+    return candidate
 
 def _extension_runtime_entries(
     manifest: object, disabled_ids: Optional[Set[str]] = None
