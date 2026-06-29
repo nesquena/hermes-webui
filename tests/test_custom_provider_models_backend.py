@@ -7,11 +7,9 @@ Verifies:
 4. Unknown provider returns error
 5. get_providers() surfaces dict-form models (read path)
 """
-import json
 import os
 import sys
 import types
-import tempfile
 from pathlib import Path
 
 import pytest
