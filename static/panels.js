@@ -5674,6 +5674,8 @@ async function switchToWorkspace(path,name){
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
     S.session.workspace=path;
+    // Trigger a sidebar re-render when the per-workspace filter is active (#2549).
+    if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -7401,6 +7403,8 @@ function _preferencesPayloadFromUi(){
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
+  const showAllWsCb=$('settingsShowAllWorkspaces');
+  if(showAllWsCb) payload.show_all_workspaces=showAllWsCb.checked;
   const showCronCb=$('settingsShowCronSessions');
   // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
   // identically to the explicit saveSettings() path, so neither save route can
@@ -7896,6 +7900,8 @@ async function loadSettingsPanel(){
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=settings.show_cli_sessions!==false;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const showAllWsCb=$('settingsShowAllWorkspaces');
+    if(showAllWsCb){showAllWsCb.checked=settings.show_all_workspaces!==false;showAllWsCb.addEventListener('change',()=>{window._showAllWorkspaces=showAllWsCb.checked;if(typeof renderSessionListFromCache==='function')renderSessionListFromCache();_schedulePreferencesAutosave();},{once:false});}
     const showCronCb=$('settingsShowCronSessions');
     if(showCronCb){
       showCronCb.checked=!!settings.show_cron_sessions;
@@ -9961,6 +9967,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._showTps=showTps;
   window._fadeTextEffect=!!fadeTextEffect;
   window._showCliSessions=showCliSessions;
+  window._showAllWorkspaces=body.show_all_workspaces!==false;
   window._showPreviousMessagingSessions=!!body.show_previous_messaging_sessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
@@ -10522,6 +10529,7 @@ async function saveSettings(andClose){
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
+  const showAllWorkspaces=!!(($('settingsShowAllWorkspaces')||{checked:true}).checked);
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
@@ -10562,6 +10570,7 @@ async function saveSettings(andClose){
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
+  body.show_all_workspaces=showAllWorkspaces;
   // Cron sessions are gated on CLI sessions (server short-circuits otherwise);
   // mirror the autosave path so the explicit Save Settings button persists it too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;

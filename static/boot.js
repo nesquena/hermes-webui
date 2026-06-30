@@ -2395,6 +2395,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=s.show_cli_sessions!==false;
+    window._showAllWorkspaces=s.show_all_workspaces!==false;  // default true for back-compat (#2549)
     window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
@@ -2526,6 +2527,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._showTps=false;
     window._fadeTextEffect=false;
     window._showCliSessions=true;  // settings-load failed: mirror the True config default (#3988)
+    window._showAllWorkspaces=true;  // default true for back-compat (#2549)
     window._soundEnabled=false;
     window._notificationsEnabled=false;
     window._whatsNewSummaryEnabled=false;

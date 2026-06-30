@@ -6039,6 +6039,20 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
+function _activeWorkspacePathForSidebar(){
+  // Resolve the active workspace path for the optional per-workspace sidebar filter
+  // (#2549). Prefer the live session's stored workspace, then fall back to the
+  // workspace detail panel's current selection (_currentWorkspaceDetail in panels.js).
+  return (typeof S!=='undefined'&&S.session&&S.session.workspace)
+    ||(typeof _currentWorkspaceDetail!=='undefined'&&_currentWorkspaceDetail?_currentWorkspaceDetail.path:null);
+}
+
+function _showAllWorkspacesActive(){
+  // Default true (show-all) for backward compat (#2549) — existing users see zero
+  // change unless they explicitly turn the Preferences toggle off.
+  return (typeof window!=='undefined')?window._showAllWorkspaces!==false:true;
+}
+
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
@@ -6049,6 +6063,13 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   const cliSessionsRaw=[];
   let webuiArchivedCount=0;
   let cliArchivedCount=0;
+  // Optional per-active-workspace filter (#2549). Default show-all (true) preserves
+  // prior behavior. Pinned rows and rows without a stored workspace are exempt,
+  // matching how show_cli_sessions / _showAllProfiles scope the list along other axes.
+  // Comparison is case-sensitive in this slice; Slice C (#2549) normalizes casing in a
+  // follow-up, so two rows whose paths differ only in case show as distinct workspaces.
+  const _showAllWs=_showAllWorkspacesActive();
+  const _activeWsPath=_activeWorkspacePathForSidebar();
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
@@ -6063,6 +6084,9 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     } else if(_activeProject){
       if(s.project_id!==_activeProject) continue;
     }
+    // Per-active-workspace filter (#2549): drop rows whose stored workspace differs
+    // from the active one, unless the row is pinned or has no workspace at all.
+    if(!_showAllWs&&_activeWsPath&&!s.pinned&&s.workspace&&s.workspace!==_activeWsPath) continue;
     referenceRaw.push(s);
     if(s.archived){
       if(isCli) cliArchivedCount++;
@@ -6381,6 +6405,13 @@ function renderSessionListFromCache(){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
     empty.textContent=_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.';
+    list.appendChild(empty);
+  } else if(!_showAllWorkspacesActive()&&_activeWorkspacePathForSidebar()&&sessions.length===0){
+    // Empty state for the active per-active-workspace filter (#2549). Placed after the
+    // CLI and project empty states so the three messages never fight over the DOM slot.
+    const empty=document.createElement('div');
+    empty.className='session-empty-note';
+    empty.textContent='No sessions in this workspace yet.';
     list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);
