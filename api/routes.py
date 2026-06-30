@@ -13012,13 +13012,6 @@ def handle_post(handler, parsed) -> bool:
             max_tokens_status = set_max_tokens(max_tokens_value)
         saved.pop("password_hash", None)  # never expose hash to client
         saved.update(max_tokens_status if max_tokens_provided else get_max_tokens_status())
-        saved["custom_logo_light_version"] = logo_version_for_settings_value(
-            saved.get("custom_logo_light_path", "")
-        )
-        saved["custom_logo_dark_version"] = logo_version_for_settings_value(
-            saved.get("custom_logo_dark_path", "")
-        )
-
         # Settings that change which sessions appear in the sidebar must
         # invalidate the session-list cache directly. Relying on the cache's
         # settings-file mtime stamp is fragile: a toggle that writes the
@@ -13072,6 +13065,13 @@ def handle_post(handler, parsed) -> bool:
                 saved["passwordless_enabled"] = False
         except Exception:
             pass
+
+        saved["custom_logo_light_version"] = logo_version_for_settings_value(
+            saved.get("custom_logo_light_path", "")
+        )
+        saved["custom_logo_dark_version"] = logo_version_for_settings_value(
+            saved.get("custom_logo_dark_path", "")
+        )
 
         if not new_cookie:
             return j(handler, saved)
