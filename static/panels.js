@@ -9759,7 +9759,7 @@ function _buildProviderCard(p){
           showToast('No custom models found. Try adding manually.');
         }
       }catch(e){
-        console.warn('Failed to fetch models for refresh:', e);
+        showToast('Failed to fetch models: ' + (e.message || e));
       }
     };
     custRefreshRow.appendChild(custRefreshBtn);

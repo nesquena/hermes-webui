@@ -11895,6 +11895,8 @@ def handle_post(handler, parsed) -> bool:
         provider_id = (body.get("provider") or "").strip().lower()
         if not provider_id:
             return bad(handler, "provider is required")
+        if not provider_id.startswith("custom:"):
+            return bad(handler, "provider must be a custom provider")
         raw_models = body.get("models")
         if raw_models is None:
             return bad(handler, "models is required")
