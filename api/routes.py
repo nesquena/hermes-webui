@@ -13005,8 +13005,14 @@ def handle_post(handler, parsed) -> bool:
         elif is_auth_enabled() or requested_password:
             body["auth_disabled_acknowledged"] = False
 
+        from api.config import get_max_tokens_status, set_max_tokens
+
         saved = save_settings(body)
+        if max_tokens_provided:
+            max_tokens_status = set_max_tokens(max_tokens_value)
         saved.pop("password_hash", None)  # never expose hash to client
+        saved.update(max_tokens_status if max_tokens_provided else get_max_tokens_status())
+
         # Settings that change which sessions appear in the sidebar must
         # invalidate the session-list cache directly. Relying on the cache's
         # settings-file mtime stamp is fragile: a toggle that writes the
