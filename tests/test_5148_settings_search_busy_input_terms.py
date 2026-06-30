@@ -13,8 +13,8 @@ class TestBusyInputSettingsSearchTerms:
         assert 'data-settings-search="message default while running queue interrupt steer"' in INDEX_HTML, (
             "busy-input field must expose supplemental search terms in data-settings-search"
         )
-        assert 'data-i18n="settings_label_busy_input_mode"' in INDEX_HTML, (
-            "busy-input field label must stay wired to the stable i18n key in the HTML"
+        assert 'data-i18n="settings_label_default_message_mode"' in INDEX_HTML, (
+            "busy-input field label must stay wired to the renamed i18n key in the HTML"
         )
 
     def test_settings_index_uses_field_text_for_busy_input(self):
