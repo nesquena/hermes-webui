@@ -10473,6 +10473,15 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(streamId&&!_readActivityDisclosureState(activityKey)){
     _copyActivityDisclosureState(`live:${streamId}`, activityKey);
   }
+  // keepSettledWorklogOpen forces collapsed:false for the ONE settle render of the
+  // just-settled turn so the live->settled swap is height-stable (no STREAM_DONE
+  // shrink jump) for both pinned followers AND unpinned mid-turn readers. If an
+  // unpinned reader had manually collapsed the live worklog, this overrides them
+  // for that single frame — but the disclosure state is preserved above
+  // (_copyActivityDisclosureState) and keep-open disarms right after the render
+  // (messages.js, _disarmKeepSettledWorklogOpen), so the NEXT re-render honors
+  // their collapsed state again. Net observable effect: a one-frame flash-open
+  // before it re-collapses — the accepted trade for removing the jump.
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
     collapsed:!keepSettledWorklogOpen,
