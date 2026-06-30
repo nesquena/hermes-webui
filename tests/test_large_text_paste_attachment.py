@@ -4,7 +4,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 CHANGELOG = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
 
 def test_large_text_paste_threshold_helpers_are_defined():
@@ -18,6 +21,26 @@ def test_large_text_paste_threshold_helpers_are_defined():
 def test_large_text_line_count_does_not_overcount_trailing_newline():
     assert "const lines=value.split('\\n');" in BOOT_JS
     assert "return value.endsWith('\\n')?lines.length-1:lines.length;" in BOOT_JS
+
+
+def test_large_text_paste_attachment_setting_is_server_backed_and_default_on():
+    assert '"large_text_paste_as_attachment": True' in CONFIG_PY
+    bool_keys_start = CONFIG_PY.index("_SETTINGS_BOOL_KEYS")
+    assert '"large_text_paste_as_attachment"' in CONFIG_PY[bool_keys_start:]
+
+
+def test_large_text_paste_attachment_setting_is_exposed_in_chat_settings():
+    assert 'id="settingsLargeTextPasteAsAttachment"' in INDEX_HTML
+    assert 'data-i18n="settings_label_large_text_paste_as_attachment"' in INDEX_HTML
+    assert 'data-i18n="settings_desc_large_text_paste_as_attachment"' in INDEX_HTML
+    assert "large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked" in PANELS_JS
+    assert "largeTextPasteCb.checked=settings.large_text_paste_as_attachment!==false" in PANELS_JS
+    assert "window._largeTextPasteAsAttachment=this.checked" in PANELS_JS
+
+
+def test_large_text_paste_attachment_setting_hydrates_runtime_gate_default_on():
+    assert "window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false" in BOOT_JS
+    assert "if(window._largeTextPasteAsAttachment===false)return false;" in BOOT_JS
 
 
 def test_line_threshold_is_one_hundred_lines():
@@ -39,6 +62,9 @@ def test_large_text_paste_creates_markdown_file_and_uses_existing_tray():
 def test_large_text_status_uses_i18n_key_available_to_all_locales():
     assert "text_pasted: 'Pasted text attached as '," in I18N_JS
     assert I18N_JS.count("text_pasted:") == I18N_JS.count("image_pasted:")
+    assert "settings_label_large_text_paste_as_attachment" in I18N_JS
+    assert I18N_JS.count("settings_label_large_text_paste_as_attachment") == I18N_JS.count("settings_label_workspace_panel_open")
+    assert I18N_JS.count("settings_desc_large_text_paste_as_attachment") == I18N_JS.count("settings_desc_workspace_panel_open")
 
 
 def test_paste_handler_keeps_image_paste_path_before_large_text_path():
