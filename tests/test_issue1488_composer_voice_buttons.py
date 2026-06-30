@@ -232,6 +232,31 @@ class TestVoiceModePreferenceGate:
             "so the button appears/disappears immediately."
 
 
+class TestVoiceModeRuntimePreferences:
+    """Voice mode runtime prefs must stay wired to localStorage-backed settings."""
+
+    def test_voice_mode_silence_pref_reads_localstorage_with_floor(self):
+        """boot.js must keep the silence timeout configurable without allowing
+        tiny or invalid values to auto-send instantly."""
+        src = _src("boot.js")
+        assert "localStorage.getItem('hermes-voice-silence-ms')" in src, (
+            "voice mode must read hermes-voice-silence-ms from localStorage "
+            "so pause timing survives reloads."
+        )
+        assert "Math.max(200,_silenceMsRaw)" in src, (
+            "voice mode must floor the configured silence timeout at 200ms "
+            "instead of trusting tiny values."
+        )
+
+    def test_voice_mode_continuous_pref_reads_localstorage(self):
+        """boot.js must preserve the continuous-recognition preference across reloads."""
+        src = _src("boot.js")
+        assert "localStorage.getItem('hermes-voice-continuous')==='true'" in src, (
+            "voice mode must read hermes-voice-continuous from localStorage "
+            "instead of hardcoding continuous recognition off."
+        )
+
+
 class TestActiveStateTooltips:
     """When recording / in voice mode, tooltips should flip to the
     'stop' variants so the affordance is honest."""
