@@ -443,6 +443,15 @@ function _hasUnreadForSession(s) {
   return s.message_count > Number(counts[s.session_id] || 0);
 }
 
+function _sessionHasUnreadForSidebar(s, viewedCounts=null) {
+  if (!s || !s.session_id) return false;
+  if (_hasSessionCompletionUnread(s.session_id)) return true;
+  const counts = viewedCounts || _getSessionViewedCounts();
+  if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) return false;
+  if (!Number.isFinite(s.message_count)) return false;
+  return s.message_count > Number(counts[s.session_id] || 0);
+}
+
 function _isSessionActivelyViewedForList(sid) {
   if (!sid || !S.session || S.session.session_id !== sid) return false;
   if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId && _loadingSessionId !== sid) return false;
@@ -1882,6 +1891,11 @@ function _setActiveProjectFilter(projectId) {
   void renderSessionList({deferWhileInteracting:false});
 }
 
+function _sessionUnreadOnlyLabel(count) {
+  const n = Number(count) || 0;
+  return `Unread only (${n})`;
+}
+
 function _setSessionSourceFilter(filter) {
   const next = filter === 'cli' ? 'cli' : 'webui';
   if (_sessionSourceFilter === next) return;
@@ -1898,6 +1912,24 @@ function _restoreSessionSourceFilter() {
   try {
     const raw = localStorage.getItem('hermes-session-source-filter');
     if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+  } catch (_e) {}
+}
+
+function _setSessionUnreadOnlyFilter(enabled) {
+  const next = !!enabled;
+  if (_sessionUnreadOnlyFilter === next) return;
+  _sessionUnreadOnlyFilter = next;
+  _activeProject = null;
+  _selectedSessions.clear();
+  _sessionSelectMode = false;
+  try { localStorage.setItem('hermes-session-unread-only-filter', next ? '1' : '0'); } catch (_e) {}
+  renderSessionListFromCache();
+}
+
+function _restoreSessionUnreadOnlyFilter() {
+  try {
+    const raw = localStorage.getItem('hermes-session-unread-only-filter');
+    if (raw === '1' || raw === '0') _sessionUnreadOnlyFilter = raw === '1';
   } catch (_e) {}
 }
 
@@ -3113,6 +3145,8 @@ let _serverWebuiSessionCount = null;  // explicit server count for WebUI session
 let _serverCliSessionCount = null;    // explicit server count for CLI sessions
 let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
 _restoreSessionSourceFilter();
+let _sessionUnreadOnlyFilter = false;
+_restoreSessionUnreadOnlyFilter();
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
@@ -6039,8 +6073,27 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
+function _sessionMatchesActiveLineageForUnreadFilter(
+  s,
+  activeSidForSidebar,
+  sessionIdsInList,
+  sessionsById,
+  activeLineageKey,
+  activeParentSid,
+){
+  if(!s||!activeSidForSidebar) return false;
+  if(s.session_id===activeSidForSidebar) return true;
+  if(activeParentSid&&s.session_id===activeParentSid) return true;
+  if(!activeLineageKey||_isChildSession(s)) return false;
+  return _sessionLineageKey(s, sessionIdsInList, sessionsById)===activeLineageKey;
+}
+
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let cliSessionCount=0;
+  let webuiUnreadCount=0;
+  let cliUnreadCount=0;
+  const viewedCounts=_getSessionViewedCounts();
+  const unreadById=new Map();
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
   const webuiReferenceRaw=[];
@@ -6049,6 +6102,15 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   const cliSessionsRaw=[];
   let webuiArchivedCount=0;
   let cliArchivedCount=0;
+  const sessionIdsInList=new Set((allMatched||[]).filter(s=>s&&s.session_id).map(s=>s.session_id));
+  const sessionsById=new Map((allMatched||[]).filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
+  const activeRow=activeSidForSidebar&&sessionsById.get(activeSidForSidebar);
+  const activeParentSid=activeRow&&activeRow.parent_session_id||null;
+  const activeLineageKey=activeRow
+    ? (_isChildSession(activeRow)
+      ? (activeRow._parent_lineage_root_id||activeParentSid||null)
+      : _sessionLineageKey(activeRow, sessionIdsInList, sessionsById))
+    : null;
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
@@ -6069,15 +6131,34 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
       else webuiArchivedCount++;
     }
     if(!_showArchived&&s.archived) continue;
+    const hasUnread=_sessionHasUnreadForSidebar(s, viewedCounts);
+    unreadById.set(s.session_id, hasUnread);
+    if(hasUnread){
+      if(isCli) cliUnreadCount++;
+      else webuiUnreadCount++;
+    }
+    const keepActiveLineage=_sessionMatchesActiveLineageForUnreadFilter(
+      s,
+      activeSidForSidebar,
+      sessionIdsInList,
+      sessionsById,
+      activeLineageKey,
+      activeParentSid,
+    );
+    if(_sessionUnreadOnlyFilter&&!hasUnread&&!keepActiveLineage) continue;
     sessionsRaw.push(s);
   }
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0 && !_sessionUnreadOnlyFilter){
     _sessionSourceFilter='webui';
   }
   const showCliOnly=_sessionSourceFilter==='cli';
-  const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;
+  const serverArchivedCount=showCliOnly
+    ? (typeof _archivedCliCount === 'number' ? _archivedCliCount : cliArchivedCount)
+    : (typeof _archivedWebuiCount === 'number' ? _archivedWebuiCount : webuiArchivedCount);
   return {
     cliSessionCount,
+    unreadCount: showCliOnly ? cliUnreadCount : webuiUnreadCount,
+    unreadById,
     profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
     sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,
     archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0)),
@@ -6147,6 +6228,8 @@ function renderSessionListFromCache(){
   const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
   const {
     cliSessionCount,
+    unreadCount,
+    unreadById,
     profileFiltered,
     sessionsRaw,
     archivedCount,
@@ -6226,19 +6309,29 @@ function renderSessionListFromCache(){
     note.appendChild(retry);
     list.appendChild(note);
   }
-  if(window._showCliSessions || cliSessionCount>0){
+  if(renderedWebuiSessionCount>0 || window._showCliSessions || renderedCliSessionCount>0 || _sessionUnreadOnlyFilter){
     const sourceTabs=document.createElement('div');
     sourceTabs.className='session-source-tabs';
-    for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;
-      const btn=document.createElement('button');
-      btn.type='button';
-      btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
-      btn.textContent=_sessionSourceLabel(filter,count);
-      btn.setAttribute('aria-pressed', _sessionSourceFilter===filter?'true':'false');
-      btn.onclick=()=>_setSessionSourceFilter(filter);
-      sourceTabs.appendChild(btn);
+    if(window._showCliSessions || renderedCliSessionCount>0){
+      for(const filter of ['webui','cli']){
+        const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;
+        const btn=document.createElement('button');
+        btn.type='button';
+        btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
+        btn.textContent=_sessionSourceLabel(filter,count);
+        btn.setAttribute('aria-pressed', _sessionSourceFilter===filter?'true':'false');
+        btn.onclick=()=>_setSessionSourceFilter(filter);
+        sourceTabs.appendChild(btn);
+      }
     }
+    const unreadBtn=document.createElement('button');
+    unreadBtn.type='button';
+    unreadBtn.className='session-source-tab session-source-toggle'+(_sessionUnreadOnlyFilter?' active':'');
+    unreadBtn.textContent=_sessionUnreadOnlyLabel(unreadCount);
+    unreadBtn.title='Show only sessions with unread completions';
+    unreadBtn.setAttribute('aria-pressed', _sessionUnreadOnlyFilter?'true':'false');
+    unreadBtn.onclick=()=>_setSessionUnreadOnlyFilter(!_sessionUnreadOnlyFilter);
+    sourceTabs.appendChild(unreadBtn);
     list.appendChild(sourceTabs);
   }
   // Project filter bar — show when there are real projects OR there are
@@ -6372,7 +6465,14 @@ function renderSessionListFromCache(){
     list.appendChild(toggle);
   }
   // Empty state for active project filter
-  if(_sessionSourceFilter==='cli'&&sessions.length===0){
+  if(_sessionUnreadOnlyFilter&&sessions.length===0){
+    const empty=document.createElement('div');
+    empty.className='session-empty-note';
+    empty.textContent=_sessionSourceFilter==='cli'&&!window._showCliSessions
+      ? 'Enable Show agent sessions in Settings to list unread CLI sessions here.'
+      : 'No unread sessions match the current filters.';
+    list.appendChild(empty);
+  } else if(_sessionSourceFilter==='cli'&&sessions.length===0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
     empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
@@ -6559,7 +6659,7 @@ function renderSessionListFromCache(){
     const isStreaming=ownStreaming||!!s._child_session_streaming;
     _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
-    const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
+    const hasUnread=(Boolean(unreadById.get(s.session_id))||!!s._child_session_has_unread)&&!isActive;
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
