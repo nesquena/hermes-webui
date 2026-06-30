@@ -4,6 +4,7 @@ import io
 import json
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,14 @@ def _simple_pptx_bytes() -> bytes:
     box.text = "Office preview"
     buffer = io.BytesIO()
     presentation.save(buffer)
+    return buffer.getvalue()
+
+def _office_zip_bytes(*members: tuple[str, str | bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        for name, payload in members:
+            archive.writestr(name, payload)
     return buffer.getvalue()
 
 
@@ -219,6 +228,54 @@ def test_docx_preview_char_budget_disables_editing(monkeypatch):
     assert preview["edit_blocked_reason"] == "docx preview exceeds safe limits"
     assert office_documents.OFFICE_PREVIEW_TRUNCATED_NOTICE in preview["content"]
 
+@pytest.mark.parametrize(
+    ("path", "member_name", "loader_attr"),
+    [
+        ("story.docx", "word/document.xml", "_load_docx_document"),
+        ("budget.xlsx", "xl/sharedStrings.xml", "_load_workbook_reader"),
+        ("deck.pptx", "ppt/media/image1.png", "_load_presentation_ctor"),
+    ],
+)
+def test_office_preview_preflight_rejects_zip_bombs_before_loader(
+    monkeypatch, path: str, member_name: str, loader_attr: str
+):
+    monkeypatch.setattr(office_documents, "MAX_OFFICE_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES", 1024)
+    monkeypatch.setattr(
+        office_documents,
+        loader_attr,
+        lambda: lambda *_args, **_kwargs: pytest.fail("office parser should not run after archive preflight rejects the payload"),
+    )
+
+    raw = _office_zip_bytes((member_name, "A" * 4096))
+
+    with pytest.raises(ValueError, match="safe archive limits"):
+        preview_office_document(path, raw)
+
+def test_office_preview_preflight_rejects_path_traversal_before_loader(monkeypatch):
+    monkeypatch.setattr(
+        office_documents,
+        "_load_docx_document",
+        lambda: lambda *_args, **_kwargs: pytest.fail("docx parser should not run after path validation fails"),
+    )
+
+    raw = _office_zip_bytes(("../word/document.xml", "payload"))
+
+    with pytest.raises(ValueError, match="safe archive limits"):
+        preview_office_document("story.docx", raw)
+
+def test_xlsx_preview_preflight_rejects_oversized_shared_strings_before_loader(monkeypatch):
+    monkeypatch.setattr(office_documents, "MAX_XLSX_ARCHIVE_SHARED_STRINGS_BYTES", 64)
+    monkeypatch.setattr(
+        office_documents,
+        "_load_workbook_reader",
+        lambda: lambda *_args, **_kwargs: pytest.fail("xlsx parser should not run after sharedStrings preflight rejects the payload"),
+    )
+
+    raw = _office_zip_bytes(("xl/sharedStrings.xml", "A" * 256))
+
+    with pytest.raises(ValueError, match="safe archive limits"):
+        preview_office_document("budget.xlsx", raw)
+
 
 def _office_state_block() -> str:
     marker = "if(data.preview_kind==='office'){"
@@ -297,6 +354,7 @@ def test_xlsx_preview_stops_when_char_budget_is_exhausted(monkeypatch):
             return None
 
     monkeypatch.setattr(office_documents, "MAX_OFFICE_PREVIEW_CHARS", 32)
+    monkeypatch.setattr(office_documents, "_preflight_office_archive", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(office_documents, "_load_workbook_reader", lambda: lambda *_args, **_kwargs: FakeWorkbook())
 
     preview = preview_office_document("budget.xlsx", b"placeholder")

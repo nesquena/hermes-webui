@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import posixpath
+import zipfile
 from pathlib import Path
 
 CLAIMED_OFFICE_EXTENSIONS = frozenset({".docx", ".xlsx", ".pptx"})
@@ -21,6 +23,16 @@ MAX_XLSX_PREVIEW_ROWS_PER_SHEET = 500
 MAX_XLSX_PREVIEW_CELLS_PER_SHEET = 5_000
 MAX_PPTX_PREVIEW_SLIDES = 100
 MAX_PPTX_PREVIEW_SHAPES_PER_SLIDE = 200
+MAX_OFFICE_ARCHIVE_MEMBERS = 256
+MAX_OFFICE_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 8_000_000
+MAX_OFFICE_ARCHIVE_MEMBER_BYTES = 4_000_000
+MAX_OFFICE_ARCHIVE_MAX_COMPRESSION_RATIO = 200
+MAX_DOCX_ARCHIVE_DOCUMENT_BYTES = 4_000_000
+MAX_XLSX_ARCHIVE_SHARED_STRINGS_BYTES = 4_000_000
+MAX_XLSX_ARCHIVE_WORKSHEET_BYTES = 2_000_000
+MAX_XLSX_ARCHIVE_METADATA_BYTES = 512_000
+MAX_PPTX_ARCHIVE_SLIDE_BYTES = 1_000_000
+MAX_PPTX_ARCHIVE_MEDIA_BYTES = 2_000_000
 
 _WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _DEFAULT_DOCX_SECTION_SIGNATURE = None
@@ -33,6 +45,12 @@ _DOCX_RUN_CHILDREN = {f"{_WORD_NAMESPACE}t"}
 
 def _office_dependency_import_error() -> ImportError:
     return ImportError(OFFICE_DEPENDENCY_HINT)
+
+def _office_archive_limit_error() -> ValueError:
+    return ValueError("Office preview exceeds safe archive limits")
+
+def _office_preview_read_error(office_format: str) -> ValueError:
+    return ValueError(f"Unable to read {office_format.upper()} preview")
 
 
 def _load_docx_document():
@@ -57,6 +75,53 @@ def _load_presentation_ctor():
     except ImportError as exc:  # pragma: no cover - depends on local install shape
         raise _office_dependency_import_error() from exc
     return presentation_ctor
+
+def _normalise_archive_member_name(name: str) -> str:
+    normalized = posixpath.normpath(name.replace("\\", "/"))
+    if name.startswith(("/", "\\")) or normalized in {"", ".", ".."} or normalized.startswith("../"):
+        raise _office_archive_limit_error()
+    return normalized
+
+def _archive_member_byte_limit(office_format: str, member_name: str) -> int:
+    if office_format == "docx":
+        if member_name == "word/document.xml":
+            return MAX_DOCX_ARCHIVE_DOCUMENT_BYTES
+    elif office_format == "xlsx":
+        if member_name == "xl/sharedStrings.xml":
+            return MAX_XLSX_ARCHIVE_SHARED_STRINGS_BYTES
+        if member_name.startswith("xl/worksheets/"):
+            return MAX_XLSX_ARCHIVE_WORKSHEET_BYTES
+        if member_name.startswith("xl/theme/") or member_name.startswith("docProps/") or member_name == "xl/workbook.xml":
+            return MAX_XLSX_ARCHIVE_METADATA_BYTES
+    elif office_format == "pptx":
+        if member_name.startswith("ppt/slides/"):
+            return MAX_PPTX_ARCHIVE_SLIDE_BYTES
+        if member_name.startswith("ppt/media/"):
+            return MAX_PPTX_ARCHIVE_MEDIA_BYTES
+    return MAX_OFFICE_ARCHIVE_MEMBER_BYTES
+
+def _preflight_office_archive(office_format: str, raw: bytes) -> None:
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile as exc:
+        raise _office_preview_read_error(office_format) from exc
+
+    with archive:
+        file_infos = [info for info in archive.infolist() if not info.is_dir()]
+        if len(file_infos) > MAX_OFFICE_ARCHIVE_MEMBERS:
+            raise _office_archive_limit_error()
+
+        total_uncompressed = 0
+        for info in file_infos:
+            member_name = _normalise_archive_member_name(info.filename)
+            member_limit = _archive_member_byte_limit(office_format, member_name)
+            if info.file_size > member_limit:
+                raise _office_archive_limit_error()
+            if info.file_size > 0 and info.file_size > max(info.compress_size, 1) * MAX_OFFICE_ARCHIVE_MAX_COMPRESSION_RATIO:
+                raise _office_archive_limit_error()
+            total_uncompressed += info.file_size
+            if total_uncompressed > MAX_OFFICE_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES:
+                raise _office_archive_limit_error()
 
 
 def is_claimed_office_path(path: str | Path) -> bool:
@@ -300,6 +365,7 @@ def _docx_editability(document) -> tuple[bool, str | None]:
 
 
 def _preview_docx(raw: bytes) -> tuple[str, bool, str | None, bool]:
+    _preflight_office_archive("docx", raw)
     try:
         document = _load_docx_document()(io.BytesIO(raw))
     except ImportError:
@@ -314,6 +380,7 @@ def _preview_docx(raw: bytes) -> tuple[str, bool, str | None, bool]:
 
 
 def _preview_xlsx(raw: bytes) -> tuple[str, bool]:
+    _preflight_office_archive("xlsx", raw)
     try:
         workbook = _load_workbook_reader()(io.BytesIO(raw), data_only=True, read_only=True)
     except ImportError:
@@ -373,6 +440,7 @@ def _preview_xlsx(raw: bytes) -> tuple[str, bool]:
 
 
 def _preview_pptx(raw: bytes) -> tuple[str, bool]:
+    _preflight_office_archive("pptx", raw)
     try:
         presentation = _load_presentation_ctor()(io.BytesIO(raw))
     except ImportError:
