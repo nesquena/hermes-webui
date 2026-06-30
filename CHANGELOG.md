@@ -35,6 +35,9 @@
 
 ### Fixed
 
+- **Deep-link composer prefill via `?q=` no longer loses the draft or starts a session early.** Opening the WebUI with a `?q=...` (and related prefill params) pre-fills the composer with that text; the draft now survives a login redirect (params are consumed after auth/profile bootstrap, and the logged-out `?q=` is carried through `next`), and a prefill boot leaves the session uncreated until you actually send — it no longer silently binds a fresh default-workspace session. Thanks @rodboev. (#4969, #4961)
+
+
 - **Two new opt-in appearance skins: Neon Soft and Neon Paint.** Both are CSS-only, namespaced under `[data-skin]`, registered in server-side skin persistence, and selectable from Settings → Appearance — they change nothing unless you pick them. Neon Soft is a muted purple/violet neon; Neon Paint a bolder magenta + cyan neon. Thanks @savagebread. (#4738)
 
 - **Opt-in Shift+Enter send-key mode.** A new send-key option mirrors the existing Ctrl+Enter mode: when set to "shift+enter", Shift+Enter sends the message and a plain Enter inserts a newline; the default "enter" behavior (Enter sends, Shift+Enter newline) is unchanged when the option is off. IME composition, numpad Enter, and the command-dropdown are all handled, with no double-send. Thanks @futureworld678. (#5005)
