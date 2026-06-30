@@ -6640,6 +6640,8 @@ def _message_counts_as_renderable_for_window(message) -> bool:
         return False
     if _is_empty_partial_activity_message(message):
         return False
+    if is_hidden_process_wakeup_message(message):
+        return False
     role = str(message.get("role") or "").strip().lower()
     return bool(role and role != "tool")
 
@@ -7021,7 +7023,7 @@ def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
 
 
 def _message_summary(messages) -> dict:
-    messages = list(messages or [])
+    messages = filter_hidden_internal_messages(messages)
     last_message_at = 0.0
     for msg in messages:
         if not isinstance(msg, dict):
@@ -7058,6 +7060,29 @@ def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict
             sidecar_last_message_at = float(getattr(sidecar_session, "updated_at", 0) or 0)
         except (TypeError, ValueError):
             sidecar_last_message_at = 0.0
+        try:
+            # Metadata-only loads skip messages for speed. If an older sidecar
+            # already persisted a hidden process_wakeup row, the stored
+            # message_count/updated_at can stay inflated and make sidebar polling
+            # refresh forever. Do the full read only for sidecars that mention the
+            # internal marker.
+            sidecar_path = getattr(sidecar_session, "path", None)
+            if sidecar_path and Path(sidecar_path).exists():
+                sidecar_text = Path(sidecar_path).read_text(encoding="utf-8", errors="ignore")
+                if "process_wakeup" in sidecar_text:
+                    full_sidecar = Session.load(sid)
+                    if full_sidecar:
+                        visible_sidecar_messages = filter_hidden_internal_messages(
+                            getattr(full_sidecar, "messages", None) or []
+                        )
+                        hidden_count = len(getattr(full_sidecar, "messages", None) or []) - len(visible_sidecar_messages)
+                        if hidden_count > 0:
+                            sidecar_count = len(visible_sidecar_messages)
+                            sidecar_last_message_at = _message_summary(
+                                visible_sidecar_messages
+                            )["last_message_at"] or float(getattr(full_sidecar, "updated_at", 0) or 0)
+        except Exception:
+            logger.debug("Failed to adjust metadata-only hidden wakeup count", exc_info=True)
         if getattr(sidecar_session, "truncation_watermark", None) is not None:
             # Intentional: once the user has truncated this sidecar, metadata
             # polling must keep the sidecar as authoritative.  A full message
@@ -7433,6 +7458,8 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
+    filter_hidden_internal_messages,
+    is_hidden_process_wakeup_message,
     get_session,
     get_session_for_file_ops,
     new_session,
@@ -10464,6 +10491,7 @@ def handle_get(handler, parsed) -> bool:
                 _summary_message_count = None
                 _summary_last_message_at = None
             if load_messages:
+                _all_msgs = filter_hidden_internal_messages(_all_msgs)
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,
                     msg_limit=msg_limit,
@@ -17163,6 +17191,8 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     only adds a durable display-message checkpoint before the agent launches.
     """
     if not msg:
+        return
+    if str(source or "").strip() == "process_wakeup":
         return
     existing = list(getattr(s, "messages", None) or [])
     if existing:

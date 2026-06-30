@@ -46,7 +46,7 @@ def _make_state_db(path: Path, sid: str, rows):
         "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, started_at REAL, message_count INTEGER)"
     )
     conn.execute(
-        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT)"
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, _source TEXT)"
     )
     conn.execute(
         "INSERT INTO sessions (id, source, title, model, started_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
@@ -54,7 +54,7 @@ def _make_state_db(path: Path, sid: str, rows):
     )
     for row in rows:
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name, _source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 sid,
                 row["role"],
@@ -63,6 +63,7 @@ def _make_state_db(path: Path, sid: str, rows):
                 row.get("tool_call_id"),
                 row.get("tool_calls"),
                 row.get("tool_name"),
+                row.get("_source"),
             ),
         )
     conn.commit()
@@ -74,7 +75,7 @@ def _append_state_db_rows(path: Path, sid: str, rows):
     try:
         for row in rows:
             conn.execute(
-                "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name, _source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     sid,
                     row["role"],
@@ -83,6 +84,7 @@ def _append_state_db_rows(path: Path, sid: str, rows):
                     row.get("tool_call_id"),
                     row.get("tool_calls"),
                     row.get("tool_name"),
+                    row.get("_source"),
                 ),
             )
         conn.execute(
@@ -1590,3 +1592,60 @@ def test_state_db_reconciliation_preserves_tool_metadata(monkeypatch, tmp_path):
     assert messages[-1]["content"] == "used a tool"
     assert messages[-1]["tool_name"] == "terminal"
     assert messages[-1]["tool_calls"] == [{"id": "call_1", "function": {"name": "terminal"}}]
+
+
+def test_metadata_only_summary_ignores_legacy_process_wakeup_rows(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_metadata_hidden_wakeup"
+    visible_messages = [
+        {"role": "user", "content": "real user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "real answer", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, visible_messages)
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            *visible_messages,
+            {
+                "role": "user",
+                "content": "[IMPORTANT: Background process done]",
+                "timestamp": 1002.0,
+                "_source": "process_wakeup",
+            },
+        ],
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert session["message_count"] == 2
+    assert session["last_message_at"] == 1001.0
+
+
+def test_metadata_only_summary_ignores_legacy_process_wakeup_sidecar_row(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_metadata_hidden_wakeup_sidecar"
+    sidecar_messages = [
+        {"role": "user", "content": "real user", "timestamp": 1000.0},
+        {
+            "role": "user",
+            "content": "[IMPORTANT: Background process done]",
+            "timestamp": 1002.0,
+            "_source": "process_wakeup",
+        },
+        {"role": "assistant", "content": "real answer", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert session["message_count"] == 2
+    assert session["last_message_at"] == 1001.0
