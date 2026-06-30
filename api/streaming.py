@@ -50,6 +50,7 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
+    is_hidden_process_wakeup_message,
     get_state_db_session_messages,
     reconciled_state_db_messages_for_session,
 )
@@ -2507,6 +2508,10 @@ def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     return stripped.strip()
 
 
+def _is_process_wakeup_source(source) -> bool:
+    return str(source or '').strip() == 'process_wakeup'
+
+
 def _looks_like_current_user_turn(msg, msg_text) -> bool:
     """Match the current human turn even if an internal workspace tag leaked mid-text.
 
@@ -4798,7 +4803,9 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     previous_display = [
         m for m in list(previous_display or [])
         if not _is_context_compression_marker(m)
+        and not is_hidden_process_wakeup_message(m)
     ]
+    process_wakeup_source = _is_process_wakeup_source(source)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -4883,7 +4890,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                         for _k in range(_cursor, _j):
                             _ckey = context_keys[_k]
                             _cmsg = previous_context[_k]
-                            if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg):
+                            if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg) and not is_hidden_process_wakeup_message(_cmsg):
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
                         # Sync multiset: decrement keys consumed by advancing
@@ -4904,7 +4911,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                         for _k in range(_cursor, len(context_keys)):
                             _ckey = context_keys[_k]
                             _cmsg = previous_context[_k]
-                            if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg):
+                            if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg) and not is_hidden_process_wakeup_message(_cmsg):
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
                         _cursor = len(context_keys)
@@ -4917,7 +4924,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                 _ckey = context_keys[_cursor]
                 _cmsg = previous_context[_cursor]
                 _cursor += 1
-                if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg):
+                if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg) and not is_hidden_process_wakeup_message(_cmsg):
                     _backfilled.append(copy.deepcopy(_cmsg))
                     _context_inserted.add(_ckey)
             if len(_backfilled) > len(previous_display):
@@ -4972,6 +4979,18 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     merged = previous_display[:]
     seen = {_message_identity(m) for m in merged}
     current_user_key = _message_identity({'role': 'user', 'content': msg_text})
+    if process_wakeup_source:
+        candidates = [
+            m for m in candidates
+            if not (
+                isinstance(m, dict)
+                and (
+                    is_hidden_process_wakeup_message(m)
+                    or _message_identity(m) == current_user_key
+                    or _looks_like_current_user_turn(m, msg_text)
+                )
+            )
+        ]
     current_user_in_candidates = any(
         _message_identity(m) == current_user_key or _looks_like_current_user_turn(m, msg_text)
         for m in candidates
@@ -4985,6 +5004,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     )
     if (
         current_user_key is not None
+        and not process_wakeup_source
         and not current_user_in_candidates
         and not current_user_already_checkpointed
         and any(
@@ -5042,8 +5062,10 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         if (
             ((key is not None and key == current_user_key) or is_current_user_turn)
             and isinstance(msg, dict)
-            and msg.get('role') == 'user'
+            and str(msg.get('role') or '').strip().lower() == 'user'
         ):
+            if process_wakeup_source:
+                continue
             display_msg = copy.deepcopy(msg)
             display_msg['content'] = msg_text
             if source and source != 'webui':
@@ -5137,6 +5159,35 @@ def _merged_transcript_lacks_final_assistant_answer(
         msg_text,
         source=source,
     )
+    if _is_process_wakeup_source(source):
+        previous_visible = [
+            msg for msg in previous_display
+            if not _is_context_compression_marker(msg)
+            and not is_hidden_process_wakeup_message(msg)
+        ]
+        tail_messages = merged_messages[len(previous_visible):]
+        if drop_replayed_assistant:
+            # Only drop replayed assistant rows when they carry a durable id-ish
+            # identity. Text-only equality is too broad: a new wakeup answer may
+            # legitimately have the same prose as an older assistant response.
+            prior_stable_assistant_ids = {
+                _message_identity(msg)
+                for msg in previous_visible
+                if isinstance(msg, dict)
+                and msg.get('role') == 'assistant'
+                and (msg.get('id') or msg.get('message_id') or msg.get('tool_call_id') or msg.get('tool_calls'))
+            }
+            tail_messages = [
+                msg for msg in tail_messages
+                if not (
+                    isinstance(msg, dict)
+                    and msg.get('role') == 'assistant'
+                    and (msg.get('id') or msg.get('message_id') or msg.get('tool_call_id') or msg.get('tool_calls'))
+                    and _message_identity(msg) in prior_stable_assistant_ids
+                )
+            ]
+        return _session_lacks_final_assistant_answer(tail_messages)
+
     current_user_idx = _find_current_user_turn(merged_messages, msg_text)
     if current_user_idx is None or current_user_idx < len(previous_display):
         # The active turn lives after the durable transcript boundary. If the
@@ -5521,6 +5572,8 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     """
     pending_text = str(getattr(session, 'pending_user_message', None) or '')
     if not pending_text:
+        return False
+    if _is_process_wakeup_source(getattr(session, 'pending_user_source', None)):
         return False
     normalized_pending = " ".join(pending_text.split())
     if normalized_pending:

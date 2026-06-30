@@ -504,6 +504,8 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
+    if str(getattr(session, 'pending_user_source', None) or '').strip() == 'process_wakeup':
+        return None
     recovered_ts = int(time.time())
     if isinstance(timestamp, (int, float)) and timestamp > 0:
         recovered_ts = int(timestamp)
@@ -590,6 +592,26 @@ def _message_role(message):
     if not isinstance(message, dict):
         return ''
     return str(message.get('role', '')).strip().lower()
+
+
+def _message_source(message):
+    if not isinstance(message, dict):
+        return ''
+    return str(message.get('_source') or '').strip()
+
+
+def is_hidden_process_wakeup_message(message) -> bool:
+    """Return True for legacy internal wakeup rows that must not render/count."""
+    return _message_role(message) == 'user' and _message_source(message) == 'process_wakeup'
+
+
+def filter_hidden_internal_messages(messages) -> list:
+    """Strip legacy hidden/internal rows from visible transcript consumers.
+
+    New process wakeups should not be persisted as user messages, but older
+    sidecars/state.db rows may already contain role=user + _source=process_wakeup.
+    """
+    return [m for m in list(messages or []) if not is_hidden_process_wakeup_message(m)]
 
 
 def _find_top_level_json_key(text, key):
@@ -5356,6 +5378,7 @@ def get_state_db_session_messages(
                 'codex_reasoning_items',
                 'reasoning_content',
                 'codex_message_items',
+                '_source',
             ]
             id_col = ['id'] if 'id' in available else []
             selected = id_col + ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
@@ -5538,6 +5561,31 @@ def get_state_db_session_summary(sid, *, profile=None) -> dict:
             available = {str(row['name']) for row in cur.fetchall()}
             if 'session_id' not in available:
                 return {"message_count": 0, "last_message_at": 0.0}
+            if {'role', '_source'}.issubset(available):
+                select_cols = ['role', '_source']
+                if 'content' in available:
+                    select_cols.append('content')
+                if 'timestamp' in available:
+                    select_cols.append('timestamp')
+                query = f"SELECT {', '.join(select_cols)} FROM messages WHERE session_id = ?"
+                cur.execute(query, (str(sid),))
+                rows = cur.fetchall()
+                count = 0
+                last_message_at = 0.0
+                for row in rows:
+                    message = {key: row[key] for key in row.keys()}
+                    if is_hidden_process_wakeup_message(message):
+                        continue
+                    count += 1
+                    if 'timestamp' in available:
+                        try:
+                            last_message_at = max(last_message_at, float(row['timestamp'] or 0))
+                        except (TypeError, ValueError):
+                            pass
+                return {
+                    "message_count": max(0, int(count)),
+                    "last_message_at": last_message_at,
+                }
             if 'timestamp' in available:
                 cur.execute(
                     "SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at "

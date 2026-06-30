@@ -3,24 +3,21 @@
 import time
 from pathlib import Path
 
-from api.models import Session, _append_recovered_pending_turn, _apply_core_sync_or_error_marker
-from api.routes import _checkpoint_user_message_for_eager_session_save
-from api.streaming import _materialize_pending_user_turn_before_error, _merge_display_messages_after_agent_result
+from api.models import Session, _append_recovered_pending_turn, _apply_core_sync_or_error_marker, filter_hidden_internal_messages
+from api.routes import _checkpoint_user_message_for_eager_session_save, _message_counts_as_renderable_for_window, _message_summary, _message_window_for_display
+from api.streaming import _materialize_pending_user_turn_before_error, _merge_display_messages_after_agent_result, _merged_transcript_lacks_final_assistant_answer
 
 
-def test_append_recovered_pending_turn_stamps_process_wakeup_source():
-    """Verify _append_recovered_pending_turn stamps _source when pending_user_source is process_wakeup."""
+def test_append_recovered_pending_turn_skips_process_wakeup_source():
+    """process_wakeup prompts are internal wakeups, not visible recovered user turns."""
     s = Session(
         session_id="test-session-1",
         pending_user_message="[IMPORTANT: Process completed]",
         pending_user_source="process_wakeup",
     )
     recovered = _append_recovered_pending_turn(s)
-    assert recovered is not None
-    assert recovered["role"] == "user"
-    assert recovered["content"] == "[IMPORTANT: Process completed]"
-    assert recovered["_source"] == "process_wakeup"
-    assert recovered["_recovered"] is True
+    assert recovered is None
+    assert s.messages == []
 
 
 def test_append_recovered_pending_turn_skips_webui_source():
@@ -51,8 +48,8 @@ def test_append_recovered_pending_turn_defaults_to_no_source():
     assert "_source" not in recovered
 
 
-def test_checkpoint_user_message_stamps_process_wakeup_source():
-    """Verify eager-path checkpoint stamps _source on message dict when source is process_wakeup."""
+def test_checkpoint_user_message_skips_process_wakeup_source():
+    """Eager persistence must not save process wakeups as human user bubbles."""
     s = Session(session_id="test-session-4")
     s.messages = []
     _checkpoint_user_message_for_eager_session_save(
@@ -62,11 +59,7 @@ def test_checkpoint_user_message_stamps_process_wakeup_source():
         started_at=time.time(),
         source="process_wakeup",
     )
-    assert len(s.messages) == 1
-    user_msg = s.messages[0]
-    assert user_msg["role"] == "user"
-    assert user_msg["content"] == "[IMPORTANT: Wakeup prompt]"
-    assert user_msg["_source"] == "process_wakeup"
+    assert s.messages == []
 
 
 def test_checkpoint_user_message_skips_webui_source():
@@ -121,7 +114,7 @@ def test_session_pending_user_source_persisted():
     assert s2.pending_user_source == "process_wakeup"
 
 
-def test_merge_display_materializes_missing_process_wakeup_user_turn():
+def test_merge_display_hides_missing_process_wakeup_user_turn():
     merged = _merge_display_messages_after_agent_result(
         [],
         [],
@@ -130,13 +123,10 @@ def test_merge_display_materializes_missing_process_wakeup_user_turn():
         source="process_wakeup",
     )
 
-    assert merged[0]["role"] == "user"
-    assert merged[0]["content"] == "[IMPORTANT: Wakeup prompt]"
-    assert merged[0]["_source"] == "process_wakeup"
-    assert merged[1]["role"] == "assistant"
+    assert merged == [{"role": "assistant", "content": "done"}]
 
 
-def test_merge_display_stamps_process_wakeup_source_on_echoed_user_turn():
+def test_merge_display_drops_echoed_process_wakeup_user_turn():
     merged = _merge_display_messages_after_agent_result(
         [],
         [],
@@ -148,9 +138,7 @@ def test_merge_display_stamps_process_wakeup_source_on_echoed_user_turn():
         source="process_wakeup",
     )
 
-    assert merged[0]["role"] == "user"
-    assert merged[0]["_source"] == "process_wakeup"
-    assert merged[1]["role"] == "assistant"
+    assert merged == [{"role": "assistant", "content": "done"}]
 
 
 def test_merge_display_leaves_webui_user_turn_unmarked():
@@ -166,7 +154,7 @@ def test_merge_display_leaves_webui_user_turn_unmarked():
     assert "_source" not in merged[0]
 
 
-def test_materialize_pending_user_turn_before_error_stamps_process_wakeup_source():
+def test_materialize_pending_user_turn_before_error_skips_process_wakeup_source():
     s = Session(
         session_id="test-session-8",
         pending_user_message="[IMPORTANT: Wakeup prompt]",
@@ -174,8 +162,8 @@ def test_materialize_pending_user_turn_before_error_stamps_process_wakeup_source
     )
     s.messages = []
 
-    assert _materialize_pending_user_turn_before_error(s) is True
-    assert s.messages[0]["_source"] == "process_wakeup"
+    assert _materialize_pending_user_turn_before_error(s) is False
+    assert s.messages == []
 
 
 def test_apply_core_sync_or_error_marker_clears_pending_user_source(tmp_path):
@@ -190,3 +178,175 @@ def test_apply_core_sync_or_error_marker_clears_pending_user_source(tmp_path):
 
     assert _apply_core_sync_or_error_marker(s, Path(tmp_path / "missing-core.json")) is True
     assert s.pending_user_source is None
+
+
+def test_process_wakeup_user_rows_are_not_renderable_or_counted():
+    hidden = {
+        "role": "user",
+        "content": "[IMPORTANT: Background process done]",
+        "_source": "process_wakeup",
+        "timestamp": 123.0,
+    }
+    visible = {"role": "assistant", "content": "done", "timestamp": 124.0}
+
+    assert _message_counts_as_renderable_for_window(hidden) is False
+    assert _message_counts_as_renderable_for_window(visible) is True
+    assert _message_summary([hidden, visible]) == {
+        "message_count": 1,
+        "last_message_at": 124.0,
+    }
+
+
+def test_filter_hidden_internal_messages_removes_legacy_process_wakeup_rows():
+    hidden = {
+        "role": "User",
+        "content": "[IMPORTANT: Background process done]",
+        "_source": "process_wakeup",
+        "timestamp": 123.0,
+    }
+    visible = {"role": "user", "content": "real user", "timestamp": 124.0}
+
+    assert filter_hidden_internal_messages([hidden, visible]) == [visible]
+
+
+def test_message_window_excludes_process_wakeup_rows_from_visible_budget():
+    messages = [
+        {"role": "assistant", "content": "older"},
+        {
+            "role": "user",
+            "content": "[IMPORTANT: Background process done]",
+            "_source": "process_wakeup",
+        },
+        {"role": "assistant", "content": "newer"},
+    ]
+
+    window, offset = _message_window_for_display(messages, msg_limit=2)
+
+    assert window == [messages[0], messages[1], messages[2]]
+    assert offset == 0
+    assert sum(1 for msg in window if _message_counts_as_renderable_for_window(msg)) == 2
+
+
+def test_process_wakeup_assistant_answer_satisfies_settlement():
+    assert _merged_transcript_lacks_final_assistant_answer(
+        [],
+        [],
+        [{"role": "assistant", "content": "done"}],
+        "[IMPORTANT: Background process done]",
+        source="process_wakeup",
+    ) is False
+
+
+def test_process_wakeup_without_visible_assistant_still_lacks_final_answer():
+    assert _merged_transcript_lacks_final_assistant_answer(
+        [],
+        [],
+        [],
+        "[IMPORTANT: Background process done]",
+        source="process_wakeup",
+    ) is True
+
+
+def test_process_wakeup_settlement_with_existing_history_and_fresh_answer():
+    previous_display = [
+        {"role": "user", "content": "older user"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+
+    assert _merged_transcript_lacks_final_assistant_answer(
+        previous_display,
+        [],
+        [{"role": "assistant", "content": "fresh wakeup answer"}],
+        "[IMPORTANT: Background process done]",
+        source="process_wakeup",
+    ) is False
+
+
+def test_process_wakeup_settlement_ignores_hidden_rows_and_markers_before_tail():
+    previous_display = [
+        {"role": "assistant", "content": "older answer"},
+        {"role": "user", "content": "hidden wakeup", "_source": "process_wakeup"},
+        {"role": "assistant", "content": "context compressed", "_context_compression_marker": True},
+    ]
+
+    assert _merged_transcript_lacks_final_assistant_answer(
+        previous_display,
+        [],
+        [{"role": "assistant", "content": "fresh wakeup answer"}],
+        "[IMPORTANT: Background process done]",
+        source="process_wakeup",
+    ) is False
+
+
+def test_process_wakeup_settlement_still_fails_without_new_answer_after_history():
+    previous_display = [
+        {"role": "user", "content": "older user"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+
+    assert _merged_transcript_lacks_final_assistant_answer(
+        previous_display,
+        [],
+        [],
+        "[IMPORTANT: Background process done]",
+        source="process_wakeup",
+    ) is True
+
+
+def test_process_wakeup_drop_replayed_stable_assistant_still_requires_fresh_answer():
+    previous_display = [
+        {"role": "assistant", "content": "old", "id": "assistant-1"},
+    ]
+
+    assert _merged_transcript_lacks_final_assistant_answer(
+        previous_display,
+        [],
+        [{"role": "assistant", "content": "old", "id": "assistant-1"}],
+        "[IMPORTANT: Background process done]",
+        source="process_wakeup",
+        drop_replayed_assistant=True,
+    ) is True
+
+
+def test_process_wakeup_drop_replayed_keeps_fresh_answer_after_replay():
+    previous_display = [
+        {"role": "assistant", "content": "old answer", "id": "assistant-1"},
+    ]
+
+    assert _merged_transcript_lacks_final_assistant_answer(
+        previous_display,
+        [],
+        [
+            {"role": "assistant", "content": "old answer", "id": "assistant-1"},
+            {"role": "assistant", "content": "fresh wakeup answer", "id": "assistant-2"},
+        ],
+        "[IMPORTANT: Background process done]",
+        source="process_wakeup",
+        drop_replayed_assistant=True,
+    ) is False
+
+
+def test_merge_display_does_not_backfill_hidden_process_wakeup_context_tail():
+    previous_display = [
+        {"role": "user", "content": "real user"},
+        {"role": "assistant", "content": "real answer"},
+    ]
+    previous_context = [
+        *previous_display,
+        {
+            "role": "user",
+            "content": "[IMPORTANT: Background process completed]",
+            "_source": "process_wakeup",
+        },
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        [*previous_context, {"role": "assistant", "content": "fresh answer"}],
+        "[IMPORTANT: Background process completed]",
+        source="process_wakeup",
+    )
+
+    assert all(not (m.get("role") == "user" and m.get("_source") == "process_wakeup") for m in merged)
+    assert merged[-1] == {"role": "assistant", "content": "fresh answer"}
