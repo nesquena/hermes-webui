@@ -32,6 +32,21 @@ from api.agent_sessions import (
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
+
+
+def _cli_visible_session_limit() -> int:
+    """Resolve the non-WebUI sidebar state.db fetch cap from settings (#3347).
+
+    Delegates to the single canonical resolver in api.config so this fetch cap
+    and the route-level visibility cap (CLI_VISIBLE_SESSION_CAP in api/routes.py)
+    always agree. Default stays 20 (legacy); clamped to a safe upper bound.
+    """
+    try:
+        return _cfg.resolve_cli_visible_session_cap()
+    except Exception:
+        return CLI_VISIBLE_SESSION_LIMIT
+
+
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -5064,7 +5079,7 @@ def _load_cli_sessions_uncached(
     profile_value = _cli_profile or 'default'
     for row in read_importable_agent_session_rows(
         db_path,
-        limit=visible_session_limit if visible_session_limit is not None else (CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron' else CLI_VISIBLE_SESSION_LIMIT),
+        limit=visible_session_limit if visible_session_limit is not None else (CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron' else _cli_visible_session_limit()),
         log=logger,
         exclude_sources=("cron",) if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),

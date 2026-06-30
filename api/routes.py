@@ -1991,8 +1991,12 @@ def _build_session_list_cache_payload(
     )
     if show_cli_sessions:
         diag_stage("cli_cap")
-        archived_scoped = _cap_recent_cli_sessions(archived_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
-        visible_scoped = _cap_recent_cli_sessions(visible_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+        # Resolve the configured non-WebUI cap once (#3347). Uses the same
+        # canonical resolver as the state.db fetch cap in api/models.py so the
+        # fetch window and the final sidebar visibility cap always agree.
+        cli_cap = _resolve_cli_session_cap()
+        archived_scoped = _cap_recent_cli_sessions(archived_scoped, cli_cap=cli_cap)
+        visible_scoped = _cap_recent_cli_sessions(visible_scoped, cli_cap=cli_cap)
     if visible_only:
         archived_scoped = [
             s for s in archived_scoped if _session_has_server_visible_messages(s)
@@ -7413,6 +7417,21 @@ def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids:
 
 
 CLI_VISIBLE_SESSION_CAP = 20
+
+
+def _resolve_cli_session_cap(settings: dict | None = None) -> int:
+    """Resolve the non-WebUI sidebar visibility cap from settings (#3347).
+
+    Delegates to the single canonical resolver in api.config so this final
+    sidebar visibility cap and the state.db fetch cap
+    (CLI_VISIBLE_SESSION_LIMIT in api/models.py) always agree. Default stays 20
+    (legacy behavior); the value is clamped to a safe upper bound.
+    """
+    try:
+        from api.config import resolve_cli_visible_session_cap
+        return resolve_cli_visible_session_cap(settings)
+    except Exception:
+        return CLI_VISIBLE_SESSION_CAP
 
 
 def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:

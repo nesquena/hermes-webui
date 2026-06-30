@@ -7788,6 +7788,19 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
 
 # ── Settings persistence ─────────────────────────────────────────────────────
 
+# Non-WebUI (CLI/Telegram/Discord/cron) sidebar session cap (#3347 salvage).
+# Historically hardcoded at 20 in two places — CLI_VISIBLE_SESSION_LIMIT
+# (api/models.py, the state.db fetch cap) and CLI_VISIBLE_SESSION_CAP
+# (api/routes.py, the final sidebar visibility cap). High-volume multi-surface
+# users (CLI + cron + messaging) lost older sessions once 20 newer ones existed
+# (see api/routes.py "once 20 newer sessions exist, older cron runs vanish").
+# Both sites now resolve a single configured value via
+# resolve_cli_visible_session_cap() so they always agree. The default stays 20
+# so existing behavior is byte-identical unless the user raises it. An upper
+# bound protects sidebar fetch/render performance from absurd values.
+CLI_VISIBLE_SESSION_CAP_DEFAULT = 20
+CLI_VISIBLE_SESSION_CAP_MAX = 500
+
 _SETTINGS_DEFAULTS = {
     "default_workspace": str(DEFAULT_WORKSPACE),
     "onboarding_completed": False,
@@ -7801,6 +7814,7 @@ _SETTINGS_DEFAULTS = {
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": True,  # merge CLI/TUI/messaging sessions from state.db into the sidebar by default (#3988); established installs are grandfathered OFF by the load_settings backfill
+    "cli_visible_session_cap": 20,  # max non-WebUI (CLI/Telegram/Discord/cron) sessions to keep visible in the sidebar; threaded through BOTH cap sites (#3347). Clamped to [1, 500]; default 20 keeps legacy behavior.
     "show_cron_sessions": False,  # surface cron sessions in the sidebar (subordinate to show_cli_sessions)
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
@@ -8025,6 +8039,7 @@ _SETTINGS_ENUM_VALUES = {
     "structured_code_default_view": {"auto", "on", "off"},
 }
 _SETTINGS_INT_RANGES = {
+    "cli_visible_session_cap": (1, CLI_VISIBLE_SESSION_CAP_MAX),
     "pinned_sessions_limit": (1, 99),
     "inflight_state_max_sessions": (1, 25),
     "inflight_state_max_messages": (1, 100),
@@ -8085,6 +8100,39 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 
 _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").Lock()
+
+
+def resolve_cli_visible_session_cap(settings: dict | None = None) -> int:
+    """Resolve the non-WebUI sidebar session cap from settings (#3347 salvage).
+
+    This is the SINGLE source of truth for both cap sites so the state.db fetch
+    cap (``CLI_VISIBLE_SESSION_LIMIT`` in api/models.py) and the final sidebar
+    visibility cap (``CLI_VISIBLE_SESSION_CAP`` in api/routes.py) always agree.
+
+    Behavior:
+      * Missing/blank/invalid/<=0  -> default 20 (legacy behavior preserved).
+      * Values above the upper bound are clamped to ``CLI_VISIBLE_SESSION_CAP_MAX``
+        (500) so a runaway value can't tank sidebar fetch/render performance.
+
+    ``load_settings`` already validates persisted values against
+    ``_SETTINGS_INT_RANGES`` (1..500), but this resolver is defensive so the
+    runtime cap stays safe even when handed a raw/unsanitized dict.
+    """
+    try:
+        source = settings if isinstance(settings, dict) else load_settings()
+        raw = source.get("cli_visible_session_cap", CLI_VISIBLE_SESSION_CAP_DEFAULT)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return CLI_VISIBLE_SESSION_CAP_DEFAULT
+        value = int(raw)
+    except (TypeError, ValueError):
+        return CLI_VISIBLE_SESSION_CAP_DEFAULT
+    except Exception:
+        return CLI_VISIBLE_SESSION_CAP_DEFAULT
+    if value < 1:
+        return CLI_VISIBLE_SESSION_CAP_DEFAULT
+    if value > CLI_VISIBLE_SESSION_CAP_MAX:
+        return CLI_VISIBLE_SESSION_CAP_MAX
+    return value
 
 
 def save_settings(settings: dict) -> dict:

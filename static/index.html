@@ -1322,6 +1322,11 @@
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_cron_sessions">Surface cron job output as conversations in the sidebar. Only active when non-WebUI sessions are enabled. Defaults off; high-frequency jobs can flood the sidebar.</div>
             </div>
+            <div class="settings-field" style="margin-left:24px">
+              <label for="settingsCliVisibleSessionCap" data-i18n="settings_label_cli_session_cap">Non-WebUI session limit</label>
+              <input type="number" id="settingsCliVisibleSessionCap" min="1" max="500" step="1" inputmode="numeric" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_cli_session_cap">Maximum number of non-WebUI sessions (CLI, Telegram, Discord, cron, etc.) kept visible in the sidebar. Only active when non-WebUI sessions are enabled. Default is 20; max is 500 (higher values are clamped to protect sidebar performance).</div>
+            </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowPreviousMessagingSessions" style="width:15px;height:15px;accent-color:var(--accent)">
