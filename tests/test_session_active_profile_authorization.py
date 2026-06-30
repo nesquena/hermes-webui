@@ -164,7 +164,7 @@ def test_chat_start_foreign_persisted_session_returns_404_before_start_run(monke
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "chat_foreign", "message": "hello"})
-    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid: persisted_foreign)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid, **_kwargs: persisted_foreign)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_start_run", lambda *_, **__: (_ for _ in ()).throw(AssertionError("_start_run should not run")))
 
@@ -185,7 +185,7 @@ def test_chat_start_body_profile_cannot_retag_visible_empty_session_without_acti
         "read_body",
         lambda _handler: {"session_id": "chat_empty", "message": "hello", "profile": "other"},
     )
-    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid: empty_visible)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid, **_kwargs: empty_visible)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *_args, **_kwargs: "/workspace")
     monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None))

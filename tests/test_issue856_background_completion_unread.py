@@ -66,16 +66,17 @@ def test_background_done_sets_marker_when_session_not_actively_viewed():
     assert "const isSessionViewed=_isSessionActivelyViewed(activeSid);" in done_block
     assert "const completedSession=d.session||{session_id:activeSid};" in done_block
     assert "const completedSid=completedSession.session_id||activeSid;" in done_block
+    assert "const completedMessageCount=completedSession.message_count != null" in done_block
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in done_block
-    assert "_markSessionCompletionUnread(completedSid, completedSession.message_count);" in done_block
+    assert "_markSessionCompletionUnread(completedSid, completedMessageCount);" in done_block
 
 
 def test_background_done_uses_rotated_session_id_for_completion_unread():
     done_block = _done_block()
 
     completed_sid_idx = done_block.find("const completedSid=completedSession.session_id||activeSid;")
-    marker_idx = done_block.find("_markSessionCompletionUnread(completedSid, completedSession.message_count);")
-    viewed_idx = done_block.find("_markSessionViewed(completedSid, completedSession.message_count")
+    marker_idx = done_block.find("_markSessionCompletionUnread(completedSid, completedMessageCount);")
+    viewed_idx = done_block.find("_markSessionViewed(completedSid, completedMessageCount);")
 
     assert completed_sid_idx != -1, "done handler must derive the final post-compression session id"
     assert marker_idx != -1, "background completion marker must be stored on the final session id"

@@ -3899,7 +3899,11 @@ function _openSessionActionMenu(session, anchorEl){
       ICONS.trash,
       async()=>{
         closeSessionActionMenu();
-        await deleteSession(session.session_id);
+        // Menu Delete has no swipe/removal animation to wait for. Pass an
+        // immediate beforeDelete hook so deleteSession() removes the sidebar row
+        // optimistically while slow backend cleanup (/api/session/delete,
+        // state.db/FTS/journal cleanup) continues.
+        await deleteSession(session.session_id,()=>Promise.resolve());
       },
       'danger'
     ));

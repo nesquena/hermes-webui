@@ -36,7 +36,7 @@ class TestSidebarCancelAction:
         assert "cancelSessionStream(session)" in body, (
             "running sidebar sessions must expose a stop action that cancels that session"
         )
-        assert body.find("cancelSessionStream(session)") < body.find("deleteSession(session.session_id)"), (
+        assert body.find("cancelSessionStream(session)") < body.find("deleteSession(session.session_id"), (
             "stop action should appear before destructive delete action"
         )
 
@@ -91,3 +91,12 @@ class TestSidebarCancelAction:
         second = body.find("t('session_delete')")
         assert first > 0 and second > 0, "menu actions should still include duplicate/delete nodes"
         assert first < second, "duplicate action should render before delete action"
+
+    def test_menu_delete_optimistically_removes_sidebar_row_before_backend_cleanup(self):
+        """Context-menu Delete should not keep the row visible while slow DELETE cleanup runs."""
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8400)
+        compact_body = "".join(body.split())
+        assert "awaitdeleteSession(session.session_id,()=>Promise.resolve())" in compact_body, (
+            "menu Delete must pass an immediate beforeDelete hook so deleteSession() "
+            "optimistically removes the sidebar row before awaiting /api/session/delete"
+        )

@@ -6,6 +6,7 @@ users to find settings across all tabs without having to click through each sect
 Issue: #3850 (Add search input at top of Settings panel)
 """
 from pathlib import Path
+import re
 
 INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
@@ -133,6 +134,34 @@ class TestSettingsSearch:
         )
         assert "position:absolute" in STYLE_CSS and ".settings-search-results" in STYLE_CSS, (
             "style.css must make .settings-search-results absolutely positioned"
+        )
+
+    def test_settings_menu_layout_ownership_contract(self):
+        """Settings search should be anchored in the menu while scrolling is owned by the button list."""
+        assert 'class="settings-menu-items"' in INDEX_HTML, (
+            "index.html must keep the section buttons inside .settings-menu-items"
+        )
+
+        menu_match = re.search(
+            r"(^|\n)\s*#settingsMenu\s*\{[^}]*\}",
+            STYLE_CSS,
+            re.MULTILINE,
+        )
+        assert menu_match is not None, "style.css must have a #settingsMenu rule"
+        menu_rules = menu_match.group(0)
+        assert "overflow: visible" in menu_rules, (
+            "settings menu must not own vertical clipping overflow"
+        )
+
+        items_match = re.search(
+            r"(^|\n)\s*#settingsMenu\s+\.settings-menu-items\s*\{[^}]*\}",
+            STYLE_CSS,
+            re.MULTILINE,
+        )
+        assert items_match is not None, "style.css must have a .settings-menu-items rule"
+        items_rules = items_match.group(0)
+        assert "overflow-y: auto" in items_rules, (
+            "settings menu items wrapper must own vertical scrolling"
         )
 
     def test_panels_js_handles_providers_pane(self):

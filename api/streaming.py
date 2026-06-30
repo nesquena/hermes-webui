@@ -5121,23 +5121,16 @@ def _session_lacks_final_assistant_answer(messages) -> bool:
     return True
 
 
-def _merged_transcript_lacks_final_assistant_answer(
+def _turn_transcript_lacks_final_assistant_answer(
+    merged_messages,
     previous_display,
-    previous_context,
-    result_messages,
     msg_text,
     source: str = "webui",
     drop_replayed_assistant: bool = False,
 ) -> bool:
-    """Return True when the current turn still lacks a final assistant answer."""
+    """Return True when an already-merged transcript still lacks a final assistant answer."""
+    merged_messages = list(merged_messages or [])
     previous_display = list(previous_display or [])
-    merged_messages = _merge_display_messages_after_agent_result(
-        previous_display,
-        previous_context,
-        _restore_reasoning_metadata(previous_display, result_messages),
-        msg_text,
-        source=source,
-    )
     current_user_idx = _find_current_user_turn(merged_messages, msg_text)
     if current_user_idx is None or current_user_idx < len(previous_display):
         # The active turn lives after the durable transcript boundary. If the
@@ -5177,6 +5170,32 @@ def _merged_transcript_lacks_final_assistant_answer(
             if _message_identity(msg) != current_user_key or msg is merged_messages[current_user_idx]
         ]
     return _session_lacks_final_assistant_answer(filtered_messages)
+
+
+def _merged_transcript_lacks_final_assistant_answer(
+    previous_display,
+    previous_context,
+    result_messages,
+    msg_text,
+    source: str = "webui",
+    drop_replayed_assistant: bool = False,
+) -> bool:
+    """Return True when the current turn still lacks a final assistant answer."""
+    previous_display = list(previous_display or [])
+    merged_messages = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        _restore_reasoning_metadata(previous_display, result_messages),
+        msg_text,
+        source=source,
+    )
+    return _turn_transcript_lacks_final_assistant_answer(
+        merged_messages,
+        previous_display,
+        msg_text,
+        source=source,
+        drop_replayed_assistant=drop_replayed_assistant,
+    )
 
 
 def _agent_result_terminal_failure(result) -> bool:
