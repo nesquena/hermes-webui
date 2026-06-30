@@ -42,7 +42,7 @@ def test_model_selection_records_pending_state_before_async_session_update():
 
 def test_load_session_applies_pending_model_before_first_topbar_sync():
     """Reload should project the pending selection before server old metadata wins."""
-    body = _body_between(SESSIONS_JS, "async function loadSession", "const activeStreamId=")
+    body = _body_between(SESSIONS_JS, "async function loadSession", "activeStreamId=S.session.active_stream_id")
 
     apply_idx = body.index("_applyPendingSessionModelForSession")
     sync_idx = body.index("syncTopbar()")

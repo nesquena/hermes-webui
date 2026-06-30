@@ -368,7 +368,7 @@ def test_session_sse_handler_wires_on_subscribe_recovery():
     # The recovery must be inside the session SSE handler and use the
     # recovered marker so the frontend uses the replay attach path.
     handler_ix = src.index("def _handle_session_sse_stream")
-    handler_src = src[handler_ix:handler_ix + 6000]
+    handler_src = src[handler_ix:handler_ix + 9000]
     assert "active_stream_id_for_session" in handler_src
     assert '"recovered": True' in handler_src
     assert "server_turn_started" in handler_src
@@ -551,3 +551,213 @@ def test_frontend_handler_requires_event_id_to_surface():
     assert "_bgTaskCompleteRingBufferAdd(sid, evt_id)" in fn_src
     # Ack body carries event_id so server can correlate.
     assert "event_id: evt_id" in fn_src
+
+
+# ---------------------------------------------------------------------------
+# Visible-tab self-heal: server-initiated turn FINISHED during the SSE gap
+# ---------------------------------------------------------------------------
+#
+# Root cause (distinct from the live-run replay above): a server-initiated
+# turn (self-wake / cron / restart hook) can start AND finish entirely while a
+# VISIBLE tab's per-session EventSource is momentarily down (transient SSE
+# drop / reverse-proxy idle-timeout / connection-pool starvation). The
+# fire-and-forget `server_turn_started` reaches no subscriber, and by the time
+# the tab reconnects the run has already cleared from ACTIVE_RUNS — so
+# active_stream_id_for_session returns None and the live-run replay finds
+# nothing. The turn IS persisted; only the tab's live-view is stale until a
+# hard refresh.
+#
+# Fix: the (re)subscribing tab reports its last-known message_count
+# (?known_count); when the live-run replay is a no-op, the handler compares the
+# persisted count against it and, if the server is AHEAD, emits a lightweight
+# `session-updated` frame so the tab incrementally syncs via the #5189
+# keepStaleUntilLoaded swap-in-place path (NO clear+refetch → no blank-gap
+# jump). Reproduced deterministically with the controlled Playwright harness in
+# references/visible-tab-misses-wake-during-sse-gap.md (SSE force-closed at the
+# wakeup-emit instant; pre-fix gotServerTurnStarted:false / msgCount:0 while the
+# sidecar already had the turn).
+# ---------------------------------------------------------------------------
+
+
+def _make_meta_session(sid, count, updated_at=123.0):
+    """Build a fake metadata-only session stub mirroring load_metadata_only()."""
+    class _MetaSession:
+        session_id = sid
+        _metadata_message_count = count
+        _loaded_metadata_only = True
+        messages = []
+        updated_at = None
+    s = _MetaSession()
+    s.updated_at = updated_at
+    return s
+
+
+def test_persisted_message_count_uses_metadata_only(monkeypatch):
+    """The companion lookup must return the persisted count via a metadata-only
+    load (never parsing the full transcript) and None when unknown."""
+    from api import background_process as bp
+    import api.models as models
+
+    sid = "sess-persisted-count"
+
+    # Normal: metadata stub carries _metadata_message_count.
+    monkeypatch.setattr(models, "get_session", lambda _sid, metadata_only=False: _make_meta_session(_sid, 7), raising=True)
+    assert bp.persisted_message_count_for_session(sid) == 7
+
+    # Unknown count (legacy sidecar, no persisted count, empty messages) → None
+    # so the caller treats it as "cannot tell", never a spurious trigger.
+    monkeypatch.setattr(models, "get_session", lambda _sid, metadata_only=False: _make_meta_session(_sid, None), raising=True)
+    assert bp.persisted_message_count_for_session(sid) is None
+
+    # Lookup failure (e.g. corrupt sidecar) is swallowed → None, never raises.
+    def _boom(_sid, metadata_only=False):
+        raise RuntimeError("decode error")
+    monkeypatch.setattr(models, "get_session", _boom, raising=True)
+    assert bp.persisted_message_count_for_session(sid) is None
+
+
+def test_persisted_message_count_requests_metadata_only(monkeypatch):
+    """Guard the perf contract: the lookup MUST pass metadata_only=True so it
+    never parses a 400KB+ transcript on every per-session SSE (re)connect."""
+    from api import background_process as bp
+    import api.models as models
+
+    seen = {}
+
+    def _spy(_sid, metadata_only=False):
+        seen["metadata_only"] = metadata_only
+        return _make_meta_session(_sid, 3)
+
+    monkeypatch.setattr(models, "get_session", _spy, raising=True)
+    assert bp.persisted_message_count_for_session("sess-spy") == 3
+    assert seen.get("metadata_only") is True
+
+
+def test_session_sse_handler_wires_finished_during_gap_self_heal():
+    """Source-grep: the per-session SSE handler must (a) parse ?known_count,
+    (b) in the live-run-absent branch compare the persisted count against it,
+    and (c) emit a `session-updated` frame when the server is ahead — all so a
+    turn that finished during the SSE gap still self-heals on a visible tab."""
+    src = (REPO_ROOT / "api" / "routes.py").read_text()
+    handler_ix = src.index("def _handle_session_sse_stream")
+    handler_src = src[handler_ix:handler_ix + 9000]
+    # (a) the subscriber reports its last-known count.
+    assert "known_count" in handler_src
+    assert "subscriber_known_count" in handler_src
+    # (b) the no-live-run branch consults the persisted count companion.
+    assert "persisted_message_count_for_session" in handler_src
+    # (c) and emits the incremental-sync frame only when ahead.
+    assert "session-updated" in handler_src
+    # The persisted-count comparison must live in the ELSE of the live-run
+    # replay (a finished-during-gap turn has NO active stream to replay), and
+    # the count comparison gates the emit. Anchor on the EMIT call itself
+    # (`_sse(handler, 'session-updated'`), not the first `session-updated`
+    # occurrence — that one is in the explanatory comment, before the gate.
+    su_ix = handler_src.index("_sse(handler, 'session-updated'")
+    gate_src = handler_src[max(0, su_ix - 1200):su_ix]
+    assert "should_emit_session_updated(" in gate_src
+
+
+def test_session_updated_emit_gate_is_the_real_handler_function():
+    """Behavioural contract for the count gate — exercises the ACTUAL function
+    the SSE handler calls (`should_emit_session_updated`), NOT a hand-rolled
+    copy. If the gate drifts (e.g. `>` becomes `>=`, or a short-circuit is
+    added), this test moves with it because it imports the real implementation.
+    Emit ONLY when a known subscriber count exists AND the persisted count
+    strictly exceeds it.
+    """
+    from api.background_process import should_emit_session_updated as gate
+
+    # Server ahead → emit.
+    assert gate(5, 7) is True
+    # Equal (tab already current) → no emit.
+    assert gate(7, 7) is False
+    # Behind (shouldn't happen, but never reload backwards) → no emit.
+    assert gate(7, 5) is False
+    # Tab didn't report a count → no emit.
+    assert gate(None, 7) is False
+    # Persisted count unknown (legacy sidecar) → no emit.
+    assert gate(5, None) is False
+    # Both unknown → no emit.
+    assert gate(None, None) is False
+
+
+def test_sse_handler_uses_shared_emit_gate_not_inline_comparison():
+    """The handler MUST call `should_emit_session_updated` rather than inline
+    the `persisted_count > subscriber_known_count` comparison — that shared gate
+    is the single source of truth the behavioural test above locks down. An
+    inline comparison would let the handler's real logic drift away from the
+    tested function (greptile P2 r…: the gate test must exercise the handler,
+    not a copy)."""
+    src = (REPO_ROOT / "api" / "routes.py").read_text()
+    handler_ix = src.index("def _handle_session_sse_stream")
+    handler_src = src[handler_ix:handler_ix + 9000]
+    # The shared gate is imported and called in the emit branch.
+    assert "should_emit_session_updated" in handler_src
+    # And the inline form is GONE (the comparison lives only in the gate fn).
+    su_ix = handler_src.index("_sse(handler, 'session-updated'")
+    gate_src = handler_src[max(0, su_ix - 1200):su_ix]
+    assert "should_emit_session_updated(" in gate_src
+    assert "> subscriber_known_count" not in gate_src
+
+
+def test_frontend_subscribes_with_known_count_and_handles_session_updated():
+    """Source-grep: the frontend must (a) append &known_count from the
+    session's FULL message_count (not the rendered tail S.messages.length), and
+    (b) handle the `session-updated` frame via the keepStaleUntilLoaded
+    swap-in-place loadSession path (no clear+refetch → no blank-gap jump)."""
+    js = (REPO_ROOT / "static" / "messages.js").read_text()
+    # (a) known_count is sent on subscribe, sourced from S.session.message_count.
+    assert "known_count" in js
+    ss_ix = js.index("function startSessionStream")
+    ss_src = js[ss_ix:ss_ix + 4000]
+    assert "known_count=" in ss_src
+    assert "S.session.message_count" in ss_src
+    # Must NOT key the reported count on S.messages.length (tail window) — that
+    # would false-trigger a reload on every reconnect for long sessions.
+    knc_ix = ss_src.index("_knownCount")
+    knc_src = ss_src[knc_ix:knc_ix + 400]
+    assert "S.messages.length" not in knc_src
+    # (b) the session-updated listener routes through the swap-in-place path.
+    su_ix = js.index("addEventListener('session-updated'")
+    su_src = js[su_ix:su_ix + 1400]
+    assert "keepStaleUntilLoaded: true" in su_src or "keepStaleUntilLoaded:true" in su_src
+    assert "loadSession(" in su_src
+    # Idle-only: must bail when a live turn is rendering (that path owns its own
+    # message updates) and when the session isn't the one on screen.
+    assert "S.activeStreamId" in su_src
+    assert "isCurrent" in su_src
+
+
+def test_loadsession_idle_cleanup_does_not_clobber_concurrent_live_stream():
+    """Self-heal-vs-live-render race guard (maintainer/Codex-reproduced; verified
+    in an isolated instance).
+
+    The `session-updated` self-heal calls `loadSession(force, keepStaleUntilLoaded)`,
+    which awaits `_ensureMessagesLoaded`. A server-initiated turn can fire
+    `server_turn_started` DURING that await and set `S.activeStreamId` for the
+    same sid. The post-await branch must NOT clear `S.activeStreamId`/`S.busy`
+    based only on the stale `activeStreamId` snapshot taken before the await —
+    that silently kills the live turn's render. It must re-read the LIVE state and
+    prefer a concurrently-attached same-session stream over the stale snapshot.
+    """
+    js = (REPO_ROOT / "static" / "sessions.js").read_text()
+    compact = js.replace(" ", "").replace("\n", "")
+    # `activeStreamId` is declared `let` (not const) so it can be re-read.
+    assert "letactiveStreamId=S.session.active_stream_id||null" in compact, (
+        "activeStreamId must be `let` so the race-guard can re-read it post-await"
+    )
+    # Before the attach/idle branch, fold a concurrently-attached same-session
+    # live stream into activeStreamId so a mid-reload server_turn_started is
+    # preserved (attached), not clobbered by the idle cleanup.
+    assert "activeStreamId=activeStreamId||((S.activeStreamId&&S.session&&S.session.session_id===sid)?S.activeStreamId:null)" in compact, (
+        "missing the post-await race-guard re-read that folds a concurrent "
+        "same-session live stream into activeStreamId before the idle branch"
+    )
+    # The re-read must sit BEFORE the attach/idle decision (`if(activeStreamId){`).
+    reread_ix = compact.find("activeStreamId=activeStreamId||((S.activeStreamId")
+    branch_ix = compact.find("if(activeStreamId){")
+    assert reread_ix != -1 and branch_ix != -1 and reread_ix < branch_ix, (
+        "race-guard re-read must precede the attach/idle branch"
+    )
+

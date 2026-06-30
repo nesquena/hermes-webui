@@ -1418,7 +1418,10 @@ async function loadSession(sid){
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
-  const activeStreamId=S.session.active_stream_id||null;
+  // `let` (not const): re-read below, after the awaited _ensureMessagesLoaded,
+  // so a server_turn_started that attaches a live stream MID-RELOAD is honored
+  // by the attach/idle decision instead of being clobbered by the stale snapshot.
+  let activeStreamId=S.session.active_stream_id||null;
   // If the server says the session is idle, reset browser-side streaming flags
   // NOW — before the async _ensureMessagesLoaded gap below. Without this,
   // S.busy can remain true from a still-running stream in the PREVIOUS session
@@ -1653,6 +1656,18 @@ async function loadSession(sid){
 
     // Attach pending user message if one is queued.
     _mergePendingSessionMessage(S.session,S.messages);
+
+    // Self-heal-vs-live-render race guard (maintainer/Codex-reproduced; verified
+    // in an isolated instance). `activeStreamId` was snapshotted BEFORE the
+    // awaited _ensureMessagesLoaded above. During a force reload (the
+    // `session-updated` self-heal or any keepStaleUntilLoaded recovery), a
+    // server-initiated turn can fire `server_turn_started` mid-await and set
+    // S.activeStreamId for THIS sid. Without re-reading, the idle branch below
+    // would clear S.activeStreamId/S.busy off the stale (null) snapshot and
+    // silently kill the live turn's render. Fold a concurrently-attached
+    // same-session stream into activeStreamId so the existing attach branch
+    // (and all its `attachLiveStream(sid, activeStreamId, ...)` calls) keeps it.
+    activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
 
     if(activeStreamId){
       S.busy=true;

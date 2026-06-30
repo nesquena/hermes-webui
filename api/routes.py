@@ -16150,9 +16150,22 @@ def _handle_session_sse_stream(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
 
+    # The (re)subscribing tab reports its last-known message_count via
+    # ?known_count=N so the on-subscribe self-heal can detect a server-initiated
+    # turn that started AND finished entirely inside this tab's SSE gap (see the
+    # "server-initiated turn finished during the gap" self-heal block below).
+    # Absent/blank/non-numeric => None ("tab didn't report", never triggers).
+    _known_count_raw = parse_qs(parsed.query).get("known_count", [""])[0]
+    try:
+        subscriber_known_count = int(_known_count_raw) if _known_count_raw != "" else None
+    except (TypeError, ValueError):
+        subscriber_known_count = None
+
     from api.background_process import (
         subscribe_to_session_channel,
         active_stream_id_for_session,
+        persisted_message_count_for_session,
+        should_emit_session_updated,
     )
 
     # Atomic get-or-create + subscribe under SESSION_CHANNELS_LOCK. Doing these
@@ -16237,6 +16250,35 @@ def _handle_session_sse_stream(handler, parsed):
                     "source": "subscribe_recovery",
                     "recovered": True,
                 })
+            else:
+                # ── Server-initiated turn that FINISHED during the SSE gap ──
+                # The block above only heals a turn that is live RIGHT NOW. But
+                # a server-initiated turn (self-wake / cron / restart hook) can
+                # start AND finish entirely inside the gap: the fire-and-forget
+                # `server_turn_started` reached no subscriber, and by the time
+                # this tab reconnects the run has already cleared from
+                # ACTIVE_RUNS — so active_stream_id_for_session returns None and
+                # nothing above replays. The turn IS persisted, but this tab's
+                # transcript stays stale until a hard refresh (the reported
+                # visible-tab defect). Detect it by comparing the persisted
+                # message_count against what this (re)subscribing tab last knew
+                # (?known_count). If the server is AHEAD, emit a lightweight
+                # `session-updated` frame so the tab does an INCREMENTAL,
+                # swap-in-place message sync (frontend reuses #5189's
+                # keepStaleUntilLoaded loadSession path — NO clear+refetch, so
+                # the #5177/#5189 blank-gap jump is not reintroduced). Carries
+                # only counts (no transcript) to stay cheap. Skipped
+                # entirely when the tab didn't report a count or the persisted
+                # count is unknown (legacy sidecar) → never a spurious reload.
+                if subscriber_known_count is not None:
+                    persisted_count = persisted_message_count_for_session(sid)
+                    if should_emit_session_updated(subscriber_known_count, persisted_count):
+                        _sse(handler, 'session-updated', {
+                            "session_id": sid,
+                            "message_count": persisted_count,
+                            "known_count": subscriber_known_count,
+                            "source": "subscribe_recovery",
+                        })
         except _CLIENT_DISCONNECT_ERRORS:
             # Client vanished mid-recovery — re-raise so the outer handler
             # treats it as a normal disconnect and the finally still cleans up.

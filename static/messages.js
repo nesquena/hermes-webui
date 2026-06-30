@@ -6559,7 +6559,25 @@ function startSessionStream(sid) {
   // Tab is visible — the real SSE owns live-view; ensure no stale hidden poll.
   _stopHiddenActiveStreamPoll();
   try {
-    const es = new EventSource(_apiUrl('api/session/stream?session_id=' + encodeURIComponent(sid)));
+    // Report our last-known message_count so the server's on-subscribe
+    // self-heal can detect a server-initiated turn (self-wake / cron / restart)
+    // that started AND finished entirely inside an SSE gap — the fire-and-forget
+    // `server_turn_started` was missed AND the run already cleared from
+    // ACTIVE_RUNS by the time we reconnect, so the `server_turn_started` replay
+    // finds nothing. When the server is ahead of this count it emits a
+    // `session-updated` frame (handled below) and we incrementally sync. Use the
+    // session's full message_count (same basis the server persists), NOT
+    // S.messages.length, which is only the rendered tail window for long
+    // sessions and would false-trigger a reload on every reconnect.
+    let _knownCount = '';
+    try {
+      if (S.session && S.session.session_id === sid && Number.isFinite(Number(S.session.message_count))) {
+        _knownCount = String(Number(S.session.message_count));
+      }
+    } catch (_) {}
+    const _streamUrl = 'api/session/stream?session_id=' + encodeURIComponent(sid)
+      + (_knownCount !== '' ? '&known_count=' + encodeURIComponent(_knownCount) : '');
+    const es = new EventSource(_apiUrl(_streamUrl));
     _sessionEventSource = es;
     es.addEventListener('initial', () => { /* connection confirmed */ });
     es.addEventListener('bg_task_complete', e => {
@@ -6567,6 +6585,41 @@ function startSessionStream(sid) {
       if (typeof _handleBgTaskCompleteEvent === 'function') {
         _handleBgTaskCompleteEvent(e, sid, {source: 'session'});
       }
+    });
+    // ── Visible-tab self-heal: a server-initiated turn finished during an SSE
+    // gap ─────────────────────────────────────────────────────────────────
+    // Distinct from `server_turn_started` (which attaches a LIVE stream): this
+    // frame fires when the server detected, at our (re)subscribe, that a turn
+    // started AND finished while our EventSource was momentarily down (so we
+    // missed the live broadcast and the run already cleared). The turn is
+    // persisted but our transcript is stale and there is NO live stream left to
+    // attach. Incrementally sync via the SAME swap-in-place path #5189 uses for
+    // the hidden-tab return (loadSession force + keepStaleUntilLoaded): the new
+    // transcript replaces the old in a single render frame — NO clear+refetch,
+    // so the #5177/#5189 blank-gap "jump" is not reintroduced.
+    es.addEventListener('session-updated', e => {
+      try {
+        const d = JSON.parse(e.data || '{}');
+        const evSid = d.session_id || sid;
+        if (evSid !== sid) return;
+        // Only act when this session is the one on screen and we're idle (no
+        // live turn rendering — that path owns its own message updates).
+        const isCurrent = (typeof _isSessionCurrentPane === 'function')
+          ? _isSessionCurrentPane(sid)
+          : (S.session && S.session.session_id === sid);
+        if (!isCurrent) return;
+        if (S.activeStreamId) return;
+        // Re-check against our CURRENT known count — a concurrent load may have
+        // already caught us up between the server's emit and now.
+        const localCount = (S.session && S.session.session_id === sid && Number.isFinite(Number(S.session.message_count)))
+          ? Number(S.session.message_count)
+          : (Array.isArray(S.messages) ? S.messages.length : 0);
+        const serverCount = Number(d.message_count);
+        if (!Number.isFinite(serverCount) || serverCount <= localCount) return;
+        if (typeof loadSession === 'function') {
+          void loadSession(sid, {force: true, externalRefreshReason: 'session-updated', keepStaleUntilLoaded: true});
+        }
+      } catch (_) {}
     });
     // ── Defect B: live-view of server-initiated (Option Z) turns ──────────
     // The drain thread starts the wakeup turn server-side and the server
