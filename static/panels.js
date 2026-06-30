@@ -2380,10 +2380,6 @@ async function runKanbanDispatcher(){
   // Confirmation dialog first because this actually consumes API budget on
   // each spawned worker.  Result toast surfaces what happened so users see
   // the dispatcher actually doing work.
-  if (!_kanbanCurrentBoard) {
-    showToast(t('kanban_unavailable') || 'Kanban unavailable', 'error');
-    return;
-  }
 
   _kanbanIsDispatching = true;
   _setKanbanDispatcherButtonsDisabled(true);
