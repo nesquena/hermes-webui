@@ -7397,6 +7397,8 @@ function _preferencesPayloadFromUi(){
   if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
   const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
   if(workspaceTodosTabCb) payload.workspace_todos_tab=workspaceTodosTabCb.checked;
+  const workspaceGitEnabledCb=$('settingsWorkspaceGitEnabled');
+  if(workspaceGitEnabledCb) payload.workspace_git_enabled=workspaceGitEnabledCb.checked;
   const apiRedactCb=$('settingsApiRedact');
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
@@ -7486,6 +7488,10 @@ async function _autosavePreferencesSettings(payload){
     if(payload&&payload.workspace_todos_tab!==undefined){
       window._workspaceTodosTab=!!(saved&&saved.workspace_todos_tab);
       if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
+    }
+    if(payload&&payload.workspace_git_enabled!==undefined){
+      window._workspaceGitEnabled=!!(saved&&saved.workspace_git_enabled);
+      if(typeof _applyWorkspaceGitVisibility==='function') _applyWorkspaceGitVisibility();
     }
     if(payload&&Object.prototype.hasOwnProperty.call(payload,'fade_text_effect')) window._fadeTextEffect=!!payload.fade_text_effect;
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'pinned_sessions_limit')) window._pinnedSessionsLimit=parseInt(saved.pinned_sessions_limit,10)||3;
@@ -7889,6 +7895,17 @@ async function loadSettingsPanel(){
       workspaceTodosTabCb.addEventListener('change',()=>{
         window._workspaceTodosTab=workspaceTodosTabCb.checked;
         _applyWorkspaceTodosTabVisibility();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const workspaceGitEnabledCb=$('settingsWorkspaceGitEnabled');
+    if(workspaceGitEnabledCb){
+      workspaceGitEnabledCb.checked=!!settings.workspace_git_enabled;
+      window._workspaceGitEnabled=workspaceGitEnabledCb.checked;
+      if(typeof _applyWorkspaceGitVisibility==='function') _applyWorkspaceGitVisibility();
+      workspaceGitEnabledCb.addEventListener('change',()=>{
+        window._workspaceGitEnabled=workspaceGitEnabledCb.checked;
+        if(typeof _applyWorkspaceGitVisibility==='function') _applyWorkspaceGitVisibility();
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -9971,6 +9988,8 @@ function _applySavedSettingsUi(saved, body, opts){
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._workspaceTodosTab=!!body.workspace_todos_tab;
   if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
+  window._workspaceGitEnabled=!!body.workspace_git_enabled;
+  if(typeof _applyWorkspaceGitVisibility==='function') _applyWorkspaceGitVisibility();
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
@@ -10560,6 +10579,7 @@ async function saveSettings(andClose){
   body.fade_text_effect=fadeTextEffect;
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.workspace_todos_tab=!!window._workspaceTodosTab;
+  body.workspace_git_enabled=!!window._workspaceGitEnabled;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
   // Cron sessions are gated on CLI sessions (server short-circuits otherwise);

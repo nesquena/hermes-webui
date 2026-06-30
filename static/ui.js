@@ -5,7 +5,7 @@
 // legacy reverse-scan over S.messages — that keeps new clients working
 // against old servers (Phase 1 may not yet be deployed everywhere).
 // See api/todo_state.py for the wire contract.
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null,git:{status:null,selectedTab:'files',selectedDiff:null,loading:false}};
 
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
@@ -16066,7 +16066,23 @@ function _renderTreeItems(container, entries, depth){
     };
     el.appendChild(nameEl);
 
-    // Size -- for real files and symlinks that resolve to files
+    // #2668 (opt-in, default off): git status badge + ignored-dimming on tree
+    // rows. _gitStatusForPath() returns null when window._workspaceGitEnabled
+    // is false, so this whole block is inert with the feature off.
+    if(window._workspaceGitEnabled){
+      const gitState=(typeof _gitStatusForPath==='function')?_gitStatusForPath(item.path):null;
+      if(gitState&&gitState.ignored){
+        el.classList.add('git-ignored');
+      }
+      if(gitState){
+        const gitMark=document.createElement('span');
+        gitMark.className='file-git-status'+(gitState.ignored?' ignored':gitState.conflict?' conflict':gitState.untracked?' untracked':'');
+        gitMark.textContent=(typeof _gitStatusLabel==='function')?_gitStatusLabel(gitState):(gitState.status||'M');
+        gitMark.title=(typeof _gitStatusTitle==='function')?_gitStatusTitle(gitState):`Git status: ${gitState.status||'M'}`;
+        el.appendChild(gitMark);
+      }
+    }
+
     if(isFileLike&&item.size){
       const sizeEl=document.createElement('span');
       sizeEl.className='file-size';
