@@ -1,8 +1,4 @@
-"""
-Hermes Web UI -- Main server entry point.
-Thin routing shell: imports Handler, delegates to api/routes.py, runs server.
-All business logic lives in api/*.
-"""
+"""Hermes Web UI server entry point."""
 import logging
 import os
 import re
@@ -15,40 +11,12 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# ── SIGPIPE handling ────────────────────────────────────────────────────────
-# Ignore SIGPIPE so a client closing the connection mid-response (browser tab
-# close, network drop, mobile backgrounding, a dropped long-poll, an
-# `/api/updates/check` timeout, etc.) does not terminate the whole server
-# process. Python's default action for SIGPIPE is `Term`, so a single dropped
-# `socket.send()` in any request thread could kill the entire WebUI silently —
-# no exception, no log, no `/health` response. With SIG_IGN the kernel still
-# returns EPIPE to the offending write (surfaced as `BrokenPipeError`); the
-# per-request handler unwinds and the connection just closes, while the server
-# keeps serving. Set at import time so it is in effect before any
-# ThreadingHTTPServer worker thread writes its first response. (Salvaged from
-# #3407 @PatrickNoFilter — reproduced in production 2026-06-02.)
-#
-# SIGPIPE is POSIX-only; it does not exist on Windows (where there is no
-# broken-pipe signal and writes to a dead socket raise an OSError directly), so
-# guard with getattr to keep native-Windows support (#1952) working.
+# Ignore SIGPIPE so a dropped client only aborts that write, not the whole WebUI process.
 _SIGPIPE = getattr(signal, "SIGPIPE", None)
 if _SIGPIPE is not None:
     signal.signal(_SIGPIPE, signal.SIG_IGN)
 
-# ── Test-mode network isolation ─────────────────────────────────────────────
-# When `HERMES_WEBUI_TEST_NETWORK_BLOCK=1` is set in the environment, refuse
-# outbound socket connections to anything that is not loopback / RFC1918 /
-# link-local / reserved-TLD. This catches accidental real outbound (forgotten
-# mocks, leaked credentials triggering SDK init, new code paths bypassing an
-# existing mock) so the test suite stays hermetic and fast.
-#
-# tests/conftest.py sets this env var on every test_server subprocess so the
-# server.py-side network isolation matches the pytest-process-side isolation
-# already installed there.
-#
-# A test that legitimately needs real outbound spawns the server with the env
-# var unset (no current callers — every test_server-using test should be
-# mockable).
+# Test-mode network isolation keeps subprocess-backed tests hermetic.
 if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
     _REAL_CREATE_CONN = socket.create_connection
     _REAL_SOCK_CONNECT = socket.socket.connect
@@ -56,8 +24,7 @@ if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true"
     import re as _re
 
     def _re_match_unique_local_ipv6(h):
-        """Match IPv6 fc00::/7 (canonical syntax). Tighter than startswith('fc')
-        so we don't mistakenly classify hostnames like 'food.example.com' as local."""
+        """Match IPv6 fc00::/7 without catching similar-looking hostnames."""
         return bool(_re.match(r"^f[cd][0-9a-f]{0,2}:", h))
 
     def _addr_is_local(host):
@@ -66,8 +33,6 @@ if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true"
         h = host.strip().lower()
         if not h:
             return False
-        # IPv6 unique-local fc00::/7: require hex pair + colon to avoid
-        # matching hostnames like "food.example.com" or "fdsa.test".
         if h in ("::1", "0:0:0:0:0:0:0:1") or h.startswith("fe80:") or _re_match_unique_local_ipv6(h):
             return True
         if h == "localhost" or h.endswith(".localhost"):
@@ -153,6 +118,14 @@ class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
     daemon_threads = True
     request_queue_size = 64
+    max_request_workers = 128
+    max_overflow_reject_workers = 16
+    _OVERFLOW_RESPONSE = (
+        b"HTTP/1.1 503 Service Unavailable\r\n"
+        b"Connection: close\r\n"
+        b"Content-Length: 0\r\n"
+        b"\r\n"
+    )
 
     def __init__(self, *args, **kwargs):
         server_address = args[0] if args else kwargs.get('server_address', None)
@@ -160,6 +133,8 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self.address_family = socket.AF_INET6
         self.ssl_context: object | None = None
         super().__init__(*args, **kwargs)
+        self._request_worker_slots = threading.BoundedSemaphore(self.max_request_workers)
+        self._overflow_reject_slots = threading.BoundedSemaphore(self.max_overflow_reject_workers)
         self.accept_loop_requests_total = 0
         self.accept_loop_last_request_at = 0.0
 
@@ -188,15 +163,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
             super().server_bind()
 
     def get_request(self):
-        """Accept a connection without letting TLS handshakes block the loop.
-
-        ``ssl.wrap_socket(listening_socket)`` performs the TLS handshake inside
-        ``accept()``. A browser/network probe that opens TCP but never sends a
-        ClientHello can then freeze the one accept loop, leaving the process
-        alive but unable to serve any later clients. Accept the raw socket here
-        and wrap the accepted connection with ``do_handshake_on_connect=False``
-        so any slow/broken handshake times out in its own request thread.
-        """
+        """Accept raw sockets and defer TLS handshake work to request threads."""
         request, client_address = self.socket.accept()
         ssl_context = getattr(self, "ssl_context", None)
         if ssl_context is None:
@@ -213,68 +180,132 @@ class QuietHTTPServer(ThreadingHTTPServer):
         return tls_request, client_address
 
     def _handle_request_noblock(self):
-        """Record accept-loop progress before dispatching a request handler.
-
-        A process can be alive and still stop accepting/dispatching requests.
-        Exposing this heartbeat on /health gives supervisors and watchdogs a
-        cheap signal that the accept loop is still moving.
-
-        Note: this method is called only from the single ``serve_forever()``
-        thread in CPython socketserver, so the un-locked ``+=`` increment is
-        safe — there is no other thread mutating these counters. The /health
-        readers may see a stale value momentarily but never an inconsistent
-        one (Python int reads are atomic). Per Opus advisor on stage-297.
-        """
+        """Record accept-loop progress before dispatching a request handler."""
         self.accept_loop_requests_total += 1
         self.accept_loop_last_request_at = time.time()
         return super()._handle_request_noblock()
-    
+
+    def _close_request_quietly(self, request) -> None:
+        try:
+            request.close()
+        except Exception:
+            pass
+
+    def _drain_request_input_nonblocking(self, request) -> None:
+        # Read through the current header block before replying so Windows
+        # doesn't reset the socket when we close with unread input.
+        deadline = time.monotonic() + 0.05
+        buffered = bytearray()
+        header_terminator = b"\r\n\r\n"
+        max_bytes = 65536
+        try:
+            timeout = request.gettimeout()
+        except Exception:
+            timeout = None
+        try:
+            while len(buffered) < max_bytes and header_terminator not in buffered:
+                wait = deadline - time.monotonic()
+                if wait <= 0:
+                    break
+                try:
+                    request.settimeout(wait)
+                    chunk = request.recv(min(4096, max_bytes - len(buffered)))
+                except (BlockingIOError, InterruptedError, TimeoutError, socket.timeout):
+                    break
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buffered.extend(chunk)
+            try:
+                request.shutdown(socket.SHUT_RD)
+            except OSError:
+                pass
+        finally:
+            try:
+                request.settimeout(timeout)
+            except Exception:
+                pass
+
+    def _reject_overflow_request(self, request) -> None:
+        if getattr(self, "ssl_context", None) is not None:
+            self._close_request_quietly(request)
+            return
+        if not self._overflow_reject_slots.acquire(blocking=False):
+            self._close_request_quietly(request)
+            return
+        try:
+            threading.Thread(
+                target=self._reject_overflow_request_worker,
+                args=(request,),
+                daemon=True,
+            ).start()
+        except Exception:
+            self._overflow_reject_slots.release()
+            self._close_request_quietly(request)
+
+    def _reject_overflow_request_worker(self, request) -> None:
+        try:
+            self._drain_request_input_nonblocking(request)
+            try:
+                request.sendall(self._OVERFLOW_RESPONSE)
+                try:
+                    request.shutdown(socket.SHUT_WR)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        finally:
+            self._close_request_quietly(request)
+            self._overflow_reject_slots.release()
+
+    def process_request(self, request, client_address):
+        if not self._request_worker_slots.acquire(blocking=False):
+            self._reject_overflow_request(request)
+            return
+        try:
+            return super().process_request(request, client_address)
+        except Exception:
+            self._request_worker_slots.release()
+            self._close_request_quietly(request)
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            return super().process_request_thread(request, client_address)
+        finally:
+            self._request_worker_slots.release()
+
     def handle_error(self, request, client_address):
-        """Override to suppress logging for common client disconnect errors."""
+        """Suppress logging for common client disconnect errors."""
         exc_type, exc_value, _ = sys.exc_info()
-        
-        # Silently ignore common connection errors caused by client disconnects
         if exc_type in (
             ConnectionResetError, BrokenPipeError, ConnectionAbortedError,
             TimeoutError, ssl.SSLError, ssl.SSLEOFError,
         ):
             return
-        
-        # Also handle socket errors that indicate client disconnect
         if issubclass(exc_type, OSError):
-            # errno 54 is Connection reset by peer on macOS/BSD
-            # errno 104 is Connection reset by peer on Linux
             if getattr(exc_value, 'errno', None) in (32, 54, 104, 110):  # EPIPE, ECONNRESET, ETIMEDOUT
                 return
-        
-        # For other errors, use default logging
         super().handle_error(request, client_address)
 
 
 class Handler(BaseHTTPRequestHandler):
-    # HTTP/1.1 enables keep-alive connection reuse — major latency win on
-    # high-RTT links where every saved TCP handshake is 2×RTT. Each response
-    # MUST declare framing (Content-Length, Transfer-Encoding: chunked, or
-    # Connection: close) so the client knows where the message ends. Helpers
-    # j()/t() emit Content-Length; SSE/streaming endpoints emit
-    # Connection: close because the body has no terminator. See PR notes.
+    # HTTP/1.1 keep-alive stays on, so every response must declare framing.
     protocol_version = "HTTP/1.1"
     timeout = 30  # seconds — kills idle/incomplete connections to prevent thread exhaustion
     
     def setup(self):
         """Set socket options for each accepted connection."""
         super().setup()
-        # TCP_NODELAY — universal, disables Nagle for HTTP latency
         try:
             self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except OSError:
             pass
-        # SO_KEEPALIVE — universal master switch (must be set before timing params)
         try:
             self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         except OSError:
             pass
-        # Per-platform timing parameters
         if hasattr(socket, 'TCP_KEEPIDLE'):  # Linux
             try:
                 self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
@@ -310,9 +341,6 @@ class Handler(BaseHTTPRequestHandler):
         try:
             print(message, flush=True)
         except Exception:
-            # Agent/tool code can redirect or close process-wide stdout/stderr
-            # in another thread. HTTP response handling must not depend on
-            # those global streams remaining writable.
             pass
 
     def log_request(self, code: str='-', size: str='-') -> None:
@@ -345,7 +373,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
-        # Per-request profile context from cookie (issue #798)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -356,37 +383,26 @@ class Handler(BaseHTTPRequestHandler):
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
         except _CLIENT_DISCONNECT_ERRORS:
-            # The browser/client closed the socket while we were writing the
-            # response. This is expected for probes, tab closes, and SSE
-            # reconnect races; do not convert it into a misleading server 500.
+            # Expected disconnect path; do not convert it into a misleading server 500.
             return
         except Exception:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
-                # Client disconnected while we were sending the 500 — nothing to do.
                 pass
             except Exception:
-                # Unexpected failure while sending the error response itself.
-                # Log it so we know something is wrong with our error handler.
                 self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time()
-        # Per-request profile context from cookie (issue #798)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            # Stage-346 Opus SHOULD-FIX defense-in-depth: scope the CSP-report
-            # auth carve-out to POST only. The endpoint is intentionally
-            # unauthenticated (browsers omit cookies on CSP reports), but the
-            # carve-out should not extend to PATCH/DELETE on that path even
-            # though they currently fail through CSRF/routing fallthrough.
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
@@ -395,20 +411,15 @@ class Handler(BaseHTTPRequestHandler):
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
         except _CLIENT_DISCONNECT_ERRORS:
-            # The browser/client closed the socket while we were writing the
-            # response. This is expected for probes, tab closes, and SSE
-            # reconnect races; do not convert it into a misleading server 500.
+            # Expected disconnect path; do not convert it into a misleading server 500.
             return
         except Exception:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
-                # Client disconnected while we were sending the 500 — nothing to do.
                 pass
             except Exception:
-                # Unexpected failure while sending the error response itself.
-                # Log it so we know something is wrong with our error handler.
                 self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
@@ -436,13 +447,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _raise_fd_soft_limit(target: int = 4096) -> dict:
-    """Best-effort raise of RLIMIT_NOFILE for persistent WebUI hosts.
-
-    macOS launchd jobs often start with a 256 soft limit. If a future FD leak
-    regresses, that low ceiling turns a leak into a hard HTTP wedge quickly.
-    Raising the soft limit does not hide leaks; it buys enough headroom for
-    diagnostics and watchdog recovery.
-    """
+    """Best-effort raise of RLIMIT_NOFILE for persistent WebUI hosts."""
     if resource is None:
         return {"status": "unsupported"}
     try:
@@ -450,8 +455,6 @@ def _raise_fd_soft_limit(target: int = 4096) -> dict:
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
 
-    # On Unix, RLIM_INFINITY is commonly a large int; keep the logic explicit
-    # so tests can use ordinary integers without depending on platform values.
     desired = int(target)
     if hard not in (-1, getattr(resource, "RLIM_INFINITY", object())):
         desired = min(desired, int(hard))
@@ -555,13 +558,8 @@ def main() -> None:
     elif fd_limit.get("status") == "error":
         print(f"[!!] WARNING: Could not raise file descriptor limit: {fd_limit.get('error')}", flush=True)
 
-    # Fix sensitive file permissions before doing anything else
     fix_credential_permissions()
 
-    # ── #1558 startup self-heal ─────────────────────────────────────────
-    # If a previous process wrote a session JSON with fewer messages than
-    # its .bak (the data-loss shape #1558 produced), restore from the .bak.
-    # Safe to run unconditionally — a clean install is a no-op.
     try:
         from api.models import _active_state_db_path
         from api.session_recovery import recover_all_sessions_on_startup
@@ -577,7 +575,6 @@ def main() -> None:
         print(f"[recovery] startup recovery failed: {exc}", flush=True)
 
     within_container = False
-    # Check for the "/.within_container" file to determine if we're running inside a container; this file is created in the Dockerfile
     try:
         with open('/.within_container', 'r') as f:
             within_container = True
@@ -587,7 +584,6 @@ def main() -> None:
     if within_container:
         print('[ok] Running within container.', flush=True)
 
-    # Security: warn if binding non-loopback without authentication
     from api.auth import is_auth_enabled
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
         print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
@@ -621,7 +617,6 @@ def main() -> None:
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
-    # Start the gateway session watcher for real-time SSE updates
     try:
         from api.gateway_watcher import start_watcher
 
@@ -639,10 +634,6 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
-    # Start the bg_task_complete drain thread for terminal(notify_on_complete=true)
-    # agent wakeup. Reads tools.process_registry.completion_queue and emits SSE
-    # bg_task_complete events (canonical name; legacy process_complete alias is
-    # still emitted for back-compat) to the matching session's stream.
     try:
         from api.background_process import start_drain_thread
         if start_drain_thread():
@@ -650,9 +641,6 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
 
-    # Start the SessionChannel reaper for the persistent per-session SSE
-    # endpoint (/api/session/stream). Runs every 60s, collects channels with
-    # no subscribers past the grace period or past the idle TTL cap.
     try:
         from api.background_process import start_session_channel_reaper
         if start_session_channel_reaper():
@@ -660,7 +648,6 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
 
-    # Load WebUI dashboard plugins
     try:
         from api.plugins import load_plugins
         load_plugins()
@@ -670,7 +657,6 @@ def main() -> None:
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
-    # ── TLS/HTTPS setup (optional) ─────────────────────────────────────────
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
     if TLS_ENABLED:
@@ -695,22 +681,16 @@ def main() -> None:
     finally:
         httpd.server_close()
         _log_shutdown_audit()
-        # Stop the gateway watcher on shutdown
         try:
             from api.gateway_watcher import stop_watcher
             stop_watcher()
         except Exception:
             logger.debug("Failed to stop gateway watcher during shutdown")
-        # Drain pending memory-provider lifecycle commits before exit
         try:
             from api.session_lifecycle import drain_all_on_shutdown
             drain_all_on_shutdown()
         except Exception:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
-        # Stop bg_task_complete drain + SessionChannel reaper (ours-original).
-        # The drain thread emits the canonical ``bg_task_complete`` event
-        # (with ``process_complete`` kept as a temporary backward-compat
-        # alias for older clients — see start_drain_thread comment above).
         try:
             from api.background_process import stop_drain_thread
             stop_drain_thread()

@@ -1026,7 +1026,13 @@ window._hermesTtsSynth=function(id, text, opts){
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
-  const SILENCE_MS=1800; // auto-send after 1.8s silence
+  // Configurable via localStorage keys (set from dev console or a future settings panel).
+  //   hermes-voice-silence-ms   — pause duration before auto-send (ms, default 1800)
+  //   hermes-voice-continuous   — keep mic open across natural pauses ("true"/"false", default false)
+  const _silenceMsRaw=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
+  // Fall back to 1800 for missing/NaN/non-positive values, and floor at 200ms so a
+  // mistyped tiny/negative value can't make the recognizer auto-send instantly.
+  const SILENCE_MS=(Number.isFinite(_silenceMsRaw)&&_silenceMsRaw>0)?Math.max(200,_silenceMsRaw):1800;
 
   function _clearBrowserTtsRecovery(){
     if(_browserTtsKeepAlive){
@@ -1086,7 +1092,7 @@ window._hermesTtsSynth=function(id, text, opts){
     _setState('listening');
 
     _recognition=new SpeechRecognition();
-    _recognition.continuous=false;
+    _recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true';
     _recognition.interimResults=true;
     _recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
@@ -1465,6 +1471,17 @@ window._hermesTtsSynth=function(id, text, opts){
   window._voiceModeDeactivate=_deactivate;
   window._voiceModeImmediateSend=_voiceModeSend;
 })();
+function _currentSessionIsReusableEmptyChat(){
+  if(!S.session) return false;
+  const hasVisibleMessages=Array.isArray(S.messages)
+    && S.messages.some(m=>m&&m.role&&m.role!=='tool');
+  return (S.session.message_count||0)===0
+    && !hasVisibleMessages
+    && !S.busy
+    && !S.session.active_stream_id
+    && !S.session.pending_user_message;
+}
+
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{
   // If the current session has no messages AND nothing is in flight, just focus
@@ -1478,11 +1495,7 @@ $('btnNewChat').onclick=async()=>{
   // couldn't actually start a parallel chat. Use the same in-flight signal as
   // `_restoreSettledSession()` in messages.js: an active stream id or a queued
   // pending user message means the session is real, not empty.
-  if(S.session
-     && (S.session.message_count||0)===0
-     && !S.busy
-     && !S.session.active_stream_id
-     && !S.session.pending_user_message){
+  if(_currentSessionIsReusableEmptyChat()){
     $('msg').focus();closeMobileSidebar();return;
   }
   if(typeof _restoreRememberedNewChatDraftSession==='function'
@@ -1738,16 +1751,15 @@ document.addEventListener('keydown',async e=>{
     }
   }
   if((e.metaKey||e.ctrlKey)&&e.key==='k'){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(isText) return;
     e.preventDefault();
     // If the current session has no messages AND nothing is in flight, just focus
     // the composer rather than creating another empty session that will clutter
     // the sidebar list (#1171). See the matching guard in $('btnNewChat').onclick
     // and bug #1432 for why the in-flight check is needed.
-    if(S.session
-       && (S.session.message_count||0)===0
-       && !S.busy
-       && !S.session.active_stream_id
-       && !S.session.pending_user_message){
+    if(_currentSessionIsReusableEmptyChat()){
       $('msg').focus();return;
     }
     // Cmd/Ctrl+K should always create a new conversation, even while the current

@@ -32,8 +32,12 @@ def test_render_uses_single_pass_partition_helper():
 
     assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in render_body
     assert "_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)])" in render_body
-    assert "const renderedWebuiSessionCount=_renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length;" in render_body
-    assert "const renderedCliSessionCount=_renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length;" in render_body
+    assert "const renderedWebuiSessionCount=_serverWebuiSessionCount===null" in render_body
+    assert "const renderedCliSessionCount=_serverCliSessionCount===null" in render_body
+    assert "? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length" in render_body
+    assert "? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length" in render_body
+    assert ": null;" in render_body
+    assert "null is a deliberate \"not computed\" sentinel" in render_body
     assert "const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);" in render_body
     assert "const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);" in render_body
     assert "const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;" in render_body
@@ -66,10 +70,23 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
     assert "cliReferenceRaw," in _partition_block()
     assert "webuiSessionsRaw," in _partition_block()
     assert "cliSessionsRaw," in _partition_block()
-    assert "const renderedWebuiSessionCount=" in render_body
-    assert "const renderedCliSessionCount=" in render_body
-    assert "_renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length" in render_body
-    assert "_renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length" in render_body
+    assert "const renderedWebuiSessionCount=_serverWebuiSessionCount===null" in render_body
+    assert "const renderedCliSessionCount=_serverCliSessionCount===null" in render_body
+    assert "? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length" in render_body
+    assert "? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length" in render_body
     assert "function _countRenderedSidebarRowsFromRawSessions" not in SESSIONS_JS
     assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){" in SESSIONS_JS
     assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows)" in SESSIONS_JS
+
+
+def test_archive_load_more_uses_source_wide_loaded_count_and_hides_under_filters():
+    render_body = _function_block("renderSessionListFromCache")
+
+    assert "function _sessionArchivePagingFilterActive()" in SESSIONS_JS
+    assert "const archivePagingFilterActive=_sessionArchivePagingFilterActive();" in render_body
+    assert "if(_showArchived&&!archivePagingFilterActive){" in render_body
+    assert "const loadedArchivedCount=sidebarRows.filter" in render_body
+    assert "const archiveLoadCapReached=Number(_archivedRowsLoadedLimit||0)>=SESSION_ARCHIVED_MAX_LOADED_LIMIT;" in render_body
+    assert "const remainingArchived=archiveLoadCapReached?0:Math.max(0, Number(activeArchivedTotal||0)-loadedArchivedCount);" in render_body
+    assert "const remainingArchived=Math.max(0, Number(activeArchivedTotal||0)-loadedArchivedCount);" not in render_body
+    assert "orderedSessions.filter(s=>s&&s.archived).length" not in render_body

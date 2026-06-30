@@ -701,6 +701,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "mistralai": "MISTRAL_API_KEY",
     "x-ai": "XAI_API_KEY",
     "xiaomi": "XIAOMI_API_KEY",
+    "neuralwatt": "NEURALWATT_API_KEY",
     "opencode-zen": "OPENCODE_ZEN_API_KEY",
     "opencode-go": "OPENCODE_GO_API_KEY",
     # NOTE: bare "ollama" (local) deliberately omitted — local Ollama is keyless

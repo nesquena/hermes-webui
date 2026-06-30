@@ -32,6 +32,7 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
+    unregister_stream_owner,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
@@ -6056,6 +6057,10 @@ def _run_agent_streaming(
     """
     q = STREAMS.get(stream_id)
     if q is None:
+        # The stream was cancelled before the worker started; the route layer
+        # already registered the stream owner, so release it here to avoid
+        # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
+        unregister_stream_owner(stream_id)
         return
     register_active_run(
         stream_id,

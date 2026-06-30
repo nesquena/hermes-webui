@@ -53,6 +53,30 @@ def test_new_chat_button_restores_remembered_draft_before_creating_session():
     )
 
 
+def test_new_chat_empty_reuse_guard_checks_loaded_visible_messages():
+    helper_start = BOOT_JS.find("function _currentSessionIsReusableEmptyChat()")
+    helper_end = BOOT_JS.find("$('fileInput').onchange", helper_start)
+    assert helper_start != -1 and helper_end != -1, "empty-chat reuse helper not found"
+    helper = BOOT_JS[helper_start:helper_end]
+    assert "S.session.message_count||0" in helper, (
+        "empty-chat reuse should still honor the server-side session message count"
+    )
+    assert "S.messages.some(m=>m&&m.role&&m.role!=='tool')" in helper, (
+        "empty-chat reuse must not focus-only when loaded transcript messages are visible"
+    )
+    assert "S.session.active_stream_id" in helper and "S.session.pending_user_message" in helper, (
+        "empty-chat reuse must continue to treat in-flight zero-count sessions as real sessions"
+    )
+
+    button_body = _btn_new_chat_handler()
+    assert "if(_currentSessionIsReusableEmptyChat())" in button_body
+    shortcut_start = BOOT_JS.find("if((e.metaKey||e.ctrlKey)&&e.key==='k')")
+    shortcut_end = BOOT_JS.find("// Cmd/Ctrl+, opens/closes Settings", shortcut_start)
+    assert shortcut_start != -1 and shortcut_end != -1, "Cmd/Ctrl+K handler block not found"
+    shortcut_body = BOOT_JS[shortcut_start:shortcut_end]
+    assert "if(_currentSessionIsReusableEmptyChat())" in shortcut_body
+
+
 def test_restore_helper_validates_candidate_with_session_metadata():
     assert "const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';" in SESSIONS_JS
     assert "async function _restoreRememberedNewChatDraftSession()" in SESSIONS_JS

@@ -440,6 +440,19 @@ def _apply_config_defaults(config_data: dict) -> None:
     for key, value in _DEFAULT_EXPERIMENTAL_CONFIG.items():
         experimental.setdefault(key, value)
 
+ 
+def reload_config_if_stale() -> None:
+    """Refresh config.yaml once for concurrent stale read paths."""
+    with _cfg_lock:
+        try:
+            config_path = _get_config_path()
+            current_mtime = config_path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+        cache_stale = current_mtime != _cfg_mtime or _cfg_path != config_path
+        if not _cfg_cache or (cache_stale and not _cfg_has_in_memory_overrides()):
+            _refresh_config_cache(config_path)
+
 
 def get_config() -> dict:
     """Return the cached config dict, loading from disk if needed."""
@@ -450,7 +463,7 @@ def get_config() -> dict:
         current_mtime = 0.0
     cache_stale = current_mtime != _cfg_mtime or _cfg_path != config_path
     if not _cfg_cache or (cache_stale and not _cfg_has_in_memory_overrides()):
-        reload_config()
+        reload_config_if_stale()
     # When a test (or runtime caller) has rebound ``cfg`` to a different dict
     # via monkeypatch.setattr(config, "cfg", ...), return that override rather
     # than the underlying _cfg_cache. Without this branch, get_config() would
@@ -499,76 +512,86 @@ def is_unified_session_db_enabled(config_data: dict | None = None) -> bool:
     return experimental.get("unified_session_db") is True
 
 
+def _refresh_config_cache(config_path: Path | None = None) -> None:
+    """Refresh _cfg_cache for ``config_path``.
+
+    Callers must hold _cfg_lock when invoking this helper because it mutates
+    shared state.
+    """
+    global _cfg_mtime, _cfg_path, _cfg_fingerprint
+    if config_path is None:
+        config_path = _get_config_path()
+    _cfg_cache.clear()
+    # Remember the old mtime so we can tell whether config actually changed
+    # vs. first-ever load (mtime == 0.0, e.g. server start or profile switch).
+    _old_cfg_mtime = _cfg_mtime
+    _cfg_path = config_path
+    _cfg_mtime = 0.0
+    try:
+        if config_path.exists():
+            # Route the parse through the mtime-keyed cache (#4652) so an
+            # unchanged config.yaml isn't re-parsed (~125ms+ on a large file)
+            # on every reload_config() on the hot path (profile switch /
+            # load_settings, #4662 Phase 2). We take the RAW cached dict and
+            # run the env expansion HERE, pinned to the unscoped process-env
+            # view (below) — never the helper's per-call expansion — for the
+            # #798 TLS reason documented in the pin block.
+            loaded = _load_yaml_config_file_raw(config_path)
+            if isinstance(loaded, dict):
+                if loaded:
+                    # The process-global _cfg_cache must reflect PROCESS-env
+                    # expansion, never a profile-scoped block_process_env_fallback
+                    # view — otherwise a reload that fires while a readonly/worker
+                    # scope is active (profile alternation resolves _get_config_path
+                    # to the named profile, #798 TLS) would bake under-expanded
+                    # literal ${VAR}s into the shared cache and starve concurrent
+                    # readers of the module-level `cfg` alias. Expansion re-runs
+                    # per-read elsewhere; here we pin the cache to the unscoped view.
+                    _prev_block = getattr(_thread_ctx, "block_process_env_fallback", False)
+                    _prev_env = getattr(_thread_ctx, "env", None)
+                    try:
+                        _thread_ctx.block_process_env_fallback = False
+                        _thread_ctx.env = {}
+                        _cfg_cache.update(_expand_env_vars(loaded))
+                    finally:
+                        _thread_ctx.block_process_env_fallback = _prev_block
+                        if _prev_env is None:
+                            try:
+                                del _thread_ctx.env
+                            except AttributeError:
+                                pass
+                        else:
+                            _thread_ctx.env = _prev_env
+                # Stamp _cfg_mtime whenever the file parsed to a dict — INCLUDING
+                # an empty {} config. The cache-update above is skipped for {} (it's
+                # a no-op), but _cfg_mtime MUST still be set or get_config()'s
+                # `current_mtime != _cfg_mtime` stale check fires on every call and
+                # spins reload_config() under _cfg_lock forever (a `{}` config from a
+                # freshly created/reset profile is reachable on the switch hot path).
+                # This matches master's pre-#4662 behavior (it entered the block for
+                # {} and set the mtime); the inner `if loaded:` only gates the no-op
+                # cache update, not the mtime stamp.
+                try:
+                    _cfg_mtime = Path(config_path).stat().st_mtime
+                except OSError:
+                    _cfg_mtime = 0.0
+    except Exception:
+        logger.debug("Failed to load yaml config from %s", config_path)
+    _apply_config_defaults(_cfg_cache)
+    _cfg_fingerprint = _fingerprint_config(_cfg_cache)
+    # Bust the models cache so the next request sees fresh config values.
+    # Only delete the disk cache when config has actually changed -- not on
+    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start or
+    # profile switch) -- preserving the disk cache so the next restart
+    # still hits the fast path without a cold run.
+    if _old_cfg_mtime != 0.0:
+        _delete_models_cache_on_disk()
+
+
 def reload_config() -> None:
     """Reload config.yaml from the active profile's directory."""
-    global _cfg_mtime, _cfg_path, _cfg_fingerprint
     with _cfg_lock:
-        _cfg_cache.clear()
-        config_path = _get_config_path()
-        # Remember the old mtime so we can tell whether config actually changed
-        # vs. first-ever load (mtime == 0.0, e.g. server start or profile switch).
-        _old_cfg_mtime = _cfg_mtime
-        _cfg_path = config_path
-        _cfg_mtime = 0.0
-        try:
-            if config_path.exists():
-                # Route the parse through the mtime-keyed cache (#4652) so an
-                # unchanged config.yaml isn't re-parsed (~125ms+ on a large file)
-                # on every reload_config() on the hot path (profile switch /
-                # load_settings, #4662 Phase 2). We take the RAW cached dict and
-                # run the env expansion HERE, pinned to the unscoped process-env
-                # view (below) — never the helper's per-call expansion — for the
-                # #798 TLS reason documented in the pin block.
-                loaded = _load_yaml_config_file_raw(config_path)
-                if isinstance(loaded, dict):
-                    if loaded:
-                        # The process-global _cfg_cache must reflect PROCESS-env
-                        # expansion, never a profile-scoped block_process_env_fallback
-                        # view — otherwise a reload that fires while a readonly/worker
-                        # scope is active (profile alternation resolves _get_config_path
-                        # to the named profile, #798 TLS) would bake under-expanded
-                        # literal ${VAR}s into the shared cache and starve concurrent
-                        # readers of the module-level `cfg` alias. Expansion re-runs
-                        # per-read elsewhere; here we pin the cache to the unscoped view.
-                        _prev_block = getattr(_thread_ctx, "block_process_env_fallback", False)
-                        _prev_env = getattr(_thread_ctx, "env", None)
-                        try:
-                            _thread_ctx.block_process_env_fallback = False
-                            _thread_ctx.env = {}
-                            _cfg_cache.update(_expand_env_vars(loaded))
-                        finally:
-                            _thread_ctx.block_process_env_fallback = _prev_block
-                            if _prev_env is None:
-                                try:
-                                    del _thread_ctx.env
-                                except AttributeError:
-                                    pass
-                            else:
-                                _thread_ctx.env = _prev_env
-                    # Stamp _cfg_mtime whenever the file parsed to a dict — INCLUDING
-                    # an empty {} config. The cache-update above is skipped for {} (it's
-                    # a no-op), but _cfg_mtime MUST still be set or get_config()'s
-                    # `current_mtime != _cfg_mtime` stale check fires on every call and
-                    # spins reload_config() under _cfg_lock forever (a `{}` config from a
-                    # freshly created/reset profile is reachable on the switch hot path).
-                    # This matches master's pre-#4662 behavior (it entered the block for
-                    # {} and set the mtime); the inner `if loaded:` only gates the no-op
-                    # cache update, not the mtime stamp.
-                    try:
-                        _cfg_mtime = Path(config_path).stat().st_mtime
-                    except OSError:
-                        _cfg_mtime = 0.0
-        except Exception:
-            logger.debug("Failed to load yaml config from %s", config_path)
-        _apply_config_defaults(_cfg_cache)
-        _cfg_fingerprint = _fingerprint_config(_cfg_cache)
-        # Bust the models cache so the next request sees fresh config values.
-        # Only delete the disk cache when config has actually changed -- not on
-        # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start or
-        # profile switch) -- preserving the disk cache so the next restart
-        # still hits the fast path without a cold run.
-        if _old_cfg_mtime != 0.0:
-            _delete_models_cache_on_disk()
+        _refresh_config_cache(_get_config_path())
 
 
 # Memoized parse cache for _load_yaml_config_file, keyed on (resolved path,
@@ -5543,7 +5566,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         (_current_mtime != _cfg_mtime or _current_path != _cfg_path)
         and not _cfg_has_in_memory_overrides()
     ):
-        reload_config()
+        reload_config_if_stale()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
@@ -7416,6 +7439,10 @@ def create_stream_channel() -> StreamChannel:
 
 STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
+# stream_id -> session_id owner, populated synchronously before worker startup so
+# stream-id authorization does not depend on worker lifecycle registration.
+STREAM_SESSION_OWNERS: dict = {}
+STREAM_SESSION_OWNERS_LOCK = threading.Lock()
 CANCEL_FLAGS: dict = {}
 AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propagation
 STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
@@ -7424,6 +7451,37 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+
+
+def register_stream_owner(stream_id: str, session_id: str) -> None:
+    """Record the session that owns a stream before worker startup."""
+    stream_id = str(stream_id or "").strip()
+    session_id = str(session_id or "").strip()
+    if not stream_id or not session_id:
+        return
+    with STREAM_SESSION_OWNERS_LOCK:
+        STREAM_SESSION_OWNERS[stream_id] = session_id
+
+
+def stream_owner_session_id(stream_id: str) -> str | None:
+    """Return the synchronously-recorded owner session for a stream, if any."""
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    with STREAM_SESSION_OWNERS_LOCK:
+        owner = STREAM_SESSION_OWNERS.get(stream_id)
+    owner = str(owner or "").strip()
+    return owner or None
+
+
+def unregister_stream_owner(stream_id: str) -> None:
+    """Forget the pre-worker stream owner once the stream has torn down."""
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return
+    with STREAM_SESSION_OWNERS_LOCK:
+        STREAM_SESSION_OWNERS.pop(stream_id, None)
+
 
 # ── Gateway capability cache ─────────────────────────────────────────────────
 # Probes /v1/capabilities once per base_url/api-key pair and caches the result
@@ -7608,6 +7666,7 @@ def unregister_active_run(stream_id: str) -> None:
     with ACTIVE_RUNS_LOCK:
         ACTIVE_RUNS.pop(stream_id, None)
         LAST_RUN_FINISHED_AT = time.time()
+    unregister_stream_owner(stream_id)
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's

@@ -611,10 +611,11 @@ def test_stream_end_restore_attaches_projected_anchor_scene_before_render():
     restore = _function_body(MESSAGES_JS, "_restoreSettledSession")
 
     assert "function _attachProjectedAnchorSceneToLastAssistant" in MESSAGES_JS
-    attach_idx = restore.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
-    carry_idx = restore.index("S.messages=_carryForwardEphemeralTurnFields")
+    carry_idx = restore.index("const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);")
+    filter_idx = restore.index("S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);")
+    attach_idx = restore.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
     render_idx = restore.index("syncTopbar();renderMessages({preserveScroll:true})")
-    assert attach_idx < carry_idx < render_idx
+    assert carry_idx < filter_idx < attach_idx < render_idx
 
 
 def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
@@ -656,7 +657,7 @@ def test_connection_error_terminal_message_attaches_projected_anchor_scene_befor
     error = _function_body(MESSAGES_JS, "_handleStreamError")
 
     assert "_applyToAnchor('error'" in error
-    push_idx = error.index("S.messages.push({role:'assistant',content:'**Connection interrupted:**")
+    push_idx = error.index("_ensureSingleTerminalStreamErrorMarker(S.messages);")
     attach_idx = error.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
     render_idx = error.index("renderMessages({preserveScroll:true});")
     assert push_idx < attach_idx < render_idx
@@ -771,7 +772,12 @@ def test_anchor_owned_settled_turn_skips_legacy_worklog_rebuild():
     assert "anchorOwnedAssistantRawIdxs.add(idx)" in render
     assert "if(anchorOwnedAssistantRawIdxs.has(aIdx)) continue;" in render
     assert "if(anchorOwnedAssistantRawIdxs.has(rawIdx)) return;" in render
-    assert "!anchorOwnedAssistantRawIdxs.has(S.messages.indexOf(m))" in render
+    assert "S.messages.indexOf(m)" not in render
+    assert "S.messages.some((m,rawIdx)=>" in render
+    assert (
+        "!anchorOwnedAssistantRawIdxs.has(rawIdx)"
+        "&&_legacySettledFallbackHasToolMetadata(m)"
+    ) in render
 
 
 def test_transparent_stream_renders_persisted_anchor_scene_after_reload():

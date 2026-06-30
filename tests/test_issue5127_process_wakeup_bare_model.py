@@ -82,6 +82,47 @@ class TestIssue5127CustomProviderBareSuffixRepair:
         assert mock_catalog.call_count == 0
         assert result == ("x-ai/grok-composer-2.5-fast", "custom:my-proxy", False)
 
+    def test_slow_path_repairs_bare_suffix_to_profile_default_for_custom_provider(self):
+        """Regression #5225: async continuations may arrive without usable model_provider."""
+        from api.routes import _resolve_compatible_session_model_state
+
+        with patch("api.routes.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "openrouter",
+                "default_model": "openai/gpt-5.5",
+                "groups": [],
+            }
+            result = _resolve_compatible_session_model_state(
+                "grok-composer-2.5-fast",
+                None,
+                profile_provider="custom:my-proxy",
+                profile_default_model="x-ai/grok-composer-2.5-fast",
+                prefer_cached_catalog=True,
+            )
+
+        assert mock_catalog.call_count == 1
+        assert result == ("x-ai/grok-composer-2.5-fast", "custom:my-proxy", True)
+
+    def test_slow_path_does_not_rewrite_unrelated_bare_model_for_custom_provider(self):
+        from api.routes import _resolve_compatible_session_model_state
+
+        with patch("api.routes.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "openrouter",
+                "default_model": "openai/gpt-5.5",
+                "groups": [],
+            }
+            result = _resolve_compatible_session_model_state(
+                "other-model",
+                None,
+                profile_provider="custom:my-proxy",
+                profile_default_model="x-ai/grok-composer-2.5-fast",
+                prefer_cached_catalog=True,
+            )
+
+        assert mock_catalog.call_count == 1
+        assert result == ("other-model", "custom:my-proxy", False)
+
     def test_openai_codex_stale_openai_slash_still_uses_slow_path(self):
         """Regression: openai/... under openai-codex must not take bare fast return."""
         from api.routes import _resolve_compatible_session_model_state

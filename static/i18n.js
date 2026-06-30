@@ -1,4 +1,4 @@
-﻿// ── i18n: locale bundles and t() helper ──────────────────────────────────────
+// ── i18n: locale bundles and t() helper ──────────────────────────────────────
 // To add a new language: add an entry to LOCALES below with all keys translated.
 // The language code must match a valid BCP 47 tag (used for speech recognition).
 // Keys missing in a non-English locale fall back to English automatically.
@@ -19924,8 +19924,8 @@ const LOCALES = {
     settings_desc_conversation_outline: 'Pokazuje desktopową listę skrótów do pytań użytkownika w bieżącej konwersacji. Domyślnie wyłączone.',
     settings_label_hide_suggestions: 'Ukryj sugestie nowej konwersacji',
     settings_desc_hide_suggestions: 'Ukryj trzy domyślne przyciski sugestii na pustym ekranie nowej konwersacji, aby zapobiec przypadkowym kliknięciom.',
-    settings_label_virtualize_transcript: 'Virtualize long transcripts',
-    settings_desc_virtualize_transcript: "Render only the visible portion of very long chat transcripts (over 80 messages) for smoother scrolling. Turn this off if you see any rendering or scroll issues, or want the browser's Find (Ctrl+F) to match the whole conversation \u2014 the full transcript will render at once.",
+    settings_label_virtualize_transcript: 'Wirtualizuj długie transkrypcje',
+    settings_desc_virtualize_transcript: "Renderuj tylko widoczną część bardzo długich zapisów czatu (ponad 80 wiadomości) dla płynniejszego przewijania. Wyłącz to, jeśli zauważysz jakiekolwiek problemy z renderowaniem lub przewijaniem, lub chcesz, aby wyszukiwanie w przeglądarce (Ctrl+F) obejmowało całą konwersację \u2014 pełny zapis wyrenderuje się od razu.",
     settings_label_token_usage: 'Pokaż zużycie tokenów',
     settings_label_token_speed: 'Pokaż prędkość tokenów (TPS)',
     settings_desc_token_speed: 'Wyświetla tokeny na sekundę w nagłówkach wiadomości asystenta podczas strumieniowania i po zakończeniu odpowiedzi. Domyślnie wyłączone.',

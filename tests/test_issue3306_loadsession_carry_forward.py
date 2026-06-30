@@ -39,7 +39,7 @@ def _load_session_clear_block() -> str:
 
 def _ensure_messages_loaded_body() -> str:
     return _function_body(
-        "async function _ensureMessagesLoaded(sid) {",
+        "async function _ensureMessagesLoaded(sid",
         "function _messageComparableText",
     )
 

@@ -65,7 +65,8 @@ def _run_node_script(script: str) -> str:
             f"\nstdout:\n{result.stdout or '<empty>'}"
             f"\nstderr:\n{result.stderr or '<empty>'}",
         )
-    return result.stdout.strip()
+    stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+    return stdout_lines[-1] if stdout_lines else ""
 
 
 def _is_js_identifier_char(char: str) -> bool:
@@ -263,7 +264,9 @@ def test_phase0_doc_records_settled_fallback_ownership_matrix():
     assert "| Settled Compact Worklog activity |" in doc
     assert "| Settled Transparent Stream activity |" in doc
     assert "| Historical / non-anchor transcripts |" in doc
-    assert "This matrix is an audit baseline, not permission to delete fallbacks." in doc
+    assert "This matrix is the current settled-render contract" in doc
+    assert "compatibility-only rebuilds" in doc
+    assert "explicit raw transcript indexes" in doc
 
 
 def test_function_extractor_handles_nested_template_literal_interpolation():
@@ -398,6 +401,478 @@ def test_transparent_raw_content_fallback_exits_for_anchor_owned_messages():
     }
 
 
+def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds():
+    """Drive the real renderMessages() gate, not only source-order assertions."""
+
+    render_source = _function_source(_ui_js(), "renderMessages")
+    transparent_source = _function_source(_ui_js(), "_transparentStreamOrderedParts")
+    legacy_metadata_source = _function_source(
+        _ui_js(), "_legacySettledFallbackHasToolMetadata"
+    )
+    script = textwrap.dedent(
+        f"""
+        class FakeClassList {{
+          constructor(el) {{ this.el = el; }}
+          _set() {{ return new Set(String(this.el.className || '').split(/\\s+/).filter(Boolean)); }}
+          contains(name) {{ return this._set().has(name); }}
+          add(...names) {{
+            const set = this._set();
+            names.forEach((name) => set.add(name));
+            this.el.className = Array.from(set).join(' ');
+          }}
+          remove(...names) {{
+            const set = this._set();
+            names.forEach((name) => set.delete(name));
+            this.el.className = Array.from(set).join(' ');
+          }}
+        }}
+        class FakeElement {{
+          constructor(tag = 'div') {{
+            this.tagName = tag.toUpperCase();
+            this.children = [];
+            this.parentElement = null;
+            this.dataset = {{}};
+            this.attributes = {{}};
+            this.className = '';
+            this.id = '';
+            this.hidden = false;
+            this.innerHTML = '';
+            this.style = {{}};
+            this.classList = new FakeClassList(this);
+          }}
+          appendChild(child) {{
+            child.parentElement = this;
+            this.children.push(child);
+            return child;
+          }}
+          insertBefore(child, ref) {{
+            child.parentElement = this;
+            const idx = this.children.indexOf(ref);
+            if (idx < 0) this.children.push(child);
+            else this.children.splice(idx, 0, child);
+            return child;
+          }}
+          remove() {{
+            if (!this.parentElement) return;
+            const idx = this.parentElement.children.indexOf(this);
+            if (idx >= 0) this.parentElement.children.splice(idx, 1);
+            this.parentElement = null;
+          }}
+          setAttribute(name, value) {{
+            this.attributes[name] = String(value);
+            if (name === 'id') this.id = String(value);
+            if (name === 'class') this.className = String(value);
+            if (name.startsWith('data-')) this.dataset[dataKey(name)] = String(value);
+          }}
+          getAttribute(name) {{
+            if (name === 'id') return this.id || null;
+            if (name === 'class') return this.className || null;
+            if (name.startsWith('data-')) {{
+              const value = this.dataset[dataKey(name)];
+              return value === undefined ? null : String(value);
+            }}
+            return this.attributes[name] === undefined ? null : this.attributes[name];
+          }}
+          removeAttribute(name) {{
+            delete this.attributes[name];
+            if (name.startsWith('data-')) delete this.dataset[dataKey(name)];
+          }}
+          matches(selector) {{ return matchesSelector(this, selector); }}
+          closest(selector) {{
+            let node = this;
+            while (node) {{
+              if (matchesSelector(node, selector)) return node;
+              node = node.parentElement;
+            }}
+            return null;
+          }}
+          querySelectorAll(selector) {{
+            const found = [];
+            const visit = (node) => {{
+              for (const child of node.children) {{
+                if (matchesSelector(child, selector)) found.push(child);
+                visit(child);
+              }}
+            }};
+            visit(this);
+            return found;
+          }}
+          querySelector(selector) {{
+            return this.querySelectorAll(selector)[0] || null;
+          }}
+          insertAdjacentHTML() {{}}
+        }}
+        function dataKey(name) {{
+          return String(name).slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+        }}
+        function matchesSelector(el, selector) {{
+          return String(selector || '').split(',').some((part) => matchesSimple(el, part.trim()));
+        }}
+        function matchesSimple(el, selector) {{
+          if (!selector) return false;
+          const negated = [];
+          const baseSelector = selector.replace(/:not\\(([^()]*)\\)/g, (_, inner) => {{
+            negated.push(String(inner || '').trim());
+            return '';
+          }}).trim();
+          if (negated.some((inner) => inner && matchesSimple(el, inner))) return false;
+          if (!baseSelector) return true;
+          const classMatches = [...baseSelector.matchAll(/\\.([A-Za-z0-9_-]+)/g)].map((m) => m[1]);
+          if (classMatches.some((name) => !el.classList.contains(name))) return false;
+          const attrMatches = [...baseSelector.matchAll(/\\[([^=\\]]+)(?:=["']?([^"'\\]]+)["']?)?\\]/g)];
+          for (const match of attrMatches) {{
+            const value = el.getAttribute(match[1]);
+            if (value === null) return false;
+            if (match[2] !== undefined && String(value) !== String(match[2])) return false;
+          }}
+          const idMatch = baseSelector.match(/#([A-Za-z0-9_-]+)/);
+          if (idMatch && el.id !== idMatch[1]) return false;
+          const tagMatch = baseSelector.match(/^[A-Za-z][A-Za-z0-9_-]*/);
+          if (tagMatch && el.tagName.toLowerCase() !== tagMatch[0].toLowerCase()) return false;
+          return true;
+        }}
+
+        const elements = {{
+          msgInner: new FakeElement('div'),
+          emptyState: new FakeElement('div'),
+        }};
+        global.window = {{}};
+        global.document = {{
+          createElement: (tag) => new FakeElement(tag),
+          getElementById: (id) => elements[id] || null,
+        }};
+        global.performance = {{ now: () => 1 }};
+        global.requestAnimationFrame = (fn) => fn();
+        global.setTimeout = (fn) => fn();
+        function $(id) {{ return elements[id] || null; }}
+        function isTransparentStream() {{ return false; }}
+        function isCompactWorklogMode() {{ return true; }}
+        function isSimplifiedToolCalling() {{ return true; }}
+        function t(key) {{ return key; }}
+        function li() {{ return ''; }}
+        function esc(value) {{ return String(value == null ? '' : value); }}
+        function msgContent(message) {{
+          if (Array.isArray(message.content)) {{
+            return message.content.filter((p) => p && p.type === 'text').map((p) => p.text || p.content || '').join('\\n');
+          }}
+          return String(message.content || '');
+        }}
+        let S;
+        const INFLIGHT = {{}};
+        let _loadingSessionId = null;
+        let _messageRenderWindowSid = null;
+        let _messageUserUnpinned = false;
+        let _programmaticScroll = false;
+        let _programmaticScrollSetAt = 0;
+        let _sessionHtmlCacheSid = null;
+        let _messagesTruncated = false;
+        let _oldestIdx = 0;
+        const _sessionHtmlCache = new Map();
+        const _recycleStash = new Map();
+        const _msgNodeRecycleEnabled = false;
+        const _recycleResetAttrs = [];
+        const _ERR_MSG_RE = /__never__/;
+
+        function _captureMessageScrollSnapshot() {{ return null; }}
+        function _resetMessageRenderWindow(sid) {{ _messageRenderWindowSid = sid; }}
+        function _latestPreservedCompressionTaskListMessages() {{ return []; }}
+        function _getVisibleMessagesWithIdx() {{ return S.messages.map((m, rawIdx) => (m && m.role !== 'tool') ? {{ m, rawIdx }} : null).filter(Boolean); }}
+        function _messageVirtualKeepTailCount() {{ return 100; }}
+        function _currentMessageVirtualWindow(vis) {{ return {{ virtualized: false, start: 0, end: vis.length, topPad: 0, bottomPad: 0, total: vis.length, tailStart: vis.length }}; }}
+        function _messageVirtualWindowKeyFor() {{ return 'all'; }}
+        function _messageRenderCacheSignature() {{ return 'sig'; }}
+        function _compressionStateForCurrentSession() {{ return null; }}
+        function clearCompressionUi() {{}}
+        function _handoffStateForCurrentSession() {{ return null; }}
+        function _captureWorklogDetailDisclosureState() {{ return null; }}
+        function _latestCompressionReferenceMessage() {{ return {{ message: null, rawIdx: -1 }}; }}
+        function _shouldShowSettledCompressionReference() {{ return false; }}
+        function _applySessionNavigationPrefs() {{}}
+        function _messageVirtualSpacer() {{ return new FakeElement('div'); }}
+        function _compressionAnchorIndex() {{ return null; }}
+        function _assistantTurnFinalVisibleContentMap() {{ return new Map(); }}
+        function _assistantTurnVisibleContentMap() {{ return new Map(); }}
+        function _isPreservedCompressionTaskListMessage() {{ return false; }}
+        function _preservedCompressionTaskListCardsHtml() {{ return ''; }}
+        function _isContextCompactionMessage() {{ return false; }}
+        function _createAssistantTurn() {{
+          const turn = new FakeElement('div');
+          turn.className = 'assistant-turn';
+          const blocks = new FakeElement('div');
+          blocks.className = 'assistant-turn-blocks';
+          turn.appendChild(blocks);
+          return turn;
+        }}
+        function _assistantTurnBlocks(turn) {{ return turn ? turn.querySelector('.assistant-turn-blocks') : null; }}
+        function _assistantRoleHtml() {{ return ''; }}
+        function _userMessageDomId(rawIdx) {{ return `user-${{rawIdx}}`; }}
+        function _messageSessionIndexForRawIdx(rawIdx) {{ return rawIdx; }}
+        function _messageViewportAnchorKeyForMessage() {{ return 'k'; }}
+        function _stripAttachedFilesMarkerForDisplay(value) {{ return String(value || ''); }}
+        function _stripWorkspaceDisplayPrefix(value) {{ return String(value || ''); }}
+        function _stripLeadingAssistantThinkingMarkup(value) {{ return String(value || ''); }}
+        function _getCachedRender(value) {{ return String(value || ''); }}
+        function _formatInServerTz() {{ return ''; }}
+        function _formatMessageFooterTimestamp() {{ return ''; }}
+        function _questionJumpButtonHtml() {{ return ''; }}
+        function _formatTurnTps() {{ return ''; }}
+        function isTpsDisplayEnabled() {{ return false; }}
+        function _renderAttachmentHtml() {{ return ''; }}
+        function _isMarkerOnlyAssistantCompressionMessage() {{ return false; }}
+        function _isAssistantEmptyPlaceholderContent() {{ return false; }}
+        function _assistantTurnAnchorSettledFinalAnswer() {{ return null; }}
+        function _worklogReasoningTextFromMessage() {{ return ''; }}
+        function _assistantMessageBelongsInWorklog() {{ return false; }}
+        function _assistantThinkingBelongsInWorklog() {{ return false; }}
+        function _assistantReasoningPayloadText() {{ return ''; }}
+        function _statusCardHtml() {{ return ''; }}
+        function _collectHandoffSummaryStates() {{ return []; }}
+        function _insertCompressionLikeNode() {{}}
+        function _handoffCardsNode() {{ return null; }}
+        function renderCompressionUi() {{}}
+        function _assistantToolAnchorIdxForMessage(messages, rawIdx) {{ return rawIdx; }}
+        function _cliToolResultSnippet(value) {{ return String(value || ''); }}
+        function _cliPatchSnippetFromArgs() {{ return ''; }}
+        function _cliToolCardSnippet(value) {{ return String(value || ''); }}
+        function _cliToolCardHasDiffSnippet() {{ return false; }}
+        function _toolArgsSnapshot(args) {{ return args || {{}}; }}
+        function _worklogReasonHtmlFromAnchor() {{ return ''; }}
+        function _normalizeThinkingEchoCompare(value) {{ return String(value || ''); }}
+        function _toolWorklogListEl(group) {{ return group; }}
+        let legacyCards = [];
+        function ensureActivityGroup(parent, opts) {{
+          const group = new FakeElement('div');
+          group.className = 'tool-worklog-group tool-call-group agent-activity-group';
+          group.setAttribute('data-legacy-fallback-owner', '1');
+          const anchor = opts && opts.anchor;
+          if (parent && anchor && anchor.parentElement === parent) parent.insertBefore(group, anchor);
+          else if (parent) parent.appendChild(group);
+          return group;
+        }}
+        function _appendWorklogStep(group, anchor, cards) {{
+          for (const card of cards || []) {{
+            legacyCards.push({{
+              tid: card.tid || card.id || card.tool_call_id || '',
+              name: card.name || '',
+              snippet: String(card.snippet || ''),
+            }});
+            const row = new FakeElement('div');
+            row.className = 'tool-card-row';
+            row.setAttribute('data-tool-id', card.tid || card.id || card.tool_call_id || '');
+            group.appendChild(row);
+          }}
+        }}
+        function _syncToolCallGroupSummary() {{}}
+        function _restoreWorklogDetailDisclosureState() {{}}
+        function _scrollAfterMessageRender() {{}}
+        function _maybeRecoverVirtualizedBlankViewport() {{ return false; }}
+        function _updateMessageVirtualMeasurements() {{}}
+        function postProcessRenderedMessages() {{}}
+        function _formatGatewayModelLabel() {{ return ''; }}
+        function _gatewayRoutingFailoverText() {{ return ''; }}
+        function _gatewayModelWarningText() {{ return ''; }}
+        function _formatTurnDuration() {{ return ''; }}
+        function _renderSettledAnchorSceneForMessage(message, segment, rawIdx) {{
+          const group = new FakeElement('div');
+          group.className = 'tool-worklog-group agent-activity-group';
+          group.setAttribute('data-anchor-settled-scene-owner', '1');
+          const blocks = _assistantTurnBlocks(segment.closest('.assistant-turn'));
+          if (blocks) blocks.insertBefore(group, segment);
+          return true;
+        }}
+
+        eval({json.dumps(transparent_source)});
+        eval({json.dumps(legacy_metadata_source)});
+        eval({json.dumps(render_source)});
+
+        const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
+        const selectorSanityElement = new FakeElement('div');
+        selectorSanityElement.className = 'tool-worklog-group anchor-owned';
+        selectorSanityElement.setAttribute('data-owner', 'anchor');
+        const selectorSanity = {{
+          positive: selectorSanityElement.matches('.tool-worklog-group:not(.legacy-owner)[data-owner="anchor"]'),
+          negatedClass: selectorSanityElement.matches('.tool-worklog-group:not(.anchor-owned)'),
+          negatedAttr: selectorSanityElement.matches('.tool-worklog-group:not([data-owner="anchor"])'),
+        }};
+        const legacyToolCall = {{
+          id: 'toolu_1',
+          function: {{ name: 'terminal', arguments: '{{"cmd":"git status"}}' }},
+        }};
+        const legacyPartial = {{ id: 'partial_1', name: 'terminal', args: {{ cmd: 'pwd' }}, snippet: 'partial result' }};
+        const legacyContentTool = {{ type: 'tool_use', id: 'content_1', name: 'terminal', input: {{ cmd: 'ls' }} }};
+        const anchorOwned = {{
+          role: 'assistant',
+          content: [{{ type: 'text', text: 'Anchor final answer' }}, legacyContentTool],
+          tool_calls: [legacyToolCall],
+          _partial_tool_calls: [legacyPartial],
+          _anchor_activity_scene: {{
+            version: 'activity_scene_v1',
+            activity_rows: [{{ id: 'row1', kind: 'tool', role: 'tool', tool: {{ name: 'terminal' }} }}],
+            final_answer: 'Anchor final answer',
+          }},
+        }};
+        S = {{
+          session: {{ session_id: 's1', tool_calls: [{{ tid: 'toolu_1', snippet: 'persisted result' }}] }},
+          messages: [{{ role: 'user', content: 'run' }}, anchorOwned, toolResult],
+          toolCalls: [{{ tid: 'toolu_1', assistant_msg_idx: 1, name: 'terminal', snippet: 'session fallback' }}],
+          busy: false,
+        }};
+        renderMessages();
+        const anchorSummary = {{
+          anchorGroups: elements.msgInner.querySelectorAll('[data-anchor-settled-scene-owner]').length,
+          legacyGroups: elements.msgInner.querySelectorAll('[data-legacy-fallback-owner]').length,
+          legacyRows: elements.msgInner.querySelectorAll('.tool-card-row').length,
+          legacyCards,
+          sToolCalls: S.toolCalls.length,
+        }};
+
+        elements.msgInner = new FakeElement('div');
+        legacyCards = [];
+        const historical = {{
+          role: 'assistant',
+          content: 'Historical answer',
+        }};
+        S = {{
+          session: {{ session_id: 's2', tool_calls: [{{ tid: 'toolu_1', snippet: 'persisted result' }}] }},
+          messages: [{{ role: 'user', content: 'run' }}, historical, toolResult],
+          toolCalls: [{{ tid: 'toolu_1', assistant_msg_idx: 1, name: 'terminal', snippet: 'session fallback' }}],
+          busy: false,
+        }};
+        renderMessages();
+        const historicalSummary = {{
+          anchorGroups: elements.msgInner.querySelectorAll('[data-anchor-settled-scene-owner]').length,
+          legacyGroups: elements.msgInner.querySelectorAll('[data-legacy-fallback-owner]').length,
+          legacyRows: elements.msgInner.querySelectorAll('.tool-card-row').length,
+          legacyCards,
+          sToolCalls: S.toolCalls.length,
+        }};
+
+        elements.msgInner = new FakeElement('div');
+        legacyCards = [];
+        const rawHistorical = {{
+          role: 'assistant',
+          content: [{{ type: 'text', text: 'Historical raw answer' }}, legacyContentTool],
+          tool_calls: [legacyToolCall],
+          _partial_tool_calls: [legacyPartial],
+        }};
+        S = {{
+          session: {{
+            session_id: 's3',
+            tool_calls: [{{ tid: 'content_1', snippet: 'persisted content result' }}],
+          }},
+          messages: [{{ role: 'user', content: 'run' }}, rawHistorical, toolResult],
+          toolCalls: [],
+          busy: false,
+        }};
+        renderMessages();
+        const rawHistoricalSummary = {{
+          anchorGroups: elements.msgInner.querySelectorAll('[data-anchor-settled-scene-owner]').length,
+          legacyGroups: elements.msgInner.querySelectorAll('[data-legacy-fallback-owner]').length,
+          legacyRows: elements.msgInner.querySelectorAll('.tool-card-row').length,
+          legacyCards,
+          sToolCalls: S.toolCalls.length,
+        }};
+
+        elements.msgInner = new FakeElement('div');
+        legacyCards = [];
+        const duplicateAnchorTool = {{ type: 'tool_use', id: 'toolu_anchor_dup', name: 'terminal', input: {{ cmd: 'anchor' }} }};
+        const duplicateHistoricalTool = {{ type: 'tool_use', id: 'toolu_hist_dup', name: 'terminal', input: {{ cmd: 'history' }} }};
+        const duplicateAnchorCall = {{
+          id: 'toolu_anchor_dup',
+          function: {{ name: 'terminal', arguments: '{{"cmd":"anchor"}}' }},
+        }};
+        const duplicateAnchorOwned = {{
+          role: 'assistant',
+          content: [{{ type: 'text', text: 'Duplicate answer' }}, duplicateAnchorTool],
+          tool_calls: [duplicateAnchorCall],
+          _anchor_activity_scene: {{
+            version: 'activity_scene_v1',
+            activity_rows: [{{ id: 'row-dup', kind: 'tool', role: 'tool', tool: {{ name: 'terminal' }} }}],
+            final_answer: 'Duplicate answer',
+          }},
+        }};
+        const duplicateHistorical = {{
+          role: 'assistant',
+          content: [{{ type: 'text', text: 'Duplicate answer' }}, duplicateHistoricalTool],
+        }};
+        S = {{
+          session: {{
+            session_id: 's4',
+            tool_calls: [{{ tid: 'toolu_hist_dup', snippet: 'historical persisted result' }}],
+          }},
+          messages: [
+            {{ role: 'user', content: 'anchor turn' }},
+            duplicateAnchorOwned,
+            {{ role: 'user', content: 'historical turn' }},
+            duplicateHistorical,
+            toolResult,
+          ],
+          toolCalls: [{{ tid: 'toolu_anchor_dup', assistant_msg_idx: 1, name: 'terminal', snippet: 'anchor session fallback' }}],
+          busy: false,
+        }};
+        renderMessages();
+        const duplicateReferenceSummary = {{
+          anchorGroups: elements.msgInner.querySelectorAll('[data-anchor-settled-scene-owner]').length,
+          legacyGroups: elements.msgInner.querySelectorAll('[data-legacy-fallback-owner]').length,
+          legacyRows: elements.msgInner.querySelectorAll('.tool-card-row').length,
+          legacyCards,
+          sToolCalls: S.toolCalls.length,
+        }};
+
+        console.log(JSON.stringify({{
+          selectorSanity,
+          anchorSummary,
+          historicalSummary,
+          rawHistoricalSummary,
+          duplicateReferenceSummary,
+        }}));
+        """
+    )
+
+    result = json.loads(_run_node_script(script))
+
+    assert result["selectorSanity"] == {
+        "positive": True,
+        "negatedClass": False,
+        "negatedAttr": False,
+    }
+    assert result["anchorSummary"] == {
+        "anchorGroups": 1,
+        "legacyGroups": 0,
+        "legacyRows": 0,
+        "legacyCards": [],
+        "sToolCalls": 1,
+    }
+    assert result["historicalSummary"]["anchorGroups"] == 0
+    assert result["historicalSummary"]["legacyGroups"] == 1
+    assert result["historicalSummary"]["legacyRows"] >= 1
+    assert result["historicalSummary"]["sToolCalls"] >= 1
+    assert [card["tid"] for card in result["historicalSummary"]["legacyCards"]] == [
+        "toolu_1"
+    ]
+
+    raw_cards = result["rawHistoricalSummary"]["legacyCards"]
+    raw_tids = {card["tid"] for card in raw_cards}
+    raw_snippets = {card["tid"]: card["snippet"] for card in raw_cards}
+    assert result["rawHistoricalSummary"]["anchorGroups"] == 0
+    assert result["rawHistoricalSummary"]["legacyGroups"] == 1
+    assert result["rawHistoricalSummary"]["legacyRows"] >= 3
+    assert result["rawHistoricalSummary"]["sToolCalls"] >= 3
+    assert {"toolu_1", "partial_1", "content_1"}.issubset(raw_tids)
+    assert raw_snippets["toolu_1"] == "tool result"
+    assert raw_snippets["partial_1"] == "partial result"
+    assert raw_snippets["content_1"] == "persisted content result"
+
+    duplicate_cards = result["duplicateReferenceSummary"]["legacyCards"]
+    assert result["duplicateReferenceSummary"]["anchorGroups"] == 1
+    assert result["duplicateReferenceSummary"]["legacyGroups"] == 1
+    assert result["duplicateReferenceSummary"]["legacyRows"] >= 1
+    assert result["duplicateReferenceSummary"]["sToolCalls"] >= 1
+    assert {card["tid"] for card in duplicate_cards} == {"toolu_hist_dup"}
+    assert "toolu_anchor_dup" not in {card["tid"] for card in duplicate_cards}
+    assert duplicate_cards[0]["snippet"] == "historical persisted result"
+
+
 def test_settled_legacy_tool_rebuild_excludes_anchor_owned_turns():
     render = _function_body(_ui_js(), "renderMessages")
 
@@ -408,7 +883,9 @@ def test_settled_legacy_tool_rebuild_excludes_anchor_owned_turns():
     source_collect = render.index("fallbackToolSources.push({m,rawIdx});")
 
     assert set_decl < collect_segments < metadata_scan < fallback_sources < source_collect
-    assert "!anchorOwnedAssistantRawIdxs.has(S.messages.indexOf(m))" in render
+    assert "S.messages.indexOf(m)" not in render
+    assert "S.messages.some((m,rawIdx)=>" in render
+    assert "!anchorOwnedAssistantRawIdxs.has(rawIdx)&&_legacySettledFallbackHasToolMetadata(m)" in render
     assert "if(anchorOwnedAssistantRawIdxs.has(rawIdx)) return;" in render
 
 
