@@ -93,13 +93,14 @@ class TestSessionPruning(unittest.TestCase):
         """Newly created sessions should have the expected 24-hour TTL."""
         auth._sessions.clear()
         token_hex = auth.create_session().split(".")[0]
-        # The _sessions dict stores token -> expiry_time
+        # The _sessions dict stores token -> {"exp": float, "username": str}
         # We can check the expiry is approximately SESSION_TTL seconds from now
         # by looking up the raw entry via the token
         from api.auth import _sessions, SESSION_TTL
         # find our entry
-        for t, exp in _sessions.items():
+        for t, data in _sessions.items():
             if t == token_hex:
+                exp = auth._session_expiry(data)
                 # expiry should be within 5 seconds of now + SESSION_TTL
                 expected = time.time() + SESSION_TTL
                 self.assertAlmostEqual(exp, expected, delta=5)
@@ -153,7 +154,7 @@ class TestHmacMigrationBridge(unittest.TestCase):
         this cookie must still be accepted (migration bridge).
         """
         token = auth.secrets.token_hex(32)
-        auth._sessions[token] = time.time() + 3600
+        auth._sessions[token] = time.time() + 3600  # legacy float format (still supported)
         legacy_sig = auth.hmac.new(
             auth._signing_key(), token.encode(), auth.hashlib.sha256
         ).hexdigest()[:32]
@@ -167,7 +168,7 @@ class TestHmacMigrationBridge(unittest.TestCase):
         arbitrary short signatures.
         """
         token = auth.secrets.token_hex(32)
-        auth._sessions[token] = time.time() + 3600
+        auth._sessions[token] = time.time() + 3600  # legacy float format (still supported)
         forged = "a" * 32
         self.assertFalse(auth.verify_session(f"{token}.{forged}"))
 
@@ -245,8 +246,9 @@ class TestSessionTtlResolution(unittest.TestCase):
         os.environ["HERMES_WEBUI_SESSION_TTL"] = "3600"
         token_hex = auth.create_session().split(".")[0]
         from api.auth import _sessions
-        for t, exp in _sessions.items():
+        for t, data in _sessions.items():
             if t == token_hex:
+                exp = auth._session_expiry(data)
                 # The resolved env-var value (3600s) should be applied, not
                 # the SESSION_TTL fallback default.
                 expected = time.time() + 3600

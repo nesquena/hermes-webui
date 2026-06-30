@@ -8199,7 +8199,8 @@ button:hover{background:rgba(124,185,255,.25)}
   <div class="logo">{{BOT_NAME_INITIAL}}</div>
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
-  <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
+  <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}" data-multi-user="{{MULTI_USER}}">
+    <input type="text" id="username" placeholder="Username" autocomplete="username" style="display:none">
     <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
     <button type="submit">{{LOGIN_BTN}}</button>
     <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
@@ -10069,6 +10070,12 @@ def handle_get(handler, parsed) -> bool:
         from urllib.parse import quote
         from api.updates import WEBUI_VERSION
         version_token = quote(WEBUI_VERSION, safe="")
+        # Check if multi-user mode is active
+        try:
+            from api.users import is_multi_user_enabled
+            _multi_user = "1" if is_multi_user_enabled() else "0"
+        except Exception:
+            _multi_user = "0"
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
@@ -10084,6 +10091,7 @@ def handle_get(handler, parsed) -> bool:
             .replace(
                 "{{LOGIN_CONN_FAILED}}", _html.escape(_login_strings["conn_failed"])
             )
+            .replace("{{MULTI_USER}}", _multi_user)
         )
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
@@ -12960,6 +12968,30 @@ def handle_post(handler, parsed) -> bool:
             from api.helpers import build_profile_cookie
             if name != 'default':
                 _validate_profile_name(name)
+
+            # Multi-user guard: non-admin users can only switch to their
+            # assigned profile (enforced by get_session_username).
+            from api.users import is_multi_user_enabled, get_user_profile
+            if is_multi_user_enabled():
+                from api.auth import parse_cookie, get_session_username
+                session_cookie = parse_cookie(handler)
+                username = get_session_username(session_cookie) if session_cookie else None
+                if username:  # non-admin user with a username in the session
+                    assigned = get_user_profile(username)
+                    if assigned is None:
+                        # User has been deleted — deny all profile switches
+                        return bad(
+                            handler,
+                            f"Access denied: user '{username}' no longer exists",
+                            403,
+                        )
+                    if name != assigned:
+                        return bad(
+                            handler,
+                            f"Access denied: profile '{name}' is not assigned to user '{username}'",
+                            403,
+                        )
+
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
             result = switch_profile(name, process_wide=False)
@@ -13749,6 +13781,7 @@ def handle_post(handler, parsed) -> bool:
             is_auth_enabled,
         )
         from api.auth import _check_login_rate, _record_login_attempt, _clear_login_attempts
+        from api.users import is_multi_user_enabled, verify_user, get_user_profile
 
         if not is_auth_enabled():
             return j(handler, {"ok": True, "message": "Auth not enabled"})
@@ -13760,20 +13793,75 @@ def handle_post(handler, parsed) -> bool:
                 status=429,
             )
         password = body.get("password", "")
-        if not verify_password(password):
-            _record_login_attempt(client_ip)
-            return bad(handler, "Invalid password", 401)
+
+        multi_user = is_multi_user_enabled()
+
+        if multi_user:
+            username = body.get("username", "")
+            if not username:
+                return j(handler, {"error": "Username is required"}, status=400)
+
+            if username == "admin":
+                # Admin login — uses legacy admin password (HERMES_WEBUI_PASSWORD)
+                if not verify_password(password):
+                    _record_login_attempt(client_ip)
+                    return bad(handler, "Invalid username or password", 401)
+                _clear_login_attempts(client_ip)
+                cookie_val = create_session(username="")
+            else:
+                # Regular user login — check users.json
+                if not verify_user(username, password):
+                    _record_login_attempt(client_ip)
+                    return bad(handler, "Invalid username or password", 401)
+                _clear_login_attempts(client_ip)
+                cookie_val = create_session(username=username)
+
+            response_body = json.dumps({"ok": True}).encode()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(response_body)))
+            handler.send_header("Cache-Control", "no-store")
+            _security_headers(handler)
+            set_auth_cookie(handler, cookie_val)
+
+            # Set profile cookie only for regular users (not admin)
+            if username != "admin":
+                profile = get_user_profile(username)
+                if profile:
+                    from api.auth import sign_profile_cookie_value, _is_secure_context, _resolve_session_ttl
+                    from api.helpers import get_profile_cookie_name
+                    import http.cookies as _hc
+                    profile_cookie_val = sign_profile_cookie_value(profile, cookie_val)
+                    pc = _hc.SimpleCookie()
+                    pc[get_profile_cookie_name()] = profile_cookie_val
+                    pc[get_profile_cookie_name()]['path'] = '/'
+                    pc[get_profile_cookie_name()]['httponly'] = True
+                    pc[get_profile_cookie_name()]['samesite'] = 'Lax'
+                    pc[get_profile_cookie_name()]['max-age'] = str(_resolve_session_ttl())
+                    if _is_secure_context(handler):
+                        pc[get_profile_cookie_name()]['secure'] = True
+                    handler.send_header("Set-Cookie", pc[get_profile_cookie_name()].OutputString())
+                    logger.info("User %s logged in, profile cookie set to %s", username, profile)
+
+            handler.end_headers()
+            handler.wfile.write(response_body)
+            return True
+        else:
+            if not verify_password(password):
+                _record_login_attempt(client_ip)
+                return bad(handler, "Invalid password", 401)
+
         _clear_login_attempts(client_ip)
-        cookie_val = create_session()
-        body = json.dumps({"ok": True}).encode()
+        cookie_val = create_session(username="")
+        response_body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
-        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Content-Length", str(len(response_body)))
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
         handler.end_headers()
-        handler.wfile.write(body)
+        handler.wfile.write(response_body)
         return True
 
     if parsed.path == "/api/auth/passkey/options":

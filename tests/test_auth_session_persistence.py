@@ -103,8 +103,8 @@ class TestSessionPersistence(unittest.TestCase):
         sessions_file = _TEST_STATE / '.sessions.json'
         now = time.time()
         sessions_file.write_text(json.dumps({
-            "expired_token": now - 10,
-            "valid_token": now + 3600,
+            "expired_token": now - 10,  # legacy float format (still supported on load)
+            "valid_token": {"exp": now + 3600, "username": ""},
         }))
         self._simulate_restart()
         self.assertNotIn("expired_token", auth._sessions)
