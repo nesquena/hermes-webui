@@ -7825,6 +7825,26 @@ _SETTINGS_DEFAULTS = {
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
 }
+
+
+def web_push_public_key() -> str:
+    return str(os.getenv("HERMES_WEBUI_VAPID_PUBLIC_KEY", "") or "").strip()
+
+
+def web_push_private_key() -> str:
+    return str(os.getenv("HERMES_WEBUI_VAPID_PRIVATE_KEY", "") or "").strip()
+
+
+def web_push_subject() -> str:
+    raw = str(os.getenv("HERMES_WEBUI_VAPID_SUBJECT", "") or "").strip()
+    if raw and "://" not in raw and not raw.startswith("mailto:"):
+        return f"mailto:{raw}"
+    return raw
+
+
+def web_push_configured() -> bool:
+    return bool(web_push_public_key() and web_push_private_key() and web_push_subject())
+
 _SETTINGS_LEGACY_DROP_KEYS = {
     "assistant_language",
     "bubble_layout",

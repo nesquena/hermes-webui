@@ -9871,6 +9871,19 @@ def _render_index_shell_base() -> str:
     return base
 
 
+def _request_csrf_token(handler) -> str:
+    try:
+        from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
+
+        if is_auth_enabled():
+            cookie_val = parse_cookie(handler)
+            if cookie_val and verify_session(cookie_val):
+                return csrf_token_for_session(cookie_val) or ""
+    except Exception:
+        pass
+    return ""
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
@@ -9894,22 +9907,11 @@ def handle_get(handler, parsed) -> bool:
         try:
             from api.extensions import inject_extension_tags
 
-            csrf_token = ""
-            try:
-                from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
-
-                if is_auth_enabled():
-                    cookie_val = parse_cookie(handler)
-                    if cookie_val and verify_session(cookie_val):
-                        csrf_token = csrf_token_for_session(cookie_val) or ""
-            except Exception:
-                csrf_token = ""
-
             # The disk read + process-constant token substitutions are cached;
             # only the per-session CSRF token and per-request extension tags are
             # applied here (see _render_index_shell_base).
             html = _render_index_shell_base().replace(
-                "__CSRF_TOKEN_JSON__", json.dumps(csrf_token)
+                "__CSRF_TOKEN_JSON__", json.dumps(_request_csrf_token(handler))
             )
             return t(
                 handler,
@@ -10253,6 +10255,12 @@ def handle_get(handler, parsed) -> bool:
         except Exception:
             pass
         return j(handler, settings)
+
+    if parsed.path == "/api/push/status":
+        return _handle_push_status(handler)
+
+    if parsed.path == "/api/push/vapid-public-key":
+        return _handle_push_vapid_public_key(handler)
 
     if parsed.path == "/api/transcribe/capability":
         return handle_transcribe_capability(handler)
@@ -11756,6 +11764,14 @@ def handle_post(handler, parsed) -> bool:
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
+        try:
+            from api.web_push import get_push_owner
+
+            push_owner = get_push_owner(handler)
+            if push_owner:
+                s.push_owner = push_owner
+        except Exception:
+            logger.debug("Failed to read Web Push owner for new session", exc_info=True)
         if worktree_info:
             publish_session_list_changed(
                 "session_new",
@@ -11798,6 +11814,7 @@ def handle_post(handler, parsed) -> bool:
                 archived=False,
                 project_id=session.project_id,
                 profile=session.profile,
+                push_owner=getattr(session, "push_owner", None),
                 input_tokens=session.input_tokens,
                 output_tokens=session.output_tokens,
                 estimated_cost=session.estimated_cost,
@@ -11839,11 +11856,7 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS.move_to_end(copied_session.session_id)
                 while len(SESSIONS) > SESSIONS_MAX:
                     SESSIONS.popitem(last=False)
-            # Persist immediately. The pre-PR flow (/api/session/new + /api/session/rename)
-            # accidentally avoided this because `/api/session/rename` calls `s.save()`.
-            # Without this explicit save, the duplicate is in-memory only — if the user
-            # refreshes before sending a turn, the duplicate vanishes.
-            copied_session.save()
+            copied_session.save()  # Persist before the duplicate can be lost on refresh.
             publish_session_list_changed(
                 "session_duplicate",
                 profile=getattr(copied_session, "profile", None),
@@ -12884,6 +12897,9 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, str(e), 409)
 
+    if parsed.path == "/api/push/subscribe":
+        return _handle_push_subscribe(handler, body)
+
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
         from api.auth import (
@@ -13786,6 +13802,9 @@ def handle_delete(handler, parsed) -> bool:
         prompts = [p for p in _load_saved_prompts() if p.get("id") != pid]
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True})
+
+    if parsed.path == "/api/push/subscribe":
+        return _handle_push_unsubscribe(handler, body)
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
@@ -16744,6 +16763,58 @@ def _handle_cron_recent(handler, parsed):
         return j(handler, {"completions": [], "since": since})
 
 
+def _handle_push_status(handler):
+    from api.web_push import web_push_status
+
+    status = dict(web_push_status())
+    status["csrf_token"] = _request_csrf_token(handler)
+    return j(handler, status)
+
+
+def _handle_push_vapid_public_key(handler):
+    from api.config import web_push_public_key
+    from api.web_push import web_push_status
+
+    status = web_push_status()
+    if not status.get("enabled"):
+        return bad(handler, "Web Push is not configured", 404)
+    return j(handler, {"public_key": web_push_public_key()})
+
+
+def _handle_push_subscribe(handler, body):
+    from api.web_push import ensure_push_owner_cookie, upsert_subscription, web_push_status
+
+    if not web_push_status().get("enabled"):
+        return bad(handler, "Web Push is not configured", 409)
+    owner_key, set_cookie_header = ensure_push_owner_cookie(handler)
+    subscription = body.get("subscription") if isinstance(body, dict) else None
+    if not isinstance(subscription, dict):
+        subscription = body if isinstance(body, dict) else {}
+    try:
+        saved = upsert_subscription(subscription, owner_key=owner_key)
+    except ValueError as exc:
+        return bad(handler, str(exc), 400)
+    extra_headers = {"Set-Cookie": set_cookie_header} if set_cookie_header else None
+    return j(handler, {"ok": True, "subscription": saved}, extra_headers=extra_headers)
+
+
+def _handle_push_unsubscribe(handler, body):
+    from api.web_push import get_push_owner, remove_subscription
+
+    endpoint = ""
+    if isinstance(body, dict):
+        endpoint = str(body.get("endpoint") or "").strip()
+        if not endpoint and isinstance(body.get("subscription"), dict):
+            endpoint = str(body["subscription"].get("endpoint") or "").strip()
+    if not endpoint:
+        return bad(handler, "subscription endpoint is required", 400)
+    owner_key = get_push_owner(handler)
+    if not owner_key:
+        return bad(handler, "Web Push owner is required", 400)
+    removed = remove_subscription(endpoint, owner_key=owner_key)
+    return j(handler, {"ok": True, "removed": removed})
+
+
 _PROJECT_CONTEXT_HERMES_NAMES = (".hermes.md", "HERMES.md")
 # Mirror the agent's lowercase filename variants (agents.md / claude.md) so the
 # tab does not under-report on case-sensitive filesystems.
@@ -17858,6 +17929,14 @@ def _handle_goal_command(handler, body):
         )
         if not has_persisted_turns:
             s.profile = requested_profile
+    try:
+        from api.web_push import get_push_owner
+
+        push_owner = get_push_owner(handler)
+        if push_owner:
+            s.push_owner = push_owner
+    except Exception:
+        logger.debug("Failed to stamp Web Push owner for goal session %s", body.get("session_id"), exc_info=True)
 
     current_stream_id = getattr(s, "active_stream_id", None)
     stream_running = False
@@ -18069,6 +18148,14 @@ def _handle_chat_start(handler, body, diag=None):
                 # currently-selected profile instead of the stale one stamped at
                 # creation time.
                 s.profile = requested_profile
+        try:
+            from api.web_push import get_push_owner
+
+            push_owner = get_push_owner(handler)
+            if push_owner:
+                s.push_owner = push_owner
+        except Exception:
+            logger.debug("Failed to stamp Web Push owner for session %s", body.get("session_id"), exc_info=True)
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
         if not msg:

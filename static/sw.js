@@ -173,6 +173,122 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
+function _webPushScopeUrl(path) {
+  const rel = String(path || '').replace(/^\/+/, '');
+  return new URL(rel, self.registration.scope || './').href;
+}
+
+async function _webPushFetchJson(path, options = {}) {
+  const {csrfToken = '', headers: extraHeaders = {}, ...fetchOptions} = options || {};
+  const headers = {'Content-Type': 'application/json', ...extraHeaders};
+  if (csrfToken) headers['X-Hermes-CSRF-Token'] = csrfToken;
+  const response = await fetch(_webPushScopeUrl(path), {
+    credentials: 'same-origin',
+    headers,
+    ...fetchOptions,
+  });
+  if (!response.ok) throw new Error(`Web Push route failed: ${response.status}`);
+  const text = await response.text();
+  return text ? JSON.parse(text) : {};
+}
+
+function _webPushUrlBase64ToUint8Array(base64String) {
+  const normalized = String(base64String || '').replace(/-/g, '+').replace(/_/g, '/');
+  const padding = '='.repeat((4 - normalized.length % 4) % 4);
+  const raw = atob(normalized + padding);
+  return Uint8Array.from(raw, (ch) => ch.charCodeAt(0));
+}
+
+function _normalizePushNotificationPayload(payload) {
+  const normalized = payload && typeof payload === 'object' ? payload : {};
+  const options = normalized.options && typeof normalized.options === 'object'
+    ? { ...normalized.options }
+    : {};
+  if (!options.icon) options.icon = 'static/favicon-192.png';
+  if (!options.badge) options.badge = 'static/favicon-32.png';
+  if (!options.data || typeof options.data !== 'object') options.data = {};
+  if (!options.data.url) options.data.url = './';
+  return {
+    title: normalized.title || 'Hermes',
+    options,
+  };
+}
+
+self.addEventListener('push', (event) => {
+  const payload = (() => {
+    if (!(event && event.data)) return _normalizePushNotificationPayload({});
+    try {
+      return _normalizePushNotificationPayload(event.data.json());
+    } catch (_jsonErr) {
+      return _normalizePushNotificationPayload({
+        title: 'Hermes',
+        options: { body: event.data.text() || '' },
+      });
+    }
+  })();
+  event.waitUntil((async () => {
+    const scopePath = new URL(self.registration.scope || './').pathname;
+    const clientList = self.clients && self.clients.matchAll
+      ? await self.clients.matchAll({type: 'window', includeUncontrolled: true}).catch(() => [])
+      : [];
+    const hasVisibleClient = clientList.some((client) => {
+      try {
+        const clientUrl = new URL(client.url);
+        return clientUrl.origin === self.location.origin &&
+          clientUrl.pathname.startsWith(scopePath) &&
+          (client.visibilityState === 'visible' || client.focused === true);
+      } catch (_err) {
+        return false;
+      }
+    });
+    if (hasVisibleClient) return;
+    return self.registration.showNotification(payload.title, payload.options);
+  })());
+});
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil((async () => {
+    try {
+      const status = await _webPushFetchJson('/api/push/status');
+      const csrfToken = typeof status.csrf_token === 'string' ? status.csrf_token : '';
+      const oldEndpoint = event.oldSubscription && event.oldSubscription.endpoint;
+      if (!status || !status.enabled) {
+        if (oldEndpoint) {
+          await _webPushFetchJson('/api/push/subscribe', {
+            method: 'DELETE',
+            csrfToken,
+            body: JSON.stringify({ endpoint: oldEndpoint }),
+          }).catch(() => {});
+        }
+        return;
+      }
+      let subscription = event.newSubscription || null;
+      if (!subscription) {
+        const keyData = await _webPushFetchJson('/api/push/vapid-public-key');
+        subscription = await self.registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: _webPushUrlBase64ToUint8Array(keyData.public_key || ''),
+        });
+      }
+      const payload = subscription && subscription.toJSON
+        ? subscription.toJSON()
+        : JSON.parse(JSON.stringify(subscription || {}));
+      await _webPushFetchJson('/api/push/subscribe', {
+        method: 'POST',
+        csrfToken,
+        body: JSON.stringify({ subscription: payload }),
+      });
+      if (oldEndpoint && payload.endpoint && oldEndpoint !== payload.endpoint) {
+        await _webPushFetchJson('/api/push/subscribe', {
+          method: 'DELETE',
+          csrfToken,
+          body: JSON.stringify({ endpoint: oldEndpoint }),
+        }).catch(() => {});
+      }
+    } catch (_err) {}
+  })());
+});
+
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();

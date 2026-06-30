@@ -135,6 +135,12 @@ class TestServiceWorker:
             "SW fetch handler must early-return for /api/* paths (no caching)"
         )
 
+    def test_sw_push_skips_foreground_clients(self):
+        src = SW.read_text(encoding="utf-8")
+        assert "self.clients.matchAll({type: 'window', includeUncontrolled: true})" in src
+        assert "client.visibilityState === 'visible' || client.focused === true" in src
+        assert "clientUrl.pathname.startsWith(scopePath)" in src
+
 
 class TestPWARoutes:
     def test_manifest_route_serves_correct_content_type(self):
