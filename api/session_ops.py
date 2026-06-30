@@ -99,10 +99,10 @@ def truncate_context_for_display_keep(
             tool_calls_sig,
         )
 
-    def _first_match_from(message: Any, start_idx: int) -> int | None:
+    def _first_match_from(message: Any, start_idx: int) -> tuple[int | None, int | None]:
         msg_sig = _row_signature(message)
         if msg_sig is None:
-            return None
+            return None, None
         msg_id = message.get('id')
         msg_ts = message.get('timestamp')
         weak_matches: list[int] = []
@@ -115,7 +115,7 @@ def truncate_context_for_display_keep(
             context_id = context_row.get('id')
             if context_id is not None and msg_id is not None:
                 if context_id == msg_id:
-                    return idx
+                    return idx, None
                 continue
 
             if context_sig != msg_sig:
@@ -124,19 +124,21 @@ def truncate_context_for_display_keep(
             context_ts = context_row.get('timestamp')
             if context_ts is not None and msg_ts is not None:
                 if context_ts == msg_ts:
-                    return idx
+                    return idx, None
                 continue
 
             weak_matches.append(idx)
             if len(weak_matches) > 1:
-                return None
-        return weak_matches[0] if len(weak_matches) == 1 else None
+                return None, weak_matches[0]
+        return (weak_matches[0], None) if len(weak_matches) == 1 else (None, None)
 
     matches = [None] * len(msgs)
+    ambiguous_matches = [None] * len(msgs)
     next_ctx_idx = 0
     for msg_idx, message in enumerate(msgs):
-        match_idx = _first_match_from(message, next_ctx_idx)
+        match_idx, ambiguous_idx = _first_match_from(message, next_ctx_idx)
         matches[msg_idx] = match_idx
+        ambiguous_matches[msg_idx] = ambiguous_idx
         if match_idx is not None:
             next_ctx_idx = match_idx + 1
 
@@ -156,6 +158,13 @@ def truncate_context_for_display_keep(
                 return ctx[:last_kept + 1]
             return ctx[:first_unkept]
         if last_kept is not None:
+            ambiguous_first_unkept = ambiguous_matches[keep]
+            if (
+                ambiguous_first_unkept is not None
+                and isinstance(msgs[keep - 1], dict)
+                and msgs[keep - 1].get('role') != 'user'
+            ):
+                return ctx[:ambiguous_first_unkept]
             return ctx[:last_kept + 1]
 
     # Final fallback preserves #5096 behavior when alignment is unreliable.

@@ -134,3 +134,20 @@ def test_truncate_context_for_display_keep_keeps_real_user_turn_when_duplicate_r
     ]
     out = truncate_context_for_display_keep(ctx, msgs, 1)
     assert [row["content"] for row in out] == ["u1", "u1"]
+
+def test_truncate_context_for_display_keep_keeps_tool_tail_before_ambiguous_unkept_anchor():
+    msgs = [
+        {"role": "user", "content": "u1", "id": "u1"},
+        {"role": "assistant", "content": "a1", "id": "a1", "tool_calls": [{"id": "kept-tool"}]},
+        {"role": "user", "content": "u2"},
+    ]
+    ctx = [
+        {"role": "user", "content": "u1", "id": "u1"},
+        {"role": "assistant", "content": "a1", "id": "a1", "tool_calls": [{"id": "kept-tool"}]},
+        {"role": "tool", "content": "kept-tool-result", "tool_call_id": "kept-tool"},
+        {"role": "user", "content": "u2"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2", "id": "a2"},
+    ]
+    out = truncate_context_for_display_keep(ctx, msgs, 2)
+    assert [row["content"] for row in out] == ["u1", "a1", "kept-tool-result"]
