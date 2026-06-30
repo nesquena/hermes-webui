@@ -11086,8 +11086,6 @@ const LOCALES = {
     settings_label_auto_scroll_follow: '自动跟随新内容',
     settings_desc_auto_scroll_follow: '启用后，流式输出时页面会自动滚动到底部。禁用后，你可以自由控制滚动位置，阅读答案不会被拽到底部。',
     settings_label_render_user_markdown: '在用户消息中渲染Markdown格式文本',
-    settings_label_large_text_paste_as_attachment: '将粘贴的大段文本作为文件附加。',
-    settings_desc_large_text_paste_as_attachment: '启用此功能后，粘贴的长文本将作为.md附件，而非直接填充到编辑器中。 ',
     settings_label_show_titlebar_profile: '在标题栏中显示配置文件切换器', 
     settings_desc_show_titlebar_profile: '启用后，应用程序左上角的标题栏会出现一个配置文件切换器按钮，这样您就可以在任意标签页中切换配置文件。默认情况下此功能关闭；无论此设置如何，撰写框底部始终有一个配置文件切换器。 ', 
     settings_desc_render_user_markdown: '启用后，您自己消息中的加粗、斜体、链接及其他Markdown格式会被渲染。默认关闭；无论此设置如何，代码块和数学公式始终会被渲染。 ',
