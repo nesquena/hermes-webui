@@ -1385,7 +1385,9 @@
   .app-titlebar-icon{display:inline-flex;align-items:center;color:var(--accent);}
   .custom-logo-img[hidden]{display:none!important;}
   .default-logo-mark[hidden],.default-logo-mark.is-hidden,html.has-custom-logo .default-logo-mark{display:none!important;}
+  html.has-custom-logo .app-titlebar-icon > svg,html.has-custom-logo .empty-logo{display:none!important;}
   .app-titlebar-custom-logo{width:16px;height:16px;object-fit:contain;display:block;}
+  .empty-custom-logo{width:52px;height:52px;object-fit:contain;display:block;margin-bottom:4px;order:-1;}
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;white-space:nowrap;flex-shrink:0;}
   .app-titlebar-sub[hidden]{display:none;}
@@ -2333,8 +2335,6 @@
     .empty-logo svg{animation:emptyLogoRise .5s ease-out both;}
     @keyframes emptyLogoRise{from{opacity:0;transform:translateY(6px) scale(.96);}to{opacity:1;transform:none;}}
   }
-  html.has-custom-logo .app-titlebar-icon > svg,html.has-custom-logo .empty-logo{display:none!important;}
-  .empty-custom-logo{width:52px;height:52px;object-fit:contain;display:block;margin-bottom:4px;}
   .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}
   .empty-state p{font-size:14px;text-align:center;max-width:320px;}
   .suggestion-grid{display:flex;flex-direction:column;gap:8px;margin-top:12px;width:100%;max-width:380px;}

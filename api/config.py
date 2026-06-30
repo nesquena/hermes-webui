@@ -440,6 +440,7 @@ def _apply_config_defaults(config_data: dict) -> None:
     for key, value in _DEFAULT_EXPERIMENTAL_CONFIG.items():
         experimental.setdefault(key, value)
 
+ 
 def reload_config_if_stale() -> None:
     """Refresh config.yaml once for concurrent stale read paths."""
     with _cfg_lock:
