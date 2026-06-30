@@ -296,6 +296,18 @@ def test_custom_logo_disable_and_load_error_restore_defaults():
     assert "document.documentElement.removeAttribute('data-custom-logo-src');" in js
 
 
+def test_custom_logo_cache_is_not_overwritten_when_settings_fail():
+    js = (Path(__file__).parents[1] / "static" / "boot.js").read_text(encoding="utf-8")
+
+    assert "let _bootSettingsLoaded=false;" in js
+    assert "_bootSettingsLoaded=true;" in js
+    assert (
+        "if(typeof _bootSettingsLoaded!=='undefined'&&_bootSettingsLoaded"
+        "&&typeof applyCustomLogo==='function') applyCustomLogo(_bootSettings);"
+    ) in js
+    assert "_bootSettings={check_for_updates:false};" in js
+
+
 def test_custom_logo_upload_cache_busting_contract():
     root = Path(__file__).parents[1]
     branding = (root / "api" / "branding.py").read_text(encoding="utf-8")
