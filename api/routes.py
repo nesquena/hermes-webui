@@ -4809,64 +4809,57 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
 
 
 def _validate_resolved_model(model: str, model_provider: str | None) -> str:
-    """Fall back to the configured default model if the resolved model is unknown.
+    """Fall back to the provider's default model if the resolved model is unknown.
 
     The fast path in _resolve_compatible_session_model_state passes bare model
-    ids through without checking them against the configured providers. A
-    truncated id like "e2b" (from "gemma4:e2b" after a frontend ":" split)
-    would be sent to the upstream API and cause a 404. This guard catches that
-    by checking the resolved model against the configured provider's model
-    list. If not found, returns the default model.
+    ids through without checking them against the model catalog. A truncated or
+    stale id (e.g. "e2b" instead of "gemma4:e2b") would be sent to the upstream
+    API and cause a 404. This guard checks the resolved model against the **same
+    catalog the model picker uses** (config.yaml models + _PROVIDER_MODELS static
+    fallback + live-discovered ids). If not found, returns the provider's default.
 
-    Only validates when the requested provider is a local/custom endpoint
-    that exists in the configured providers dict. Models from cloud providers
-    (openai, anthropic, openrouter, ...) pass through untouched.
+    Only validates configured providers that appear in the picker catalog.
+    Cloud providers (openai, anthropic, openrouter, ...) and anything not in
+    the catalog pass through untouched.
     """
     if not model:
         return model
-    try:
-        from api.config import cfg as _active_cfg
-        providers_cfg = _active_cfg.get("providers") if isinstance(_active_cfg, dict) else {}
-    except Exception:
-        providers_cfg = {}
-    if not isinstance(providers_cfg, dict):
-        return model
-    # Only validate against configured (local) providers. The frontend sends
-    # model_provider as the configured provider key (e.g. "ollama"). If the
-    # requested provider does not match any configured key, it is a cloud
-    # provider — pass through without validation.
     _requested = str(model_provider or "").strip().lower()
     if not _requested:
         return model
-    _matched_key = None
-    for _cfg_key in providers_cfg:
-        if _cfg_key.strip().lower() == _requested:
-            _matched_key = _cfg_key
-            break
-    if _matched_key is None:
-        return model  # cloud provider — pass through
-    _pcfg = providers_cfg[_matched_key]
-    if not isinstance(_pcfg, dict):
+    try:
+        from api.config import get_available_models
+        catalog = get_available_models(prefer_cache=True)
+    except Exception:
+        return model
+    if not isinstance(catalog, dict):
+        return model
+    groups = catalog.get("groups", [])
+    if not isinstance(groups, list):
         return model
     _normalized = str(model).strip().lower()
-    for _m in _pcfg.get("models", []):
-        if isinstance(_m, str) and _m.strip().lower() == _normalized:
-            return model
-        if isinstance(_m, dict):
-            _mid = str(_m.get("id") or _m.get("name") or "").strip().lower()
-            if _mid == _normalized:
-                return model
-    # Not found in this provider's configured models — use the default
-    _default = _pcfg.get("default_model")
-    if not _default:
-        try:
-            from api.config import get_config as _get_cfg
-            _cfg = _get_cfg()
-            _mdl = _cfg.get("model", {})
-            _default = _mdl.get("default") if isinstance(_mdl, dict) else None
-        except Exception:
-            pass
-    return _default or model
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        group_provider = str(group.get("provider_id") or "").strip().lower()
+        # Match by provider key — only validate local/custom providers
+        if group_provider != _requested:
+            continue
+        # Provider found in catalog — check if model is in its model list
+        for m in group.get("models", []):
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("id") or "").strip().lower()
+            if mid == _normalized:
+                return model  # model is valid — pass through
+        # Model not found — use this provider's first model as fallback
+        _models = group.get("models", [])
+        if _models and isinstance(_models[0], dict):
+            _fallback = _models[0].get("id", "")
+            if _fallback:
+                return _fallback
+        break  # provider matched but empty catalog — don't fall through to global
+    return model
 
 
 def _model_matches_configured_default(
