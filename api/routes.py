@@ -13061,13 +13061,6 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             pass
 
-        saved["custom_logo_light_version"] = logo_version_for_settings_value(
-            saved.get("custom_logo_light_path", "")
-        )
-        saved["custom_logo_dark_version"] = logo_version_for_settings_value(
-            saved.get("custom_logo_dark_path", "")
-        )
-
         if not new_cookie:
             return j(handler, saved)
 
