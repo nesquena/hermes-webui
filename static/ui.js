@@ -6334,7 +6334,7 @@ function getComposerPrimaryAction(){
   }
   const explicitAction=_getExplicitBusyCommandAction(msg&&msg.value);
   if(explicitAction) return explicitAction;
-  const defaultMessageMode=window._defaultMessageMode||'queue';
+  const defaultMessageMode=window._defaultMessageMode||'steer';
   if(defaultMessageMode==='steer'){
     if(S.activeStreamId&&typeof _trySteer==='function') return 'steer';
     return 'queue';

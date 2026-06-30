@@ -166,7 +166,7 @@ class TestYoloBusySendPath:
         intercept_start = messages_js.find("if(text.startsWith('/')", busy_start)
         assert intercept_start >= 0, "busy slash intercept block not found in send()"
         intercept_idx = messages_js.find("'steer','interrupt','queue','terminal','goal','yolo'", intercept_start)
-        busymode_idx = messages_js.find("_defaultMessageMode||'queue'", busy_start)
+        busymode_idx = messages_js.find("_defaultMessageMode||'steer'", busy_start)
         assert intercept_idx >= 0, "Busy-path slash allowlist must include yolo in the mid-turn branch"
         assert intercept_idx < busymode_idx, "Busy-path intercept must run before busyMode routing"
 

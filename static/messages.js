@@ -1277,7 +1277,7 @@ async function send(){
           }
         }
       }
-      const defaultMessageMode=window._defaultMessageMode||'queue';
+    const defaultMessageMode=window._defaultMessageMode||'steer';
       if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.

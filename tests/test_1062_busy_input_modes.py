@@ -172,7 +172,7 @@ class TestBusySendButton:
         assert "return 'queue'" in body, "queue mode and unavailable steer/interrupt fallbacks must map to queue"
         assert "return 'interrupt'" in body, "interrupt mode with an active stream must map to interrupt"
         assert "return 'steer'" in body, "steer mode with active stream support must map to steer"
-        assert "window._defaultMessageMode||'queue'" in body, "helper must respect the Default message mode setting"
+        assert "window._defaultMessageMode||'steer'" in body, "helper must respect the Default message mode setting"
         assert "_getExplicitBusyCommandAction(msg&&msg.value)" in body, (
             "explicit /queue, /interrupt, and /steer drafts must override the Default message mode for button visuals"
         )
@@ -324,7 +324,7 @@ class TestSendBusyBranchDispatch:
         assert busy_start >= 0, "busy block not found"
         # The intercept must appear BEFORE the busyMode assignment
         intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
-        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'queue'", busy_start)
+        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         assert intercept_idx >= 0, (
             "send() must intercept /steer /interrupt /queue /terminal /goal /yolo before the busyMode "
             "routing block — otherwise they queue instead of executing immediately"
@@ -345,7 +345,7 @@ class TestSendBusyBranchDispatch:
         intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         assert intercept_idx >= 0
         # Get the intercept block (up to the next busyMode assignment)
-        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'queue'", busy_start)
+        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
         assert "_bc.fn(_pc.args)" in intercept_block, (
             "The intercept must call the command handler directly via _bc.fn(_pc.args)"
@@ -365,7 +365,7 @@ class TestSendBusyBranchDispatch:
         send_idx = MESSAGES_JS.find("async function send(")
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
         intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
-        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'queue'", busy_start)
+        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
         clear_idx = intercept_block.find("$('msg').value=''")
         await_idx = intercept_block.find("await _bc.fn")
