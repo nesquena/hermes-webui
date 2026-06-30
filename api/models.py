@@ -105,6 +105,40 @@ _SIDECAR_METADATA_CACHE_MAX = 2000
 
 _STALE_TMP_AGE_SECONDS = 3600  # 1 hour
 
+
+# ---------------------------------------------------------------------------
+# Windows-safe os.replace() with retry
+# ---------------------------------------------------------------------------
+# On Windows, os.replace() raises WinError 5 (ERROR_ACCESS_DENIED) when the
+# target file is momentarily locked by another process (antivirus scanner,
+# browser polling the session JSON, etc.).  This helper retries with
+# exponential backoff on PermissionError, which is the Python exception
+# mapped from WinError 5.  On non-Windows platforms it is a thin wrapper
+# (one attempt, no delay).
+# ---------------------------------------------------------------------------
+
+_WINDOWS_REPLACE_MAX_RETRIES = 5
+_WINDOWS_REPLACE_INITIAL_DELAY = 0.05  # 50 ms
+
+
+def _safe_replace(src: Path, dst: Path) -> None:
+    """Atomic replace with retries on Windows file-locking errors."""
+    if os.name != 'nt':
+        os.replace(src, dst)
+        return
+
+    delay = _WINDOWS_REPLACE_INITIAL_DELAY
+    for attempt in range(_WINDOWS_REPLACE_MAX_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _WINDOWS_REPLACE_MAX_RETRIES - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2  # 50 -> 100 -> 200 -> 400 -> 800 ms
+
+
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
@@ -325,7 +359,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, session_index_file)
+                _safe_replace(_tmp, session_index_file)
             except Exception:
                 # Best-effort cleanup of stale tmp on failure
                 try:
@@ -372,7 +406,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, session_index_file)
+                _safe_replace(_tmp, session_index_file)
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
@@ -419,7 +453,7 @@ def prune_session_from_index(session_id: str) -> None:
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(_tmp, SESSION_INDEX_FILE)
+                _safe_replace(_tmp, SESSION_INDEX_FILE)
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
@@ -905,7 +939,7 @@ class Session:
                             bf.write(existing_text)
                             bf.flush()
                             os.fsync(bf.fileno())
-                        os.replace(bak_tmp, bak_path)
+                        _safe_replace(bak_tmp, bak_path)
                     except OSError:
                         # Backup is best-effort; main save proceeds regardless.
                         try:
@@ -921,7 +955,7 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, self.path)
+            _safe_replace(tmp, self.path)
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
@@ -2311,6 +2345,194 @@ def _repair_stale_pending(session) -> bool:
         return False
 
 
+def _sync_sidecar_from_state_db_if_newer(session) -> bool:
+    """Read-side self-heal when WebUI sidecar lags Hermes state.db.
+
+    A WebUI stream can lose its terminal ``done``/``stream_end`` path while the
+    underlying agent continues writing messages to ``state.db``. In that shape
+    the browser briefly shows live SSE output, but a refresh reloads the stale
+    sidecar JSON and the already-produced text appears to vanish. Reconcile the
+    sidecar from state.db whenever the state transcript is visibly newer than
+    the sidecar, even if the sidecar still carries an ``active_stream_id``.
+
+    This deliberately reuses the existing append-only reconciler so workspace
+    prefixes, timestamp drift, compaction watermarks, and tool metadata keep the
+    same semantics as normal WebUI/state.db display merging.
+    """
+    if session is None or getattr(session, '_loaded_metadata_only', False):
+        return False
+    sid = getattr(session, 'session_id', None)
+    if not sid or not is_safe_session_id(sid):
+        return False
+    seen_stream_id = getattr(session, 'active_stream_id', None)
+    has_unfinished_sidecar_turn = bool(
+        seen_stream_id or getattr(session, 'pending_user_message', None)
+    )
+    if not has_unfinished_sidecar_turn:
+        return False
+    # Never reconcile while the sidecar's stream is still a LIVE in-process
+    # worker. A running turn owns the final writeback (it merges the agent
+    # result and clears pending state itself); racing it here would drop its
+    # active_stream_id mid-run and make the normal terminal writeback skip as
+    # "stale". Only self-heal once the worker is gone from both the SSE
+    # (STREAMS) and worker-lifecycle (ACTIVE_RUNS) registries.
+    if seen_stream_id and seen_stream_id in _active_stream_ids():
+        return False
+    # Registration-window grace guard (mirrors _repair_stale_pending). A turn is
+    # registered in STREAMS/ACTIVE_RUNS by the worker thread a moment AFTER the
+    # request handler persists active_stream_id + pending_started_at to the
+    # sidecar. Within that window the stream is legitimately in flight yet not
+    # yet visible in the registries, so the liveness check above would
+    # mis-classify it as a dead stream. A recent pending_started_at means "still
+    # starting up" — bail. This also covers cross-process / gateway turns the
+    # local registries cannot see. Falsy pending_started_at (None/0/missing) is
+    # treated as "old enough" so legacy/orphaned sidecars still self-heal.
+    if seen_stream_id:
+        _started = getattr(session, 'pending_started_at', None)
+        if _started:
+            try:
+                _age = time.time() - float(_started)
+            except (TypeError, ValueError):
+                _age = float('inf')
+            if _age < _REPAIR_STALE_PENDING_GRACE_SECONDS:
+                return False
+
+    try:
+        state_summary = get_state_db_session_summary(
+            sid,
+            profile=getattr(session, 'profile', None),
+        )
+        state_count = int(state_summary.get('message_count') or 0)
+        state_last = float(state_summary.get('last_message_at') or 0.0)
+    except Exception:
+        logger.debug("state.db summary check failed for session %s", sid, exc_info=True)
+        return False
+    if state_count <= 0:
+        return False
+
+    sidecar_messages = list(getattr(session, 'messages', None) or [])
+    sidecar_count = len(sidecar_messages)
+    sidecar_last = _last_message_timestamp(sidecar_messages) or 0.0
+
+    # Fast negative (pre-lock): if state.db is not ahead by either count or
+    # timestamp, do not pay for the lock. This keeps normal reads cheap.
+    if state_count <= sidecar_count and state_last <= sidecar_last:
+        return False
+
+    # ── Under-lock critical section ──────────────────────────────────────────
+    # The merge + sidecar write must hold the per-session lock so a concurrent
+    # worker/checkpoint save can neither (a) be clobbered by a stale full-record
+    # write here, nor (b) revive the stream between our liveness check and our
+    # write. Non-blocking acquire: if a caller already holds the lock (retry_last,
+    # undo_last, cancel_stream, the streaming worker's own finalize), bail rather
+    # than deadlock — a later read will retry the self-heal.
+    lock = _get_session_agent_lock(sid)
+    if not lock.acquire(blocking=False):
+        logger.debug(
+            "state.db newer-sidecar sync: lock contended, skipping for session %s", sid,
+        )
+        return False
+    try:
+        # Re-load the authoritative on-disk session under the lock so we both
+        # validate against (and write back) the very latest sidecar — never a
+        # snapshot captured before the lock that could clobber a newer write.
+        try:
+            locked = Session.load(sid)
+        except Exception:
+            logger.debug(
+                "state.db newer-sidecar sync: locked reload failed for session %s",
+                sid, exc_info=True,
+            )
+            return False
+        if locked is None:
+            return False
+
+        # Re-check liveness conditions against the freshly-loaded state: the
+        # stream may have rotated (compression), come back alive, terminated and
+        # cleared its own pending state, or had its turn finalized while we
+        # waited. Any of these means there is nothing stale to repair.
+        locked_stream_id = getattr(locked, 'active_stream_id', None)
+        if locked_stream_id != seen_stream_id:
+            return False
+        if not (locked_stream_id or getattr(locked, 'pending_user_message', None)):
+            return False
+        if locked_stream_id and locked_stream_id in _active_stream_ids():
+            return False
+        if locked_stream_id:
+            _lstarted = getattr(locked, 'pending_started_at', None)
+            if _lstarted:
+                try:
+                    _lage = time.time() - float(_lstarted)
+                except (TypeError, ValueError):
+                    _lage = float('inf')
+                if _lage < _REPAIR_STALE_PENDING_GRACE_SECONDS:
+                    return False
+
+        locked_messages = list(getattr(locked, 'messages', None) or [])
+        locked_count = len(locked_messages)
+
+        state_messages = get_state_db_session_messages(
+            sid,
+            profile=getattr(locked, 'profile', None),
+        )
+        if not state_messages:
+            return False
+        merged_messages = reconciled_state_db_messages_for_session(
+            locked,
+            state_messages=state_messages,
+        )
+        # The reconciler is append-only: a genuine state.db advance (output the
+        # lost stream never wrote back) shows up as MORE rows than the sidecar.
+        # A merged length not greater than the sidecar means nothing new to
+        # recover — leave the sidecar untouched rather than rewriting in place.
+        if len(merged_messages) <= locked_count:
+            return False
+        merged_context = reconciled_state_db_messages_for_session(
+            locked,
+            prefer_context=True,
+            state_messages=state_messages,
+        )
+
+        # Mutate + persist the freshly-loaded, locked object. Because we hold the
+        # lock and reloaded under it, this save cannot clobber a concurrent
+        # writer's newer record.
+        locked.messages = merged_messages
+        locked.context_messages = merged_context
+        locked.active_stream_id = None
+        locked.pending_user_message = None
+        locked.pending_attachments = []
+        locked.pending_started_at = None
+        locked.pending_user_source = None
+        try:
+            locked.save(touch_updated_at=True)
+        except Exception:
+            logger.debug(
+                "state.db newer-sidecar sync save failed for session %s",
+                sid, exc_info=True,
+            )
+            return False
+
+        # Durable write succeeded — reflect the reconciled state on the caller's
+        # shared/cached object so the in-flight read returns the recovered data.
+        session.messages = merged_messages
+        session.context_messages = merged_context
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+        logger.info(
+            "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
+            sid,
+            locked_count,
+            len(merged_messages),
+        )
+        return True
+    finally:
+        lock.release()
+
+
+
 def _last_non_tool_role(messages) -> str:
     if not isinstance(messages, list):
         return ''
@@ -2546,6 +2768,14 @@ def get_session(sid, metadata_only=False):
                     "lazy journal-retry failed on cache hit for session %s",
                     sid, exc_info=True,
                 )
+        if not metadata_only:
+            try:
+                _sync_sidecar_from_state_db_if_newer(cached)
+            except Exception:
+                logger.debug(
+                    "state.db newer-sidecar sync failed on cache hit for session %s",
+                    sid, exc_info=True,
+                )
         return cached
     if metadata_only:
         s = Session.load_metadata_only(sid)
@@ -2561,12 +2791,13 @@ def get_session(sid, metadata_only=False):
                 SESSIONS.popitem(last=False)  # evict least recently used
         if not metadata_only:
             try:
-                repaired = _repair_stale_pending(s)
+                synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
+                repaired = False if synced_from_state else _repair_stale_pending(s)
                 # If the stale-pending repair did not fire but the session
                 # already carries a pending-journal-retry marker (e.g. set on
                 # a previous repair pass), give the lazy-retry path one
                 # chance to self-heal on this read.
-                if not repaired and _session_has_pending_journal_retry(s):
+                if not repaired and not synced_from_state and _session_has_pending_journal_retry(s):
                     try:
                         _try_retry_journal_recovery_in_place(s)
                     except Exception:
@@ -3279,14 +3510,34 @@ def _sidebar_title_is_generic_webui(title: str | None) -> bool:
     return text.startswith(prefix) and text[len(prefix):].isdigit()
 
 
-def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> dict[str, dict]:
+def _read_state_db_sidebar_overrides(
+    db_path: Path,
+    session_ids: set[str],
+    count_session_ids: set[str] | None = None,
+) -> dict[str, dict]:
     """Return cheap state.db source/title overrides for sidebar rows.
 
     This intentionally does not chase lineage parents/children. It is used on
     the /api/sessions hot path before CLI filtering so state.db can correct
     stale JSON source flags without paying the full lineage-enrichment cost.
+
+    Two-tier cost split (#5132): the ``sessions``-table lookup (source/title/
+    message_count) is an indexed primary-key fetch and is run for ALL
+    ``session_ids`` — its result feeds the source classification that
+    ``/api/sessions`` filters on BEFORE the lazy lineage correction, so capping
+    it would silently drop rows (e.g. a stale ``cli`` JSON row whose state.db
+    source is ``webui``) from the default sidebar. The expensive part is the
+    ``messages`` aggregation (``COUNT(*)``/``MAX(timestamp)`` GROUP BY), which is
+    what blocked /api/sessions for 5-18s on power users; that scan is restricted
+    to ``count_session_ids`` (the top-N paint-priority rows). When
+    ``count_session_ids`` is None, both tiers cover the full set (caller opted
+    out of the cap).
     """
     wanted = {str(sid) for sid in (session_ids or set()) if sid}
+    if count_session_ids is None:
+        count_wanted = set(wanted)
+    else:
+        count_wanted = {str(sid) for sid in count_session_ids if sid} & wanted
     if not wanted or not db_path.exists():
         return {}
     try:
@@ -3352,15 +3603,19 @@ def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> di
                     if entry:
                         overrides[sid] = entry
                 if has_messages_table and messages_has_session_id:
+                    count_chunk = [sid for sid in chunk if sid in count_wanted]
+                    if not count_chunk:
+                        continue
+                    count_placeholders = ','.join('?' * len(count_chunk))
                     last_at_expr = "MAX(timestamp) AS last_message_at" if messages_has_timestamp else "NULL AS last_message_at"
                     cur.execute(
                         f"""
                         SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
                         FROM messages
-                        WHERE session_id IN ({placeholders})
+                        WHERE session_id IN ({count_placeholders})
                         GROUP BY session_id
                         """,
-                        chunk,
+                        count_chunk,
                     )
                     for row in cur.fetchall():
                         sid = str(row['session_id'])
@@ -3383,11 +3638,34 @@ def _read_state_db_sidebar_overrides(db_path: Path, session_ids: set[str]) -> di
 
 
 def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
-    """Apply state.db source/title overrides without full lineage enrichment."""
+    """Apply state.db source/title overrides without full lineage enrichment.
+
+    Source classification (source/title) is corrected for ALL rows because it
+    feeds the CLI/WebUI sidebar filter that runs BEFORE the lazy lineage
+    correction — capping it would silently drop rows whose stale JSON source
+    disagrees with state.db (#5132 regression guard). Only the expensive
+    ``messages`` count/last-message aggregation is capped to the top-N most
+    recent (paint-priority) rows, which is what actually blocked /api/sessions
+    for 5-18s on power users reading state.db for 2400+ rows on every
+    concurrent poll (#5132). The cap is env-configurable and fails open; rows
+    beyond it keep their JSON message-count/last-message until the history panel
+    opens (lazily corrected, exactly as with the lineage cap #4638).
+    """
+    import os as _os
+    try:
+        _cap = int(_os.environ.get("HERMES_WEBUI_STATE_DB_OVERRIDE_TOP_N", "300"))
+    except (TypeError, ValueError):
+        _cap = 300
+    all_ids = {str(s.get('session_id')) for s in sessions if s.get('session_id')}
+    if _cap > 0 and len(sessions) > _cap:
+        count_ids = {str(s.get('session_id')) for s in sessions[:_cap] if s.get('session_id')}
+    else:
+        count_ids = None  # cap disabled / under cap -> count every row too
     try:
         metadata = _read_state_db_sidebar_overrides(
             _active_state_db_path(),
-            {str(s.get('session_id')) for s in sessions if s.get('session_id')},
+            all_ids,
+            count_session_ids=count_ids,
         )
     except Exception:
         return

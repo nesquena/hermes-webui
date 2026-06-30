@@ -24,12 +24,15 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
 const OFFLINE_RECHECK_MS=2500;
+const OFFLINE_HEALTH_TIMEOUT_MS=10000;
+const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;
 let _offlineVisible=false;
 let _offlineReason='browser';
 let _offlineProbeTimer=null;
 let _offlineChecking=false;
 let _offlineProbePromise=null;
 let _offlineHealthProbePromise=null;
+let _offlineFetchProbeFailures=0;
 let _offlineRawFetch=null;
 let _offlineFetchPatched=false;
 function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLine!==false;}
@@ -82,7 +85,7 @@ async function _probeOfflineRecovery(){
     // the initial banner display on the offline-event/startup paths.
     let ctrl=null,timer=null;
     try{ctrl=(typeof AbortController!=='undefined')?new AbortController():null;}catch(_){ctrl=null;}
-    if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},3000);
+    if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},OFFLINE_HEALTH_TIMEOUT_MS);
     try{
       const opts={cache:'no-store',credentials:'include'};
       if(ctrl)opts.signal=ctrl.signal;
@@ -94,14 +97,21 @@ async function _probeOfflineRecovery(){
   try{return await _offlineHealthProbePromise;}
   finally{_offlineHealthProbePromise=null;}
 }
-async function _showOfflineBannerIfProbeFails(reason){
+async function _showOfflineBannerIfProbeFails(reason,opts){
+  opts=opts||{};
   const visibleAtStart=_offlineVisible;
+  const requireConsecutiveFailures=opts.requireConsecutiveFailures!==false;
   if(visibleAtStart)_setOfflineChecking(true);
   const ok=await _probeOfflineRecovery();
   if(visibleAtStart)_setOfflineChecking(false);
   if(ok){
+    _offlineFetchProbeFailures=0;
     if(_offlineVisible){_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();}
     return true;
+  }
+  if(!visibleAtStart&&requireConsecutiveFailures){
+    _offlineFetchProbeFailures+=1;
+    if(_offlineFetchProbeFailures<OFFLINE_FETCH_FAILURES_BEFORE_BANNER)return false;
   }
   showOfflineBanner(reason||(_browserReportsOnline()?'network':'browser'));
   return false;
@@ -113,7 +123,7 @@ async function checkOfflineRecoveryNow(){
     _setOfflineChecking(true);
     const ok=await _probeOfflineRecovery();
     _setOfflineChecking(false);
-    if(ok){if(!_offlineVisible)return true;_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
+    if(ok){_offlineFetchProbeFailures=0;if(!_offlineVisible)return true;_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
     showOfflineBanner(_browserReportsOnline()?'network':'browser');
     return false;
   })();
@@ -182,9 +192,9 @@ function _patchOfflineFetch(){
 }
 function initOfflineMonitor(){
   _patchOfflineFetch();
-  window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');});
+  window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});});
   window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
-  if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser');
+  if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
 else initOfflineMonitor();
@@ -1174,11 +1184,28 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
 const DASHBOARD_STATUS_TTL_MS=60000;
 let _dashboardStatusCache=null;
 let _dashboardStatusFetchedAt=0;
+let _dashboardLastNonNeverMode='auto'; // Server-scoped dashboard config keeps this restore target session-global on purpose.
+let _dashboardSettingsLoadSeq=0;
+let _dashboardSettingsWriteSeq=0;
 
 function _dashboardIsBrowserLoopback(){
   const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
   return host==='127.0.0.1'||host==='localhost'||host==='::1';
 }
+
+function _normalizeDashboardEnabledMode(mode){
+  return mode==='auto'||mode==='always'||mode==='never'?mode:'auto';
+}
+
+function _setDashboardModeForChip(mode){
+  mode=_normalizeDashboardEnabledMode(mode);
+  if(mode==='auto'||mode==='always') _dashboardLastNonNeverMode=mode;
+}
+
+function _getDashboardChipRestoreMode(){
+  return _dashboardLastNonNeverMode||'auto';
+}
+
 function _dashboardBrowserUrl(status){
   if(!status||!status.running) return '';
   if(status.browser_url||status.url){
@@ -1234,26 +1261,39 @@ async function loadDashboardSettings(){
   const modeEl=$('settingsDashboardMode');
   const urlEl=$('settingsDashboardUrl');
   if(!modeEl&&!urlEl) return;
+  const loadSeq=++_dashboardSettingsLoadSeq;
+  const writeSeq=_dashboardSettingsWriteSeq;
   try{
     const cfg=await api('/api/dashboard/config');
-    if(modeEl) modeEl.value=cfg.enabled||'auto';
+    if(loadSeq!==_dashboardSettingsLoadSeq||writeSeq!==_dashboardSettingsWriteSeq) return;
+    const mode=_normalizeDashboardEnabledMode(cfg&&cfg.enabled);
+    if(modeEl) modeEl.value=mode;
+    _setDashboardModeForChip(mode);
     if(urlEl) urlEl.value=cfg.url||'';
+    if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
   }catch(_){/* leave defaults visible */}
 }
-async function saveDashboardSettings(){
+async function saveDashboardSettings(opts){
+  opts=opts||{};
   const modeEl=$('settingsDashboardMode');
   const urlEl=$('settingsDashboardUrl');
   const statusEl=$('settingsDashboardStatus');
   const payload={enabled:(modeEl&&modeEl.value)||'auto',url:(urlEl&&urlEl.value||'').trim()};
+  _dashboardSettingsWriteSeq+=1;
   try{
     const saved=await api('/api/dashboard/config',{method:'POST',body:JSON.stringify(payload)});
-    if(modeEl) modeEl.value=saved.enabled||'auto';
+    const mode=_normalizeDashboardEnabledMode(saved&&saved.enabled);
+    if(modeEl) modeEl.value=mode;
+    _setDashboardModeForChip(mode);
     if(urlEl) urlEl.value=saved.url||'';
     if(statusEl) statusEl.textContent='Dashboard link settings saved.';
     await refreshDashboardStatus(true);
+    if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
   }catch(err){
     if(statusEl) statusEl.textContent='Dashboard link settings failed to save.';
     else if(typeof showToast==='function') showToast('Dashboard link settings failed to save.');
+    try{await loadDashboardSettings();}catch(_){}
+    if(opts.raiseOnError) throw err;
   }
 }
 function openHermesDashboard(event){
@@ -1594,7 +1634,7 @@ function _providerQuotaIndicatorText(status){
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
     const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
     const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:provider+' '+remaining, title:(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
   }
   const quota=status.quota||null;
   if(quota){
@@ -1605,7 +1645,7 @@ function _providerQuotaIndicatorText(status){
       const parts=[];
       if(used) parts.push('used '+used);
       if(limit) parts.push('limit '+limit);
-      return {label:provider+' '+remaining, title:(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
+      return {label:remaining, title:provider+' — '+(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
     }
   }
   return null;
@@ -1613,14 +1653,17 @@ function _providerQuotaIndicatorText(status){
 function renderProviderQuotaIndicator(status){
   const chip=$('providerQuotaChip');
   const label=$('providerQuotaChipLabel');
+  const mobileAction=$('composerMobileQuotaAction');
+  const mobileLabel=$('composerMobileQuotaLabel');
   if(!chip||!label) return;
   // Hide entirely when the user has disabled the ambient quota chip in Settings.
-  // Default is off (window._showQuotaChip defaults to false in boot.js) so users
-  // never see the chip unless they opt in.
+  // Boot defaults this on; an explicit false preference suppresses it.
   if(window._showQuotaChip!==true){
     chip.hidden=true;
     label.textContent='';
     chip.removeAttribute('title');
+    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
+    if(mobileLabel) mobileLabel.textContent='';
     return;
   }
   const text=_providerQuotaIndicatorText(status);
@@ -1628,11 +1671,15 @@ function renderProviderQuotaIndicator(status){
     chip.hidden=true;
     label.textContent='';
     chip.removeAttribute('title');
+    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
+    if(mobileLabel) mobileLabel.textContent='';
     return;
   }
   label.textContent=text.label;
   chip.title=text.title;
   chip.hidden=false;
+  if(mobileAction){mobileAction.style.display='';mobileAction.title=text.title;}
+  if(mobileLabel) mobileLabel.textContent=text.label;
 }
 async function refreshProviderQuotaIndicator(){
   // Short-circuit before the fetch when the chip is disabled — no point asking
@@ -1640,6 +1687,10 @@ async function refreshProviderQuotaIndicator(){
   if(window._showQuotaChip!==true){
     const chip=$('providerQuotaChip');
     if(chip){chip.hidden=true;chip.removeAttribute('title');}
+    const mobileAction=$('composerMobileQuotaAction');
+    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
+    const mobileLabel=$('composerMobileQuotaLabel');
+    if(mobileLabel) mobileLabel.textContent='';
     return;
   }
   if(_providerQuotaRefreshInFlight) return;
@@ -2355,6 +2406,37 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   return matches[0];
 }
 
+function _compactComposerModelChipLabel(modelId,labelText){
+  const id=String(modelId||'').trim();
+  const raw=String(labelText||'').trim();
+  if(!raw) return getModelLabel(id);
+  const idLower=id.toLowerCase();
+  const rawLower=raw.toLowerCase();
+  const slash=id.indexOf('/');
+  if(slash>0){
+    const provider=id.slice(0,slash).toLowerCase();
+    if(rawLower.startsWith(provider+'/')){
+      return raw.slice(provider.length+1).trim();
+    }
+  }
+  if(id&&rawLower===idLower&&raw.includes('/')){
+    return raw.slice(raw.indexOf('/')+1).trim();
+  }
+  if(raw.includes('/') && !/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)){
+    const parts=raw.split('/').map(s=>s.trim()).filter(Boolean);
+    if(parts.length>=2){
+      const tail=parts[parts.length-1];
+      const tailLower=tail.toLowerCase();
+      if(idLower && (tailLower===idLower || idLower.endsWith('/'+tailLower))) return tail;
+      if(parts.length===2){
+        const leadLower=parts[0].toLowerCase();
+        if(tailLower.startsWith(leadLower+'-')) return tail;
+      }
+    }
+  }
+  return raw;
+}
+
 function syncModelChip(){
   const sel=$('modelSelect');
   const chip=$('composerModelChip');
@@ -2372,8 +2454,9 @@ function syncModelChip(){
   }
   const opt=_selectedModelOption();
   const text=opt?opt.textContent:getModelLabel(sel.value||'');
+  const compactText=_compactComposerModelChipLabel(sel.value||'', text);
   const gatewayRouting=_latestGatewayRoutingForSession(S.session);
-  const displayText=_formatGatewayModelLabel(sel.value||'',text,gatewayRouting)||text;
+  const displayText=_formatGatewayModelLabel(sel.value||'',compactText,gatewayRouting)||compactText;
   label.textContent=displayText;
   if(mobileLabel) mobileLabel.textContent=displayText;
   chip.title=gatewayRouting?`${sel.value||'Conversation model'} ${_gatewayRoutingLabel(gatewayRouting)}`:(sel.value||'Conversation model');
@@ -3190,6 +3273,84 @@ window.addEventListener('resize',()=>{
   }
 });
 
+// ── Fit-based composer footer collapse ──────────────────────────────────────
+// Stage classes on .composer-footer:
+//   (none) full labels · .cf-icons icon chips · .cf-icons.cf-burger hamburger.
+let _composerFitScheduled=false;
+let _composerFitResizeObserver=null;
+let _composerFitMutationObserver=null;
+let _composerFitObservedFooter=null;
+let _composerFitResizeListenerBound=false;
+
+function _fitComposerFooter(){
+  const footer=document.querySelector('.composer-footer');
+  if(!footer) return;
+  const left=footer.querySelector('.composer-left');
+  if(!left) return;
+  if(!left.clientWidth) return;
+  const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  footer.classList.remove('cf-icons','cf-burger');
+  if(!overflows()) return;
+  footer.classList.add('cf-icons');
+  if(!overflows()) return;
+  footer.classList.add('cf-burger');
+}
+window._fitComposerFooter=_fitComposerFooter;
+
+function _scheduleComposerFit(){
+  if(_composerFitScheduled) return;
+  _composerFitScheduled=true;
+  requestAnimationFrame(function(){
+    _composerFitScheduled=false;
+    try{_fitComposerFooter();}catch(_){ }
+  });
+}
+window._scheduleComposerFit=_scheduleComposerFit;
+
+function _initComposerFooterFit(){
+  const footer=document.querySelector('.composer-footer');
+  const left=footer&&footer.querySelector('.composer-left');
+  if(!footer||!left) return;
+  _scheduleComposerFit();
+  if(_composerFitObservedFooter===footer) return;
+  if(_composerFitResizeObserver){try{_composerFitResizeObserver.disconnect();}catch(_){ }}
+  if(_composerFitMutationObserver){try{_composerFitMutationObserver.disconnect();}catch(_){ }}
+  _composerFitResizeObserver=null;
+  _composerFitMutationObserver=null;
+  _composerFitObservedFooter=footer;
+  if(window.ResizeObserver){
+    try{
+      _composerFitResizeObserver=new ResizeObserver(_scheduleComposerFit);
+      _composerFitResizeObserver.observe(footer);
+      // Also observe the left control group directly: the footer's outer width
+      // may not change when right-side controls (status/context chips) appear or
+      // resize, but that shrinks .composer-left's available room and must
+      // retrigger a refit. (Codex gate #4657.)
+      if(left && left!==footer){try{_composerFitResizeObserver.observe(left);}catch(_){ }}
+    }catch(_){ }
+  }
+  if(window.MutationObserver){
+    try{
+      _composerFitMutationObserver=new MutationObserver(_scheduleComposerFit);
+      _composerFitMutationObserver.observe(left,{
+        childList:true,subtree:true,characterData:true,
+        attributes:true,attributeFilter:['class','style','hidden']
+      });
+    }catch(_){ }
+  }
+  if(!_composerFitResizeListenerBound){
+    window.addEventListener('resize',_scheduleComposerFit);
+    _composerFitResizeListenerBound=true;
+  }
+}
+window._initComposerFooterFit=_initComposerFooterFit;
+
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',_initComposerFooterFit);
+}else{
+  _initComposerFooterFit();
+}
+
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
 let _currentReasoningEffortsSupported=null;
@@ -3201,7 +3362,12 @@ function _normalizeReasoningEffort(eff){
 function _formatReasoningEffortLabel(effort){
   if(effort==='none') return 'None';
   if(!effort) return 'Default';
-  return effort;
+  if(effort==='minimal') return 'Minimal';
+  if(effort==='low') return 'Low';
+  if(effort==='medium') return 'Medium';
+  if(effort==='high') return 'High';
+  if(effort==='xhigh') return 'XHigh';
+  return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
 function _reasoningEffortContext(){
@@ -3274,7 +3440,9 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    chip.title='Reasoning effort: '+text;
+    const labelText='Reasoning effort: '+text;
+    chip.title=labelText;
+    chip.setAttribute('aria-label',labelText);
   }
   if(mobileAction) mobileAction.classList.toggle('inactive',!effort||effort==='none');
   _highlightReasoningOption(effort);
@@ -3760,6 +3928,18 @@ function closeMobileComposerConfig(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
 }
 
+function openMobileComposerConfig(){
+  const panel=$('composerMobileConfigPanel');
+  if(!panel) return;
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  closeModelDropdown();
+  closeReasoningDropdown();
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  panel.classList.add('open');
+  _syncMobileComposerConfigButton(true);
+}
+
 function toggleMobileComposerConfig(){
   const panel=$('composerMobileConfigPanel');
   if(!panel) return;
@@ -3771,14 +3951,22 @@ function toggleMobileComposerConfig(){
     if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
     return;
   }
-  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
-  if(typeof closeWsDropdown==='function') closeWsDropdown();
-  closeModelDropdown();
-  closeReasoningDropdown();
-  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
-  panel.classList.add('open');
-  _syncMobileComposerConfigButton(true);
+  openMobileComposerConfig();
 }
+
+function openComposerContextMenu(e){
+  if(e){
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  const tooltip=$('ctxTooltip');
+  if(tooltip){
+    tooltip.classList.remove('ctx-tooltip-active');
+    tooltip.setAttribute('aria-hidden','true');
+  }
+  openMobileComposerConfig();
+}
+window.openComposerContextMenu=openComposerContextMenu;
 
 document.addEventListener('click',function(e){
   if(
@@ -4439,7 +4627,7 @@ function _clearActivityElapsedTimer(){
   _activityElapsedTimerGroup=null;
 }
 
-const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, reasoning, and context settings';
+const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, quota, reasoning, and context settings';
 
 function _setCtxCompressButton(btn,text){
   if(!btn)return;
@@ -4669,20 +4857,16 @@ function _syncCtxIndicator(usage){
 }
 
 // ── Touch support: toggle context tooltip on tap (#524) ──
-// On mobile, hover doesn't work — allow tap on the context ring button
-// to toggle the tooltip visibility so the compress affordance is reachable.
+// Hover/focus still exposes the compact tooltip, but a click/tap now opens the
+// shared composer config menu used by the phone footer so the richer context
+// details and compress action have one interaction path.
 document.addEventListener('DOMContentLoaded',function(){
   const wrap=document.getElementById('ctxIndicatorWrap');
   const tooltip=document.getElementById('ctxTooltip');
   if(!wrap||!tooltip)return;
   const btn=document.getElementById('ctxIndicator');
   if(!btn)return;
-  btn.addEventListener('click',function(e){
-    e.stopPropagation();
-    const isOpen=tooltip.classList.contains('ctx-tooltip-active');
-    tooltip.classList.toggle('ctx-tooltip-active',!isOpen);
-    tooltip.setAttribute('aria-hidden',String(isOpen));
-  });
+  btn.addEventListener('click',openComposerContextMenu);
   // Close on outside tap
   document.addEventListener('click',function(){
     tooltip.classList.remove('ctx-tooltip-active');
@@ -4972,7 +5156,9 @@ function _gatewayRoutingLabel(routing){
 function _formatGatewayModelLabel(modelId,labelText,routing){
   if(!routing)return'';
   const usedModel=String(routing.used_model||'').trim();
-  const base=usedModel?getModelLabel(usedModel):(labelText||getModelLabel(modelId));
+  const base=usedModel
+    ?_compactComposerModelChipLabel(usedModel,getModelLabel(usedModel))
+    :_compactComposerModelChipLabel(modelId,labelText||getModelLabel(modelId));
   const via=_gatewayRoutingLabel(routing);
   return via?`${base} ${via}`:base;
 }
@@ -6697,6 +6883,26 @@ function speakMessage(btn){
     _playEdgeTtsChunked(clean, btn);
     return;
   }
+  // Extension-registered TTS engine (window.registerHermesTtsEngine). Synthesize
+  // via the extension, then play through the shared audio-buffer path.
+  if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+    if(btn) btn.dataset.speaking='1';
+    _ttsSpeaking=true;
+    const _failReg=function(msg){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn)btn.dataset.speaking='0';
+      if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+    };
+    const _opts={
+      voice: localStorage.getItem('hermes-tts-voice')||'',
+      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
+      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
+    };
+    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
+      .then(function(buf){ return _playAudioBuf(buf, btn, 'TTS'); })
+      .catch(function(e){ _failReg((e&&e.message)||'TTS engine failed'); });
+    return;
+  }
 
   if(!('speechSynthesis' in window)){
     showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
@@ -6828,6 +7034,24 @@ function autoReadLastAssistant(){
     _playEdgeTtsChunked(clean, null);
     return;
   }
+  // Extension-registered TTS engine (window.registerHermesTtsEngine): synth via
+  // the extension, then play through the shared audio-buffer path. Mirrors the
+  // registered-engine branch in speakMessage() so auto-read honors the selection.
+  if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+    _ttsSpeaking=true;
+    const _opts={
+      voice: localStorage.getItem('hermes-tts-voice')||'',
+      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
+      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
+    };
+    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
+      .then(function(buf){ return _playAudioBuf(buf, null, 'TTS'); })
+      .catch(function(){ _ttsSpeaking=false; _playingEdgeAudio=null; });
+    return;
+  }
+  // Unknown/unregistered engine (e.g. an extension engine that's no longer
+  // registered) — fall back to browser TTS only if it's available.
+  if(!('speechSynthesis' in window)) return;
   // Use chunked playback for browser TTS
   _ttsChunkQueue=_splitForTTS(clean);
   _ttsChunkIndex=0;
@@ -6991,8 +7215,9 @@ function clearInflightState(sid){
 //      and as the hash that compares "rendered vs current" snapshots.
 //
 //   2. scheduleTodosRefresh() — coalesces multiple `todo_state` events that
-//      land in the same animation frame into a single loadTodos() call.
-//      Skips work entirely when the panel is not active.
+//      land in the same animation frame into a single refresh pass. It keeps
+//      the left sidebar Todos behavior unchanged, and also lets the workspace
+//      Todos tab repaint when that tab is enabled and currently visible.
 //
 //   3. _hydrateTodosFromSession(session) — applies cold-load todo_state
 //      from the session GET payload, or clears the panel when neither a
@@ -7000,7 +7225,7 @@ function clearInflightState(sid){
 //      `S.session = ...` settle point so cross-session navigation never
 //      leaves a stale list visible.
 //
-// The hash is keyed on (id, content, status); the render itself uses
+// The hash is keyed on (id, content/text, status); the render itself uses
 // `esc()` for any user-controlled string, so XSS surface is the same as
 // any other innerHTML path in this file.
 let _todosLastRenderedHash=null;
@@ -7017,9 +7242,72 @@ function _todosHash(items){
   let h=items.length+'|';
   for(let i=0;i<items.length;i++){
     const t=items[i]||{};
-    h+=String(t.id==null?'':t.id)+'\x1f'+String(t.content==null?'':t.content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
+    const content=t.content==null?(t.text==null?'':t.text):t.content;
+    h+=String(t.id==null?'':t.id)+'\x1f'+String(content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
   }
   return h;
+}
+
+const TODO_STATUS_RENDERING=Object.freeze({
+  pending:Object.freeze({icon:'square',color:'var(--muted)'}),
+  in_progress:Object.freeze({icon:'loader',color:'var(--blue)'}),
+  completed:Object.freeze({icon:'check',color:'rgba(100,200,100,.8)'}),
+  cancelled:Object.freeze({icon:'x',color:'rgba(200,100,100,.5)'}),
+});
+
+function todoStatusKey(status){
+  const key=String(status||'pending');
+  return Object.prototype.hasOwnProperty.call(TODO_STATUS_RENDERING,key)?key:'pending';
+}
+
+function todoStatusVisual(status){
+  const key=todoStatusKey(status);
+  return TODO_STATUS_RENDERING[key];
+}
+
+function renderTodoStatusIcon(status,size=14){
+  const visual=todoStatusVisual(status);
+  return typeof li==='function'?li(visual.icon,size):'';
+}
+
+function todoContent(todo){
+  if(!todo) return '';
+  return todo.content==null?(todo.text==null?'':todo.text):todo.content;
+}
+
+function renderTodoEmptyState(options={}){
+  const centered=!!(options&&options.centered);
+  const style=centered
+    ? 'padding:24px 12px;text-align:center;color:var(--muted);font-size:12px'
+    : 'color:var(--muted);font-size:12px;padding:4px 0';
+  return `<div style="${style}">${esc(t('todos_no_active'))}</div>`;
+}
+
+function renderTodoRow(todo,options={}){
+  const td=todo||{};
+  const status=todoStatusKey(td.status);
+  const visual=todoStatusVisual(status);
+  const showMetadata=!(options&&options.metadata===false);
+  const isCompleted=status==='completed';
+  const isCancelled=status==='cancelled';
+  const contentColor=(isCompleted||isCancelled)?'var(--muted)':'var(--text)';
+  const completedStyle=(isCompleted||isCancelled)?'text-decoration:line-through;opacity:.5':'';
+  const metadata=showMetadata
+    ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(status)}</div>`
+    : '';
+  return `
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${visual.color}">${renderTodoStatusIcon(status,14)}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;color:${contentColor};${completedStyle};line-height:1.4">${esc(todoContent(td))}</div>
+        ${metadata}
+      </div>
+    </div>`;
+}
+
+function renderTodoRows(todos,options={}){
+  const items=Array.isArray(todos)?todos:[];
+  return items.map(td=>renderTodoRow(td,options)).join('');
 }
 
 function _todosPanelIsActive(){
@@ -7035,12 +7323,14 @@ function scheduleTodosRefresh(){
   if(_todosRenderRafId) return;
   if(typeof requestAnimationFrame!=='function'){
     if(typeof loadTodos==='function') loadTodos();
+    if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
     return;
   }
   _todosRenderRafId=requestAnimationFrame(()=>{
     _todosRenderRafId=0;
-    if(!_todosPanelIsActive()) return;
-    if(typeof loadTodos==='function') loadTodos();
+    const sidebarActive=_todosPanelIsActive();
+    if(sidebarActive&&typeof loadTodos==='function') loadTodos();
+    if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
   });
 }
 
@@ -7048,6 +7338,7 @@ function _resetTodosRenderCache(){
   // Clear after every cross-session navigation so the next render is
   // never short-circuited against a hash from a different session.
   _todosLastRenderedHash=null;
+  if(typeof _resetWorkspaceTodosRenderCache==='function') _resetWorkspaceTodosRenderCache();
 }
 
 function _hydrateTodosFromSession(session){
@@ -7128,6 +7419,7 @@ function _hydrateTodosFromSession(session){
     S.todoStateMeta=null;
   }
   _resetTodosRenderCache();
+  if(typeof scheduleTodosRefresh==='function') scheduleTodosRefresh();
 }
 
 function snapshotLiveTurnHtmlForSession(sid){
@@ -7740,8 +8032,8 @@ async function applyUpdates(){
   const forceBtnReset=$('btnForceUpdate');
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
   const targets=[];
-  if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(window._updateData?.agent?.behind>0) targets.push('agent');
+  if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(!targets.length){
     const msg='No update target selected. Refresh update status and retry.';
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -9818,7 +10110,10 @@ function _anchorSceneWorklogGroup(blocks, opts){
   let group=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
   if(!group){
     group=ensureActivityGroup(blocks,{
-      collapsed:!live,
+      // Respect callers that need the settled activity group open. Round 6:
+      // pinned followers keep the just-settled worklog open so STREAM_DONE does
+      // not collapse hundreds of px of live worklog and visibly clamp the pane.
+      collapsed:(opts&&opts.collapsed!==undefined)?opts.collapsed:!live,
       live,
       activityKey,
       beforeAnchor:!!(opts&&opts.beforeAnchor),
@@ -10045,8 +10340,28 @@ if(typeof window!=='undefined'){
   window._projectLiveAnchorActivitySceneForStream=_projectLiveAnchorActivitySceneForStream;
   window.isLiveAnchorActivitySceneOwner=isLiveAnchorActivitySceneOwner;
 }
+function _anchorSceneSceneHasWorklogWorthyRows(scene){
+  // Mirror of messages.js _anchorSceneHasWorklogWorthyRows for the RENDER side:
+  // a settled scene that was persisted (or hydrated from the backend) before the
+  // generation-side guard existed can still be all-prose. Such a scene must NOT be
+  // promoted to a collapsed worklog at render time (it would hide the whole answer
+  // and shrink the transcript at settle → bottom-pinned jump-back). Require at least
+  // one tool/thinking/compression row. (defense-in-depth for already-persisted scenes)
+  const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+  for(const row of rows){
+    if(!row||typeof row!=='object') continue;
+    const role=String(row.role||'');
+    if(role==='tool'||role==='thinking') return true;
+    if(role==='lifecycle'){
+      const source=String(row.source_event_type||'');
+      if(source==='compressing'||source==='compressed') return true;
+    }
+  }
+  return false;
+}
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
@@ -10083,8 +10398,48 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   }
   return wrote;
 }
+// One-shot token: the stream id of the turn that JUST settled at STREAM_DONE.
+// The keep-open exception applies to ONLY this one turn's settled render, then
+// is cleared so every other (historical) settled worklog renders compact even
+// while the reader is pinned. Set right before the STREAM_DONE
+// renderMessages({preserveScroll:true}) call and cleared after the settled-scene
+// render pass; null at all other times.
+let _keepSettledWorklogOpenForStreamId=null;
+function _shouldKeepSettledWorklogOpenForPinnedFollow(streamId){
+  // Round 6 scroll-jump guard: while the reader is pinned at the live tail,
+  // collapsing the JUST-settled live worklog into a compact summary can shrink
+  // the transcript by hundreds of px at STREAM_DONE. The browser clamps scrollTop
+  // to the new max, which looks like a large backward jump even though pinned
+  // state is correct. Keep that one worklog open for pinned followers so the
+  // live->settled DOM swap is height-stable; unpinned readers still get compact
+  // settled worklogs and preserve their viewport normally. This intentionally
+  // wins over a transient user-collapsed live worklog while the reader remains
+  // pinned: avoiding the visible STREAM_DONE jump takes precedence for followers.
+  // SCOPING: the exception is gated on the one-shot token matching this turn's
+  // stream id, so it applies ONLY to the turn that just settled — not to every
+  // historical settled worklog on every pinned re-render (which would defeat the
+  // compact-worklog default for past turns). Pin flags use the sticky pin state
+  // because during live DOM rebuilds the raw bottom distance can transiently
+  // exceed a threshold even for a pinned follower.
+  if(!streamId||_keepSettledWorklogOpenForStreamId!==streamId) return false;
+  return !!(_scrollPinned && !_messageUserUnpinned);
+}
+// One-shot token set/clear API used by the STREAM_DONE handler (messages.js):
+// arm the keep-open exception for exactly the turn that just settled, render,
+// then disarm so subsequent re-renders collapse historical worklogs as normal.
+function _armKeepSettledWorklogOpen(streamId){
+  _keepSettledWorklogOpenForStreamId=streamId?String(streamId):null;
+}
+function _disarmKeepSettledWorklogOpen(){
+  _keepSettledWorklogOpenForStreamId=null;
+}
+if(typeof window!=='undefined'){
+  window._armKeepSettledWorklogOpen=_armKeepSettledWorklogOpen;
+  window._disarmKeepSettledWorklogOpen=_disarmKeepSettledWorklogOpen;
+}
 function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
     return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
   }
@@ -10104,13 +10459,14 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   });
   blocks.querySelectorAll('.tool-worklog-group:not([data-anchor-scene-owner="1"]),.tool-call-group:not([data-anchor-scene-owner="1"]),.agent-activity-thinking:not([data-anchor-scene-row="1"]),.wl-reason').forEach(el=>el.remove());
   const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');
+  const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForPinnedFollow(streamId);
   const activityKey=`anchor-scene:${rawIdx}`;
   if(streamId&&!_readActivityDisclosureState(activityKey)){
     _copyActivityDisclosureState(`live:${streamId}`, activityKey);
   }
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
-    collapsed:true,
+    collapsed:!keepSettledWorklogOpen,
     beforeAnchor:true,
     anchor:segment,
     activityKey,
@@ -11259,10 +11615,33 @@ function _captureMessageScrollSnapshot(){
     userUnpinned:_messageUserUnpinned,
   };
 }
+function _restorePinnedMessageScrollSnapshot(snapshot){
+  const el=$('messages');
+  if(!el||!snapshot||snapshot.pinned!==true||snapshot.userUnpinned===true) return false;
+  const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  const bottom=Number(snapshot.bottom);
+  const target=Number.isFinite(bottom)?maxTop-Math.max(0,bottom):maxTop;
+  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  el.scrollTop=Math.max(0,Math.min(target,maxTop));
+  // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
+  _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+  _messageUserUnpinned=false;
+  _scrollPinned=true;
+  _nearBottomCount=2;
+  if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+  else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
+  return true;
+}
 function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  // If the reader was following the live tail, preserve the tail-relative bottom
+  // distance. Do not semantic-anchor to the first visible row: live Worklog/
+  // activity rebuilds can remount an older top-of-viewport anchor and yank a
+  // pinned streaming transcript upward. Semantic anchors remain for manual
+  // unpinned reading positions below.
+  if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;
@@ -11322,6 +11701,10 @@ window._fixMobileScrollJank=function _fixMobileScrollJank(){
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
+  // Same-frame live DOM updates (tool/worklog/activity rows) are the hot path for
+  // streaming. Pinned followers must stay tail-relative here too; restoring the
+  // semantic viewport anchor is only safe for explicitly unpinned readers.
+  if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;
@@ -11389,6 +11772,14 @@ function _transparentStreamOrderedParts(message){
     }
   }
   return hasText&&hasTool?ordered:null;
+}
+function _legacySettledFallbackHasToolMetadata(message){
+  if(!message||message.role!=='assistant'||message._anchor_activity_scene) return false;
+  return !!(
+    (Array.isArray(message.tool_calls)&&message.tool_calls.length>0)||
+    (Array.isArray(message._partial_tool_calls)&&message._partial_tool_calls.length>0)||
+    (Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use'))
+  );
 }
 function _transparentOrderedDisplayText(text){
   return _stripWorkspaceDisplayPrefix(
@@ -12231,12 +12622,8 @@ function renderMessages(options){
   // tracking, or runs that didn't go through the normal streaming path), build
   // a display list from per-message tool_calls (OpenAI format) stored in each
   // assistant message. This covers the reload case described in issue #140.
-  const hasMessageToolMetadata=!S.busy&&Array.isArray(S.messages)&&S.messages.some(m=>
-    m&&m.role==='assistant'&&!anchorOwnedAssistantRawIdxs.has(S.messages.indexOf(m))&&(
-      (Array.isArray(m.tool_calls)&&m.tool_calls.length>0)||
-      (Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0)||
-      (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
-    )
+  const hasMessageToolMetadata=!S.busy&&Array.isArray(S.messages)&&S.messages.some((m,rawIdx)=>
+    !anchorOwnedAssistantRawIdxs.has(rawIdx)&&_legacySettledFallbackHasToolMetadata(m)
   );
   if(!S.busy && (hasMessageToolMetadata||!S.toolCalls||!S.toolCalls.length)){
     // Index tool outputs by tool_call_id / tool_use_id so the
@@ -12281,10 +12668,7 @@ function renderMessages(options){
       }
       if(m.role==='assistant'){
         if(anchorOwnedAssistantRawIdxs.has(rawIdx)) return;
-        const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-        const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
-        if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});
+        if(_legacySettledFallbackHasToolMetadata(m)) fallbackToolSources.push({m,rawIdx});
       }
     });
     const derived=[];
@@ -14013,16 +14397,19 @@ function autoResizeTextarea(ta) {
 
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
-  // Truncate session at msgIdx (keep messages before the edited one)
-  // then re-send the edited text
+  const initialSid = S.session.session_id;
+  const absoluteKeepCount = _oldestIdx + msgIdx;
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: msgIdx  // keep messages[0..msgIdx-1], discard from msgIdx onward
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
     })});
-    S.messages = S.messages.slice(0, msgIdx);
+    S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
-    // Now send the edited message as a new chat
     $('msg').value = newText;
     await send();
   } catch(e) { setStatus(t('edit_failed') + e.message); }
@@ -14030,24 +14417,27 @@ async function submitEdit(msgIdx, newText) {
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
-  // Find the last user message and re-run it
-  // Remove the last assistant message first (truncate to before it)
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
-  // Find the last user message text (one before this assistant message)
+  const absoluteKeepCount = _oldestIdx + assistantIdx;
+  const initialSid = S.session.session_id;
   let lastUserText = '';
   for(let i = assistantIdx - 1; i >= 0; i--) {
     const m = S.messages[i];
     if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
   }
   if(!lastUserText) return;
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: assistantIdx  // remove the assistant message
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
     })});
-    S.messages = S.messages.slice(0, assistantIdx);
+    S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = lastUserText;
     await send();
@@ -14493,19 +14883,23 @@ function loadPdfInline(container){
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
+    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
     const loadPdf=(pdfjsLib)=>{
-      fetch('api/media?path='+encodeURIComponent(path))
+      fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            const dlUrl=publicMediaUrl+'&download=1';
+            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
           return pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise;
         })
         .then(pdf=>{
           if(!pdf) return;
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1';
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
           const wrap=document.createElement('div');
@@ -14544,7 +14938,7 @@ function loadPdfInline(container){
           renderPage(1);
         })
         .catch(()=>{
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1';
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
         });
     };
@@ -14564,7 +14958,7 @@ function loadPdfInline(container){
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
         if(!_pdfjsReady){
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1';
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }
@@ -14584,20 +14978,23 @@ function loadHtmlInline(container){
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+          const openUrl=publicMediaUrl+'&inline=1';
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+        const openUrl=publicMediaUrl+'&inline=1';
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const dlUrl=publicMediaUrl+'&download=1';
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });

@@ -207,3 +207,32 @@ class TestCancelledTurnPersistenceGuards:
         assert "No response from provider" in block
         assert "Cancellation details" in block
         assert "Interruption details" in block
+
+    def test_frontend_cancel_prefers_embedded_session_payload(self):
+        src = _read("static/messages.js")
+        start = src.find("source.addEventListener('cancel'")
+        end = src.find("for(const _runJournalEventName", start)
+        assert start != -1 and end != -1, "cancel handler not found"
+        block = src[start:end]
+
+        assert "const _applyCancelSessionPayload=(sessionPayload)=>" in block
+        assert "const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;" in block
+        assert "if(_applyCancelSessionPayload(_cancelSessionPayload)) return;" in block
+        assert "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);" in block
+        assert block.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;") < block.index("const data=await api("), (
+            "Cancel handler must apply the terminal SSE session payload before falling back "
+            "to /api/session so captured _partial reasoning/tool rows are visible immediately."
+        )
+
+    def test_worker_cancel_events_do_not_embed_session_payload(self):
+        src = _read("api/streaming.py")
+        worker_start = src.find("def _run_agent_streaming(")
+        cancel_stream_start = src.find("def cancel_stream(", worker_start)
+        assert worker_start != -1 and cancel_stream_start != -1, "streaming worker/cancel_stream not found"
+        worker_block = src[worker_start:cancel_stream_start]
+        cancel_stream_block = src[cancel_stream_start:]
+
+        assert "_cancel_event_payload('Cancelled by user', s)" not in worker_block
+        assert "_cancel_event_payload('Cancelled by user', session=" not in worker_block
+        assert "None if ephemeral else s" not in worker_block
+        assert "_cancel_event_payload('Cancelled by user', session=_cancel_session_payload)" in cancel_stream_block

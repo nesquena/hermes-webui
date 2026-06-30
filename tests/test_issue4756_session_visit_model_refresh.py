@@ -33,6 +33,7 @@ def _reset_models_memory_cache(monkeypatch):
 
     monkeypatch.setattr(cfg, "_available_models_cache", None, raising=False)
     monkeypatch.setattr(cfg, "_available_models_cache_ts", 0.0, raising=False)
+    monkeypatch.setattr(cfg, "_available_models_live_rebuild_ts", 0.0, raising=False)
     monkeypatch.setattr(cfg, "_available_models_cache_source_fingerprint", None, raising=False)
     monkeypatch.setattr(cfg, "_cache_build_in_progress", False, raising=False)
 
@@ -117,6 +118,351 @@ def test_session_visit_stale_profile_cache_revalidates_with_live_rebuild(tmp_pat
 
     assert cfg.get_available_models_for_session_visit() == rebuilt_catalog
     assert calls == [{"force_refresh": True}]
+
+
+def test_session_visit_overlapping_stale_calls_coalesce_to_single_live_rebuild(tmp_path, monkeypatch):
+    import api.config as cfg
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    _reset_models_memory_cache(monkeypatch)
+    stale_catalog = _catalog("stale-model")
+    rebuilt_catalog = _catalog("rebuilt-model")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    old = time.time() - 600.0
+    os.utime(cache_path, (old, old))
+    fingerprint = {"profile": "demo"}
+    stale_load_counts = {}
+    stale_load_lock = threading.Lock()
+    second_load_gate = threading.Barrier(2)
+    rebuild_count = 0
+    rebuild_lock = threading.Lock()
+
+    monkeypatch.setattr(cfg, "_SESSION_VISIT_MODELS_FRESHNESS_SECONDS", 300.0, raising=False)
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+
+    def _load_stale_models_cache_from_disk():
+        ident = threading.get_ident()
+        with stale_load_lock:
+            count = stale_load_counts.get(ident, 0) + 1
+            stale_load_counts[ident] = count
+        if count == 2:
+            second_load_gate.wait(timeout=5)
+        return stale_catalog
+
+    def _invoke_models_rebuild(_builder):
+        nonlocal rebuild_count
+        with rebuild_lock:
+            rebuild_count += 1
+        return rebuilt_catalog
+
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", _load_stale_models_cache_from_disk)
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _invoke_models_rebuild)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(cfg.get_available_models_for_session_visit) for _ in range(2)]
+        results = [future.result(timeout=10) for future in futures]
+
+    assert all(result == rebuilt_catalog for result in results)
+    assert rebuild_count == 1
+
+
+def test_force_refresh_sync_followers_wait_past_legacy_timeout(tmp_path, monkeypatch):
+    import api.config as cfg
+    import threading
+
+    _reset_models_memory_cache(monkeypatch)
+    stale_catalog = _catalog("stale-model")
+    rebuilt_catalog = _catalog("rebuilt-model")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    old = time.time() - 600.0
+    os.utime(cache_path, (old, old))
+    fingerprint = {"profile": "demo"}
+    rebuild_count = 0
+    timeout_waits = []
+    original_wait_for = threading.Condition.wait_for
+
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+
+    def _wait_for(self, predicate, timeout=None):
+        if self is not cfg._cache_build_cv:
+            return original_wait_for(self, predicate, timeout)
+        timeout_waits.append(timeout)
+        if timeout is None:
+            published_at = time.monotonic()
+            cfg._available_models_cache = rebuilt_catalog
+            cfg._available_models_cache_ts = published_at
+            cfg._available_models_live_rebuild_ts = published_at
+            cfg._available_models_cache_source_fingerprint = fingerprint
+            cfg._cache_build_in_progress = False
+            return True
+        if timeout == 60.0:
+            return False
+        return original_wait_for(self, predicate, timeout=timeout)
+
+    def _invoke_models_rebuild(_builder):
+        nonlocal rebuild_count
+        rebuild_count += 1
+        return rebuilt_catalog
+
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+    monkeypatch.setattr(threading.Condition, "wait_for", _wait_for)
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _invoke_models_rebuild)
+
+    assert cfg.get_available_models(force_refresh=True) == rebuilt_catalog
+    assert rebuild_count == 0
+    assert None in timeout_waits
+    assert 60.0 not in timeout_waits
+
+def test_force_refresh_sync_followers_retry_after_failed_active_rebuild(tmp_path, monkeypatch):
+    import api.config as cfg
+    import threading
+
+    _reset_models_memory_cache(monkeypatch)
+    stale_catalog = _catalog("stale-model")
+    rebuilt_catalog = _catalog("rebuilt-model")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    old = time.time() - 600.0
+    os.utime(cache_path, (old, old))
+    fingerprint = {"profile": "demo"}
+    rebuild_count = 0
+    timeout_waits = []
+    original_wait_for = threading.Condition.wait_for
+
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+
+    def _wait_for(self, predicate, timeout=None):
+        if self is not cfg._cache_build_cv:
+            return original_wait_for(self, predicate, timeout)
+        timeout_waits.append(timeout)
+        if timeout is None:
+            cfg._cache_build_in_progress = False
+            return True
+        return original_wait_for(self, predicate, timeout=timeout)
+
+    def _invoke_models_rebuild(_builder):
+        nonlocal rebuild_count
+        rebuild_count += 1
+        return rebuilt_catalog
+
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+    monkeypatch.setattr(threading.Condition, "wait_for", _wait_for)
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _invoke_models_rebuild)
+
+    assert cfg.get_available_models(force_refresh=True) == rebuilt_catalog
+    assert rebuild_count == 1
+    assert None in timeout_waits
+    assert cfg._available_models_cache == rebuilt_catalog
+    assert cfg._cache_build_in_progress is False
+
+
+def test_force_refresh_bounded_followers_wait_only_remaining_budget(tmp_path, monkeypatch):
+    import api.config as cfg
+    import threading
+
+    _reset_models_memory_cache(monkeypatch)
+    stale_catalog = _catalog("stale-model")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    old = time.time() - 600.0
+    os.utime(cache_path, (old, old))
+    fingerprint = {"profile": "demo"}
+    timeout_waits = []
+    original_wait_for = threading.Condition.wait_for
+
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+
+    def _wait_for(self, predicate, timeout=None):
+        if self is not cfg._cache_build_cv:
+            return original_wait_for(self, predicate, timeout)
+        timeout_waits.append(timeout)
+        time.sleep(min(timeout or 0.0, 0.01))
+        return False
+
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+    monkeypatch.setattr(threading.Condition, "wait_for", _wait_for)
+
+    started_at = time.monotonic()
+    result = cfg.get_available_models(force_refresh=True)
+    elapsed = time.monotonic() - started_at
+
+    assert result == stale_catalog
+    assert len(timeout_waits) == 1
+    assert timeout_waits[0] is not None
+    assert 0.0 <= timeout_waits[0] <= 0.05
+    assert 60.0 not in timeout_waits
+    assert elapsed < 0.1
+
+
+def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebuild(tmp_path, monkeypatch):
+    import api.config as cfg
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    _reset_models_memory_cache(monkeypatch)
+    stale_catalog = _catalog("stale-model")
+    rebuilt_catalog = _catalog("rebuilt-model")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    old = time.time() - 600.0
+    os.utime(cache_path, (old, old))
+    fingerprint = {"profile": "demo"}
+    stale_load_counts = {}
+    stale_load_lock = threading.Lock()
+    second_load_gate = threading.Barrier(2)
+    rebuild_count = 0
+    rebuild_lock = threading.Lock()
+
+    monkeypatch.setattr(cfg, "_SESSION_VISIT_MODELS_FRESHNESS_SECONDS", 300.0, raising=False)
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+
+    def _load_stale_models_cache_from_disk():
+        ident = threading.get_ident()
+        with stale_load_lock:
+            count = stale_load_counts.get(ident, 0) + 1
+            stale_load_counts[ident] = count
+        if count == 2:
+            second_load_gate.wait(timeout=5)
+        return stale_catalog
+
+    def _invoke_models_rebuild(_builder):
+        nonlocal rebuild_count
+        with rebuild_lock:
+            rebuild_count += 1
+        time.sleep(0.05)
+        return rebuilt_catalog
+
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", _load_stale_models_cache_from_disk)
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _invoke_models_rebuild)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(cfg.get_available_models_for_session_visit) for _ in range(2)]
+        results = [future.result(timeout=10) for future in futures]
+
+    assert all(result == stale_catalog for result in results)
+    assert rebuild_count == 1
+    time.sleep(0.1)
+    assert cfg._available_models_cache == rebuilt_catalog
+    assert cfg._cache_build_in_progress is False
+
+
+def test_session_visit_force_refresh_ignores_plain_disk_publish_started_after_refresh(tmp_path, monkeypatch):
+    import api.config as cfg
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    _reset_models_memory_cache(monkeypatch)
+    stale_catalog = _catalog("stale-model")
+    rebuilt_catalog = _catalog("rebuilt-model")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}", encoding="utf-8")
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    old = time.time() - 600.0
+    os.utime(cache_path, (old, old))
+    fingerprint = {"profile": "demo"}
+    stale_load_counts = {}
+    stale_load_lock = threading.Lock()
+    force_refresh_waiting = threading.Event()
+    plain_publish_done = threading.Event()
+    rebuild_count = 0
+    rebuild_lock = threading.Lock()
+
+    monkeypatch.setattr(cfg, "_SESSION_VISIT_MODELS_FRESHNESS_SECONDS", 300.0, raising=False)
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: stale_catalog)
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+
+    def _load_stale_models_cache_from_disk():
+        ident = threading.get_ident()
+        with stale_load_lock:
+            count = stale_load_counts.get(ident, 0) + 1
+            stale_load_counts[ident] = count
+        if count == 2:
+            force_refresh_waiting.set()
+            assert plain_publish_done.wait(timeout=5)
+        return stale_catalog
+
+    def _invoke_models_rebuild(_builder):
+        nonlocal rebuild_count
+        with rebuild_lock:
+            rebuild_count += 1
+        return rebuilt_catalog
+
+    def _plain_disk_hit():
+        result = cfg.get_available_models()
+        plain_publish_done.set()
+        return result
+
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", _load_stale_models_cache_from_disk)
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _invoke_models_rebuild)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        refresh_future = executor.submit(cfg.get_available_models_for_session_visit)
+        assert force_refresh_waiting.wait(timeout=5)
+        plain_result = executor.submit(_plain_disk_hit).result(timeout=10)
+        refresh_result = refresh_future.result(timeout=10)
+
+    assert plain_result == stale_catalog
+    assert refresh_result == rebuilt_catalog
+    assert rebuild_count == 1
+    assert cfg._available_models_cache == rebuilt_catalog
 
 
 def test_session_visit_fresh_disk_hit_does_not_overwrite_newer_memory_cache(tmp_path, monkeypatch):
@@ -324,22 +670,39 @@ def test_populate_model_dropdown_accepts_session_visit_freshness_and_guards_stal
     assert live_tail.count("requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq") >= 4
 
 
-def test_load_session_schedules_async_session_visit_model_refresh_after_metadata_load():
+def test_load_session_schedules_session_visit_model_refresh_before_message_load():
     body = _extract_function_body(_read_static("sessions.js"), "async function loadSession(")
 
     assign_idx = body.index("S.session=data.session")
-    boot_guard_idx = body.index("if(!S._bootReady&&typeof window!=='undefined'&&typeof window._startBootModelDropdown==='function'){")
-    boot_promise_idx = body.index("Promise.resolve().then(()=>{", boot_guard_idx)
-    boot_refresh_idx = body.index("return window._startBootModelDropdown();")
-    else_idx = body.index("}else{", boot_refresh_idx)
-    promise_idx = body.index("const modelRefreshPromise=Promise.resolve().then(", else_idx)
-    ready_idx = body.index("window._modelDropdownReady=modelRefreshPromise")
-    refresh_idx = body.index("populateModelDropdown({freshness:'session_visit'})")
-    stale_guard_idx = body.index("_loadingSessionId!==modelRefreshSid")
+    message_load_idx = body.index("await _ensureMessagesLoaded(sid", assign_idx)
+    failure_return_idx = body.index("return;", message_load_idx)
+    model_block_idx = body.index("if(typeof populateModelDropdown==='function')", assign_idx)
+    guard_helper_idx = body.index("const isActiveModelRefreshSession", model_block_idx)
+    promise_idx = body.index("const modelRefreshPromise=_deferSessionSideEffect", model_block_idx)
+    ready_idx = body.index("window._modelDropdownReady=modelRefreshPromise", promise_idx)
+    refresh_idx = body.index("populateModelDropdown({freshness:'session_visit'})", promise_idx)
 
-    assert assign_idx < boot_guard_idx < boot_promise_idx < boot_refresh_idx < else_idx < promise_idx < refresh_idx < ready_idx
-    assert boot_promise_idx < stale_guard_idx < boot_refresh_idx
-    assert promise_idx < body.index("_loadingSessionId!==modelRefreshSid", promise_idx) < refresh_idx
+    assert assign_idx < model_block_idx < message_load_idx < failure_return_idx
+    assert model_block_idx < promise_idx < refresh_idx < ready_idx
+    assert guard_helper_idx < promise_idx
+    assert "_loadingSessionId!==modelRefreshSid" not in body[model_block_idx:ready_idx], (
+        "deferred model refresh must guard on the active session, not _loadingSessionId, "
+        "because loadSession clears _loadingSessionId when the first paint is complete"
+    )
+
+
+def test_session_visit_model_refresh_is_deferred_until_after_first_paint():
+    sessions = _read_static("sessions.js")
+    defer_helper = _extract_function_body(sessions, "function _afterSessionFirstPaint(")
+    side_effect_helper = _extract_function_body(sessions, "function _deferSessionSideEffect(")
+    load_body = _extract_function_body(sessions, "async function loadSession(")
+
+    assert "requestAnimationFrame(()=>requestAnimationFrame(run))" in defer_helper
+    assert "requestIdleCallback(invoke,{timeout:1500})" in defer_helper
+    assert "return _afterSessionFirstPaint(()=>" in side_effect_helper
+    assert "const modelRefreshPromise=_deferSessionSideEffect" in load_body
+    assert "isActiveModelRefreshSession()" in load_body
+    assert "return populateModelDropdown({freshness:'session_visit'});" in load_body
 
 
 def test_boot_model_dropdown_clears_cached_ready_on_401():

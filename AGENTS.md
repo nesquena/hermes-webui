@@ -60,8 +60,9 @@ Follow that checklist's safety rules:
   justification and a rollback story.
 - Update docs when changing setup, onboarding, runtime behavior, architecture,
   testing guidance, or user-facing workflows.
-- Update `CHANGELOG.md` for user-visible behavior, setup, workflow, or
-  documentation changes that should be release-note ready.
+- Do not edit `CHANGELOG.md` in ordinary contributor PRs. The release workflow
+  owns changelog updates through release commits. If a change is release-note
+  worthy, include concise release-note wording in the PR body instead.
 - For UI or UX changes, include before/after evidence and test relevant
   desktop, narrow, and mobile states.
 - For behavior changes, add or update automated tests where practical and list

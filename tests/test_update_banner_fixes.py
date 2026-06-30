@@ -696,6 +696,10 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
         monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+        monkeypatch.setattr(
+            'api.updates.restart_active_profile_gateway',
+            lambda: {'status': 'completed', 'message': 'Gateway service restarted successfully'},
+        )
 
         result = upd.apply_update('agent')
         assert result['ok'] is True
@@ -789,6 +793,230 @@ class TestApplyForceUpdate:
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
         result = upd.apply_force_update('invalid')
         assert result['ok'] is False
+
+
+class TestAgentUpdateRequiresGatewayRestart:
+    """Agent updates must prove gateway restart before returning ok=True."""
+
+    def test_apply_update_agent_requires_gateway_restart(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        ran = []
+        gateway_restarts = []
+
+        def fake_run(args, cwd, timeout=10):
+            ran.append(args)
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
+                return '', True
+            if args[:2] == ['status', '--porcelain']:
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[0] == 'pull':
+                return 'Already up to date.', True
+            return '', True
+
+        def fake_gateway_restart():
+            gateway_restarts.append('called')
+            return {'status': 'completed', 'message': 'Gateway service restarted successfully'}
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+        monkeypatch.setattr('api.updates.restart_active_profile_gateway', fake_gateway_restart)
+
+        result = upd.apply_update('agent')
+        assert result['ok'] is True
+        assert result['target'] == 'agent'
+        assert result['restart_scheduled'] is True
+        assert result['gateway_restart'] == 'completed'
+        assert gateway_restarts == ['called']
+
+    def test_apply_update_agent_stash_conflict_success_invokes_gateway_restart(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        gateway_restarts = []
+        ran = []
+
+        def fake_run(args, cwd, timeout=10):
+            ran.append(args)
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
+                return '', True
+            if args[:2] == ['status', '--porcelain']:
+                return 'M file', True
+            if args[:2] == ['status', '--porcelain', '--untracked-files=no']:
+                return 'M file', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[:2] == ['rev-parse', '--short']:
+                return 'abc1234', True
+            if args[:2] == ['stash', 'push']:
+                return '', True
+            if args[:2] == ['stash', 'apply']:
+                return '', False
+            if args[0] == 'stash':
+                return '', True
+            if args[:3] == ['reset', '--hard', 'HEAD']:
+                return '', True
+            if args[0] == 'pull':
+                return 'Updating', True
+            return '', True
+
+        def fake_gateway_restart():
+            gateway_restarts.append('called')
+            return {'status': 'in_progress', 'message': 'Gateway service restart initiated (in progress)'}
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+        monkeypatch.setattr('api.updates.restart_active_profile_gateway', fake_gateway_restart)
+
+        result = upd.apply_update('agent')
+        assert result['ok'] is True
+        assert result['stash_conflict'] is True
+        assert result['target'] == 'agent'
+        assert result['restart_scheduled'] is True
+        assert result['gateway_restart'] == 'in_progress'
+        assert gateway_restarts == ['called']
+
+    def test_apply_update_agent_without_gateway_restart_result_fails(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
+                return '', True
+            if args[:2] == ['status', '--porcelain']:
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[:2] == ['rev-parse', '--short', 'origin/master']:
+                return 'abc1234', True
+            if args[0] == 'pull':
+                return 'Already up to date.', True
+            return '', True
+
+        restart_calls = []
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+        monkeypatch.setattr('api.updates.restart_active_profile_gateway', lambda: (
+            restart_calls.append('called'),
+            {'status': 'busy', 'message': 'Restart already in progress. Please wait a moment and try again.'},
+        )[1])
+
+        result = upd.apply_update('agent')
+        assert result['ok'] is False
+        assert 'restart_scheduled' not in result
+        assert result['target'] == 'agent'
+        assert result['gateway_restart'] == 'busy'
+        assert 'hermes gateway restart' in result['message']
+        assert restart_calls == ['called']
+
+    def test_apply_force_update_agent_uses_gateway_restart_status(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        ran = []
+
+        def fake_run(args, cwd, timeout=10):
+            ran.append(args)
+            if args[0] == 'fetch':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[0] == 'checkout':
+                return '', True
+            if args[0] == 'reset':
+                return '', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+        monkeypatch.setattr('api.updates.restart_active_profile_gateway', lambda: {'status': 'completed', 'message': 'Gateway service restarted successfully'})
+
+        result = upd.apply_force_update('agent')
+        assert result['ok'] is True
+        assert result['target'] == 'agent'
+        assert result['restart_scheduled'] is True
+        assert result['gateway_restart'] == 'completed'
+
+    def test_apply_force_update_agent_fails_when_gateway_restart_busy(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[0] == 'checkout':
+                return '', True
+            if args[0] == 'reset':
+                return '', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+        monkeypatch.setattr(
+            'api.updates.restart_active_profile_gateway',
+            lambda: {'status': 'busy', 'message': 'Restart already in progress. Please wait a moment and try again.'},
+        )
+
+        result = upd.apply_force_update('agent')
+        assert result['ok'] is False
+        assert result['target'] == 'agent'
+        assert result['gateway_restart'] == 'busy'
+        assert 'hermes gateway restart' in result['message']
+
+    def test_apply_update_webui_does_not_call_gateway_restart(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(
+            'api.updates.restart_active_profile_gateway',
+            lambda: (_ for _ in ()).throw(AssertionError('helper must not run for webui updates')),
+        )
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
+                return '', True
+            if args[:2] == ['status', '--porcelain']:
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[0] == 'pull':
+                return 'Already up to date.', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+
+        result = upd.apply_update('webui')
+        assert result['ok'] is True
+        assert result['target'] == 'webui'
+        assert result['restart_scheduled'] is True
 
 
 # ── api/routes.py ─────────────────────────────────────────────────────────────

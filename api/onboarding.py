@@ -572,7 +572,10 @@ def _provider_api_key_present(
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
         return True
 
-    providers_cfg = cfg.get("providers", {})
+    # ``cfg.get("providers", {})`` only returns the default when the key is
+    # absent; an explicit ``providers:`` (null) in config.yaml yields ``None``.
+    # ``... or {}`` degrades that null to an empty mapping (salvage of #3967).
+    providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         provider_cfg = providers_cfg.get(provider, {})
         if (

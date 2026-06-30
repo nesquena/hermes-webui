@@ -289,6 +289,7 @@ async function authorizeWorkspaceEscapeNavigation(item){
 
 let _workspacePanelActiveTab = 'files';
 let _renderSessionArtifactsTimer = null;
+let _workspaceTodosLastRenderedHash = null;
 
 function _setWorkspacePanelTabDataset(){
   const panel = document.querySelector('.rightpanel');
@@ -301,6 +302,35 @@ function scheduleRenderSessionArtifacts(){
     _renderSessionArtifactsTimer = null;
     renderSessionArtifacts();
   }, 100);
+}
+
+function _workspaceTodosHash(items){
+  if(!Array.isArray(items)) return '';
+  let h=items.length+'|';
+  for(let i=0;i<items.length;i++){
+    const t=items[i]||{};
+    h+=String(t.id==null?'':t.id)+'\x1f'+String(t.content==null?(t.text==null?'':t.text):t.content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
+  }
+  return h;
+}
+
+function _workspaceTodosTabIsActive(){
+  if(typeof window==='undefined'||window._workspaceTodosTab!==true) return false;
+  if(typeof document==='undefined') return false;
+  const rightPanel=document.querySelector('.rightpanel');
+  if(!rightPanel||!rightPanel.dataset||rightPanel.dataset.activeTab!=='todos') return false;
+  const tab=document.getElementById('workspaceTodosTab');
+  const panel=document.getElementById('workspaceTodosPanel');
+  return !!(tab&&panel&&!tab.hidden&&!panel.hidden);
+}
+
+function _resetWorkspaceTodosRenderCache(){
+  _workspaceTodosLastRenderedHash=null;
+}
+
+function _refreshWorkspacePanelTodos(){
+  if(!_workspaceTodosTabIsActive()) return;
+  _loadWorkspacePanelTodos();
 }
 
 if(typeof document !== 'undefined'){
@@ -348,25 +378,10 @@ function _loadWorkspacePanelTodos(){
     }
   }catch(e){ todos = []; }
   if(!todos.length){
-    panel.innerHTML = '<div style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px">No active tasks</div>';
+    panel.innerHTML = renderTodoEmptyState({centered:true});
     return;
   }
-  const statusIcon = (s) => {
-    if(s === 'completed') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
-    if(s === 'in_progress') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
-    if(s === 'cancelled') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-    // pending
-    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg>';
-  };
-  const items = todos.map(t => {
-    const s = t.status || 'pending';
-    const isDone = s === 'completed' || s === 'cancelled';
-    return `<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">`+
-      `<span style="flex-shrink:0;margin-top:2px">${statusIcon(s)}</span>`+
-      `<span style="font-size:12px;color:${isDone?'var(--muted)':'var(--text)'};text-decoration:${s==='cancelled'?'line-through':'none'}">${_escHtml(t.content||t.text||'')}</span>`+
-      `</div>`;
-  }).join('');
-  panel.innerHTML = `<div style="padding:4px 0">${items}</div>`;
+  panel.innerHTML = renderTodoRows(todos, {metadata:true});
 }
 
 function _escHtml(s){
