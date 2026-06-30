@@ -5193,13 +5193,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // turn boundary so the following syncTopbar() refetches the authoritative
           // effort exactly once (not per-token — the storm short-circuit is intact).
           if(typeof _lastReasoningFetchKey!=='undefined') _lastReasoningFetchKey=null;
-          // Arm the one-shot keep-open token for JUST this settled turn so a
-          // pinned follower's worklog stays height-stable (no STREAM_DONE shrink
-          // jump); disarm right after the render so historical worklogs collapse
-          // compact as normal. Scoped to the just-settled stream id.
+          // Arm one-shot keep-open so the JUST-settled worklog stays open on the
+          // settle render (height-stable swap, no shrink jump). Disarm, then run a
+          // scroll-PRESERVING collapse pass for BOTH pin states so the worklog
+          // returns to its copied live/user disclosure state (a pinned follower's
+          // scrollToBottom() only settles scroll, it does NOT re-render, so without
+          // this pass the forced-open DOM would persist for them). This unarmed
+          // render also populates the cache with the correctly-collapsed DOM, and
+          // the same-frame JS restore absorbs the collapse so there is no jump.
+          // (#5260 gate-cert: keep-open must be transient + uncached for everyone.)
           if(typeof _armKeepSettledWorklogOpen==='function') _armKeepSettledWorklogOpen(_settledStreamId);
           syncTopbar();renderMessages({preserveScroll:true});
           if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
+          if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot();
+          else renderMessages({preserveScroll:true});
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });

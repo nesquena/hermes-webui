@@ -124,3 +124,74 @@ def test_just_settled_turn_stays_open_for_both_pin_states_history_collapses():
     assert out["B_history_unpinned"] is False, "historical settled worklog must stay collapsed (unpinned)"
     assert out["A_after_disarm"] is False, "exception must be one-shot, cleared after the render"
     assert out["no_token"] is False, "no armed stream id → never keep open"
+
+
+def test_forced_open_dom_is_not_cached_while_token_armed():
+    # Round 9 (#5260 gate-cert, RED): the keep-open settle render force-opens the
+    # worklog; that DOM must NOT be written into _sessionHtmlCache while the token
+    # is armed, or it persists the forced-open worklog across session switches /
+    # restores and silently overrides a user-collapsed worklog.
+    armed = _function_body(UI_JS, "_isKeepSettledWorklogOpenArmed")
+    assert "_keepSettledWorklogOpenForStreamId!==null" in armed, (
+        "_isKeepSettledWorklogOpenArmed() must report whether the one-shot "
+        "keep-open token is currently armed."
+    )
+    # The cache-write guard in renderMessages must consult the armed check (via a
+    # typeof-safe local) so the forced-open settle render is excluded from
+    # _sessionHtmlCache.set().
+    assert "typeof _isKeepSettledWorklogOpenArmed==='function'" in UI_JS, (
+        "the cache guard must call _isKeepSettledWorklogOpenArmed() through a "
+        "typeof check so standalone renderMessages() harnesses still work (#5260)."
+    )
+    assert "!_keepOpenArmed" in UI_JS, (
+        "the _sessionHtmlCache population guard must include !_keepOpenArmed so the "
+        "forced-open settle render DOM is not cached (#5260)."
+    )
+    # Anchor it to the actual cache-write site: the armed check sits on the same
+    # condition as the INFLIGHT / transient-UI guards that gate the cache .set().
+    cache_guard_idx = UI_JS.index("!_keepOpenArmed")
+    window = UI_JS[cache_guard_idx : cache_guard_idx + 400]
+    assert "_sessionHtmlCache.set(" in window, (
+        "the !_keepOpenArmed guard must gate the "
+        "_sessionHtmlCache.set() call, not some unrelated branch."
+    )
+
+
+def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
+    # Round 9 (#5260 gate-cert, RED x2): disarming the token alone leaves the
+    # forced-open worklog on screen. The first re-push collapse-rendered only the
+    # NON-following path and let a pinned follower fall through to scrollToBottom()
+    # — but scrollToBottom() does NOT re-render (ui.js), so the armed-open DOM
+    # persisted for pinned followers. Fix: run the scroll-PRESERVING collapse pass
+    # UNCONDITIONALLY right after disarm (covers both pin states), THEN scrollToBottom()
+    # only for followers to re-settle at the tail. This makes keep-open genuinely
+    # one-frame for everyone.
+    disarm_idx = MESSAGES_JS.index("_disarmKeepSettledWorklogOpen()")
+    after = MESSAGES_JS[disarm_idx : disarm_idx + 700]
+    # The collapse pass must run after disarm for BOTH pin states.
+    assert "_renderMessagesWithScrollSnapshot()" in after, (
+        "after _disarmKeepSettledWorklogOpen() the STREAM_DONE handler must run a "
+        "scroll-preserving collapse pass (_renderMessagesWithScrollSnapshot) so the "
+        "forced-open worklog collapses back to the user/live state without the jump."
+    )
+    # The follower re-settle (scrollToBottom) must come AFTER the collapse render —
+    # otherwise a pinned follower keeps the forced-open DOM (scrollToBottom does not
+    # re-render). This is the exact pinned-path bug the second RED gate-cert caught.
+    collapse_pos = after.index("_renderMessagesWithScrollSnapshot()")
+    follow_pos = after.index("shouldFollowOnDone")
+    assert collapse_pos < follow_pos, (
+        "the collapse render must run BEFORE the shouldFollowOnDone scrollToBottom() "
+        "so BOTH pinned and unpinned readers get the worklog collapsed; scrollToBottom() "
+        "alone does not re-render and would leave a pinned follower forced-open."
+    )
+    assert "scrollToBottom()" in after, (
+        "a pinned/near-bottom follower must scrollToBottom() after the collapse "
+        "render to re-settle exactly at the tail."
+    )
+    # And the wrapper must exist and be scroll-preserving (capture → render →
+    # restore same-frame), so the collapse height change is absorbed by the JS
+    # restore rather than left to native scroll-anchoring (suppressed on mobile).
+    wrapper = _function_body(UI_JS, "_renderMessagesWithScrollSnapshot")
+    assert "_captureMessageScrollSnapshot()" in wrapper
+    assert "_restoreMessageScrollSnapshotSameFrame" in wrapper
+
