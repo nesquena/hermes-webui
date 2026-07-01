@@ -10540,6 +10540,16 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/health":
         return _handle_health(handler, parsed)
 
+    if parsed.path == "/api/server/restart/config":
+        from api.server_restart import restart_config
+        return j(handler, restart_config())
+
+    if parsed.path == "/api/server/restart/status":
+        from api.server_restart import read_restart_status
+        query = parse_qs(parsed.query)
+        restart_id = (query.get("id", ["latest"])[0] or "latest").strip()
+        return j(handler, read_restart_status(restart_id))
+
     if parsed.path == "/api/health/agent":
         payload = build_agent_health_payload()
         payload["gateway_chat"] = gateway_chat_config_status()
@@ -11992,6 +12002,10 @@ def handle_post(handler, parsed) -> bool:
         finally:
             if diag:
                 diag.finish()
+
+    if parsed.path == "/api/server/restart":
+        from api.server_restart import start_guarded_restart
+        return j(handler, start_guarded_restart(reason="settings"))
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)

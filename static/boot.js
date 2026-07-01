@@ -3092,6 +3092,91 @@ window.addEventListener('pageshow', async (event) => {
   }
 });
 
+function _restartText(key) {
+  return (typeof t === 'function' ? (t(key) || key) : key);
+}
+
+function _restartStatusLabelKey(status) {
+  const value = String(status || 'idle').replace(/[^a-z0-9_]/gi, '').toLowerCase() || 'idle';
+  return 'settings_restart_status_' + value;
+}
+
+function _setRestartServerStatus(status, detail) {
+  const el = $('restartServerStatus');
+  if (!el) return;
+  const key = _restartStatusLabelKey(status);
+  el.setAttribute('data-i18n', key);
+  const label = _restartText(key);
+  el.textContent = detail ? (label + ' · ' + detail) : label;
+}
+
+async function initServerRestartControls() {
+  const btn = $('btnRestartServer');
+  const status = $('restartServerStatus');
+  if (!btn || !status) return;
+  try {
+    const cfg = await api('/api/server/restart/config', { timeoutToast: false });
+    const enabled = !!(cfg && cfg.enabled);
+    btn.disabled = !enabled;
+    btn.style.opacity = enabled ? '' : '.6';
+    btn.title = enabled ? '' : _restartText('settings_restart_not_configured');
+    _setRestartServerStatus(enabled ? 'idle' : 'unavailable', enabled ? '' : _restartText('settings_restart_not_configured'));
+  } catch (_) {
+    btn.disabled = true;
+    btn.style.opacity = '.6';
+    _setRestartServerStatus('unavailable');
+  }
+}
+
+async function _pollRestartStatus(restartId) {
+  const startedAt = Date.now();
+  const poll = async () => {
+    try {
+      const suffix = restartId ? ('?id=' + encodeURIComponent(restartId)) : '';
+      const status = await api('/api/server/restart/status' + suffix, { timeoutToast: false });
+      const elapsed = Number(status && status.elapsed_seconds || Math.round((Date.now() - startedAt) / 1000));
+      _setRestartServerStatus(status && status.status, elapsed ? (elapsed + 's') : '');
+      if (status && status.status === 'succeeded') {
+        setTimeout(() => window.location.reload(), 500);
+        return;
+      }
+      if (status && (status.status === 'failed' || status.status === 'unavailable')) {
+        const btn = $('btnRestartServer');
+        if (btn) btn.disabled = false;
+        return;
+      }
+    } catch (_) {
+      _setRestartServerStatus('checking_health', Math.round((Date.now() - startedAt) / 1000) + 's');
+    }
+    setTimeout(poll, 1000);
+  };
+  poll();
+}
+
+async function restartServer() {
+  const ok = await showConfirmDialog({
+    title: _restartText('settings_restart_confirm_title'),
+    message: _restartText('settings_restart_confirm_message'),
+    confirmLabel: _restartText('settings_restart_confirm_btn'),
+    danger: false,
+  });
+  if (!ok) return;
+  const btn = $('btnRestartServer');
+  if (btn) btn.disabled = true;
+  _setRestartServerStatus('restarting');
+  try {
+    const result = await api('/api/server/restart', { method: 'POST' });
+    _setRestartServerStatus(result && result.status);
+    if (result && result.restart_id) _pollRestartStatus(result.restart_id);
+    if (result && (result.status === 'failed' || result.status === 'unavailable')) {
+      if (btn) btn.disabled = false;
+    }
+  } catch (err) {
+    _setRestartServerStatus('failed', (err && err.message) ? err.message : '');
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function shutdownServer() {
   const ok = await showConfirmDialog({
     title: (typeof t === 'function' ? t('settings_shutdown_confirm_title') : 'Stop Hermes WebUI'),
