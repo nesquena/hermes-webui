@@ -824,6 +824,46 @@ function _captureMessageViewportAnchor(){
   }
   return null;
 }
+// Temporarily suppress the browser's native overflow-anchor on a scroll
+// container so a JS scrollTop write is not double-compensated by the browser's
+// own scroll-anchoring in the same frame. Returns a release fn that restores the
+// prior inline value on the NEXT frame (after layout settles). No-op on desktop,
+// where the resting computed value is already `none` (CSS hover/fine-pointer
+// media query) — suppressing `none` changes nothing and the release restores the
+// same empty inline value. Only mobile (resting `auto`) is actually affected,
+// which is exactly where the double-compensation jump-back happens.
+//
+// Both this helper and _fixMobileScrollJank() gate on the SAME question — "is
+// the browser's native scroll-anchor layer currently active on this element?" —
+// routed through this one predicate so the two guards can't drift apart if the
+// CSS media query ever changes (maintainer review on #5338). The computed-value
+// test is more robust than a matchMedia('(hover:hover) and (pointer:fine)')
+// check because it reflects the real resting value, including any inline
+// override, not just the viewport media state.
+function _browserOverflowAnchorActive(el){
+  if(!el) return false;
+  try{ return getComputedStyle(el).overflowAnchor==='auto'; }catch(_){ return false; }
+}
+function _suppressBrowserOverflowAnchor(container){
+  if(!container||!container.style) return null;
+  // Only engage when the browser layer is actually active (auto). On desktop
+  // (none) there is nothing to suppress.
+  if(!_browserOverflowAnchorActive(container)) return null;
+  const prevInline=container.style.overflowAnchor||'';
+  container.style.overflowAnchor='none';
+  let released=false;
+  return function _release(){
+    if(released) return;
+    released=true;
+    const restore=()=>{
+      // Only restore if we still own the suppression (another render may have
+      // re-set it); compare against the value we wrote.
+      if(container.style.overflowAnchor==='none') container.style.overflowAnchor=prevInline;
+    };
+    if(typeof requestAnimationFrame==='function') requestAnimationFrame(restore);
+    else restore();
+  };
+}
 function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const container=$('messages');
   if(!container||!anchor) return false;
@@ -842,7 +882,19 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const rect=row.getBoundingClientRect();
   const targetTop=Number(anchor.topOffset)||0;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  // Mobile-only jump fix: the resting overflow-anchor on .messages is `auto` on
+  // touch devices (CSS media query keeps it `none` only for hover+fine-pointer
+  // desktops). When we write scrollTop here to realign the anchor row, a mobile
+  // browser's OWN overflow-anchor machinery ALSO shifts scrollTop in the same
+  // frame if content height above the viewport changed — the two compensations
+  // stack and yank the reader to an unrelated turn (the mobile jump-back). This is why the
+  // bug is mobile-only and never reproduces on a desktop (none) browser. Suppress
+  // the browser layer for this write; _releaseAnchorSuppression restores it next
+  // frame. Desktop is already `none`, so this is a no-op there.
+  const _releaseAnchorSuppression=(typeof _suppressBrowserOverflowAnchor==='function')
+    ? _suppressBrowserOverflowAnchor(container) : null;
   container.scrollTop+=(rect.top-containerRect.top)-targetTop;
+  if(_releaseAnchorSuppression) _releaseAnchorSuppression();
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
   else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
   return true;
@@ -7855,7 +7907,7 @@ function restoreLiveTurnHtmlForSession(sid){
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
-  requestAnimationFrame(()=>postProcessRenderedMessages(restored));
+  requestAnimationFrame(()=>_postProcessWithAnchorSuppression(restored));
   return true;
 }
 
@@ -12184,9 +12236,12 @@ function _restoreMessageScrollSnapshot(snapshot){
 window._fixMobileScrollJank=function _fixMobileScrollJank(){
   const el=document.getElementById('messages');
   if(!el) return;
-  // Desktop with a mouse: keep overflow-anchor:none (explicitly set by CSS).
-  // Mobile touch devices only: temporarily suppress anchor re-selection.
-  if(window.matchMedia('(hover:hover) and (pointer:fine)').matches) return;
+  // Route through the same "is the browser scroll-anchor layer active?" predicate
+  // as _suppressBrowserOverflowAnchor so the two guards can't drift (#5338 review).
+  // Desktop rests at overflow-anchor:none (predicate false) → nothing to suppress.
+  // Mobile touch devices rest at auto (predicate true) → temporarily suppress
+  // anchor re-selection during the wipe-and-rebuild gap.
+  if(!_browserOverflowAnchorActive(el)) return;
   el.style.overflowAnchor='none';
   requestAnimationFrame(()=>{
     if(el.style.overflowAnchor==='none') el.style.overflowAnchor='';
@@ -12475,7 +12530,7 @@ function renderMessages(options){
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
-      requestAnimationFrame(()=>postProcessRenderedMessages(inner));
+      requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -13829,7 +13884,7 @@ function renderMessages(options){
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>postProcessRenderedMessages(inner));
+  requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -14955,6 +15010,36 @@ async function regenerateResponse(btn) {
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
 
+// postProcessRenderedMessages() runs one frame AFTER the render + JS scroll
+// restore (it is scheduled via requestAnimationFrame). It performs syntax
+// highlighting, inline diff/csv/pdf/html/excalidraw hydration, mermaid/katex
+// rendering — all of which can CHANGE the height of rows above the viewport.
+//
+// On mobile the scroller rests at overflow-anchor:auto, so any above-viewport
+// height change in this post-render frame makes the browser's native anchor
+// engine compensate scrollTop a SECOND time — after the JS restore already
+// settled the reader's position — yanking them to an unrelated turn ("往回大跳").
+// The synchronous _fixMobileScrollJank / _suppressBrowserOverflowAnchor guards
+// only cover the render frame itself; they have already released by the time
+// this rAF fires. Wrap the post-process (and the media-reflow frame right after
+// it) in the same suppression so the browser layer cannot re-anchor during the
+// async settle window. Desktop rests at `none`, so this is a no-op there.
+function _postProcessWithAnchorSuppression(container){
+  const scroller=$('messages');
+  const release=(scroller&&typeof _suppressBrowserOverflowAnchor==='function')
+    ? _suppressBrowserOverflowAnchor(scroller) : null;
+  try{
+    postProcessRenderedMessages(container);
+  }finally{
+    // Hold suppression across ONE more frame so late media/layout reflow
+    // (image decode, katex/mermaid measure) cannot re-anchor either, then let
+    // _suppressBrowserOverflowAnchor's own rAF-deferred restore run.
+    if(release){
+      if(typeof requestAnimationFrame==='function') requestAnimationFrame(release);
+      else release();
+    }
+  }
+}
 function postProcessRenderedMessages(container) {
   highlightCode(container);
   addCopyButtons(container);
