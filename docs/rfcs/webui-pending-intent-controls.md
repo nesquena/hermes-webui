@@ -100,7 +100,7 @@ of Stop-and-send.
 
 ## Settings Model
 
-Current Settings expose `Busy input mode` with three choices:
+Current Settings expose `Default message mode` with three choices:
 
 - Queue follow-up
 - Interrupt current turn

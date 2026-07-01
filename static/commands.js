@@ -1273,12 +1273,12 @@ async function cmdGoal(args){
 }
 
 // ── Busy-input mode commands ──────────────────────────────────────────────
-// These commands let users override the default busy_input_mode setting for a
+// These commands let users override the default message mode setting for a
 // specific message.  They are only meaningful while the agent is running.
 
 /**
  * /queue <message> — Explicitly queue a message for the next turn.
- * Works regardless of the busy_input_mode setting.
+ * Works regardless of the default message mode setting.
  */
 async function cmdQueue(args){
   const msg=(args||'').trim();
@@ -1403,7 +1403,7 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
 }
 
 /**
- * Shared implementation for /steer and the busy_input_mode='steer' path.
+ * Shared implementation for /steer and the default_message_mode='steer' path.
  *
  * Tries the real steer endpoint first. On any non-accept response (no cached
  * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
