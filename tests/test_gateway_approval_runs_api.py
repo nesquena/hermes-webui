@@ -496,6 +496,65 @@ def test_gateway_runs_api_streaming_forwards_sanitized_client_identity_headers()
     assert events_req.get_header("Accept") == "text/event-stream"
 
 
+def test_gateway_runs_api_streaming_uses_server_scope_without_client_session_key():
+    """Authenticated Runs API requests fall back to the server-owned WebUI session scope."""
+    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming
+
+    requests = []
+    stream_id = "sid-runs-identity-default-scope"
+
+    class _JsonResponse:
+        def read(self, _limit=None):
+            return json.dumps({"run_id": "run-default-scope"}).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    class _SseResponse:
+        def __iter__(self):
+            return iter([b'data: {"event":"run.completed","output":"done"}\n', b'\n'])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    def fake_urlopen(req, *, timeout=None):
+        requests.append(req)
+        if req.full_url.endswith("/v1/runs"):
+            return _JsonResponse()
+        return _SseResponse()
+
+    try:
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_runs_api_streaming(
+                session_id="sess-default-scope",
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+                base_url="http://gw:8642",
+                api_key="secret",
+                prefill_messages=[],
+                body_extras={},
+                put_gateway_event=lambda *_args, **_kwargs: None,
+                cancel_event=threading.Event(),
+                client_identity={"name": "Person A"},
+            )
+    finally:
+        _STREAM_RUN_IDS.pop(stream_id, None)
+
+    assert len(requests) == 2
+    for req in requests:
+        assert req.get_header("Authorization") == "Bearer secret"
+        assert req.get_header("X-hermes-client-name") == "Person A"
+        assert req.get_header("X-hermes-session-key") == "webui:sess-default-scope"
+
+
 def test_gateway_runs_api_streaming_omits_session_key_header_when_gateway_unauthenticated():
     """Runs API must not send X-Hermes-Session-Key without gateway auth."""
     from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming
