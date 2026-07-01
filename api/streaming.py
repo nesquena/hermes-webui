@@ -1311,6 +1311,43 @@ def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = 
     ]
 
 
+# Structured markers the Hermes Agent stamps on synthetic scaffolding turns that
+# drive its internal verify-before-finish loop. The agent appends BOTH a
+# synthetic assistant "premature done" answer AND a synthetic ``user`` nudge
+# (e.g. "[System: You edited code in this turn, but the workspace does not have
+# fresh passing verification evidence yet...]") to preserve role alternation for
+# the next API turn, and flags each with one of these keys. They exist only to
+# run the loop; they must never surface as visible user/assistant turns in the
+# WebUI transcript. This mirrors ``run_agent._EPHEMERAL_SCAFFOLDING_FLAGS`` on
+# the agent side (which keeps them out of the durable session store); WebUI
+# honors the same markers when building the visible transcript. Keep roughly in
+# sync with the agent set. (#5334; same class as #3320/#3821/#4373/#4875)
+_SYNTHETIC_CONTROL_MESSAGE_FLAGS = (
+    "_verification_stop_synthetic",
+    "_pre_verify_synthetic",
+)
+
+
+def _is_synthetic_control_message(message) -> bool:
+    """Return True for an Agent-internal synthetic scaffolding turn flagged by marker."""
+    return isinstance(message, dict) and any(
+        message.get(flag) for flag in _SYNTHETIC_CONTROL_MESSAGE_FLAGS
+    )
+
+
+def _drop_synthetic_control_messages(messages):
+    """Remove Agent-internal synthetic scaffolding turns from the WebUI transcript.
+
+    Honors the structured ``_verification_stop_synthetic`` / ``_pre_verify_synthetic``
+    markers the agent already sets, rather than string-matching the nudge copy.
+    """
+    return [
+        msg
+        for msg in list(messages or [])
+        if not _is_synthetic_control_message(msg)
+    ]
+
+
 def _agent_result_tool_limit_reached(result) -> bool:
     """Return True when current-turn metadata says the tool iteration cap fired."""
     if not isinstance(result, dict):
@@ -4941,6 +4978,15 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         m for m in list(previous_display or [])
         if not _is_context_compression_marker(m)
     ]
+    # Drop Hermes Agent internal verify-loop scaffolding (synthetic "premature
+    # done" answer + the "[System: ...verification evidence...]" nudge) before
+    # it can become a visible user/assistant turn. The agent flags these with
+    # structured markers (_verification_stop_synthetic / _pre_verify_synthetic)
+    # and already keeps them out of its own durable store; honor the same
+    # markers here so they never leak into the WebUI transcript. Filter all
+    # three inputs consistently so prefix/delta detection below stays aligned.
+    # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
+    previous_display = _drop_synthetic_control_messages(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -4967,6 +5013,11 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     previous_display = _deduped
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
+    # Same marker filter for the model-history inputs: the synthetic verify-loop
+    # answer/nudge live in the agent's returned messages and prior context, and
+    # would otherwise slip into the merged transcript as a real delta. (#5334)
+    previous_context = _drop_synthetic_control_messages(previous_context)
+    result_messages = _drop_synthetic_control_messages(result_messages)
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
