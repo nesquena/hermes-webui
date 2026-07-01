@@ -18015,6 +18015,9 @@ def _handle_memory_read(handler, parsed=None):
 
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
+    phase1_removed_ids = set()
+
+    # Phase 1: Clean orphan session files (existing behavior).
     for p in SESSION_DIR.glob("*.json"):
         if p.name.startswith("_"):
             continue
@@ -18029,10 +18032,87 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                     SESSIONS.pop(p.stem, None)
                 p.unlink(missing_ok=True)
                 cleaned += 1
+                phase1_removed_ids.add(p.stem)
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
+
+    phase1_touched = bool(cleaned)
+    phase2_rewrote_index = False
+
+    # Phase 2: Index-only ghost sweep (#5331).
+    # Remove index entries that have no backing .json file and no
+    # in-memory session.  These are orphaned rows left by a write path that
+    # updated _index.json without writing the session sidecar.
+    #
+    # Title-agnostic (#5331): a session with no backing file has no real
+    # data regardless of its title, so even a non-"Untitled" stub in the
+    # index is a ghost.  A legitimate session always has a sidecar file.
+    #
+    # Holds _INDEX_WRITE_LOCK for the full read-modify-write cycle to
+    # prevent races with concurrent Session.save() / prune_session_from_index().
     if SESSION_INDEX_FILE.exists():
+        try:
+            from api.models import _INDEX_WRITE_LOCK, _safe_replace
+
+            with _INDEX_WRITE_LOCK:
+                index_file_data = json.loads(
+                    SESSION_INDEX_FILE.read_text(encoding="utf-8")
+                )
+                if isinstance(index_file_data, list):
+                    live_ids = {
+                        p.stem
+                        for p in SESSION_DIR.glob("*.json")
+                        if not p.name.startswith("_")
+                    }
+                    with LOCK:
+                        in_memory_ids = set(SESSIONS.keys())
+
+                    survivors = []
+                    for entry in index_file_data:
+                        sid = entry.get("session_id")
+                        if not sid or sid in live_ids or sid in in_memory_ids:
+                            survivors.append(entry)
+                            continue
+                        # Phase 1 already removed the backing file for this
+                        # sid, so the index entry is stale too.  Drop it
+                        # from the index without double-counting.
+                        if sid in phase1_removed_ids:
+                            continue
+                        # Index-only ghost — no backing file, not in memory.
+                        cleaned += 1
+                        # Ghost not added to survivors — removed from index.
+
+                    if cleaned > 0 and len(survivors) < len(index_file_data):
+                        _tmp = SESSION_INDEX_FILE.with_suffix(
+                            f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+                        )
+                        _payload = json.dumps(survivors, ensure_ascii=False, indent=2)
+                        try:
+                            with open(_tmp, "w", encoding="utf-8") as f:
+                                f.write(_payload)
+                                f.flush()
+                                os.fsync(f.fileno())
+                            _safe_replace(_tmp, SESSION_INDEX_FILE)
+                            phase2_rewrote_index = True
+                        except Exception:
+                            try:
+                                _tmp.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            raise
+        except Exception:
+            logger.debug(
+                "Failed to clean up index-only session entries", exc_info=True
+            )
+
+    # Post-cleanup index invalidation.
+    # When Phase 1 removed files and Phase 2 didn't already clean the
+    # index, delete the index to force a fresh rebuild from disk on the
+    # next sidebar poll.  When Phase 2 succeeded the index is already
+    # correct, so keep it (avoids a wasteful rebuild).
+    if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
+
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
