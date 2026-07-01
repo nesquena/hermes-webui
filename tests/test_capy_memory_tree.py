@@ -7055,7 +7055,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_commit_comment_r
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_comment_reactions_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_comment_reactions_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch
 ):
     root = tmp_path / "capy-memory"
@@ -7099,7 +7099,8 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_comment_r
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("nothing-indexed-after-commit-comment-reaction-drift", limit=5)
-    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("space-commit-comment-reaction-drift", limit=5)
+    serialized = json.dumps({"result": result, "search": search, "relevant": relevant}, sort_keys=True).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["job_id"] == receipt["job_id"]
@@ -7108,6 +7109,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_comment_r
     assert read_calls == []
     assert not (root / "vault" / "github-commit-comment-reactions-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "query-fragment-reactor",
         "secret_value_do_not_leak",
