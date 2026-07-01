@@ -14367,11 +14367,35 @@ def _handle_session_export(handler, parsed):
     if not _profiles_match(getattr(s, "profile", None), active_profile):
         return bad(handler, "Session not found", 404)
     safe = redact_session_data(s.__dict__)
-    payload = json.dumps(safe, ensure_ascii=False, indent=2)
+    qs = parse_qs(parsed.query)
+    fmt = qs.get("format", ["json"])[0].lower()
+    if fmt == "html":
+        from api.session_export_html import render_session_html
+        theme = qs.get("theme", ["dark"])[0].lower()
+        palette: dict | None = None
+        raw_palette = qs.get("palette", [""])[0]
+        if raw_palette:
+            try:
+                import base64 as _b64
+                decoded = _b64.b64decode(raw_palette, validate=False).decode("utf-8")
+                parsed_palette = json.loads(decoded)
+                if isinstance(parsed_palette, dict):
+                    # Cap payload so a hostile client can't blow up the response.
+                    if len(parsed_palette) <= 64:
+                        palette = parsed_palette
+            except Exception:
+                palette = None
+        payload = render_session_html(safe, theme=theme, palette=palette)
+        content_type = "text/html; charset=utf-8"
+        ext = "html"
+    else:
+        payload = json.dumps(safe, ensure_ascii=False, indent=2)
+        content_type = "application/json; charset=utf-8"
+        ext = "json"
     handler.send_response(200)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Type", content_type)
     handler.send_header(
-        "Content-Disposition", f'attachment; filename="hermes-{sid}.json"'
+        "Content-Disposition", f'attachment; filename="hermes-{sid}.{ext}"'
     )
     handler.send_header("Content-Length", str(len(payload.encode("utf-8"))))
     handler.send_header("Cache-Control", "no-store")
