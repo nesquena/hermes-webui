@@ -2141,6 +2141,11 @@
   .cron-last-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:4px;}
   /* Skills panel */
   .skills-list{flex:1;overflow-y:auto;padding:0 8px 8px;}
+  .skills-sort{display:flex;align-items:center;gap:4px;padding:2px 8px 4px;}
+  .skills-sort-label{font-size:10px;color:var(--muted);margin-right:2px;}
+  .skills-sort-btn{font-size:10px;padding:2px 8px;border-radius:12px;border:1px solid var(--border2);background:transparent;color:var(--muted);cursor:pointer;transition:all .12s;}
+  .skills-sort-btn:hover{color:var(--text);border-color:var(--text);}
+  .skills-sort-btn.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent);}
   .skills-category{margin-bottom:4px;}
   .skills-cat-header{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 6px 4px;cursor:pointer;display:flex;align-items:center;gap:2px;user-select:none;}
   .skills-cat-header:hover{color:var(--text);}

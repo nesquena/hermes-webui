@@ -253,6 +253,11 @@
         </div>
       </div>
       <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()"></div>
+      <div class="skills-sort" id="skillsSortBar">
+        <span class="skills-sort-label" data-i18n="skills_sort_label">Sort:</span>
+        <button class="skills-sort-btn active" data-sort="name" onclick="setSkillsSort('name')" data-i18n="skills_sort_name">Name</button>
+        <button class="skills-sort-btn" data-sort="modified" onclick="setSkillsSort('modified')" data-i18n="skills_sort_modified">Modified</button>
+      </div>
       <div class="skills-list" id="skillsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Memory panel -->
