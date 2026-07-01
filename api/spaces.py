@@ -58,7 +58,9 @@ _OMITTED_PAYLOAD_KEYS = {
     "memorycontext",
     "password",
     "raw_context",
+    "raw_memory_context",
     "rawcontext",
+    "rawmemorycontext",
     "renderer",
     "required_gates",
     "requiredgates",
@@ -122,7 +124,26 @@ _SPACE_REPAIR_UNSAFE_TEXT_RE = re.compile(
     r"(^|[^a-z0-9])(api[\s_-]?auth|api[\s_-]?key|apiauth|apikey|auth(?:orization)?|bearer|body|cookie|credential|credentials|data|generated[ _-]?(?:code|widget[ _-]?body)|html|on[a-z]+|password|raw[ _-]?prompt|renderer|script|secret|source|token)([^a-z0-9]|$)",
     re.IGNORECASE,
 )
-_SPACE_REPAIR_OMITTED_PAYLOAD_KEYS = _OMITTED_PAYLOAD_KEYS | {"body", "generated_body", "prompt", "raw_prompt"}
+_OPERATOR_NOTE_VALUE_RE = re.compile(
+    r"(^|[^a-z0-9])operator[\s_-]*notes?([^a-z0-9]|$)",
+    re.IGNORECASE,
+)
+_SPACE_REPAIR_OMITTED_PAYLOAD_KEYS = _OMITTED_PAYLOAD_KEYS | {
+    "advisory_context",
+    "advisorycontext",
+    "body",
+    "context_authority",
+    "contextauthority",
+    "generated_body",
+    "operator_note",
+    "operator_notes",
+    "operatornote",
+    "operatornotes",
+    "prompt",
+    "raw_prompt",
+    "trusted_system_memory",
+    "trustedsystemmemory",
+}
 _TRUSTED_SYSTEM_WIDGETS = {
     "chat": {"id": "system-chat", "title": "Chat"},
     "workspaces": {"id": "system-workspaces", "title": "Spaces"},
@@ -852,6 +873,26 @@ def _browser_surface_template_action_policy_receipt(preflight_receipt: dict[str,
         approval_gates=["destructive_external_action"],
         prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
         model_route_hint="hint:reasoning",
+    )
+
+
+def _camera_dashboard_template_prompt_preflight_receipt() -> dict[str, Any]:
+    from api.capy_policy import prompt_preflight
+
+    return prompt_preflight(
+        "Install camera dashboard template with explicit user approval required for camera stream review and network-adjacent actions.",
+        boundary="browser_surface",
+    )
+
+
+def _camera_dashboard_template_action_policy_receipt(preflight_receipt: dict[str, Any]) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        "space.template.install.camera",
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
+        model_route_hint="hint:vision",
     )
 
 
@@ -2136,6 +2177,7 @@ def _space_create_output_compaction_receipt(
     space: dict[str, Any],
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    progress_events: list[dict[str, Any]] | None = None,
     memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for source-style Space create.
@@ -2165,6 +2207,11 @@ def _space_create_output_compaction_receipt(
         _payload_text_summary((progress_event or {}).get("run_id") or f"space.create:{safe_space_id}", 160)
         or f"space.create:{safe_space_id}"
     )
+    progress_event_types = ", ".join(
+        _payload_text_summary(event.get("event_type"), 40) or "tool.completed"
+        for event in (progress_events or ([progress_event] if isinstance(progress_event, dict) else []))
+        if isinstance(event, dict)
+    )
     lines = [
         "Capy Spaces tool action metadata-only receipt",
         f"space_action: {safe_action}",
@@ -2179,6 +2226,8 @@ def _space_create_output_compaction_receipt(
         "metadata_only: true",
         "raw_prompt_stored: false",
     ]
+    if progress_event_types:
+        lines.append(f"progress_event_types: {progress_event_types}")
     if isinstance(memory_advisory, dict):
         advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
         context_authority = (
@@ -2232,6 +2281,7 @@ def _space_tool_action_output_compaction_receipt(
     revision_event_ids: list[str] | None = None,
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    progress_events: list[dict[str, Any]] | None = None,
     memory_advisory: dict[str, Any] | None = None,
     include_memory_required_gates: bool = False,
     include_widget_count: bool = True,
@@ -2284,25 +2334,6 @@ def _space_tool_action_output_compaction_receipt(
         lines.append(f"widget_count: {safe_widget_count}")
     if safe_space_count is not None:
         lines.append(f"space_count: {safe_space_count}")
-    if public_revision_event_ids:
-        if len(public_revision_event_ids) == 1:
-            lines.append(f"revision_event_id: {public_revision_event_ids[0]}")
-        else:
-            lines.append(f"revision_event_ids: {', '.join(public_revision_event_ids[:8])}")
-    if isinstance(autonomy_policy, dict):
-        lines.append(
-            f"prompt_preflight_status: {_payload_text_summary(autonomy_policy.get('prompt_preflight_status') or 'required', 40) or 'required'}"
-        )
-        lines.append(f"autonomy_action: {_payload_text_summary(autonomy_policy.get('action') or safe_action, 120) or safe_action}")
-        lines.append(
-            f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:fast', 80) or 'hint:fast'}"
-        )
-    if isinstance(progress_event, dict):
-        fallback_progress_id = f"space.action:{safe_target_space_id or safe_space_id or safe_source_space_id or 'unknown-space'}"
-        lines.append(
-            f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or fallback_progress_id, 160) or fallback_progress_id}"
-        )
-        lines.append(f"progress_status: {_payload_text_summary(progress_event.get('status') or 'completed', 40) or 'completed'}")
     if isinstance(memory_advisory, dict):
         advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
         context_authority = (
@@ -2322,6 +2353,32 @@ def _space_tool_action_output_compaction_receipt(
         lines.append(f"can_bypass_safety_gates: {can_bypass}")
         if safe_required_gates and include_memory_required_gates:
             lines.append(f"required_gates: {', '.join(safe_required_gates)}")
+    if public_revision_event_ids:
+        if len(public_revision_event_ids) == 1:
+            lines.append(f"revision_event_id: {public_revision_event_ids[0]}")
+        else:
+            lines.append(f"revision_event_ids: {', '.join(public_revision_event_ids[:8])}")
+    if isinstance(autonomy_policy, dict):
+        lines.append(
+            f"prompt_preflight_status: {_payload_text_summary(autonomy_policy.get('prompt_preflight_status') or 'required', 40) or 'required'}"
+        )
+        lines.append(f"autonomy_action: {_payload_text_summary(autonomy_policy.get('action') or safe_action, 120) or safe_action}")
+        lines.append(
+            f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:fast', 80) or 'hint:fast'}"
+        )
+    if isinstance(progress_event, dict):
+        fallback_progress_id = f"space.action:{safe_target_space_id or safe_space_id or safe_source_space_id or 'unknown-space'}"
+        progress_event_types = ", ".join(
+            _payload_text_summary(event.get("event_type"), 40) or "tool.completed"
+            for event in (progress_events or [])
+            if isinstance(event, dict)
+        )
+        lines.append(
+            f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or fallback_progress_id, 160) or fallback_progress_id}"
+        )
+        lines.append(f"progress_status: {_payload_text_summary(progress_event.get('status') or 'completed', 40) or 'completed'}")
+        if progress_event_types:
+            lines.append(f"progress_event_types: {progress_event_types}")
 
     retained_space_id = safe_target_space_id or safe_space_id or safe_source_space_id
     artifact_handles: list[dict[str, str]] = []
@@ -2362,6 +2419,148 @@ def _space_tool_action_output_compaction_receipt(
     if receipt.get("redaction_status") == "none":
         receipt["redaction_status"] = "metadata_only"
     return receipt
+
+
+
+def _space_lifecycle_safe_space_id(space_id: Any) -> str | None:
+    """Return a safe public Space id for lifecycle receipts, or None."""
+    if space_id is None:
+        return None
+    try:
+        sid = validate_space_id(str(space_id or ""))
+    except ValueError:
+        return None
+    try:
+        from api.capy_progress import _safe_public_id  # type: ignore[attr-defined]
+
+        return sid if _safe_public_id(sid) == sid else None
+    except Exception:
+        lowered = sid.lower()
+        if _SECRET_LIKE_VALUE_RE.search(sid):
+            return None
+        unsafe_markers = ("renderer", "script", "source", "body", "credential", "secret", "token")
+        if any(marker in lowered for marker in unsafe_markers):
+            return None
+        return sid
+
+
+def _active_space_lifecycle_run_id(action: str, space_id: str | None = None) -> str:
+    safe_action = _context_value(action, 120) or "space.lifecycle"
+    if safe_action not in {"space.activate", "space.deactivate"}:
+        safe_action = "space.lifecycle"
+    safe_space_id = _space_lifecycle_safe_space_id(space_id)
+    if safe_space_id:
+        return f"{safe_action}:{safe_space_id}"
+    return f"{safe_action}:session"
+
+
+def _record_active_space_lifecycle_progress_event(
+    action: str,
+    *,
+    space_id: str | None = None,
+    event_type: str = "tool.completed",
+) -> dict[str, Any]:
+    """Best-effort metadata-only progress producer for active Space switching."""
+    safe_action = _context_value(action, 120) or "space.lifecycle"
+    if safe_action not in {"space.activate", "space.deactivate"}:
+        safe_action = "space.lifecycle"
+    safe_event_type = str(event_type or "tool.completed").strip().lower()
+    if safe_event_type not in {"tool.started", "tool.completed"}:
+        safe_event_type = "tool.completed"
+    safe_space_id = _space_lifecycle_safe_space_id(space_id)
+    run_id = _active_space_lifecycle_run_id(safe_action, safe_space_id)
+    try:
+        from api.capy_progress import record_progress_event
+
+        payload = {"event_type": safe_event_type, "run_id": run_id}
+        if safe_space_id:
+            payload["space_id"] = safe_space_id
+        return record_progress_event(payload)
+    except Exception:
+        fallback = {
+            "stored": False,
+            "queued": False,
+            "event_type": safe_event_type,
+            "family": "tool",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+        if safe_space_id:
+            fallback["space_id"] = safe_space_id
+        return fallback
+
+
+def start_active_space_lifecycle_receipt(action: str, *, space_id: str | None = None) -> dict[str, Any]:
+    """Record a metadata-only lifecycle start after route preconditions pass."""
+    return _record_active_space_lifecycle_progress_event(action, space_id=space_id, event_type="tool.started")
+
+
+def _active_space_lifecycle_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    return _required_prompt_preflight_receipt(
+        action,
+        boundary="active_space_switch",
+        checks=["active_space_context_switch", "prompt_injection_preflight_required"],
+    )
+
+
+def _active_space_lifecycle_action_policy_receipt(
+    action: str,
+    preflight_receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    prompt_preflight_status = "required"
+    if isinstance(preflight_receipt, dict):
+        prompt_preflight_status = str(preflight_receipt.get("status") or "required")
+    return action_policy_receipt(
+        action,
+        approval_gates=["creator_commit"],
+        prompt_preflight_status=prompt_preflight_status,
+        model_route_hint="hint:fast",
+    )
+
+
+def active_space_lifecycle_receipts(
+    action: str,
+    *,
+    space_id: str | None = None,
+    progress_started: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return metadata-only trust envelopes for successful active Space switching."""
+    safe_action = _context_value(action, 120) or "space.lifecycle"
+    if safe_action not in {"space.activate", "space.deactivate"}:
+        safe_action = "space.lifecycle"
+    safe_space_id = _space_lifecycle_safe_space_id(space_id)
+    prompt_preflight = _active_space_lifecycle_required_prompt_preflight_receipt(safe_action)
+    autonomy_policy = _active_space_lifecycle_action_policy_receipt(safe_action, prompt_preflight)
+    memory_advisory = _memory_advisory_public_envelope()
+    progress_completed = _record_active_space_lifecycle_progress_event(
+        safe_action,
+        space_id=safe_space_id,
+        event_type="tool.completed",
+    )
+    progress_events = [
+        event for event in (progress_started, progress_completed) if isinstance(event, dict)
+    ]
+    output_compaction = _space_tool_action_output_compaction_receipt(
+        action=safe_action,
+        space_id=safe_space_id,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_completed,
+        progress_events=progress_events,
+        memory_advisory=memory_advisory,
+        include_memory_required_gates=True,
+        include_widget_count=False,
+    )
+    return {
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "memory_advisory": memory_advisory,
+        "progress_event": progress_completed,
+        "progress_events": progress_events,
+        "output_compaction": output_compaction,
+    }
 
 
 
@@ -2784,6 +2983,29 @@ def _space_widget_delete_prompt_preflight_receipt(widget_count: int, *, delete_a
 
 
 
+def _space_widget_toggle_required_prompt_preflight_receipt(action: str, widget_count: int) -> dict[str, Any]:
+    """Return metadata-only required preflight evidence for widget layout toggles."""
+    safe_action = _context_value(action, 120) or "space.spaces.togglewidgets"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "creator_commit",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": [
+            "widget_layout_toggle_preflight_required",
+            "metadata_only_payload_required",
+            "prompt_injection_preflight_required",
+        ],
+        "widget_count": max(0, int(widget_count or 0)),
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+
 def _space_delete_prompt_preflight_receipt(widget_count: int) -> dict[str, Any]:
     """Preflight metadata-only Space delete intent before persisted mutation.
 
@@ -2937,15 +3159,40 @@ def _memory_advisory_public_envelope() -> dict[str, Any]:
         envelope = _memory_advisory_envelope()
     except Exception:
         envelope = {}
-    raw_gates = envelope.get("required_gates") if isinstance(envelope, dict) else None
+    return _memory_advisory_public_summary(envelope)
+
+
+def _memory_advisory_public_summary(advisory: Any) -> dict[str, Any]:
+    """Return a metadata-only/no-authority public advisory envelope.
+
+    Persisted advisory receipts are treated as untrusted input when listed back
+    out. Only bounded public metadata is retained; authority-bearing fields are
+    clamped to the server-side safe values.
+    """
+    default_gates = [
+        "prompt_preflight",
+        "approval",
+        "sandbox_preview",
+        "visual_qa",
+        "rollback_recovery",
+    ]
+    allowed_gates = set(default_gates)
+    advisory_is_safe_public_shape = (
+        isinstance(advisory, dict)
+        and advisory.get("metadata_only") is True
+        and advisory.get("advisory_context") is True
+        and advisory.get("context_authority") == "untrusted_advisory"
+        and advisory.get("can_bypass_safety_gates") is False
+    )
+    raw_gates = advisory.get("required_gates") if advisory_is_safe_public_shape else None
     gates: list[str] = []
     if isinstance(raw_gates, list):
         for gate in raw_gates:
             safe_gate = _active_context_value(gate, 80)
-            if safe_gate and safe_gate != "[REDACTED]" and safe_gate not in gates:
+            if safe_gate in allowed_gates and safe_gate not in gates:
                 gates.append(safe_gate)
     if not gates:
-        gates = ["prompt_preflight", "approval", "sandbox_preview", "visual_qa", "rollback_recovery"]
+        gates = list(default_gates)
     return {
         "metadata_only": True,
         "advisory_context": True,
@@ -3096,7 +3343,11 @@ def _space_repair_text_summary(value: Any, limit: int = 500) -> str:
     text = _payload_text_summary(value, limit)
     if text == "[REDACTED]":
         return text
-    if text and (_SPACE_REPAIR_UNSAFE_TEXT_RE.search(text) or re.search(r"<\s*/?\s*[a-z][^>]*>", text, re.IGNORECASE)):
+    if text and (
+        _OPERATOR_NOTE_VALUE_RE.search(text)
+        or _SPACE_REPAIR_UNSAFE_TEXT_RE.search(text)
+        or re.search(r"<\s*/?\s*[a-z][^>]*>", text, re.IGNORECASE)
+    ):
         return "[REDACTED]"
     return text
 
@@ -3110,6 +3361,12 @@ def _space_repair_marker_text(value: Any, limit: int = 200) -> str:
     text = _context_value(value, limit)
     text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
     return re.sub(r"[^a-z0-9]+", " ", text.lower())
+
+
+def _space_repair_operator_note_key_is_unsafe(key: str) -> bool:
+    """Block only exact normalized operator-note keys, not benign substrings."""
+    compact_marker = _space_repair_marker_text(key).replace(" ", "")
+    return compact_marker in {"operatornote", "operatornotes"}
 
 
 def _space_repair_payload_key_is_safe(key: str) -> bool:
@@ -3135,9 +3392,15 @@ def _space_repair_payload_key_is_safe(key: str) -> bool:
         "source",
         "token",
     )
+    omitted_compact_markers = {
+        re.sub(r"[^a-z0-9]+", "", str(omitted_key or "").lower())
+        for omitted_key in _SPACE_REPAIR_OMITTED_PAYLOAD_KEYS
+    }
     return (
         bool(lowered)
         and lowered not in _SPACE_REPAIR_OMITTED_PAYLOAD_KEYS
+        and compact_marker not in omitted_compact_markers
+        and not _space_repair_operator_note_key_is_unsafe(raw_text)
         and not any(marker in raw_lowered for marker in _EXECUTABLE_VALUE_MARKERS)
         and not re.search(r"<\s*/?\s*[a-z][^>]*>", raw_text, re.IGNORECASE)
         and not _SPACE_REPAIR_UNSAFE_TEXT_RE.search(marker_text)
@@ -3917,6 +4180,7 @@ def create_space(
     prompt_preflight = (
         _space_create_prompt_preflight_receipt(payload) if (preflight_agent_instructions or include_safety_receipts) else None
     )
+    progress_started: dict[str, Any] | None = None
     with _SPACE_MANIFEST_LOCK:
         _ensure_dirs()
         name = str(payload.get("name") or "Untitled Space").strip() or "Untitled Space"
@@ -3924,6 +4188,12 @@ def create_space(
         space_id = validate_space_id(requested_id) if requested_id else _unique_space_id(name)
         if _manifest_path(space_id).exists():
             raise FileExistsError("Space already exists")
+        if include_safety_receipts:
+            progress_started = _record_space_tool_progress_event(
+                space_id,
+                run_prefix="space.create",
+                event_type="tool.started",
+            )
         now = time.time()
         space = {
             "schema_version": SCHEMA_VERSION,
@@ -3950,13 +4220,19 @@ def create_space(
     receipt_space["widget_count"] = len(receipt_space.get("widgets") or [])
     if prompt_preflight is not None:
         receipt_space["agent_instructions"] = "[metadata-only instructions stored after prompt preflight]"
-    progress_event = _record_space_tool_progress_event(detail["space_id"], run_prefix="space.create")
+    progress_event = _record_space_tool_progress_event(
+        detail["space_id"],
+        run_prefix="space.create",
+        event_type="tool.completed",
+    )
+    progress_events = [event for event in (progress_started, progress_event) if isinstance(event, dict)]
     autonomy_policy = _space_create_action_policy_receipt(action, prompt_preflight)
     memory_advisory = _memory_advisory_public_envelope()
     response: dict[str, Any] = {
         "space": receipt_space,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "progress_events": progress_events,
         "memory_advisory": memory_advisory,
         "output_compaction": _space_create_output_compaction_receipt(
             action=action,
@@ -3964,6 +4240,7 @@ def create_space(
             space=receipt_space,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            progress_events=progress_events,
             memory_advisory=memory_advisory,
         ),
     }
@@ -3976,10 +4253,43 @@ def _safe_session_title_for_space(title: Any) -> str:
     text = _context_value(title, 80)
     if not text or text.lower() == "untitled":
         return "Chat Context Space"
-    if re.search(r"api[_-]?key|authorization|bearer|cookie|password|secret|token", text, re.IGNORECASE):
+    if re.search(
+        r"api[\s_-]?auth|api[\s_-]?key|authorization|bearer|cookie|credential|credentials|forged_memory_authority|generated[\s_-]?(?:code|widget[\s_-]?body)|html|password|raw[\s_-]?prompt|renderer|script|secret|source|token|trusted_system_memory",
+        text,
+        re.IGNORECASE,
+    ):
         return "Chat Context Space"
     text = re.sub(r"[<>]", "", text).strip() or "Chat Context"
     return text if text.lower().endswith("space") else f"{text} Space"
+
+
+def _space_create_from_session_prompt_preflight_receipt() -> dict[str, Any]:
+    """Return fixed metadata-only preflight evidence for chat-to-Space creation.
+
+    This boundary intentionally does not hash or inspect chat message bodies,
+    pending prompts, or composer drafts. The boundary remains prompt-preflight
+    gated, so expose a required upstream gate without evaluating or storing raw
+    chat text.
+    """
+    return {
+        "available": True,
+        "action": "capy.prompt_preflight",
+        "target_action": "space.create_from_session",
+        "boundary": "create_from_session",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": [
+            "create_from_session_metadata_only",
+            "chat_messages_omitted",
+            "pending_prompt_omitted",
+            "composer_draft_omitted",
+            "prompt_injection_preflight_required",
+        ],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
 
 
 def create_space_from_session_metadata(session: Any) -> dict[str, Any]:
@@ -3991,23 +4301,55 @@ def create_space_from_session_metadata(session: Any) -> dict[str, Any]:
     """
     title = getattr(session, "title", "")
     name = _safe_session_title_for_space(title)
-    return create_space(
-        {
-            "name": name,
-            "description": "Trusted starter created from the current chat. Message bodies stay in chat and are not copied into Space metadata.",
-            "template": "chat-context",
-            "layout": {"columns": 24},
-            "widgets": [
-                {
-                    "id": "chat-context",
-                    "kind": "status",
-                    "title": "Linked chat context",
-                    "layout": {"x": 0, "y": 0, "w": 8, "h": 4},
-                }
-            ],
-            "capabilities": {"trusted_session_context": True},
-        }
+    payload = {
+        "name": name,
+        "description": "Trusted starter created from the current chat. Message bodies stay in chat and are not copied into Space metadata.",
+        "template": "chat-context",
+        "layout": {"columns": 24},
+        "widgets": [
+            {
+                "id": "chat-context",
+                "kind": "status",
+                "title": "Linked chat context",
+                "layout": {"x": 0, "y": 0, "w": 8, "h": 4},
+            }
+        ],
+        "capabilities": {"trusted_session_context": True},
+    }
+    detail = create_space(payload)
+    receipt_space = dict(detail)
+    receipt_space["widget_count"] = len(receipt_space.get("widgets") or [])
+    prompt_preflight = _space_create_from_session_prompt_preflight_receipt()
+    autonomy_policy = _space_create_action_policy_receipt("space.create_from_session", prompt_preflight)
+    progress_started = _record_space_tool_progress_event(
+        detail["space_id"],
+        run_prefix="space.create_from_session",
+        event_type="tool.started",
     )
+    progress_event = _record_space_tool_progress_event(
+        detail["space_id"],
+        run_prefix="space.create_from_session",
+        event_type="tool.completed",
+    )
+    progress_events = [progress_started, progress_event]
+    memory_advisory = _memory_advisory_public_envelope()
+    return {
+        "space": receipt_space,
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "progress_events": progress_events,
+        "memory_advisory": memory_advisory,
+        "output_compaction": _space_create_output_compaction_receipt(
+            action="space.create_from_session",
+            raw_payload=payload,
+            space=receipt_space,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+            progress_events=progress_events,
+            memory_advisory=memory_advisory,
+        ),
+    }
 
 
 def duplicate_space_metadata_only(space_id: str, *, target_space_id: str | None = None) -> dict[str, Any]:
@@ -4057,12 +4399,28 @@ def duplicate_space_metadata_only(space_id: str, *, target_space_id: str | None 
     }
     widgets = source.get("widgets") if isinstance(source.get("widgets"), list) else []
     payload["widgets"] = [_space_tool_widget_payload(widget) for widget in widgets if isinstance(widget, dict)]
-    created = create_space(payload)
+    with _SPACE_MANIFEST_LOCK:
+        if _manifest_path(duplicate_space_id).exists():
+            raise FileExistsError("Space already exists")
+        progress_started = _record_space_tool_progress_event(
+            duplicate_space_id,
+            run_prefix="space.duplicate",
+            event_type="tool.started",
+        )
+        created = create_space(payload)
+    progress_event = _record_space_tool_progress_event(
+        created["space_id"],
+        run_prefix="space.duplicate",
+        event_type="tool.completed",
+    )
+    progress_events = [progress_started, progress_event]
     return {
         "source_space_id": source_id,
         "space_id": created["space_id"],
         "revision_event_id": created["revision_event_id"],
         "prompt_preflight": instruction_preflight,
+        "progress_event": progress_event,
+        "progress_events": progress_events,
     }
 
 
@@ -7439,8 +7797,10 @@ def repair_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
     space["widgets"] = widgets
     _space_tool_sanitize_widgets(space)
+    progress_started = _record_space_repair_progress_event(space_id, event_type="tool.started")
     saved = _write_manifest(space, "space.layout.repaired", {"widget_ids": repaired_ids})
-    progress_event = _record_space_repair_progress_event(saved["space_id"])
+    progress_event = _record_space_repair_progress_event(saved["space_id"], event_type="tool.completed")
+    progress_events = [progress_started, progress_event]
     return {
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
@@ -7449,6 +7809,7 @@ def repair_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
         "space": read_space_detail(saved["space_id"]),
         "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
+        "progress_events": progress_events,
     }
 
 
@@ -7705,6 +8066,7 @@ def _browser_surface_output_compaction_receipt(
     policy: dict[str, Any],
     progress_event: dict[str, Any],
     memory_advisory: dict[str, Any],
+    progress_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for receipt-only browser tools."""
     from api.capy_compaction import compact_output
@@ -7714,6 +8076,11 @@ def _browser_surface_output_compaction_receipt(
     advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
     context_authority = _context_value(memory_advisory.get("context_authority") or "untrusted_advisory", 80) or "untrusted_advisory"
     can_bypass = "true" if memory_advisory.get("can_bypass_safety_gates") is True else "false"
+    progress_event_types = ", ".join(
+        _context_value(event.get("event_type"), 40) or "tool.completed"
+        for event in (progress_events or [progress_event])
+        if isinstance(event, dict)
+    ) or "tool.completed"
     surface_bits = [
         f"{key}: {value}"
         for key, value in sorted(surface.items())
@@ -7731,6 +8098,7 @@ def _browser_surface_output_compaction_receipt(
         f"context_authority: {context_authority}",
         f"can_bypass_safety_gates: {can_bypass}",
         f"progress_run_id: {_context_value(progress_event.get('run_id'), 160) or f'browser.{safe_kind}'}",
+        f"progress_event_types: {progress_event_types}",
         *surface_bits,
     ]
     receipt = compact_output(
@@ -7772,7 +8140,17 @@ def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[
         surface["typed_text_stored"] = False
     preflight = _browser_surface_prompt_preflight_receipt(action, payload)
     policy = _browser_surface_action_policy_receipt(action, preflight)
-    progress_event = _record_space_tool_progress_event(space_id, run_prefix=f"browser.{kind}")
+    progress_started = _record_space_tool_progress_event(
+        space_id,
+        run_prefix=f"browser.{kind}",
+        event_type="tool.started",
+    )
+    progress_event = _record_space_tool_progress_event(
+        space_id,
+        run_prefix=f"browser.{kind}",
+        event_type="tool.completed",
+    )
+    progress_events = [progress_started, progress_event]
     memory_advisory = _memory_advisory_public_envelope()
     return {
         "ok": True,
@@ -7782,6 +8160,7 @@ def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[
         "prompt_preflight": preflight,
         "autonomy_policy": policy,
         "progress_event": progress_event,
+        "progress_events": progress_events,
         "memory_advisory": memory_advisory,
         "output_compaction": _browser_surface_output_compaction_receipt(
             action=action,
@@ -7791,6 +8170,7 @@ def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[
             policy=policy,
             progress_event=progress_event,
             memory_advisory=memory_advisory,
+            progress_events=progress_events,
         ),
     }
 
@@ -7974,18 +8354,21 @@ def _space_widget_sdk_helper_receipt_envelope(action: str) -> dict[str, Any]:
     }
 
 
-def _record_space_api_health_progress_event(action: str) -> dict[str, Any]:
+def _record_space_api_health_progress_event(action: str, event_type: str = "tool.completed") -> dict[str, Any]:
     """Best-effort metadata-only progress receipt for no-space health checks."""
     run_id = "space.health:api"
+    safe_event_type = str(event_type or "tool.completed").strip().lower()
+    if safe_event_type not in {"tool.started", "tool.completed"}:
+        safe_event_type = "tool.completed"
     try:
         from api.capy_progress import record_progress_event
 
-        return record_progress_event({"event_type": "tool.completed", "run_id": run_id})
+        return record_progress_event({"event_type": safe_event_type, "run_id": run_id})
     except Exception:
         return {
             "stored": False,
             "queued": False,
-            "event_type": "tool.completed",
+            "event_type": safe_event_type,
             "family": "tool",
             "run_id": run_id,
             "redaction_status": "metadata_only",
@@ -8033,12 +8416,15 @@ def _space_api_health_receipt_envelope(action: str, *, space_count: int) -> dict
     """Return metadata-only receipts for no-space Capy Spaces health checks."""
     prompt_preflight = _space_api_health_required_prompt_preflight_receipt(action)
     autonomy_policy = _space_api_health_action_policy_receipt(action, prompt_preflight)
-    progress_event = _record_space_api_health_progress_event(action)
+    progress_started = _record_space_api_health_progress_event(action, "tool.started")
+    progress_event = _record_space_api_health_progress_event(action, "tool.completed")
+    progress_events = [progress_started, progress_event]
     memory_advisory = _memory_advisory_public_envelope()
     return {
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "progress_events": progress_events,
         "memory_advisory": memory_advisory,
         "output_compaction": _space_tool_action_output_compaction_receipt(
             action=action,
@@ -8046,6 +8432,7 @@ def _space_api_health_receipt_envelope(action: str, *, space_count: int) -> dict
             space_count=space_count,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            progress_events=progress_events,
             memory_advisory=memory_advisory,
             include_memory_required_gates=True,
             include_widget_count=False,
@@ -8196,12 +8583,47 @@ def _space_tool_template_name(payload: dict[str, Any], default: str = "weather")
     return template_name or default
 
 
-def _space_current_context_output_compaction(context: str) -> dict[str, Any]:
+def _space_current_context_memory_advisory_lines(memory_advisory: dict[str, Any] | None) -> list[str]:
+    if not isinstance(memory_advisory, dict):
+        return []
+
+    advisory_context = "true"
+    context_authority = "untrusted_advisory"
+    can_bypass = "false"
+
+    safe_required_gates: list[str] = []
+    raw_required_gates = memory_advisory.get("required_gates")
+    required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+    for gate in required_gates[:8]:
+        safe_gate = _payload_text_summary(gate, 40)
+        if safe_gate and safe_gate != "[REDACTED]" and safe_gate not in safe_required_gates:
+            safe_required_gates.append(safe_gate)
+
+    lines = [
+        "memory_advisory_metadata_only: true",
+        f"advisory_context: {advisory_context}",
+        f"context_authority: {context_authority}",
+        f"can_bypass_safety_gates: {can_bypass}",
+    ]
+    if safe_required_gates:
+        lines.append(f"required_gates: {', '.join(safe_required_gates)}")
+    return lines
+
+
+def _space_current_context_output_compaction(
+    context: str,
+    memory_advisory: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return product-visible compaction evidence for active Space context tool output."""
     from api.capy_compaction import compact_output
 
+    compaction_lines = _space_current_context_memory_advisory_lines(memory_advisory)
+    if context:
+        compaction_lines.append(context)
+    compaction_text = "\n".join(compaction_lines)
+
     receipt = compact_output(
-        context,
+        compaction_text,
         tool="capy-spaces-context",
         command="space.current.context",
         exit_status=0,
@@ -8412,6 +8834,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.current.context", "space.context", "space.current.prompt_context"}:
         current_id = _space_tool_current_id(data)
         context_status = _space_demo_context_status()
+        memory_advisory = _memory_advisory_public_envelope()
         if not current_id:
             return {
                 "ok": True,
@@ -8420,7 +8843,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "metadata_only": True,
                 "local_only": True,
                 "context": "",
-                "output_compaction": _space_current_context_output_compaction(""),
+                "memory_advisory": memory_advisory,
+                "output_compaction": _space_current_context_output_compaction("", memory_advisory),
                 "context_status": context_status,
             }
         space_id = validate_space_id(current_id)
@@ -8437,7 +8861,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "context": context,
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": _space_current_context_action_policy_receipt(name, prompt_preflight),
-            "output_compaction": _space_current_context_output_compaction(context),
+            "memory_advisory": memory_advisory,
+            "output_compaction": _space_current_context_output_compaction(context, memory_advisory),
             "context_status": context_status,
             "progress_event": progress_event,
         }
@@ -8622,21 +9047,24 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **result}
     if name in {"space.create", "space.spaces.create", "space.spaces.createspace"}:
         create_payload = _space_tool_create_payload(data)
-        prompt_preflight = _space_create_prompt_preflight_receipt(create_payload)
-        created = create_space(create_payload)
-        space = read_space_detail(created["space_id"])
-        space["widget_count"] = len(space.get("widgets") or [])
-        if prompt_preflight is not None:
-            space["agent_instructions"] = "[metadata-only instructions stored after prompt preflight]"
-        progress_event = _record_space_tool_progress_event(created["space_id"], run_prefix="space.create")
-        autonomy_policy = _space_create_action_policy_receipt(name, prompt_preflight)
-        memory_advisory = _memory_advisory_public_envelope()
+        created = create_space(create_payload, include_safety_receipts=True, action=name)
+        space = created["space"]
+        autonomy_policy = created["autonomy_policy"]
+        progress_event = created["progress_event"]
+        raw_progress_events = created.get("progress_events")
+        progress_events: list[dict[str, Any]] = (
+            [event for event in raw_progress_events if isinstance(event, dict)]
+            if isinstance(raw_progress_events, list)
+            else ([progress_event] if isinstance(progress_event, dict) else [])
+        )
+        memory_advisory = created["memory_advisory"]
         output_compaction = _space_create_output_compaction_receipt(
             action=name,
             raw_payload=data,
             space=space,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            progress_events=progress_events,
             memory_advisory=memory_advisory,
         )
         response = {
@@ -8645,11 +9073,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "space": space,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "progress_events": progress_events,
             "memory_advisory": memory_advisory,
             "output_compaction": output_compaction,
         }
-        if prompt_preflight is not None:
-            response["prompt_preflight"] = prompt_preflight
+        if "prompt_preflight" in created:
+            response["prompt_preflight"] = created["prompt_preflight"]
         return response
     if name in {"space.creator.preview", "space.creator.spec.preview", "space.spaces.previewcreatorspec"}:
         return _space_creator_preview_payload(name, data)
@@ -8689,14 +9118,22 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             response["autonomy_policy"] = autonomy_policy
             response["progress_event"] = progress_event
             response["memory_advisory"] = memory_advisory
-        response["output_compaction"] = _space_tool_action_output_compaction_receipt(
-            action=name,
-            space_id=space_id,
-            widget_count=len(space.get("widgets") or []),
-            autonomy_policy=autonomy_policy,
-            progress_event=progress_event,
-            memory_advisory=memory_advisory,
-        )
+            response["output_compaction"] = _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(space.get("widgets") or []),
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+                memory_advisory=memory_advisory,
+            )
+        else:
+            response.update(
+                _space_collection_read_receipt_envelope(
+                    action=name,
+                    space_id=space_id,
+                    widget_count=len(space.get("widgets") or []),
+                )
+            )
         return response
     if name in {"space.spaces.reloadcurrentspace", "space.spaces.reloadspace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -8985,7 +9422,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         )
         space = read_space_detail(result["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
-        progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="space.duplicate")
+        raw_progress_events = result.get("progress_events")
+        progress_events: list[dict[str, Any]] = (
+            [event for event in raw_progress_events if isinstance(event, dict)]
+            if isinstance(raw_progress_events, list)
+            else []
+        )
+        progress_event = result.get("progress_event") if isinstance(result.get("progress_event"), dict) else None
+        if not isinstance(progress_event, dict):
+            progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="space.duplicate")
+            progress_events = [progress_event]
         preflight_receipt = result.get("prompt_preflight") if isinstance(result.get("prompt_preflight"), dict) else None
         autonomy_policy = _space_layout_action_policy_receipt(name, preflight_receipt)
         memory_advisory = _memory_advisory_public_envelope()
@@ -8996,6 +9442,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "space": space,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "progress_events": progress_events,
             "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
@@ -9005,6 +9452,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_id=result.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                progress_events=progress_events,
                 memory_advisory=memory_advisory,
                 include_memory_required_gates=True,
             ),
@@ -9088,6 +9536,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_id=result.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=result.get("progress_event"),
+                progress_events=(
+                    result.get("progress_events") if isinstance(result.get("progress_events"), list) else None
+                ),
                 memory_advisory=memory_advisory,
                 include_memory_required_gates=True,
             ),
@@ -9175,6 +9626,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             revision_event_ids.append(result["revision_event_id"])
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.upsert")
         autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         response: dict[str, Any] = {
             "ok": True,
             "action": name,
@@ -9185,6 +9637,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -9192,6 +9645,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_ids=revision_event_ids,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
         if name.endswith("upsertwidget") and saved_widgets:
@@ -9376,6 +9831,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = patch_widget(space_id, widget_id, safe_patch)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.patch")
         autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         response = {
             "ok": True,
             "action": name,
@@ -9384,6 +9840,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -9391,6 +9848,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_id=result.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
         if name.startswith("space.current."):
@@ -9411,7 +9870,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             revision_event_ids.append(result["revision_event_id"])
             toggled_widgets.append(read_widget_detail(space_id, widget_id))
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.toggle")
-        autonomy_policy = _space_layout_action_policy_receipt(name)
+        prompt_preflight = _space_widget_toggle_required_prompt_preflight_receipt(name, len(toggled_widgets))
+        autonomy_policy = _space_layout_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         response = {
             "ok": True,
             "action": name,
@@ -9421,8 +9882,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widgets": toggled_widgets,
             "widget_count": len(toggled_widgets),
             "revision_event_ids": revision_event_ids,
+            "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -9430,6 +9893,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_ids=revision_event_ids,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
         if name.startswith("space.current."):
@@ -9446,6 +9911,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = delete_widget(space_id, widget_id)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.delete")
         autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         response = {
             "ok": True,
             "action": name,
@@ -9453,6 +9919,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -9460,6 +9927,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_id=result.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
         if name.startswith("space.current."):
@@ -9484,6 +9953,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             revision_event_ids.append(result["revision_event_id"])
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.delete")
         autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         response = {
             "ok": True,
             "action": name,
@@ -9495,6 +9965,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -9502,6 +9973,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_ids=revision_event_ids,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
         if name.startswith("space.current."):
@@ -9526,6 +9999,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             revision_event_ids.append(result["revision_event_id"])
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.delete")
         autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         response = {
             "ok": True,
             "action": name,
@@ -9537,6 +10011,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -9544,6 +10019,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_ids=revision_event_ids,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
         if name.startswith("space.current."):
@@ -9866,6 +10343,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         prompt_preflight = _space_repair_required_prompt_preflight_receipt(name)
         autonomy_policy = _space_repair_action_policy_receipt(name, prompt_preflight)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="recovery.space.repair_events")
+        memory_advisory = _memory_advisory_public_envelope()
         response = {
             "ok": True,
             "action": name,
@@ -9874,6 +10352,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
         }
         if is_current:
             response["active_space_id"] = space_id
@@ -9885,6 +10364,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             prompt_preflight=prompt_preflight,
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         )
         return response
     if name in {
@@ -10077,6 +10557,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             _RECOVERY_MODULE_PROGRESS_SPACE_ID,
             run_prefix="recovery.module.repair_events",
         )
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -10085,6 +10566,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _module_repair_events_output_compaction(
                 action=name,
                 module_id=module_id,
@@ -10092,6 +10574,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 prompt_preflight=prompt_preflight,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
             ),
         }
     if name == "widget.list":
@@ -10129,6 +10612,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = patch_widget(space_id, widget_id, patch_payload)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.patch")
         autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
+        memory_advisory = _memory_advisory_public_envelope()
         return {
             "ok": True,
             "action": name,
@@ -10136,6 +10620,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -10143,6 +10628,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_id=result.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
+                include_memory_required_gates=True,
             ),
         }
     if name in {
@@ -10221,6 +10708,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
         autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.events")
+        memory_advisory = _memory_advisory_public_envelope()
         response = {
             "ok": True,
             "action": name,
@@ -10229,6 +10717,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "memory_advisory": copy.deepcopy(memory_advisory),
             "output_compaction": _widget_events_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -10236,6 +10725,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 events=events,
                 active_space_id=space_id if is_current_widget_events else None,
                 progress_event=progress_event,
+                memory_advisory=memory_advisory,
             ),
         }
         return response
@@ -10648,6 +11138,11 @@ def update_space(space_id: str, updates: dict[str, Any], *, include_safety_recei
                         raise ValueError(f"Space update prompt preflight blocked{suffix}")
                     value = str(value or "")
                 space[key] = value
+        progress_started = (
+            _record_space_tool_progress_event(sid, run_prefix="space.update", event_type="tool.started")
+            if include_safety_receipts and prompt_preflight is not None
+            else None
+        )
         saved = _write_manifest(space, "space.updated", {"fields": sorted(set(updates or {}) & allowed)})
         detail = read_space_detail(saved["space_id"])
         if not include_safety_receipts:
@@ -10656,10 +11151,16 @@ def update_space(space_id: str, updates: dict[str, Any], *, include_safety_recei
         if prompt_preflight is not None:
             result["prompt_preflight"] = prompt_preflight
             autonomy_policy = _space_current_instruction_action_policy_receipt("space.update", prompt_preflight)
-            progress_event = _record_space_tool_progress_event(sid, run_prefix="space.update")
+            progress_event = _record_space_tool_progress_event(
+                sid,
+                run_prefix="space.update",
+                event_type="tool.completed",
+            )
+            progress_events = [event for event in (progress_started, progress_event) if isinstance(event, dict)]
             memory_advisory = _memory_advisory_public_envelope()
             result["autonomy_policy"] = autonomy_policy
             result["progress_event"] = progress_event
+            result["progress_events"] = progress_events
             result["memory_advisory"] = memory_advisory
             result["output_compaction"] = _space_tool_action_output_compaction_receipt(
                 action="space.update",
@@ -10667,6 +11168,7 @@ def update_space(space_id: str, updates: dict[str, Any], *, include_safety_recei
                 revision_event_id=saved.get("revision_event_id"),
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                progress_events=progress_events,
                 memory_advisory=memory_advisory,
                 include_widget_count=False,
             )
@@ -10686,11 +11188,21 @@ def delete_space(space_id: str, *, include_safety_receipts: bool = False, action
         prompt_preflight = _space_delete_prompt_preflight_receipt(widget_count) if include_safety_receipts else None
         if isinstance(prompt_preflight, dict) and prompt_preflight.get("status") != "pass":
             raise ValueError("Space delete prompt preflight blocked")
+        progress_started = (
+            _record_space_tool_progress_event(sid, run_prefix="space.delete", event_type="tool.started")
+            if include_safety_receipts
+            else None
+        )
         event_id = _record_event(sid, "space.deleted")
         shutil.rmtree(path)
         result: dict[str, Any] = {"deleted": True, "space_id": sid, "revision_event_id": event_id}
         if include_safety_receipts:
-            progress_event = _record_space_tool_progress_event(sid, run_prefix="space.delete")
+            progress_event = _record_space_tool_progress_event(
+                sid,
+                run_prefix="space.delete",
+                event_type="tool.completed",
+            )
+            progress_events = [progress_started, progress_event] if isinstance(progress_started, dict) else [progress_event]
             autonomy_policy = _space_layout_action_policy_receipt(action, prompt_preflight)
             memory_advisory = _memory_advisory_public_envelope()
             result.update(
@@ -10698,6 +11210,7 @@ def delete_space(space_id: str, *, include_safety_receipts: bool = False, action
                     "prompt_preflight": prompt_preflight,
                     "autonomy_policy": autonomy_policy,
                     "progress_event": progress_event,
+                    "progress_events": progress_events,
                     "memory_advisory": memory_advisory,
                     "output_compaction": _space_tool_action_output_compaction_receipt(
                         action=action,
@@ -10706,6 +11219,7 @@ def delete_space(space_id: str, *, include_safety_receipts: bool = False, action
                         revision_event_id=event_id,
                         autonomy_policy=autonomy_policy,
                         progress_event=progress_event,
+                        progress_events=progress_events,
                         memory_advisory=memory_advisory,
                         include_memory_required_gates=True,
                     ),
@@ -10994,12 +11508,29 @@ def _space_agent_import_widget_ids(widget_files: dict[str, str]) -> dict[str, st
     return assigned
 
 
-def _space_agent_import_prompt_preflight_receipt(instructions: str) -> dict[str, Any] | None:
+def _space_agent_import_required_prompt_preflight_receipt() -> dict[str, Any]:
+    """Return metadata-only required-preflight evidence for no-prompt package imports."""
+
+    return {
+        "available": True,
+        "action": "capy.prompt_preflight",
+        "boundary": "space_agent_package_import",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+        "reason": "Package import is a gated high-risk boundary; no active prompt was present to preflight.",
+    }
+
+
+def _space_agent_import_prompt_preflight_receipt(instructions: str) -> dict[str, Any]:
     """Preflight imported active-Space instructions before persistence."""
 
     text = str(instructions or "").strip()
     if not text or text == "[REDACTED]":
-        return None
+        return _space_agent_import_required_prompt_preflight_receipt()
     from api.capy_policy import prompt_preflight
 
     receipt = prompt_preflight(text, boundary="active_space_instructions")
@@ -11014,7 +11545,7 @@ def _space_agent_import_action_policy_receipt(action: str, preflight_receipt: di
     return action_policy_receipt(
         action,
         approval_gates=["creator_commit", "generated_widget_execution"],
-        prompt_preflight_status=(preflight_receipt or {}).get("status") if preflight_receipt else "pass",
+        prompt_preflight_status=(preflight_receipt or {}).get("status") if preflight_receipt else "required",
         model_route_hint="hint:reasoning",
     )
 
@@ -11123,7 +11654,7 @@ def _space_agent_import_output_compaction_receipt(
     safe_widget_count = max(0, int(widget_count or 0))
     policy_action = _context_value((autonomy_policy_receipt or {}).get("action"), 120) or "space.agent.import"
     model_route_hint = _context_value((autonomy_policy_receipt or {}).get("model_route_hint"), 80) or "hint:reasoning"
-    prompt_preflight_status = _context_value((autonomy_policy_receipt or {}).get("prompt_preflight_status"), 40) or "pass"
+    prompt_preflight_status = _context_value((autonomy_policy_receipt or {}).get("prompt_preflight_status"), 40) or "required"
     progress_run_id = _context_value((progress_event or {}).get("run_id"), 160) or "package.import:[REDACTED]"
     memory_advisory = memory_advisory if isinstance(memory_advisory, dict) else _memory_advisory_public_envelope()
     advisory_context = "true" if memory_advisory.get("advisory_context") is True else "false"
@@ -11271,8 +11802,7 @@ def import_space_agent_package(
             memory_advisory=memory_advisory,
         ),
     }
-    if preflight_receipt:
-        response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
     return response
 
 
@@ -11680,6 +12210,7 @@ def _camera_stream_output_compaction_receipt(
     preflight: dict[str, Any],
     policy: dict[str, Any],
     progress_event: dict[str, Any],
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return bounded metadata-only compaction evidence for camera stream ingestion."""
     from api.capy_compaction import compact_output
@@ -11704,6 +12235,26 @@ def _camera_stream_output_compaction_receipt(
         f"model_route_hint: {_context_value(policy.get('model_route_hint'), 80) or 'hint:vision'}",
         f"progress_run_id: {_context_value(progress_event.get('run_id'), 160) or f'camera.stream.add:{safe_space_id}'}",
     ]
+    if isinstance(memory_advisory, dict):
+        advisory = _memory_advisory_public_summary(memory_advisory)
+        advisory_context = "true" if advisory.get("advisory_context") is True else "false"
+        context_authority = (
+            _context_value(advisory.get("context_authority") or "untrusted_advisory", 80)
+            or "untrusted_advisory"
+        )
+        can_bypass = "true" if advisory.get("can_bypass_safety_gates") is True else "false"
+        raw_required_gates = advisory.get("required_gates")
+        required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+        safe_required_gates = [
+            safe_gate
+            for gate in required_gates
+            if (safe_gate := _context_value(gate, 40))
+        ][:6]
+        lines.append(f"advisory_context: {advisory_context}")
+        lines.append(f"context_authority: {context_authority}")
+        lines.append(f"can_bypass_safety_gates: {can_bypass}")
+        if safe_required_gates:
+            lines.append(f"required_gates: {', '.join(safe_required_gates)}")
     receipt = compact_output(
         "\n".join(lines),
         tool="capy-spaces-camera-stream",
@@ -11711,6 +12262,7 @@ def _camera_stream_output_compaction_receipt(
         exit_status=0,
         max_chars=700,
     )
+    receipt["metadata_only"] = True
     if receipt.get("redaction_status") == "none":
         receipt["redaction_status"] = "metadata_only"
     return receipt
@@ -11765,6 +12317,7 @@ def add_camera_stream(space_id: str, stream: dict[str, Any], *, action: str = "s
     prompt_preflight = _camera_stream_required_prompt_preflight_receipt(action)
     autonomy_policy = _camera_stream_action_policy_receipt(action)
     progress_event = _record_space_tool_progress_event(sid, run_prefix="camera.stream.add")
+    memory_advisory = _memory_advisory_public_envelope()
     return {
         "space_id": saved["space_id"],
         "stream": safe_stream,
@@ -11773,6 +12326,7 @@ def add_camera_stream(space_id: str, stream: dict[str, Any], *, action: str = "s
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "memory_advisory": memory_advisory,
         "output_compaction": _camera_stream_output_compaction_receipt(
             action=action,
             space_id=sid,
@@ -11780,6 +12334,7 @@ def add_camera_stream(space_id: str, stream: dict[str, Any], *, action: str = "s
             preflight=prompt_preflight,
             policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
         ),
     }
 
@@ -11953,6 +12508,8 @@ def patch_widget(
         )
         result["progress_event"] = progress_event
         result["autonomy_policy"] = autonomy_policy
+        memory_advisory = _memory_advisory_public_envelope()
+        result["memory_advisory"] = memory_advisory
         result["output_compaction"] = _space_tool_action_output_compaction_receipt(
             action="space.widget.patch",
             space_id=sid,
@@ -11961,6 +12518,8 @@ def patch_widget(
             revision_event_id=result.get("revision_event_id"),
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
         )
     return result
 
@@ -12861,6 +13420,10 @@ def install_template(template: str, *, space_id: str | None = None, record_progr
         preflight_receipt = _browser_surface_template_prompt_preflight_receipt()
         result["prompt_preflight"] = preflight_receipt
         result["autonomy_policy"] = _browser_surface_template_action_policy_receipt(preflight_receipt)
+    elif response_template == "camera":
+        preflight_receipt = _camera_dashboard_template_prompt_preflight_receipt()
+        result["prompt_preflight"] = preflight_receipt
+        result["autonomy_policy"] = _camera_dashboard_template_action_policy_receipt(preflight_receipt)
     elif response_template == "service":
         preflight_receipt = _local_service_template_prompt_preflight_receipt()
         result["prompt_preflight"] = preflight_receipt
@@ -13471,6 +14034,9 @@ def _module_repair_event_summary(event: dict[str, Any], module_id: str | None = 
     autonomy_policy = raw_autonomy_policy if isinstance(raw_autonomy_policy, dict) else None
     if autonomy_policy:
         summary["autonomy_policy"] = _action_policy_receipt_metadata_summary(autonomy_policy)
+    raw_memory_advisory = details.get("memory_advisory")
+    if isinstance(raw_memory_advisory, dict):
+        summary["memory_advisory"] = _memory_advisory_public_summary(raw_memory_advisory)
     return summary
 
 
@@ -13528,6 +14094,7 @@ def queue_recovery_module_repair_event(
     response_autonomy_policy_receipt = _space_repair_action_policy_receipt(receipt_action, response_prompt_preflight)
     prompt_preview = _space_repair_prompt_preview(prompt)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
+    memory_advisory = _memory_advisory_public_envelope()
     event_details = {
         "module_id": _public_module_id_summary(mid),
         "event_name": name,
@@ -13535,6 +14102,7 @@ def queue_recovery_module_repair_event(
         "payload_summary": payload_summary,
         "session_id": _space_repair_text_summary(session_id, 120),
         "status": "queued",
+        "memory_advisory": copy.deepcopy(memory_advisory),
     }
     if prompt_preflight:
         event_details["prompt_preflight"] = copy.deepcopy(prompt_preflight)
@@ -13558,6 +14126,7 @@ def queue_recovery_module_repair_event(
         "event_id": event_id,
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
+        "memory_advisory": copy.deepcopy(memory_advisory),
         "progress_event": progress_event,
         "output_compaction": _space_repair_output_compaction(
             action=receipt_action,
@@ -13569,6 +14138,7 @@ def queue_recovery_module_repair_event(
             autonomy_policy_receipt=response_autonomy_policy_receipt,
             progress_event=progress_event,
             payload=payload,
+            memory_advisory=memory_advisory,
         ),
     }
     if response_prompt_preflight:
@@ -14039,6 +14609,9 @@ def _space_repair_event_summary(event: dict[str, Any], sid: str) -> dict[str, An
     autonomy_policy = raw_autonomy_policy if isinstance(raw_autonomy_policy, dict) else None
     if autonomy_policy:
         summary["autonomy_policy"] = _action_policy_receipt_metadata_summary(autonomy_policy)
+    raw_memory_advisory = details.get("memory_advisory")
+    if isinstance(raw_memory_advisory, dict):
+        summary["memory_advisory"] = _memory_advisory_public_summary(raw_memory_advisory)
     return summary
 
 
@@ -14218,6 +14791,7 @@ def _widget_events_output_compaction_receipt(
     widget_id: str | None = None,
     active_space_id: str | None = None,
     progress_event: dict[str, Any] | None = None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for widget event list responses."""
     from api.capy_compaction import compact_output
@@ -14243,8 +14817,10 @@ def _widget_events_output_compaction_receipt(
             lines.append(f"progress_run_id: {safe_progress_run_id}")
         if safe_progress_status:
             lines.append(f"progress_status: {safe_progress_status}")
-    if any(isinstance(event, dict) and isinstance(event.get("memory_advisory"), dict) for event in safe_events):
+    advisory = _memory_advisory_public_summary(memory_advisory) if isinstance(memory_advisory, dict) else None
+    if advisory is None and any(isinstance(event, dict) and isinstance(event.get("memory_advisory"), dict) for event in safe_events):
         advisory = _memory_advisory_public_envelope()
+    if advisory is not None:
         lines.append("memory_advisory_context: true")
         lines.append(f"memory_context_authority: {advisory['context_authority']}")
         lines.append("memory_can_bypass_safety_gates: false")
@@ -14770,6 +15346,7 @@ def _record_space_tool_progress_event(
         "shared-slot.get",
         "shared-slot.delete",
         "space.create",
+        "space.create_from_session",
         "space.current.read",
         "space.delete",
         "space.duplicate",
@@ -14816,7 +15393,12 @@ def _record_space_tool_progress_event(
         }
 
 
-def _record_space_repair_progress_event(space_id: str, *, run_prefix: str = "repair") -> dict[str, Any]:
+def _record_space_repair_progress_event(
+    space_id: str,
+    *,
+    run_prefix: str = "repair",
+    event_type: str = "tool.completed",
+) -> dict[str, Any]:
     """Best-effort metadata-only progress producer for recovery repair queues."""
     safe_prefix = str(run_prefix or "repair").strip().lower()
     if safe_prefix not in {
@@ -14826,7 +15408,11 @@ def _record_space_repair_progress_event(space_id: str, *, run_prefix: str = "rep
         "recovery.module.repair",
     }:
         safe_prefix = "repair"
-    return _record_space_tool_progress_event(space_id, run_prefix=safe_prefix)
+    event = _record_space_tool_progress_event(space_id, run_prefix=safe_prefix, event_type=event_type)
+    event["metadata_only"] = True
+    if event.get("redaction_status") != "metadata_only":
+        event["redaction_status"] = "metadata_only"
+    return event
 
 
 def _space_repair_payload_key_counts(payload: dict[str, Any] | None) -> dict[str, int]:
@@ -14852,6 +15438,7 @@ def _space_repair_output_compaction(
     autonomy_policy_receipt: dict[str, Any] | None,
     progress_event: dict[str, Any] | None,
     payload: dict[str, Any] | None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build metadata-only compaction evidence for high-risk repair queues."""
     from api.capy_compaction import compact_output
@@ -14865,8 +15452,26 @@ def _space_repair_output_compaction(
     policy_action = _context_value((autonomy_policy_receipt or {}).get("action"), 120) or safe_action
     progress_run_id = _space_repair_text_summary((progress_event or {}).get("run_id"), 160) or "[REDACTED]"
     payload_counts = _space_repair_payload_key_counts(payload)
+    advisory_lines: list[str] = []
+    if isinstance(memory_advisory, dict):
+        raw_gates = memory_advisory.get("required_gates")
+        gates: list[str] = []
+        if isinstance(raw_gates, list):
+            for gate in raw_gates:
+                safe_gate = _context_value(gate, 80)
+                if safe_gate and safe_gate != "[REDACTED]" and safe_gate not in gates:
+                    gates.append(safe_gate)
+        if not gates:
+            gates = ["prompt_preflight", "approval", "sandbox_preview", "visual_qa", "rollback_recovery"]
+        advisory_lines = [
+            f"advisory_context: {str(bool(memory_advisory.get('advisory_context'))).lower()}",
+            f"context_authority: {_context_value(memory_advisory.get('context_authority'), 80) or 'untrusted_advisory'}",
+            f"can_bypass_safety_gates: {str(bool(memory_advisory.get('can_bypass_safety_gates'))).lower()}",
+            f"required_gates: {', '.join(gates)}",
+        ]
     lines = [
         "Capy Spaces recovery repair queue metadata-only receipt",
+        *advisory_lines,
         f"status: {safe_status}",
         f"target_kind: {safe_target_kind}",
         f"target_handle: {safe_target_handle}",
@@ -14908,6 +15513,7 @@ def _space_repair_events_output_compaction(
     prompt_preflight: dict[str, Any] | None = None,
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build metadata-only compaction evidence for whole-Space repair event lists."""
     from api.capy_compaction import compact_output
@@ -14924,10 +15530,25 @@ def _space_repair_events_output_compaction(
         (autonomy_policy or {}).get("action") if isinstance(autonomy_policy, dict) else None,
         120,
     )
+    advisory_lines: list[str] = []
+    if isinstance(memory_advisory, dict):
+        advisory = _memory_advisory_public_summary(memory_advisory)
+        safe_required_gates = [
+            _payload_text_summary(gate, 40)
+            for gate in advisory.get("required_gates", [])
+            if _payload_text_summary(gate, 40)
+        ]
+        advisory_lines = [
+            f"advisory_context: {str(advisory.get('advisory_context') is True).lower()}",
+            f"context_authority: {_payload_text_summary(advisory.get('context_authority') or 'untrusted_advisory', 80) or 'untrusted_advisory'}",
+            f"can_bypass_safety_gates: {str(advisory.get('can_bypass_safety_gates') is True).lower()}",
+            f"required_gates: {', '.join(safe_required_gates)}",
+        ]
     lines = [
         "Capy Spaces recovery repair events list metadata-only receipt",
         "metadata_only: true",
         "raw_prompt_stored: false",
+        *advisory_lines,
         f"space_action: {safe_action}",
         f"space_id: {safe_space_id}",
         f"event_count: {len(safe_events)}",
@@ -15000,6 +15621,7 @@ def _module_repair_events_output_compaction(
     prompt_preflight: dict[str, Any] | None = None,
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build metadata-only compaction evidence for recovery-module repair event lists."""
     from api.capy_compaction import compact_output
@@ -15008,6 +15630,12 @@ def _module_repair_events_output_compaction(
     raw_module_id = _context_value(module_id, 120) or "unknown-module"
     safe_module_id = raw_module_id if _space_repair_text_summary(raw_module_id, 120) == raw_module_id else "metadata-only"
     safe_events = events if isinstance(events, list) else []
+    advisory = _memory_advisory_public_summary(memory_advisory)
+    safe_required_gates = [
+        _payload_text_summary(gate, 40)
+        for gate in advisory.get("required_gates", [])
+        if _payload_text_summary(gate, 40)
+    ]
     safe_prompt_status = _context_value(
         (prompt_preflight or {}).get("status") if isinstance(prompt_preflight, dict) else None,
         60,
@@ -15031,6 +15659,10 @@ def _module_repair_events_output_compaction(
         "Capy Spaces recovery module repair events list metadata-only receipt",
         "metadata_only: true",
         "raw_prompt_stored: false",
+        f"advisory_context: {str(advisory.get('advisory_context') is True).lower()}",
+        f"context_authority: {_payload_text_summary(advisory.get('context_authority') or 'untrusted_advisory', 80) or 'untrusted_advisory'}",
+        f"can_bypass_safety_gates: {str(advisory.get('can_bypass_safety_gates') is True).lower()}",
+        f"required_gates: {', '.join(safe_required_gates)}",
         f"module_action: {safe_action}",
         f"module_id: {safe_module_id}",
         f"event_count: {len(safe_events)}",
@@ -15121,12 +15753,14 @@ def queue_space_repair_event(
     response_autonomy_policy_receipt = _space_repair_action_policy_receipt(receipt_action, response_prompt_preflight)
     prompt_preview = _space_repair_prompt_preview(prompt)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
+    memory_advisory = _memory_advisory_public_envelope()
     event_details = {
         "event_name": name,
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
         "session_id": _space_repair_text_summary(session_id, 120),
         "status": "queued",
+        "memory_advisory": copy.deepcopy(memory_advisory),
     }
     if prompt_preflight:
         event_details["prompt_preflight"] = copy.deepcopy(prompt_preflight)
@@ -15149,6 +15783,7 @@ def queue_space_repair_event(
         autonomy_policy_receipt=response_autonomy_policy_receipt,
         progress_event=progress_event,
         payload=payload,
+        memory_advisory=memory_advisory,
     )
     return {
         "queued": True,
@@ -15158,6 +15793,7 @@ def queue_space_repair_event(
         "event_id": event_id,
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
+        "memory_advisory": copy.deepcopy(memory_advisory),
         "progress_event": progress_event,
         "output_compaction": output_compaction,
         **({"prompt_preflight": copy.deepcopy(response_prompt_preflight)} if response_prompt_preflight else {}),

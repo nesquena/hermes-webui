@@ -113,6 +113,7 @@
       renderPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
       renderPackageProgressEvidence(result && result.progress_event, 'Template install progress') +
+      renderMemoryAdvisoryEvidence(result && result.memory_advisory) +
       renderCompactionEvidence(result && (result.output_compaction || result.compaction)) +
       '</div>';
   }
@@ -131,6 +132,29 @@
       renderPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
       renderPackageProgressEvidence(result && result.progress_event, 'Template reset progress') +
+      renderCompactionEvidence(result && (result.output_compaction || result.compaction)) +
+      '</div>';
+  }
+
+  function renderCreateFromSessionStatus(result){
+    const space = result && result.space && typeof result.space === 'object' && !Array.isArray(result.space) ? result.space : {};
+    const spaceId = space.space_id ? String(space.space_id) : '';
+    const spaceName = space.name || spaceId || 'Chat Context Space';
+    const widgets = Array.isArray(space.widgets) ? space.widgets : [];
+    const rawWidgetCount = space.widget_count;
+    const hasNumericWidgetCount = typeof rawWidgetCount === 'number' || (typeof rawWidgetCount === 'string' && rawWidgetCount.trim() !== '');
+    const parsedWidgetCount = hasNumericWidgetCount ? Number(rawWidgetCount) : NaN;
+    const widgetCount = Number.isFinite(parsedWidgetCount) ? parsedWidgetCount : widgets.length;
+    const widgetLabel = widgetCount === 1 ? '1 widget' : widgetCount+' widgets';
+    const actions = spaceId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open created Space</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage linked context widget</button></div>' : '';
+    return '<div class="capy-spaces-card" role="status"><h3>Created from current chat</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(spaceName)+' · '+escapeHtml(widgetLabel)+' · metadata-only chat starter</div>' +
+      '<div class="capy-spaces-muted">Chat messages, pending prompt text, composer drafts, generated widget bodies, implementation fields, API-auth fields, and secrets stay omitted.</div>' +
+      actions +
+      renderPromptPreflightEvidence(result && result.prompt_preflight) +
+      renderActionPolicyEvidence(result && result.autonomy_policy) +
+      renderPackageProgressEvidence(result && result.progress_event, 'Create-from-session progress') +
+      renderMemoryAdvisoryEvidence(result && result.memory_advisory) +
       renderCompactionEvidence(result && (result.output_compaction || result.compaction)) +
       '</div>';
   }
@@ -253,7 +277,7 @@
     const status = safeSourceRefreshJobStatus(job.status);
     const attempts = safeNonNegativeCount(job.attempts);
     const queuedAt = safeSourceRefreshTimestamp(job.created_at) || safeSourceRefreshTimestamp(job.updated_at);
-    const parts = [sourceId, status, String(attempts)+' '+(attempts === 1 ? 'attempt' : 'attempts')];
+    const parts = [sourceId, status, String(attempts)+' '+(attempts === 1 ? 'attempt' : 'attempts'), 'metadata-only', 'advisory only'];
     if (queuedAt) parts.push('Queued '+queuedAt);
     return '<article class="capy-spaces-source-connector-card capy-spaces-source-refresh-job-card"><p>'+parts.map(function(part){ return escapeHtml(part); }).join(' · ')+'</p></article>';
   }
@@ -285,17 +309,22 @@
   }
 
   function renderSourceConnectorCard(connector){
+    const connectorId = safePathIdText(connector && connector.connector_id) || 'source';
     const label = safeDisplayMetadataText(connector && connector.label, 'Source connector') || 'Source connector';
     const state = safeConnectorState(connector && connector.state);
     const sourceCount = safeNonNegativeCount(connector && connector.source_count);
     const staleCount = safeNonNegativeCount(connector && connector.stale_source_count);
     const errorCount = safeNonNegativeCount(connector && connector.error_source_count);
     const refreshJobCount = safeNonNegativeCount(connector && connector.refresh_job_count);
+    const syncCadence = safeConnectorSyncCadence(connector && connector.sync_cadence, connectorId);
+    const permissionScope = safeConnectorPermissionScope(connector && connector.permission_scope, connectorId);
+    const advisoryLabel = connector && connector.advisory_context === false ? 'No advisory context' : 'Advisory only';
     const sources = Array.isArray(connector && connector.sources) ? connector.sources.slice(0, 3) : [];
     const sourceRows = sources.map(renderSourceConnectorSourceRow).join('');
     return '<article class="capy-spaces-source-connector-card">' +
       '<div><strong>'+escapeHtml(label)+'</strong><span>'+escapeHtml(titleCaseConnectorState(state))+'</span></div>' +
       '<p>'+escapeHtml(sourceCount+' '+(sourceCount === 1 ? 'source' : 'sources'))+' · '+escapeHtml(staleCount+' stale')+' · '+escapeHtml(errorCount+' '+(errorCount === 1 ? 'error' : 'errors'))+' · '+escapeHtml(refreshJobCount+' '+(refreshJobCount === 1 ? 'refresh job' : 'refresh jobs'))+'</p>' +
+      '<p>'+escapeHtml(syncCadence)+' · '+escapeHtml(permissionScope)+' · '+escapeHtml(advisoryLabel)+'</p>' +
       (sourceRows ? '<ul>'+sourceRows+'</ul>' : '') +
       '</article>';
   }
@@ -322,9 +351,55 @@
     return allowed[normalized] || 'unknown';
   }
 
+  function safeConnectorSyncCadence(value, connectorId){
+    const text = safeDisplayMetadataText(value, '');
+    const allowed = {
+      'Manual/scheduled metadata refresh': 'Manual/scheduled metadata refresh',
+      'On Space revisions': 'On Space revisions',
+      'On local knowledge refresh': 'On local knowledge refresh',
+      'Manual metadata refresh': 'Manual metadata refresh'
+    };
+    if (allowed[text]) return allowed[text];
+    if (connectorId === 'local') return 'On Space revisions';
+    if (connectorId === 'local_knowledge') return 'On local knowledge refresh';
+    return 'Manual/scheduled metadata refresh';
+  }
+
+  function safeConnectorPermissionScope(value, connectorId){
+    const text = safeDisplayMetadataText(value, '');
+    const allowed = {
+      'Metadata-only fetch receipts': 'Metadata-only fetch receipts',
+      'Local Space metadata': 'Local Space metadata',
+      'Local knowledge provenance': 'Local knowledge provenance',
+      'Metadata-only receipts': 'Metadata-only receipts'
+    };
+    if (allowed[text]) return allowed[text];
+    if (connectorId === 'local') return 'Local Space metadata';
+    if (connectorId === 'local_knowledge') return 'Local knowledge provenance';
+    return 'Metadata-only fetch receipts';
+  }
+
   function titleCaseConnectorState(value){
     const state = safeConnectorState(value);
     return state.replace(/\b\w/g, function(ch){ return ch.toUpperCase(); });
+  }
+
+  function renderSourceRefreshPromptPreflightEvidence(receipt){
+    const data = receipt && typeof receipt === 'object' && !Array.isArray(receipt) ? receipt : null;
+    if (!data) return '';
+    const status = String(data.status == null ? '' : data.status).trim().toLowerCase();
+    if (!/^(pass|warn|block|required)$/.test(status)) return '';
+    const boundary = String(data.boundary == null ? '' : data.boundary).trim().toLowerCase().replace(/[\s-]+/g, '_');
+    if (boundary !== 'capy_memory_source_refresh') return '';
+    const flags = [];
+    if (data.metadata_only === true) flags.push('metadata-only');
+    if (data.raw_prompt_stored === false || data.source_text_stored === false) flags.push('source text omitted');
+    const details = ['Status: '+status, 'Boundary: '+boundary];
+    if (flags.length) details.push(flags.join(' · '));
+    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Prompt preflight</strong>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(details.join(' · '))+'</div>' +
+      '<div class="capy-spaces-muted">Source-refresh prompt preflight receipt is metadata-only; fetched source text and prompt bodies stay omitted.</div>' +
+      '</div></div></div>';
   }
 
   function renderMemoryRefreshResult(result){
@@ -355,8 +430,10 @@
       '<div class="capy-spaces-muted">'+escapeHtml(summary)+'</div>' +
       (queueRows ? '<ul>'+queueRows+'</ul>' : '') +
       (jobRows ? '<ul>'+jobRows+'</ul>' : '') +
+      renderSourceRefreshPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
       renderPackageProgressEvidence(result && result.progress_event, isScheduled ? 'Scheduled refresh progress' : 'Source refresh progress') +
+      renderMemoryAdvisoryEvidence(result && result.memory_advisory) +
       renderCompactionEvidence(result && (result.output_compaction || result.compaction)) +
       '</div>';
   }
@@ -1516,17 +1593,7 @@
     if (!data || data.metadata_only !== true || data.advisory_context !== true) return '';
     const authority = 'untrusted_advisory';
     const canBypass = 'no';
-    const allowedGates = {
-      prompt_preflight: 'prompt preflight',
-      approval: 'approval',
-      sandbox_preview: 'sandbox preview',
-      visual_qa: 'visual QA',
-      rollback_recovery: 'rollback recovery',
-    };
-    const gates = Array.isArray(data.required_gates) ? data.required_gates.slice(0, 8).map(function(gate){
-      const key = String(gate || '');
-      return Object.prototype.hasOwnProperty.call(allowedGates, key) ? allowedGates[key] : '';
-    }).filter(Boolean) : [];
+    const gates = ['prompt preflight', 'approval', 'sandbox preview', 'visual QA', 'rollback recovery'];
     if (!authority && !gates.length) return '';
     return '<div class="capy-spaces-card capy-spaces-memory-advisory"><h4>Memory advisory</h4>' +
       '<div class="capy-spaces-muted">Authority: '+escapeHtml(authority)+' · Advisory context: yes · Can bypass safety gates: '+escapeHtml(canBypass)+'</div>' +
@@ -1715,7 +1782,7 @@
       }
       const data = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(safeSpaceId));
       root.dataset.editingWidgetId = '';
-      root.innerHTML = renderWidgetManager(safeSpaceId, data.widgets || [], eventsData.events || []);
+      root.innerHTML = renderWidgetManager(safeSpaceId, data.widgets || [], eventsData || {events: []});
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Widget manager unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Back to spaces</button></div>';
     }
@@ -2234,7 +2301,30 @@
     return safe;
   }
 
-  function renderWidgetEventInbox(events){
+  function widgetEventReceiptHtml(html){
+    return String(html || '')
+      .replace(/raw prompt not stored/g, 'prompt text not stored')
+      .replace(/raw prompts/g, 'prompt texts')
+      .replace(/raw prompt text remains omitted/g, 'prompt text remains omitted')
+      .replace(/credentials remain omitted/g, 'secrets remain omitted');
+  }
+
+  function renderWidgetEventInboxReceipt(envelope){
+    const data = envelope && typeof envelope === 'object' && !Array.isArray(envelope) ? envelope : null;
+    if (!data) return '';
+    const preflight = widgetEventReceiptHtml(renderPromptPreflightEvidence(data.prompt_preflight));
+    const policy = renderActionPolicyEvidence(data.autonomy_policy);
+    const progress = renderPackageProgressEvidence(data.progress_event, 'Widget event inbox progress');
+    const advisory = renderMemoryAdvisoryEvidence(data.memory_advisory);
+    const compaction = widgetEventReceiptHtml(renderCompactionEvidence(data.output_compaction || data.compaction));
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Widget event inbox receipt</h3>' +
+      '<div class="capy-spaces-muted">Metadata-only read receipt for this widget event inbox. Prompt text, event payload bodies, generated widget bodies, and secrets stay omitted.</div>' +
+      preflight + policy + progress + advisory + compaction + '</div>';
+  }
+
+  function renderWidgetEventInbox(events, receiptEnvelope){
+    const envelope = receiptEnvelope && typeof receiptEnvelope === 'object' && !Array.isArray(receiptEnvelope) ? receiptEnvelope : null;
     const safeEvents = Array.isArray(events) ? events.slice(0, 10) : [];
     const rows = safeEvents.length ? safeEvents.map(function(event){
       const eventName = event && event.event_name ? String(event.event_name) : 'widget.event';
@@ -2268,7 +2358,7 @@
         compactionEvidence +
         '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No queued widget events.</div>';
-    return '<div class="capy-spaces-card"><h3>Queued widget events</h3>' +
+    return renderWidgetEventInboxReceipt(envelope) + '<div class="capy-spaces-card"><h3>Queued widget events</h3>' +
       '<div class="capy-spaces-muted">Metadata-only event inbox. Prompts and payload summaries are redacted before display.</div>' +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
@@ -2297,7 +2387,9 @@
     return '<div class="capy-spaces-muted">Recovery: disabled'+escapeHtml(safeReason)+'</div>';
   }
 
-  function renderWidgetManager(spaceId, widgets, events){
+  function renderWidgetManager(spaceId, widgets, eventInbox){
+    const eventEnvelope = eventInbox && typeof eventInbox === 'object' && !Array.isArray(eventInbox) ? eventInbox : null;
+    const events = Array.isArray(eventInbox) ? eventInbox : (Array.isArray(eventEnvelope && eventEnvelope.events) ? eventEnvelope.events : []);
     const widgetCards = widgets.length ? widgets.map(function(w){
       const widgetId = w.id || '';
       const title = safeDisplayMetadataText(w.title, widgetId || 'Untitled widget') || widgetId || 'Untitled widget';
@@ -2329,7 +2421,7 @@
       '<h3>Widgets for '+escapeHtml(spaceId)+'</h3>' +
       '<div class="capy-spaces-muted">Safe metadata view. Generated widget code is intentionally not fetched or executed in this list.</div>' +
       '<div class="capy-spaces-widget-list">'+widgetCards+'</div>' +
-      renderWidgetEventInbox(events || []) +
+      renderWidgetEventInbox(events || [], eventEnvelope) +
       '<div class="capy-spaces-form" aria-label="Add or update widget">' +
       '<label>Widget ID<input id="capyWidgetId" type="text" autocomplete="off" placeholder="weather"></label>' +
       '<label>Title<input id="capyWidgetTitle" type="text" autocomplete="off" placeholder="Weather"></label>' +
@@ -3184,6 +3276,8 @@
       if (data && data.session && typeof S !== 'undefined') S.session = data.session;
       if (typeof syncCapyActiveSpaceContext === 'function') syncCapyActiveSpaceContext();
       await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderCreateFromSessionStatus(data || {}) + refreshedRoot.innerHTML;
       return;
     }
     if (action === 'addSystemWidget') {
@@ -3320,7 +3414,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3343,7 +3437,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3366,7 +3460,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3389,7 +3483,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3412,7 +3506,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3435,7 +3529,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3458,7 +3552,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3481,7 +3575,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3504,7 +3598,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3527,7 +3621,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3550,7 +3644,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3573,7 +3667,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3596,7 +3690,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3619,7 +3713,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
@@ -3642,7 +3736,7 @@
             const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId)+'&limit=10');
             const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
             refreshedRoot.dataset.editingWidgetId = '';
-            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData || {events: []});
           } catch (widgetErr) {
             refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
           }
