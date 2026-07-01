@@ -14787,10 +14787,14 @@ def _handle_sessions_search(handler, parsed):
             try:
                 sess = get_session(s["session_id"])
                 msgs = sess.messages[:depth] if depth else sess.messages
-                for m in msgs:
+                for raw_idx, m in enumerate(msgs):
                     c = _session_search_message_text(m)
                     if q in str(c).lower():
-                        item = dict(s, match_type="content")
+                        # #4159: surface the matched message index so the frontend
+                        # can jump to it (msg-user-<rawIdx>). The renderer stamps
+                        # rows with the same raw index it gets from sess.messages,
+                        # so this enumerate lines up with the DOM ids.
+                        item = dict(s, match_type="content", match_message_idx=raw_idx)
                         preview = _session_search_preview(c, q)
                         if preview:
                             item["match_preview"] = _redact_text(preview)

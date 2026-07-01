@@ -7565,6 +7565,17 @@ function renderSessionListFromCache(){
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
           await loadSession(s.session_id);renderSessionListFromCache();
+          // #4159: if the user clicked a content-search hit, scroll the
+          // newly-loaded transcript to the matched message and flash it.
+          // window._jumpToMessage (exposed by outline.js) handles both the
+          // in-window case (smooth scrollIntoView + flash) and the
+          // out-of-render-window case (refetch full session w/ msg_limit=9999,
+          // expand the window, then retry). A missing idx falls back to opening
+          // at the latest message, so this stays backward compatible.
+          if(s.match_type==='content' && Number.isInteger(s.match_message_idx) && typeof window._jumpToMessage==='function'){
+            const _jumpIdx=s.match_message_idx;
+            window.setTimeout(()=>{ try{ window._jumpToMessage(_jumpIdx); }catch(_e){} }, 0);
+          }
           if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         }finally{
           el.classList.remove('loading');
