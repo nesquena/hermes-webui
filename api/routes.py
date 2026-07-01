@@ -6,6 +6,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 import html as _html
 import copy
 import hashlib
+import inspect
 import errno
 import io
 import gzip
@@ -1766,7 +1767,7 @@ _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cach
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
-_session_list_cache_key = _route_session_list_cache._session_list_cache_key
+_route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
 _session_list_cache_path_stamp = _route_session_list_cache._session_list_cache_path_stamp
 _session_list_cache_profile_scope = _route_session_list_cache._session_list_cache_profile_scope
@@ -1779,6 +1780,52 @@ _session_list_cache_source_stamp = _route_session_list_cache._session_list_cache
 _session_list_cache_state_db_fingerprint = _route_session_list_cache._session_list_cache_state_db_fingerprint
 _session_list_cache_stale_reason = _route_session_list_cache._session_list_cache_stale_reason
 _session_list_cache_streaming_freeze_marker = _route_session_list_cache._session_list_cache_streaming_freeze_marker
+
+
+def _callable_accepts_kwarg(callable_obj, kwarg_name: str) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    if kwarg_name in signature.parameters:
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _session_list_cache_key(
+    active_profile: str | None,
+    all_profiles: bool,
+    show_cli_sessions: bool,
+    show_previous_messaging_sessions: bool,
+    show_cron_sessions: bool,
+    include_archived: bool = False,
+    exclude_hidden: bool = False,
+    visible_only: bool = False,
+    show_webhook_sessions: bool = False,
+    source_filter: str | None = None,
+    sidebar_source: str | None = None,
+    archived_limit: int | None = None,
+    archived_offset: int = 0,
+    show_claude_code_sessions: bool = True,
+) -> tuple:
+    return _route_session_list_cache_key(
+        active_profile=active_profile,
+        all_profiles=all_profiles,
+        show_cli_sessions=show_cli_sessions,
+        show_previous_messaging_sessions=show_previous_messaging_sessions,
+        show_cron_sessions=show_cron_sessions,
+        include_archived=include_archived,
+        exclude_hidden=exclude_hidden,
+        visible_only=visible_only,
+        show_webhook_sessions=show_webhook_sessions,
+        source_filter=source_filter,
+        sidebar_source=sidebar_source,
+        archived_limit=archived_limit,
+        archived_offset=archived_offset,
+    ) + (bool(show_claude_code_sessions),)
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -2014,6 +2061,7 @@ def _build_session_list_cache_payload(
     show_cli_sessions: bool,
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
+    show_claude_code_sessions: bool = True,
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
@@ -2052,18 +2100,11 @@ def _build_session_list_cache_payload(
         )
 
     def _all_sessions_for_sidebar():
-        try:
+        if _callable_accepts_kwarg(all_sessions, "include_lineage_metadata"):
             return all_sessions(diag=diag, include_lineage_metadata=False)
-        except TypeError as exc:
-            message = str(exc)
-            if (
-                "unexpected keyword argument" not in message
-                or "include_lineage_metadata" not in message
-            ):
-                raise
-            # Focused tests and third-party callers sometimes monkeypatch
-            # routes.all_sessions with the historical diag-only signature.
-            return all_sessions(diag=diag)
+        # Focused tests and third-party callers sometimes monkeypatch
+        # routes.all_sessions with the historical diag-only signature.
+        return all_sessions(diag=diag)
 
     diag_stage("all_sessions")
     webui_sessions = _all_sessions_for_sidebar()
@@ -2079,7 +2120,19 @@ def _build_session_list_cache_payload(
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
-        cli = get_cli_sessions(source_filter=source_filter, all_profiles=all_profiles)
+        if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
+            cli = get_cli_sessions(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+                include_claude_code=show_claude_code_sessions,
+            )
+        else:
+            # Focused tests sometimes monkeypatch routes.get_cli_sessions with
+            # the historical two-keyword signature.
+            cli = get_cli_sessions(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+            )
         diag_stage("merge_cli_sessions")
         cli_by_id = {s["session_id"]: s for s in cli}
         # #3238/#4591: reconcile orphaned imported sidecars. When a CLI or
@@ -2355,6 +2408,7 @@ def _build_session_list_cache_payload(
             "show_cli_sessions": show_cli_sessions,
             "show_previous_messaging_sessions": show_previous_messaging_sessions,
             "show_cron_sessions": show_cron_sessions,
+            "show_claude_code_sessions": show_claude_code_sessions if show_cli_sessions else False,
             "show_webhook_sessions": show_webhook_sessions,
         },
     }
@@ -11205,6 +11259,7 @@ def handle_get(handler, parsed) -> bool:
             diag.stage("load_settings")
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
+            show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
             show_previous_messaging_sessions = bool(
                 settings.get("show_previous_messaging_sessions")
             )
@@ -11226,6 +11281,7 @@ def handle_get(handler, parsed) -> bool:
                 active_profile=active_profile,
                 all_profiles=all_profiles,
                 show_cli_sessions=show_cli_sessions,
+                show_claude_code_sessions=show_claude_code_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
                 include_archived=include_archived,
@@ -11247,6 +11303,7 @@ def handle_get(handler, parsed) -> bool:
                     active_profile=active_profile,
                     all_profiles=all_profiles,
                     show_cli_sessions=show_cli_sessions,
+                    show_claude_code_sessions=show_claude_code_sessions,
                     show_previous_messaging_sessions=show_previous_messaging_sessions,
                     show_cron_sessions=show_cron_sessions,
                     include_archived=include_archived,
@@ -13434,6 +13491,7 @@ def handle_post(handler, parsed) -> bool:
             k in body
             for k in (
                 "show_cli_sessions",
+                "show_claude_code_sessions",
                 "show_cron_sessions",
                 "show_webhook_sessions",
                 "show_previous_messaging_sessions",

@@ -3,6 +3,7 @@ import collections
 import copy
 import datetime
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -5097,6 +5098,19 @@ def _path_stat_cache_key(path):
         return None
 
 
+def _callable_accepts_include_claude_code(callable_obj) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    if 'include_claude_code' in signature.parameters:
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
 def _sqlite_content_fingerprint(db_path: Path):
     """Return a commit-reliable content fingerprint for a state.db.
 
@@ -5222,7 +5236,7 @@ def _cli_sessions_streaming_freeze_marker():
         return ("streaming",)
 
 
-def _resolve_cli_sessions_context(source_filter=None):
+def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool = True):
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
     # (stored in the server's runtime config). This means:
@@ -5259,6 +5273,7 @@ def _resolve_cli_sessions_context(source_filter=None):
         str(db_path),
         str(source_filter or ''),
         db_state_key,
+        bool(include_claude_code),
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
         _path_stat_cache_key(SESSION_INDEX_FILE),
@@ -5684,7 +5699,12 @@ def _load_cli_sessions_uncached(
     return cli_sessions
 
 
-def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
+def get_cli_sessions(
+    source_filter=None,
+    *,
+    all_profiles: bool = False,
+    include_claude_code: bool = True,
+) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
 
@@ -5704,34 +5724,61 @@ def get_cli_sessions(source_filter=None, *, all_profiles: bool = False) -> list:
         cache_key = (
             'all_profiles',
             source_filter or '',
+            bool(include_claude_code),
             context_cache_key,
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(SESSION_INDEX_FILE),
         )
     else:
-        hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(source_filter)
+        resolve_kwargs = {}
+        resolve_supports_include_claude_code = _callable_accepts_include_claude_code(
+            _resolve_cli_sessions_context
+        )
+        if resolve_supports_include_claude_code:
+            resolve_kwargs['include_claude_code'] = include_claude_code
+        hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(
+            source_filter,
+            **resolve_kwargs,
+        )
+        if not resolve_supports_include_claude_code:
+            cache_key = cache_key + (bool(include_claude_code),)
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
     def _load_sessions():
+        loader_supports_include_claude_code = _callable_accepts_include_claude_code(
+            _load_cli_sessions_uncached
+        )
         if all_profiles:
             merged: list[dict] = []
             for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
+                load_kwargs = {
+                    'source_filter': source_filter,
+                    'visible_session_limit': None,
+                    'cron_project_limit': None,
+                    'webhook_project_limit': None,
+                }
+                if loader_supports_include_claude_code:
+                    load_kwargs['include_claude_code'] = include_claude_code and idx == 0
                 merged.extend(
                     _load_cli_sessions_uncached(
                         ctx_home,
                         ctx_db_path,
                         ctx_profile,
-                        source_filter=source_filter,
-                        visible_session_limit=None,
-                        cron_project_limit=None,
-                        webhook_project_limit=None,
-                        include_claude_code=(idx == 0),
+                        **load_kwargs,
                     )
                 )
             return merged
-        return _load_cli_sessions_uncached(hermes_home, db_path, cli_profile, source_filter=source_filter)
+        load_kwargs = {'source_filter': source_filter}
+        if loader_supports_include_claude_code:
+            load_kwargs['include_claude_code'] = include_claude_code
+        return _load_cli_sessions_uncached(
+            hermes_home,
+            db_path,
+            cli_profile,
+            **load_kwargs,
+        )
 
     if ttl > 0:
         stale_sessions = None
