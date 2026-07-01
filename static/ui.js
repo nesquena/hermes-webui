@@ -7907,7 +7907,7 @@ function restoreLiveTurnHtmlForSession(sid){
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
-  requestAnimationFrame(()=>postProcessRenderedMessages(restored));
+  requestAnimationFrame(()=>_postProcessWithAnchorSuppression(restored));
   return true;
 }
 
@@ -12530,7 +12530,7 @@ function renderMessages(options){
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
-      requestAnimationFrame(()=>postProcessRenderedMessages(inner));
+      requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -13884,7 +13884,7 @@ function renderMessages(options){
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>postProcessRenderedMessages(inner));
+  requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -15010,6 +15010,36 @@ async function regenerateResponse(btn) {
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
 
+// postProcessRenderedMessages() runs one frame AFTER the render + JS scroll
+// restore (it is scheduled via requestAnimationFrame). It performs syntax
+// highlighting, inline diff/csv/pdf/html/excalidraw hydration, mermaid/katex
+// rendering — all of which can CHANGE the height of rows above the viewport.
+//
+// On mobile the scroller rests at overflow-anchor:auto, so any above-viewport
+// height change in this post-render frame makes the browser's native anchor
+// engine compensate scrollTop a SECOND time — after the JS restore already
+// settled the reader's position — yanking them to an unrelated turn ("往回大跳").
+// The synchronous _fixMobileScrollJank / _suppressBrowserOverflowAnchor guards
+// only cover the render frame itself; they have already released by the time
+// this rAF fires. Wrap the post-process (and the media-reflow frame right after
+// it) in the same suppression so the browser layer cannot re-anchor during the
+// async settle window. Desktop rests at `none`, so this is a no-op there.
+function _postProcessWithAnchorSuppression(container){
+  const scroller=$('messages');
+  const release=(scroller&&typeof _suppressBrowserOverflowAnchor==='function')
+    ? _suppressBrowserOverflowAnchor(scroller) : null;
+  try{
+    postProcessRenderedMessages(container);
+  }finally{
+    // Hold suppression across ONE more frame so late media/layout reflow
+    // (image decode, katex/mermaid measure) cannot re-anchor either, then let
+    // _suppressBrowserOverflowAnchor's own rAF-deferred restore run.
+    if(release){
+      if(typeof requestAnimationFrame==='function') requestAnimationFrame(release);
+      else release();
+    }
+  }
+}
 function postProcessRenderedMessages(container) {
   highlightCode(container);
   addCopyButtons(container);
