@@ -248,6 +248,68 @@ const SESSION_ARCHIVE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_DELETE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_SWIPE_CANCEL_RATIO = 0.75;
 
+let _cachedAuxConfig=null;
+let _cachedAuxConfigLoaded=false;
+let _cachedAuxConfigPromise=null;
+
+function _manualTitleAuxConfigFromSettings(){
+  try{
+    if(typeof _auxOriginalConfig!=='undefined'&&_auxOriginalConfig&&typeof _auxOriginalConfig==='object'){
+      return _auxOriginalConfig;
+    }
+  }catch(_){
+  }
+  return null;
+}
+
+function _manualTitleAuxConfigFromPayload(auxData){
+  if(!auxData||typeof auxData!=='object'||Array.isArray(auxData)) return null;
+  if(auxData.title_generation&&typeof auxData.title_generation==='object') return auxData;
+  const tasks=Array.isArray(auxData.tasks)?auxData.tasks:null;
+  if(!tasks) return null;
+  const taskMap={};
+  for(const task of tasks){
+    if(task&&typeof task==='object'&&typeof task.task==='string'&&task.task){
+      taskMap[task.task]=task;
+    }
+  }
+  return taskMap;
+}
+
+async function _loadManualTitleAuxConfig(){
+  const settingsCfg=_manualTitleAuxConfigFromSettings();
+  if(settingsCfg) return settingsCfg;
+  if(_cachedAuxConfigLoaded) return _cachedAuxConfig;
+  if(_cachedAuxConfigPromise) return _cachedAuxConfigPromise;
+  _cachedAuxConfigPromise=(async()=>{
+    try{
+      const auxData=await api('/api/model/auxiliary',{retries:0,timeoutToast:false});
+      _cachedAuxConfig=_manualTitleAuxConfigFromPayload(auxData);
+      return _cachedAuxConfig;
+    }catch(_){
+      _cachedAuxConfig=null;
+      return null;
+    }finally{
+      _cachedAuxConfigLoaded=true;
+      _cachedAuxConfigPromise=null;
+    }
+  })();
+  return _cachedAuxConfigPromise;
+}
+
+async function _manualTitleRegenerateTimeoutMs(){
+  let cfg=null;
+  try{
+    const auxConfig=await _loadManualTitleAuxConfig();
+    cfg=auxConfig&&auxConfig.title_generation;
+  }catch(_){
+    return null;
+  }
+  const timeoutSeconds=Number(cfg&&cfg.timeout);
+  if(!Number.isFinite(timeoutSeconds)||timeoutSeconds<=0) return null;
+  return Math.max(30000,Math.round((timeoutSeconds+5)*1000));
+}
+
 function _formatSessionModelWithGateway(s){
   if(!s||!s.model)return'';
   const routing=(typeof _latestGatewayRoutingForSession==='function')?_latestGatewayRoutingForSession(s):(s.gateway_routing||null);
@@ -3917,7 +3979,10 @@ function _openSessionActionMenu(session, anchorEl){
       closeSessionActionMenu();
       try{
         if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
-        const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+        const requestOpts={method:'POST',body:JSON.stringify({session_id:session.session_id})};
+        const timeoutMs=await _manualTitleRegenerateTimeoutMs();
+        if(timeoutMs) requestOpts.timeoutMs=timeoutMs;
+        const response=await api('/api/session/title/regenerate',requestOpts);
         const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
         if(nextTitle){
           session.title=nextTitle;
