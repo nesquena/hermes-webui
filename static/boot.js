@@ -916,7 +916,7 @@ function _micToastKeyForRecognitionError(error){
     }
     try{
       const captureStream=await navigator.mediaDevices.getUserMedia({audio:true});
-      if(startSeq!==_micStartSeq||(holdRequired&&!_micHoldActive)){
+      if(startSeq!==_micStartSeq||!_micButtonAvailable()||(holdRequired&&!_micHoldActive)){
         _isRecording=false;
         _stopTracks(captureStream);
         return;
@@ -962,6 +962,7 @@ function _micToastKeyForRecognitionError(error){
       recorder.start();
       _setRecording(true);
     }catch(err){
+      if(startSeq!==_micStartSeq) return;
       _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();

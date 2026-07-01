@@ -74,8 +74,9 @@ def test_hold_release_routes_to_stop_mic():
         re.DOTALL,
     )
     assert "const startSeq=++_micStartSeq;" in src
-    assert "if(startSeq!==_micStartSeq||(holdRequired&&!_micHoldActive)){" in src
+    assert "if(startSeq!==_micStartSeq||!_micButtonAvailable()||(holdRequired&&!_micHoldActive)){" in src
     assert "_stopTracks(captureStream);" in src
+    assert "if(startSeq!==_micStartSeq) return;" in src
 
 
 def test_ctrl_shift_d_routes_through_toggle_helper():
