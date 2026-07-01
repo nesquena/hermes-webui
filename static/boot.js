@@ -629,6 +629,8 @@ function _micToastKeyForRecognitionError(error){
   let _finalText='';
   let _prefix='';
   let _isRecording=false;
+  let _speechStopRequested=false;
+  let _micWakeLock=null;
 
   function _setButtonTooltipAndKey(btn, key){
     const text = t(key);
@@ -742,6 +744,34 @@ function _micToastKeyForRecognitionError(error){
     }
   }
 
+  async function _acquireMicWakeLock(){
+    if(!navigator.wakeLock||_micWakeLock) return;
+    try{
+      _micWakeLock=await navigator.wakeLock.request('screen');
+      _micWakeLock.addEventListener?.('release',()=>{ _micWakeLock=null; },{once:true});
+    }catch(_){
+      _micWakeLock=null;
+    }
+  }
+
+  async function _releaseMicWakeLock(){
+    const lock=_micWakeLock;
+    _micWakeLock=null;
+    if(!lock) return;
+    try{ await lock.release(); }catch(_){}
+  }
+
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='hidden'){
+      void _releaseMicWakeLock();
+      return;
+    }
+
+    if(window._micActive&&_activeCaptureMode==='speech'){
+      void _acquireMicWakeLock();
+    }
+  });
+
   function _stopMic(){
     if(!window._micActive) return;
     // Stop the backend that was ACTIVE WHEN RECORDING STARTED — not whatever
@@ -749,6 +779,7 @@ function _micToastKeyForRecognitionError(error){
     // which would otherwise make us stop the wrong backend and orphan the other
     // (#3169 Codex review). _activeCaptureMode is pinned at start.
     if(recognition && _activeCaptureMode==='speech'){
+      _speechStopRequested=true;
       recognition.stop();
       return;
     }
@@ -764,7 +795,7 @@ function _micToastKeyForRecognitionError(error){
   function _ensureSpeechRecognition(){
     if(!SpeechRecognition) return null;
     const sr=recognition||new SpeechRecognition();
-    sr.continuous=false;
+    sr.continuous=true;
     sr.interimResults=true;
     sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
@@ -788,9 +819,22 @@ function _micToastKeyForRecognitionError(error){
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      _setRecording(false);
       ta.value=committed;
       autoResize();
+      if(!_speechStopRequested&&window._micActive&&_activeCaptureMode==='speech'){
+        _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
+          ? committed+' '
+          : committed;
+        _finalText='';
+        try{
+          sr.start();
+          return;
+        }catch(_){}
+      }
+      _speechStopRequested=false;
+      _isRecording=false;
+      void _releaseMicWakeLock();
+      _setRecording(false);
       if(window._micPendingSend){
         window._micPendingSend=false;
         send();
@@ -799,10 +843,19 @@ function _micToastKeyForRecognitionError(error){
     };
 
     sr.onerror=(event)=>{
+      if((event.error==='no-speech'||event.error==='aborted')
+          && window._micActive
+          && _activeCaptureMode==='speech'
+          && !_speechStopRequested){
+        return;
+      }
+
+      _speechStopRequested=false;
       _setRecording(false);
       window._micPendingSend=false;
       _isRecording=false;
-      if(event.error==='network'||event.error==='not-allowed'){
+      void _releaseMicWakeLock();
+      if(event.error==='network'||event.error==='not-allowed'||event.error==='service-not-allowed'||event.error==='audio-capture'){
         // Persist SR failure: next reload will skip SpeechRecognition
         localStorage.setItem(_micForceMediaRecorderKey,'1');
         _forceMediaRecorder=true;
@@ -874,7 +927,9 @@ function _micToastKeyForRecognitionError(error){
     }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
+      _speechStopRequested=false;
       recognition.start();
+      void _acquireMicWakeLock();
       _setRecording(true);
       return;
     }
