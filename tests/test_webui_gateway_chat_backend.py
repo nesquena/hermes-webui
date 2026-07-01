@@ -9,7 +9,7 @@ import urllib.error
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
-from api.config import STREAMS, create_stream_channel
+from api.config import PENDING_GOAL_CONTINUATION, STREAMS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
     _gateway_http_error_event,
@@ -488,6 +488,160 @@ def test_gateway_chat_worker_reads_reasoning_content_deltas_from_chat_completion
         if item[0] == "reasoning":
             reasoning_events.append(item[1]["text"])
     assert reasoning_events == ["Let me ", "think"]
+
+
+def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"goal "}}]}\n\n'
+            yield b'data: {"choices":[{"delta":{"content":"reply"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    from api import goals as webui_goals
+
+    monkeypatch.setattr(webui_goals, "has_active_goal", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        webui_goals,
+        "evaluate_goal_after_turn",
+        lambda *args, **kwargs: {
+            "should_continue": True,
+            "continuation_prompt": "continue the goal",
+            "message": "Continuing goal",
+            "message_key": "goal_continuing",
+            "message_args": ["one step remains"],
+        },
+    )
+
+    s = new_session()
+    stream_id = "stream-gateway-goal-continue"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "finish it"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+    PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "finish it",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        goal_related=True,
+    )
+
+    saved = models.get_session(s.session_id)
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    event_names = [item[0] for item in events]
+
+    assert event_names.count("goal") == 2
+    assert "goal_continue" in event_names
+    assert "done" in event_names
+    assert "stream_end" in event_names
+    assert event_names.index("goal_continue") < event_names.index("done")
+    assert event_names.index("done") < event_names.index("stream_end")
+    assert s.session_id in PENDING_GOAL_CONTINUATION
+
+    goal_continue_event = next(item for item in events if item[0] == "goal_continue")
+    assert goal_continue_event[1]["continuation_prompt"] == "continue the goal"
+    assert goal_continue_event[1]["message"] == "Continuing goal"
+    assert goal_continue_event[1]["message_key"] == "goal_continuing"
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "goal reply"
+
+
+def test_gateway_chat_worker_skips_goal_judge_for_non_goal_turn(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"plain reply"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    from api import goals as webui_goals
+
+    has_goal_calls = []
+    judge_calls = []
+
+    monkeypatch.setattr(
+        webui_goals,
+        "has_active_goal",
+        lambda *args, **kwargs: has_goal_calls.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        webui_goals,
+        "evaluate_goal_after_turn",
+        lambda *args, **kwargs: judge_calls.append((args, kwargs)),
+    )
+
+    s = new_session()
+    stream_id = "stream-gateway-no-goal"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "plain turn"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+    PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "plain turn",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        goal_related=False,
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    event_names = [item[0] for item in events]
+
+    assert "goal" not in event_names
+    assert "goal_continue" not in event_names
+    assert "done" in event_names
+    assert "stream_end" in event_names
+    assert has_goal_calls == []
+    assert judge_calls == []
+    assert s.session_id not in PENDING_GOAL_CONTINUATION
 
 
 def test_gateway_chat_worker_normalizes_prefill_slice_before_system_prefix(tmp_path, monkeypatch):

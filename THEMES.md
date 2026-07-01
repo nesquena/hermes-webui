@@ -102,6 +102,12 @@ Two ways to ship it:
    declare it in `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS`. No code changes
    needed; the skin attribute can be set from your own JS.
 
+   Extensions that register a skin through `window.registerHermesSkin()` may
+   also set `scheme: "light"` or `scheme: "dark"` for light-only or dark-only
+   skins. The saved Theme preference stays unchanged, but WebUI applies the
+   matching effective base class while that skin is selected so System/Light or
+   System/Dark does not mix incompatible base tokens into the skin.
+
 ### Tips
 
 - **Test both themes.** A skin that pops on Dark can be illegible on Light.
@@ -142,7 +148,9 @@ font size. Persists alongside theme and skin.
 
 1. **Theme:** `document.documentElement.classList.toggle('dark', isDark)` —
    light mode removes the class. System mode tracks
-   `matchMedia('(prefers-color-scheme: dark)')`.
+   `matchMedia('(prefers-color-scheme: dark)')`. Extension-registered skins
+   may declare a light/dark `scheme`; when selected, that scheme controls the
+   effective `.dark` class without rewriting the saved Theme preference.
 2. **Skin:** `document.documentElement.dataset.skin = name` (or remove the
    attribute for `default`).
 3. **Font size:** `document.documentElement.dataset.fontSize = size` (or

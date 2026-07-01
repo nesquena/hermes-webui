@@ -91,5 +91,5 @@ def test_deferred_hidden_stream_error_reattaches_or_restores_before_inline_error
     assert "api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`)" in recovery_block
     assert "if(st.active)" in recovery_block
     assert "_wireSSE(new EventSource" in recovery_block
-    assert "if(await _restoreSettledSession(source)) return;" in recovery_block
-    assert recovery_block.find("if(await _restoreSettledSession(source)) return;") < recovery_block.rfind("_handleStreamError(source)")
+    assert "if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;" in recovery_block
+    assert recovery_block.find("if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;") < recovery_block.rfind("_handleStreamError(source)")

@@ -934,7 +934,11 @@ async function newSession(flash, options={}){
     };
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
-    if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
+    if(Object.prototype.hasOwnProperty.call(options,'project_id')){
+      reqBody.project_id=options.project_id;
+    } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
+      reqBody.project_id=_activeProject;
+    }
     // Forward a pre-session toolset override only from the empty composer (#4490).
     if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
     const modelSelForNew=$('modelSelect');
@@ -1418,7 +1422,10 @@ async function loadSession(sid){
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
-  const activeStreamId=S.session.active_stream_id||null;
+  // `let` (not const): re-read below, after the awaited _ensureMessagesLoaded,
+  // so a server_turn_started that attaches a live stream MID-RELOAD is honored
+  // by the attach/idle decision instead of being clobbered by the stale snapshot.
+  let activeStreamId=S.session.active_stream_id||null;
   // If the server says the session is idle, reset browser-side streaming flags
   // NOW — before the async _ensureMessagesLoaded gap below. Without this,
   // S.busy can remain true from a still-running stream in the PREVIOUS session
@@ -1653,6 +1660,18 @@ async function loadSession(sid){
 
     // Attach pending user message if one is queued.
     _mergePendingSessionMessage(S.session,S.messages);
+
+    // Self-heal-vs-live-render race guard (maintainer/Codex-reproduced; verified
+    // in an isolated instance). `activeStreamId` was snapshotted BEFORE the
+    // awaited _ensureMessagesLoaded above. During a force reload (the
+    // `session-updated` self-heal or any keepStaleUntilLoaded recovery), a
+    // server-initiated turn can fire `server_turn_started` mid-await and set
+    // S.activeStreamId for THIS sid. Without re-reading, the idle branch below
+    // would clear S.activeStreamId/S.busy off the stale (null) snapshot and
+    // silently kill the live turn's render. Fold a concurrently-attached
+    // same-session stream into activeStreamId so the existing attach branch
+    // (and all its `attachLiveStream(sid, activeStreamId, ...)` calls) keeps it.
+    activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
 
     if(activeStreamId){
       S.busy=true;
@@ -3284,6 +3303,38 @@ function _sessionIdFromLocation(){
     return qs.get('session')||qs.get('session_id')||null;
   }catch(_e){return null;}
 }
+function _composerPrefillIntentFromLocation(){
+  const empty={hasParams:false,hasText:false,text:'',autoSend:false};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    const hasQ=qs.has('q');
+    const hasPrompt=qs.has('prompt');
+    const hasSend=qs.has('send');
+    if(!hasQ&&!hasPrompt&&!hasSend) return empty;
+    const text=hasQ?(qs.get('q')||''):(hasPrompt?(qs.get('prompt')||''):'');
+    return {
+      hasParams:true,
+      hasText:!!String(text).trim(),
+      text,
+      autoSend:false
+    };
+  }catch(_e){return empty;}
+}
+function _consumeComposerPrefillParamsFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('q');
+    current.searchParams.delete('prompt');
+    current.searchParams.delete('send');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _appRootPath(){
   try{
     const base = new URL(document.baseURI||window.location.origin+'/', window.location.origin);
@@ -3299,6 +3350,9 @@ function _sessionUrlForSid(sid){
     const current=new URL(window.location.href);
     current.searchParams.delete('session');
     current.searchParams.delete('session_id');
+    current.searchParams.delete('q');
+    current.searchParams.delete('prompt');
+    current.searchParams.delete('send');
     base.search=current.searchParams.toString();
     base.hash=current.hash;
   }catch(_e){}
@@ -3899,7 +3953,11 @@ function _openSessionActionMenu(session, anchorEl){
       ICONS.trash,
       async()=>{
         closeSessionActionMenu();
-        await deleteSession(session.session_id);
+        // Menu Delete has no swipe/removal animation to wait for. Pass an
+        // immediate beforeDelete hook so deleteSession() removes the sidebar row
+        // optimistically while slow backend cleanup (/api/session/delete,
+        // state.db/FTS/journal cleanup) continues.
+        await deleteSession(session.session_id,()=>Promise.resolve());
       },
       'danger'
     ));
@@ -5673,10 +5731,6 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
-    if(!isForkChild&&child._cross_surface_child_session){
-      if(childRenderable) orphans.push({...child,_orphan_child_session:true});
-      continue;
-    }
     const parentSid=child.parent_session_id;
     let parentRow=visibleBySid.get(parentSid);
     let parentSegment=null;
@@ -5693,6 +5747,25 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     }
     if(!parentRow&&hasHiddenArchivedAncestor(child)){
       hiddenArchivedChildTree.add(child.session_id);
+      continue;
+    }
+    // Cross-surface rows (for example a WebUI continuation from a Telegram
+    // conversation) should remain top-level when there is no WebUI-owned parent
+    // row to stack under.  But if the parent is visible in this same sidebar
+    // render, attach normally — delegated subagent rows are also cross-source
+    // relative to their WebUI parent and should not be forced into orphans.
+    const parentSourceMarker=String(parentRow&&(
+      parentRow.session_source||parentRow.raw_source||parentRow.source_tag||parentRow.source
+    )||'').toLowerCase();
+    const parentIsExternal=parentRow&&(
+      (typeof _isExternalSession==='function'&&_isExternalSession(parentRow))||
+      (typeof _isMessagingSession==='function'&&_isMessagingSession(parentRow))||
+      parentRow.is_cli_session===true||
+      parentRow.session_source==='messaging'||
+      (parentSourceMarker&&parentSourceMarker!=='webui'&&parentSourceMarker!=='subagent'&&parentSourceMarker!=='other'&&parentSourceMarker!=='fork')
+    );
+    if(parentRow&&child._cross_surface_child_session&&parentIsExternal){
+      if(childRenderable) orphans.push({...child,_orphan_child_session:true});
       continue;
     }
     if(parentRow){
@@ -6110,6 +6183,56 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
 }
 
+function _attachProjectQuickCreateButton(chip, project){
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.className='project-chip-quick-create';
+  btn.textContent='+';
+  btn.title='New conversation in this project';
+  btn.setAttribute('aria-label','New conversation in this project');
+  const stop=function(e){
+    if(!e) return;
+    if(typeof e.preventDefault==='function') e.preventDefault();
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    if(typeof e.stopImmediatePropagation==='function') e.stopImmediatePropagation();
+  };
+  const stopTouchBubble=function(e){
+    if(!e) return;
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    if(typeof e.stopImmediatePropagation==='function') e.stopImmediatePropagation();
+  };
+  btn.onclick=async(e)=>{
+    stop(e);
+    if(_newSessionInFlight){
+      // The initiating tap already owns the filter change and rollback path.
+      try{
+        await newSession(false,{project_id:project.project_id});
+      }catch(_){
+        // The initiating tap already owns the visible failure path.
+      }
+      return;
+    }
+    const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
+    _setActiveProjectFilter(project.project_id);
+    try{
+      await newSession(false,{project_id:project.project_id});
+      // newSession() does not repaint the sidebar (callers own that — see the
+      // newSession contract). Repaint from the post-create state so the new
+      // project-assigned session appears deterministically.
+      try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+      try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+    }catch(err){
+      _setActiveProjectFilter(previousProject);
+      if(typeof showToast==='function') showToast('New conversation failed: '+(err&&err.message||err));
+    }
+  };
+  btn.ondblclick=(e)=>{stop(e);};
+  btn.oncontextmenu=(e)=>{stop(e);};
+  btn.ontouchstart=(e)=>{stopTouchBubble(e);};
+  btn.ontouchend=(e)=>{stopTouchBubble(e);};
+  chip.appendChild(btn);
+}
+
 
 function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
@@ -6324,6 +6447,7 @@ function renderSessionListFromCache(){
         clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
         chip.classList.remove('long-pressing');
       },{passive:true});
+      if(window._projectQuickCreate) _attachProjectQuickCreateButton(chip,p);
       bar.appendChild(chip);
     }
     // Create button

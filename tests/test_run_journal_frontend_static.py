@@ -213,7 +213,11 @@ process.stdout.write(JSON.stringify({{
 
 def test_reattach_path_uses_replay_when_status_reports_journal():
     reattach_pos = MESSAGES_SRC.index("let replayOnly=false;")
-    block = MESSAGES_SRC[reattach_pos : reattach_pos + 1200]
+    # Window widened to 2200: the SSE-recovery follow-restore fix (the
+    # _wasFollowingAtReconnectDead guard + its sticky-unpin check) inserted lines
+    # into the reconnect-dead cleanup block between this anchor and the
+    # replay-params assertion below, pushing the target string past the old slice.
+    block = MESSAGES_SRC[reattach_pos : reattach_pos + 2200]
 
     assert "st.replay_available" in block
     assert "replayOnly=true" in block

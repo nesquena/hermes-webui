@@ -11,9 +11,13 @@ Covers:
 
 from __future__ import annotations
 
+import io
+import logging
 import re
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlparse
 
 import pytest
 
@@ -107,12 +111,19 @@ def models_module():
 
 def test_get_session_for_file_ops_webui_passthrough(models_module, monkeypatch):
     """(a) WebUI session — delegates to get_session, no state.db consulted."""
-    sentinel = object()
-    called = {"get_session": 0, "state_db": 0}
+    profiles_module = pytest.importorskip("api.profiles")
+    sentinel = SimpleNamespace(profile=None)
+    called = {"get_session": 0, "profile_match": 0, "state_db": 0}
 
     def fake_get_session(sid, metadata_only=False):
         called["get_session"] += 1
         return sentinel
+
+    def fake_profiles_match(session_profile, active_profile):
+        called["profile_match"] += 1
+        assert session_profile is None
+        assert active_profile == "default"
+        return True
 
     def fake_has(_sid):
         called["state_db"] += 1
@@ -120,9 +131,99 @@ def test_get_session_for_file_ops_webui_passthrough(models_module, monkeypatch):
 
     monkeypatch.setattr(models_module, "get_session", fake_get_session)
     monkeypatch.setattr(models_module, "state_db_has_session", fake_has)
+    monkeypatch.setattr(profiles_module, "_profiles_match", fake_profiles_match)
+    monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
     result = models_module.get_session_for_file_ops("webui-sid")
     assert result is sentinel
-    assert called == {"get_session": 1, "state_db": 0}
+    assert called == {"get_session": 1, "profile_match": 1, "state_db": 0}
+
+
+def test_get_session_for_file_ops_rejects_foreign_profile(
+    models_module, monkeypatch, tmp_path, caplog
+):
+    """WebUI sessions must belong to the active profile before file access."""
+    profiles_module = pytest.importorskip("api.profiles")
+    foreign_session = SimpleNamespace(profile="research", workspace=str(tmp_path))
+    called = {"get_session": 0, "profile_match": 0, "state_db": 0}
+
+    def fake_get_session(sid, metadata_only=False):
+        called["get_session"] += 1
+        return foreign_session
+
+    def fake_profiles_match(session_profile, active_profile):
+        called["profile_match"] += 1
+        assert session_profile == "research"
+        assert active_profile == "default"
+        return False
+
+    def fake_has(_sid):
+        called["state_db"] += 1
+        return True
+
+    monkeypatch.setattr(models_module, "get_session", fake_get_session)
+    monkeypatch.setattr(models_module, "state_db_has_session", fake_has)
+    monkeypatch.setattr(profiles_module, "_profiles_match", fake_profiles_match)
+    monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
+
+    with caplog.at_level(logging.DEBUG, logger=models_module.logger.name):
+        with pytest.raises(KeyError):
+            models_module.get_session_for_file_ops("foreign-webui-sid")
+    # A found-but-foreign WebUI sidecar is an authorization failure, not a
+    # missing-session condition that can fall through to the state.db fallback.
+    assert called == {"get_session": 1, "profile_match": 1, "state_db": 0}
+    assert "Rejected file-manager session for foreign profile" in caplog.text
+    assert "foreign-webui-sid" in caplog.text
+    assert "session_profile='research'" in caplog.text
+    assert "active_profile='default'" in caplog.text
+
+
+def test_file_read_rejects_foreign_profile_session(
+    models_module, monkeypatch, tmp_path
+):
+    """A default-profile file route cannot read a named-profile workspace."""
+    profiles_module = pytest.importorskip("api.profiles")
+    routes_module = pytest.importorskip("api.routes")
+    workspace = tmp_path / "named-workspace"
+    workspace.mkdir()
+    (workspace / "marker.txt").write_text("foreign profile marker")
+    session = models_module.Session(
+        session_id="foreign-profile-file-read",
+        workspace=str(workspace),
+        profile="research",
+    )
+    models_module.SESSIONS[session.session_id] = session
+
+    class Handler:
+        command = "GET"
+        headers = {}
+
+        def __init__(self):
+            self.status = None
+            self.headers_sent = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, code):
+            self.status = code
+
+        def send_header(self, key, value):
+            self.headers_sent.append((key, value))
+
+        def end_headers(self):
+            pass
+
+    monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
+    try:
+        handler = Handler()
+        routes_module._handle_file_read(
+            handler,
+            urlparse(
+                "/api/file?session_id=foreign-profile-file-read&path=marker.txt"
+            ),
+        )
+        assert handler.status == 404
+        assert b"foreign profile marker" not in handler.wfile.getvalue()
+    finally:
+        models_module.SESSIONS.pop(session.session_id, None)
 
 
 def test_get_session_for_file_ops_state_db_fallback(

@@ -99,6 +99,30 @@ async function _savedSessionSidebarOnlyState(sid){
 }
 
 // ── Mobile navigation ──────────────────────────────────────────────────────
+// URL prefill boot helpers.
+function _prefillHasDraftText(prefillIntent){
+  return !!(prefillIntent&&prefillIntent.hasText);
+}
+function _rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent){
+  return !urlSession&&!!savedLocal&&_prefillHasDraftText(prefillIntent);
+}
+async function _applyComposerPrefillOnBoot(prefillIntent){
+  if(!prefillIntent||!prefillIntent.hasText) return;
+  const msg=(typeof $==='function')?$('msg'):document.getElementById('msg');
+  if(!msg) return;
+  const text=String(prefillIntent.text||'');
+  msg.value=text;
+  if(typeof autoResize==='function') autoResize();
+  else if(typeof updateSendBtn==='function') updateSendBtn();
+}
+async function _finalizeComposerPrefillOnBoot(prefillIntent){
+  if(prefillIntent&&prefillIntent.hasParams&&typeof _consumeComposerPrefillParamsFromLocation==='function'){
+    _consumeComposerPrefillParamsFromLocation();
+  }
+  await _applyComposerPrefillOnBoot(prefillIntent);
+}
+
+// Mobile navigation.
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 
 function _isCompactWorkspaceViewport(){
@@ -224,7 +248,8 @@ function handleWorkspaceClose(){
   closeWorkspacePanel();
 }
 
-async function _maybeBindFreshDefaultWorkspaceSession(){
+async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
+  if(_prefillHasDraftText(prefillIntent)) return false;
   if(S.session) return false;
   if(_workspacePanelMode!=='browse') return false;
   if(!S._profileDefaultWorkspace) return false;
@@ -926,12 +951,12 @@ window._micPendingSend=window._micPendingSend||false;
 // handles selection, the dropdown option, and playback. Mirrors registerHermesSkin.
 //
 //   window.registerHermesTtsEngine({
-//     id: 'voicevox',            // [a-z0-9_-], not a built-in (browser/edge/elevenlabs)
+//     id: 'voicevox',            // [a-z0-9_-], not a built-in (browser/edge/elevenlabs/openai)
 //     label: 'VOICEVOX (local)',
 //     synthesize(text, opts) { return Promise<ArrayBuffer|Blob>; }
 //   }) -> true on success, false if rejected
 var _HERMES_TTS_ENGINES = Object.create(null);
-var _HERMES_TTS_RESERVED = { browser:1, edge:1, elevenlabs:1 };
+var _HERMES_TTS_RESERVED = { browser:1, edge:1, elevenlabs:1, openai:1 };
 function _hermesTtsValidId(id){ return typeof id==='string' && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(id); }
 function _hermesAddTtsOption(id, label){
   var sel=document.getElementById('settingsTtsEngine');
@@ -1284,6 +1309,46 @@ window._hermesTtsSynth=function(id, text, opts){
           if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
         };
         audio.play().catch(e => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        });
+      })
+      .catch(() => {
+        _ttsSpeaking=false;
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      });
+      return;
+    }
+    if(engine==="openai"){
+      _ttsSpeaking=true;
+      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: clean, engine: 'openai'})
+      })
+      .then(r => {
+        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
+        return r.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        _playingEdgeAudio=audio;
+        audio.onended = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+        };
+        audio.onerror = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        };
+        audio.play().catch(() => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
           URL.revokeObjectURL(url);
@@ -1697,6 +1762,9 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCmdDropdown();return;}
     if(e.key==='Enter'&&!e.shiftKey){
       if(_isImeEnter(e)){return;}
+      if(window._sendKey==='shift+enter'){
+        return;
+      }
       e.preventDefault();
       selectCmdDropdownItem();
       return;
@@ -1710,7 +1778,8 @@ $('msg').addEventListener('keydown',e=>{
   // doesn't consistently reduce vv.height by >120px. The pointer media query
   // pair is a sufficient and more reliable signal for "software keyboard only".
   // Hardware keyboards on tablets are covered by _hasFinePointerCoexisting.
-  // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
+  // The 'ctrl+enter' and 'shift+enter' settings also use this behavior
+  // (plain Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
@@ -1718,7 +1787,9 @@ $('msg').addEventListener('keydown',e=>{
     const _mobileDefault=matchMedia('(pointer:coarse)').matches
       &&!_hasFinePointerCoexisting()
       &&window._sendKey==='enter';
-    if(window._sendKey==='ctrl+enter'||_mobileDefault){
+    if(window._sendKey==='shift+enter'){
+      if(e.shiftKey){e.preventDefault();send();}
+    } else if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(isNumpadEnter||e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
       if(!e.shiftKey){e.preventDefault();send();}
@@ -1815,6 +1886,7 @@ function _largeTextPasteLineCount(text){
   return value.endsWith('\n')?lines.length-1:lines.length;
 }
 function _shouldAttachLargePastedText(text){
+  if(window._largeTextPasteAsAttachment===false)return false;
   const value=String(text||'');
   if(!value.trim())return false;
   return value.length>=LARGE_TEXT_PASTE_CHAR_THRESHOLD || _largeTextPasteLineCount(value)>=LARGE_TEXT_PASTE_LINE_THRESHOLD;
@@ -1952,7 +2024,7 @@ if(window.visualViewport){
   };
 })();
 
-// ── Appearance helpers (theme = light/dark/system, skin = accent color) ──────
+// ── Appearance helpers (theme = light/dark/system, skin = palette/accent) ────
 const _THEMES=[
   {name:'Light', value:'light', colors:['#FEFCF7','#FAF7F0','#B8860B']},
   {name:'Dark', value:'dark', colors:['#0D0D1A','#141425','#FFD700']},
@@ -1975,6 +2047,8 @@ const _SKINS=[
   {name:'Hepburn',   colors:['#c6246a','#ec5597','#f2abca']},
   {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
   {name:'Neon',     colors:['#B347FF','#C76BFF','#00DDFF']},
+  {name:'Neon Soft', value:'neon-soft', colors:['#B347FF','#C76BFF','#00DDFF']},
+  {name:'Neon Paint', value:'neon-paint', colors:['#FF2D95','#00E5FF','#FFB800']},
   {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
   {name:'Zeus',     colors:['#FFD700','#FFBF00','#1A1A00']},
   {name:'Verdigris', value:'verdigris', colors:['#C89A5A','#0F1714','#22342C']},
@@ -1993,6 +2067,7 @@ let _onSystemThemeChange=null;
 let _systemThemePollTimer=null;
 let _lastResolvedThemeIsDark=null;
 const _SYSTEM_THEME_PAGESHOW_EVENT='pageshow';
+let _resolvedThemeBaseDark=false;
 
 function _customLogoCachePayload(settings){
   return {
@@ -2074,10 +2149,34 @@ function _syncThemeColorMeta(){
   }catch(e){}
 }
 
+function _skinKey(skin){
+  return (skin&&String(skin.value||skin.name||'').toLowerCase())||'';
+}
+
+function _findSkinEntry(key){
+  const normalized=String(key||'default').toLowerCase();
+  return (_SKINS||[]).find(s=>_skinKey(s)===normalized)||null;
+}
+
+function _activeSkinScheme(){
+  const key=(document.documentElement.dataset.skin||'default').toLowerCase();
+  const skin=_findSkinEntry(key);
+  const scheme=skin&&skin._extScheme;
+  return scheme==='light'||scheme==='dark'?scheme:'';
+}
+
+function _effectiveThemeDark(baseIsDark){
+  const skinScheme=_activeSkinScheme();
+  if(skinScheme==='dark') return true;
+  if(skinScheme==='light') return false;
+  return !!baseIsDark;
+}
+
 function _setResolvedTheme(isDark){
-  const nextIsDark=!!isDark;
-  document.documentElement.classList.toggle('dark',nextIsDark);
-  _lastResolvedThemeIsDark=nextIsDark;
+  _resolvedThemeBaseDark=!!isDark;
+  _lastResolvedThemeIsDark=_resolvedThemeBaseDark;
+  const effectiveDark=_effectiveThemeDark(_resolvedThemeBaseDark);
+  document.documentElement.classList.toggle('dark',effectiveDark);
   window._customLogoThemeVersion=(Number(window._customLogoThemeVersion)||0)+1;
   if(typeof applyCustomLogo==='function'){
     // Use stored logo paths so theme switch picks the right variant
@@ -2090,7 +2189,7 @@ function _setResolvedTheme(isDark){
   }
   const link=document.getElementById('prism-theme');
   if(!link){ _syncThemeColorMeta(); return; }
-  const want=isDark
+  const want=effectiveDark
     ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
     :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
   // No SRI integrity on theme CSS — jsdelivr edge nodes serve different
@@ -2105,7 +2204,8 @@ function _syncSystemThemeFromMedia(){
   try{
     matches=window.matchMedia('(prefers-color-scheme:dark)').matches;
   }catch(_){}
-  if(_lastResolvedThemeIsDark!==matches||document.documentElement.classList.contains('dark')!==matches){
+  const effectiveMatches=_effectiveThemeDark(matches);
+  if(_lastResolvedThemeIsDark!==matches||document.documentElement.classList.contains('dark')!==effectiveMatches){
     _setResolvedTheme(matches);
   }else if(typeof applyCustomLogo==='function'){
     applyCustomLogo({
@@ -2198,7 +2298,7 @@ function _applySkin(name){
   const key=(name||'default').toLowerCase();
   if(key==='default') delete document.documentElement.dataset.skin;
   else document.documentElement.dataset.skin=key;
-  _syncThemeColorMeta();
+  _setResolvedTheme(_resolvedThemeBaseDark);
 }
 
 function _pickTheme(name){
@@ -2336,6 +2436,11 @@ const _ALLOWED_SKIN_TOKENS=new Set([
 // with url(), expression(), semicolons, braces, or other CSS-injection vectors.
 const _SAFE_SKIN_VALUE_RE=/^(#(?:[0-9a-fA-F]{3,8})|rg(?:b|ba)\(\s*[0-9.,%\s/]+\)|hsl(?:a)?\(\s*[0-9.,%\s/deg]+\)|[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}|[a-zA-Z]{3,20}|[0-9.]+(?:px|em|rem|%)?)$/;
 
+function _sanitizeSkinScheme(scheme){
+  const value=String(scheme||'').trim().toLowerCase();
+  return value==='light'||value==='dark'?value:'';
+}
+
 function _sanitizeSkinTokens(tokens){
   const out={};
   if(!tokens||typeof tokens!=='object') return out;
@@ -2380,12 +2485,13 @@ function registerHermesSkin(descriptor){
     if(_RESERVED_SKIN_KEYS.has(key)) return false;        // never shadow a core skin
     const tokens=_sanitizeSkinTokens(descriptor.tokens);
     if(Object.keys(tokens).length===0) return false;      // nothing valid to apply
+    const scheme=_sanitizeSkinScheme(descriptor.scheme);
     // 3 swatch colors for the picker (sanitized); fall back to accent/bg/text.
     let colors=Array.isArray(descriptor.colors)?descriptor.colors.slice(0,3):[];
     colors=colors.map(c=>String(c).trim()).filter(c=>_SAFE_SKIN_VALUE_RE.test(c));
     while(colors.length<3) colors.push(tokens['--accent']||tokens['--bg']||tokens['--text']||'#888');
     const label=String(descriptor.label||name).slice(0,40);
-    const entry={name:name.slice(0,40),value:key,label,colors,_extToken:tokens,_extension:true};
+    const entry={name:name.slice(0,40),value:key,label,colors,_extToken:tokens,_extScheme:scheme,_extension:true};
 
     const existingIdx=_SKINS.findIndex(s=>(s.value||s.name).toLowerCase()===key);
     if(existingIdx>=0&&_EXT_SKIN_KEYS.has(key)){
@@ -2424,6 +2530,7 @@ function applyBotName(){
   if(topbarTitle && (!S.session)) topbarTitle.textContent=name;
   const msg=$('msg');
   if(msg) msg.placeholder='Message '+name+'\u2026';
+  if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
 }
 
 function customLogoAssetUrl(path,mode){
@@ -2628,6 +2735,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   let _bootSettings={};
   let _bootSettingsLoaded=false;
   _applyCachedCustomLogo();
+  const prefillIntent=(typeof _composerPrefillIntentFromLocation==='function')?_composerPrefillIntentFromLocation():null;
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
@@ -2685,8 +2793,11 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       jsonChars:parseInt(s.inflight_state_max_json_chars||1500000,10)||1500000,
     };
     window._busyInputMode=(s.busy_input_mode||'queue');
+    window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._autoScrollFollow=s.auto_scroll_follow!==false;
+    window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
+    window._projectQuickCreate=!!s.project_quick_create_buttons;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
     window._showTitlebarProfile=!!s.show_titlebar_profile;
     _applyTitlebarProfileVisibility();
@@ -2806,6 +2917,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
+    window._showBusyPlaceholderHint=false;
     window._sessionEndlessScrollEnabled=false;
     window._autoScrollFollow=true;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
@@ -3024,9 +3136,16 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   if(pwaLaunchAction==='new-chat'){
     try{
       await newSession(true);
-      if(S.session) await _startBootModelDropdown();
+      // New-chat PWA launches need the empty conversation visible immediately.
+      // Boot model hydration can take several seconds when /api/models falls
+      // into a cold provider-catalog rebuild; it is already safe to finish in
+      // the background because newSession() posted the configured default and
+      // rendered the session's authoritative model/provider.
+      if(S.session){
+        try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+      }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();return;
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
   }
   const savedLocal=localStorage.getItem('hermes-webui-session');
@@ -3044,7 +3163,19 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
-        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
+        return;
+      }
+      if(_rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent)){
+        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        S._bootReady=true;
+        const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
+          || localStorage.getItem('hermes-webui-workspace-panel')==='open';
+        if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
+        await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+        syncTopbar();syncWorkspacePanelState();
+        $('emptyState').style.display='';
+        await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
       await loadSession(saved, {preserveActiveInput:true});
@@ -3079,10 +3210,10 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
-        await _maybeBindFreshDefaultWorkspaceSession();
+        await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
-        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
       // Restore the panel from localStorage when the session has a workspace.
@@ -3094,7 +3225,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
@@ -3105,10 +3236,10 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
-  await _maybeBindFreshDefaultWorkspaceSession();
+  await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
   syncWorkspacePanelState();
   $('emptyState').style.display='';
-  await renderSessionList();
+  await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })().catch(e=>{

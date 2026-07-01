@@ -387,6 +387,7 @@ window.registerHermesSkin({
   name: 'E-Ink',            // display name (also the picker label)
   value: 'e-ink',           // optional stable key; slugified from name if omitted
   label: 'E-Ink',           // optional explicit picker label
+  scheme: 'light',          // optional: force a light or dark base while selected
   colors: ['#000000', '#ffffff', '#555555'],  // up to 3 preview swatches
   tokens: {                 // CSS design-token overrides for this skin
     '--bg': '#ffffff',
@@ -404,6 +405,13 @@ The call returns `true` on success and `false` if the descriptor was rejected
 shows up in the picker, can be selected, and persists across reloads exactly
 like a built-in skin. Registering the same key again updates it in place
 (idempotent), which is what a live theme editor relies on while the user edits.
+
+Use `scheme` when a skin is light-only or dark-only. Accepted values are
+`"light"` and `"dark"`; any other value is ignored. This does not rewrite the
+user's saved Theme setting (`Light`, `Dark`, or `System Default`). It only
+controls the effective base theme class while that extension skin is selected,
+so a dark editor skin is not mixed with light-mode code/table tokens, and a
+light E-Ink skin is not mixed with dark-mode tokens.
 
 **Core does the security-sensitive work for you.** Because token values are
 written into CSS, every value is sanitized in core, once, so every theme
@@ -425,6 +433,8 @@ extension inherits the guard:
 - **Reserved keys are protected** — an extension cannot overwrite a built-in
   skin key (e.g. `default`, `ares`, `graphite`).
 - A descriptor with no valid tokens after sanitization is rejected entirely.
+- **Skin scheme is constrained** — only `light` and `dark` are accepted. Invalid
+  scheme values are ignored rather than rendered into CSS.
 
 This is the supported, forward-looking way for theme-pack and theme-creator
 extensions to integrate with the built-in appearance system.

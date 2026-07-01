@@ -453,6 +453,9 @@ const _recycleResetAttrs=[
   'data-transparent-turn-toggle-bound',
   'data-anchor-scene-live-owner',
   'data-anchor-stream-id',
+  'data-latest-assistant-response',
+  'role',
+  'aria-label',
   // Defensive reset for legacy/restored shells that may still carry the fallback live-turn marker.
   'data-live-assistant-turn',
 ];
@@ -1340,6 +1343,274 @@ function _openImgLightbox(imgEl) {
   }
   _openImgLightboxWithNav(src, alt, allImages, startIndex);
 }
+
+const _MERMAID_VIEWER_MIN_SCALE = 0.25;
+const _MERMAID_VIEWER_MAX_SCALE = 8;
+const _MERMAID_VIEWER_ZOOM_STEP = 1.2;
+
+function _mermaidViewerIcon(kind) {
+  const icons = {
+    zoomIn: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"></circle><path d="M10 7v6M7 10h6"></path><path d="M15 15l4 4"></path></svg>',
+    zoomOut: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"></circle><path d="M7 10h6"></path><path d="M15 15l4 4"></path></svg>',
+    reset: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9V4H1"></path><path d="M1 4l4 4"></path><path d="M10 4a8 8 0 1 1-5.66 13.66"></path></svg>',
+    fit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"></path></svg>',
+    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"></path></svg>',
+  };
+  return icons[kind] || '';
+}
+
+function _createMermaidViewerButton(label, iconKind, onClick) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'mermaid-viewer-btn';
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('title', label);
+  btn.innerHTML = _mermaidViewerIcon(iconKind);
+  btn.onclick = e => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick(e);
+  };
+  return btn;
+}
+
+function _mermaidSvgBox(svgEl) {
+  const box = {x: 0, y: 0, width: 0, height: 0};
+  if(!svgEl) return box;
+  const viewBox = svgEl.viewBox && svgEl.viewBox.baseVal;
+  if(viewBox && viewBox.width && viewBox.height){
+    box.x = Number(viewBox.x) || 0;
+    box.y = Number(viewBox.y) || 0;
+    box.width = Number(viewBox.width) || 0;
+    box.height = Number(viewBox.height) || 0;
+    return box;
+  }
+  const rawViewBox = svgEl.getAttribute && svgEl.getAttribute('viewBox');
+  if(rawViewBox){
+    const parts = rawViewBox.trim().split(/[,\s]+/).map(Number);
+    if(parts.length >= 4 && parts.every(n => Number.isFinite(n))){
+      box.x = parts[0] || 0;
+      box.y = parts[1] || 0;
+      box.width = parts[2] || 0;
+      box.height = parts[3] || 0;
+      return box;
+    }
+  }
+  const width = Number.parseFloat(svgEl.getAttribute && svgEl.getAttribute('width')) || (svgEl.getBoundingClientRect ? svgEl.getBoundingClientRect().width : 0) || 0;
+  const height = Number.parseFloat(svgEl.getAttribute && svgEl.getAttribute('height')) || (svgEl.getBoundingClientRect ? svgEl.getBoundingClientRect().height : 0) || 0;
+  box.width = width || 800;
+  box.height = height || 450;
+  return box;
+}
+
+function _mountMermaidViewer(svgEl, options = {}) {
+  if(!svgEl) return null;
+  const mode = options.mode === 'lightbox' ? 'lightbox' : 'inline';
+  const openLightbox = typeof options.openLightbox === 'function' ? options.openLightbox : () => _openMermaidLightbox(svgEl);
+  const box = _mermaidSvgBox(svgEl);
+  const host = svgEl.parentNode;
+  const root = document.createElement('div');
+  root.className = 'mermaid-viewer mermaid-viewer--' + mode;
+  const toolbar = document.createElement('div');
+  toolbar.className = 'mermaid-viewer-toolbar';
+  const viewport = document.createElement('div');
+  viewport.className = 'mermaid-viewer-viewport';
+  const canvas = document.createElement('div');
+  canvas.className = 'mermaid-viewer-canvas';
+  canvas.style.width = Math.max(1, Math.round(box.width)) + 'px';
+  canvas.style.height = Math.max(1, Math.round(box.height)) + 'px';
+  svgEl.classList.add('mermaid-viewer-svg');
+  if(mode === 'lightbox') svgEl.classList.add('mermaid-lightbox-svg');
+  svgEl.style.width = '100%';
+  svgEl.style.height = '100%';
+  svgEl.style.display = 'block';
+  viewport.appendChild(canvas);
+  root.appendChild(toolbar);
+  root.appendChild(viewport);
+  if(host) host.replaceChild(root, svgEl);
+  canvas.appendChild(svgEl);
+
+  const state = {
+    box,
+    canvas,
+    dragging: false,
+    dragOriginX: 0,
+    dragOriginY: 0,
+    dragPointerId: null,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragged: false,
+    mode,
+    root,
+    toolbar,
+    scale: 1,
+    svg: svgEl,
+    viewport,
+    x: 0,
+    y: 0,
+  };
+  root._mermaidViewer = state;
+
+  function _viewportSize(){
+    const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+    const width = viewport.clientWidth || (rect && rect.width) || (mode === 'lightbox' ? Math.round((window.innerWidth || box.width) * 0.9) : Math.round(window.innerWidth || box.width));
+    const height = viewport.clientHeight || (rect && rect.height) || (mode === 'lightbox' ? Math.round((window.innerHeight || box.height) * 0.9) : Math.round((window.innerHeight || box.height) * 0.7));
+    return {
+      width: Math.max(1, Number(width) || box.width || 1),
+      height: Math.max(1, Number(height) || box.height || 1),
+    };
+  }
+
+  function _applyTransform(){
+    canvas.style.transform = `translate(${Math.round(state.x)}px, ${Math.round(state.y)}px) scale(${state.scale})`;
+    canvas.style.transformOrigin = '0 0';
+  }
+
+  function _centerForScale(nextScale){
+    const size = _viewportSize();
+    const scaledWidth = box.width * nextScale;
+    const scaledHeight = box.height * nextScale;
+    state.x = scaledWidth < size.width ? Math.round((size.width - scaledWidth) / 2) : 0;
+    state.y = scaledHeight < size.height ? Math.round((size.height - scaledHeight) / 2) : 0;
+  }
+
+  function _fitScale(){
+    const size = _viewportSize();
+    return Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, Math.min(size.width / box.width, size.height / box.height)));
+  }
+
+  function _setScale(nextScale, anchorX, anchorY){
+    const bounded = Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, nextScale));
+    if(!Number.isFinite(bounded) || !box.width || !box.height) return;
+    const focusX = Number.isFinite(anchorX) ? anchorX : _viewportSize().width / 2;
+    const focusY = Number.isFinite(anchorY) ? anchorY : _viewportSize().height / 2;
+    if(state.scale){
+      const ratio = bounded / state.scale;
+      state.x = focusX - (focusX - state.x) * ratio;
+      state.y = focusY - (focusY - state.y) * ratio;
+    }
+    state.scale = bounded;
+    _applyTransform();
+  }
+
+  function _fitViewer(){
+    const nextScale = _fitScale();
+    state.scale = nextScale;
+    _centerForScale(nextScale);
+    _applyTransform();
+  }
+
+  function _resetViewer(){
+    state.scale = 1;
+    _centerForScale(1);
+    _applyTransform();
+  }
+
+  function _zoomIn(){
+    const size = _viewportSize();
+    _setScale(state.scale * _MERMAID_VIEWER_ZOOM_STEP, size.width / 2, size.height / 2);
+  }
+
+  function _zoomOut(){
+    const size = _viewportSize();
+    _setScale(state.scale / _MERMAID_VIEWER_ZOOM_STEP, size.width / 2, size.height / 2);
+  }
+
+  function _zoomFromWheel(e){
+    if(e.preventDefault) e.preventDefault();
+    const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : {left: 0, top: 0};
+    const anchorX = Number.isFinite(e.clientX) ? e.clientX - rect.left : undefined;
+    const anchorY = Number.isFinite(e.clientY) ? e.clientY - rect.top : undefined;
+    const deltaMode = Number(e.deltaMode) || 0;
+    const lineScale = deltaMode === 1 ? 30 : deltaMode === 2 ? 600 : 1;
+    const factor = Math.exp((-(Number(e.deltaY) || 0)) * lineScale * 0.0015);
+    _setScale(state.scale * factor, anchorX, anchorY);
+  }
+
+  function _onPointerDown(e){
+    if(e.button != null && e.button !== 0) return;
+    state.dragging = true;
+    state.dragged = false;
+    state.dragOriginX = Number(e.clientX) || 0;
+    state.dragOriginY = Number(e.clientY) || 0;
+    state.dragPointerId = e.pointerId != null ? e.pointerId : null;
+    state.dragStartX = state.x;
+    state.dragStartY = state.y;
+    viewport.classList.add('is-panning');
+    if(state.dragPointerId != null && viewport.setPointerCapture) viewport.setPointerCapture(state.dragPointerId);
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _onPointerMove(e){
+    if(!state.dragging) return;
+    const dx = (Number(e.clientX) || 0) - state.dragOriginX;
+    const dy = (Number(e.clientY) || 0) - state.dragOriginY;
+    if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
+    state.x = state.dragStartX + dx;
+    state.y = state.dragStartY + dy;
+    _applyTransform();
+  }
+
+  function _endPointerDrag(){
+    if(!state.dragging) return;
+    state.dragging = false;
+    if(state.dragPointerId != null && viewport.releasePointerCapture){
+      try{ viewport.releasePointerCapture(state.dragPointerId); }catch(_){}
+    }
+    state.dragPointerId = null;
+    viewport.classList.remove('is-panning');
+  }
+
+  function _openViewerOnClick(e){
+    if(mode !== 'inline') return;
+    if(state.dragged){
+      state.dragged = false;
+      return;
+    }
+    if(e.preventDefault) e.preventDefault();
+    if(e.stopPropagation) e.stopPropagation();
+    openLightbox();
+  }
+
+  viewport.onpointerdown = _onPointerDown;
+  viewport.onpointermove = _onPointerMove;
+  viewport.onpointerup = _endPointerDrag;
+  viewport.onpointercancel = _endPointerDrag;
+  viewport.onpointerleave = _endPointerDrag;
+  viewport.onwheel = _zoomFromWheel;
+  viewport.onclick = _openViewerOnClick;
+  root.onclick = e => e.stopPropagation();
+  state.fit = _fitViewer;
+  state.reset = _resetViewer;
+  state.zoomIn = _zoomIn;
+  state.zoomOut = _zoomOut;
+  state.zoomAt = _setScale;
+  state.applyTransform = _applyTransform;
+  state.openLightbox = openLightbox;
+
+  toolbar.appendChild(_createMermaidViewerButton('Zoom in', 'zoomIn', _zoomIn));
+  toolbar.appendChild(_createMermaidViewerButton('Zoom out', 'zoomOut', _zoomOut));
+  toolbar.appendChild(_createMermaidViewerButton('Reset view', 'reset', _resetViewer));
+  toolbar.appendChild(_createMermaidViewerButton('Fit to screen', 'fit', _fitViewer));
+  if(mode === 'inline'){
+    toolbar.appendChild(_createMermaidViewerButton('Fullscreen', 'fullscreen', openLightbox));
+  }
+
+  const initialFit = _fitScale();
+  state.scale = initialFit;
+  _centerForScale(initialFit);
+  _applyTransform();
+  if(mode === 'lightbox'){
+    viewport.style.width = Math.max(1, Math.round(box.width * initialFit)) + 'px';
+    viewport.style.height = Math.max(1, Math.round(box.height * initialFit)) + 'px';
+  } else {
+    viewport.style.width = '100%';
+    viewport.style.height = Math.max(1, Math.round(box.height * initialFit)) + 'px';
+  }
+
+  return root;
+}
+
 function _openMermaidLightbox(svgEl) {
   if(!svgEl) return;
   const lb = document.createElement('div');
@@ -1381,16 +1652,15 @@ function _openMermaidLightbox(svgEl) {
       styleEl.textContent = styleText;
     });
   }
-  clone.classList.add('mermaid-lightbox-svg');
   clone.removeAttribute('width');
   clone.removeAttribute('height');
-  clone.onclick = e => e.stopPropagation();
+  const viewer = _mountMermaidViewer(clone, {mode:'lightbox'});
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
   cls.setAttribute('aria-label', 'Close');
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
-  lb.appendChild(clone);
+  lb.appendChild(viewer);
   lb.appendChild(cls);
   lb.onclick = () => _closeImgLightbox(lb);
   lb._keyHandler = e => {
@@ -4038,6 +4308,7 @@ const MESSAGE_TOUCH_SCROLL_SUPPRESS_MS=1200;
 // post-render artifact suppression would swallow it for the whole window.
 const MESSAGE_WHEEL_INTENT_SUPPRESS_MS=1200;
 let _lastMessageWheelIntentMs=-Infinity;
+let _lastMessageScrollIntentMs=-Infinity;
 // #4970 review (greptile P1): keyboard scrolling of the message pane (PageUp/Down,
 // arrows, Space, Home/End) fires a native `scroll` event with NO wheel/touch/
 // scrollbar/non-message intent. Without recording it, a keyboard scroll-up inside
@@ -4064,6 +4335,13 @@ function _recentMessageTouchScrollIntent(){
 // true, otherwise a real gentle scroll-up right after a render gets swallowed.
 function _recentMessageWheelIntent(){
   return performance.now()-_lastMessageWheelIntentMs<MESSAGE_WHEEL_INTENT_SUPPRESS_MS;
+}
+function _recentMessageScrollIntent(){
+  // This manual-reader snapshot signal intentionally excludes the raw
+  // touch/key recency helpers: those also record near-tail events for render
+  // artifact suppression. Only this timestamp is guarded by bottom distance.
+  return performance.now()-_lastMessageScrollIntentMs<MESSAGE_WHEEL_INTENT_SUPPRESS_MS
+    || (typeof _scrollbarDragActive!=='undefined'&&!!_scrollbarDragActive);
 }
 // #4970 review (greptile P1): true when the reader recently used the keyboard to
 // scroll the message pane. Keyboard scrolls fire a native scroll event with no
@@ -4102,6 +4380,10 @@ function _recordNonMessageScrollIntent(e){
   // suppression consults _recentMessageWheelIntent() so it cannot swallow a real
   // gentle scroll-up. This does NOT unpin on its own — only the <-30 branch and
   // the scroll listener's movedUp branch flip _messageUserUnpinned.
+  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
+    const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+    if(bottomDistance>120) _lastMessageScrollIntentMs=performance.now();
+  }
   if(typeof e.deltaY==='number'&&e.deltaY<0) _lastMessageWheelIntentMs=performance.now();
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)){
     _cancelBottomSettle();
@@ -4197,6 +4479,7 @@ function _resetScrollDirectionTracker(){
   // into the new chat's first post-render window — the artifact then isn't
   // suppressed, falls into movedUp, and falsely unpins live-follow.
   _lastMessageWheelIntentMs=-Infinity;
+  _lastMessageScrollIntentMs=-Infinity;
   // #4970 review (greptile P1): same hygiene for keyboard scroll intent.
   _lastMessageKeyScrollIntentMs=-Infinity;
   clearTimeout(_deferredOlderMessagesTimer);
@@ -4212,6 +4495,7 @@ function _resetStreamScrollFollow(){
   // gentle upward wheel within the prior 1200ms can under-suppress a genuine
   // no-intent render artifact and silently disable live follow for the new stream.
   _lastMessageWheelIntentMs=-Infinity;
+  _lastMessageScrollIntentMs=-Infinity;
   // #4970 review (greptile P1): same hygiene for keyboard scroll intent.
   _lastMessageKeyScrollIntentMs=-Infinity;
   _cancelBottomSettle();
@@ -4338,7 +4622,10 @@ if(typeof window!=='undefined'){
     // Count only when the message pane itself is the scroll target: it is focused,
     // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
     if(a===el||el.contains(a)||el.matches(':hover')){
-      _lastMessageKeyScrollIntentMs=performance.now();
+      const now=performance.now();
+      _lastMessageKeyScrollIntentMs=now;
+      const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+      if(bottomDistance>120) _lastMessageScrollIntentMs=now;
     }
   },{capture:true,passive:true});
   let _scrollRaf=0;
@@ -4413,6 +4700,19 @@ if(typeof window!=='undefined'){
         if(nearBottom){
           _nearBottomCount=_nearBottomCount+1;
           if(_nearBottomCount>=2){_scrollPinned=true;_nearBottomCount=0;}
+        }else if(!movedUp && _autoScrollFollow && _scrollPinned){
+          // Content-grew-beneath-a-pinned-viewport case (NOT a user scroll-away).
+          // During streaming on a tall transcript (esp. mobile, where chunks land
+          // fast), new content increases scrollHeight under a stationary viewport,
+          // so bottomDistance crosses the nearBottom threshold even though the
+          // reader never scrolled (top did NOT move up, _messageUserUnpinned is
+          // false). Previously this fell through to `_scrollPinned=false`, killing
+          // auto-follow mid-stream: the follow writer and this listener then fought
+          // frame-by-frame, the viewport stalled while content kept growing, and it
+          // was progressively stranded mid-transcript (the "jump back" report).
+          // Keep the pin and re-snap to the true bottom instead of unpinning.
+          _nearBottomCount=0;
+          if(typeof _setMessageScrollToBottom==='function') _setMessageScrollToBottom();
         }else{
           _nearBottomCount=0;
           _scrollPinned=false;
@@ -6046,6 +6346,33 @@ function getComposerPrimaryAction(){
   return 'queue';
 }
 
+function _applyBusyComposerPlaceholder(){
+  const input=$('msg');
+  if(!input) return;
+  if(_compressionPlaceholderSaved!==null) return;
+  if(input.disabled) return;
+  if(_composerHasContent()) return;
+  const idlePlaceholder='Message '+assistantDisplayName()+'\u2026';
+  if(!window._showBusyPlaceholderHint||!S.busy){
+    input.placeholder=idlePlaceholder;
+    return;
+  }
+  const busyMode=window._busyInputMode||'queue';
+  const busyPlaceholderKey=busyMode==='interrupt'
+    ? 'composer_placeholder_busy_interrupt'
+    : busyMode==='steer'
+      ? 'composer_placeholder_busy_steer'
+      : 'composer_placeholder_busy_queue';
+  const busyPlaceholderFallback=busyMode==='interrupt'
+    ? 'Enter = interrupt | /queue | /background | /steer'
+    : busyMode==='steer'
+      ? 'Enter = steer | /queue | /background | /interrupt'
+      : 'Enter = queue | /interrupt | /background | /steer';
+  input.placeholder=typeof t==='function'
+    ? (t(busyPlaceholderKey)||busyPlaceholderFallback)
+    : busyPlaceholderFallback;
+}
+
 function _setComposerPrimaryButtonIcon(btn,action){
   // Queue/interrupt/steer icons are inline Lucide SVGs (ISC):
   // https://lucide.dev/icons/
@@ -6063,7 +6390,10 @@ function _setComposerPrimaryButtonIcon(btn,action){
 
 function updateSendBtn(){
   const btn=$('btnSend');
-  if(!btn) return;
+  if(!btn){
+    if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    return;
+  }
   const action=getComposerPrimaryAction();
   btn.dataset.action=action;
   btn.classList.toggle('stop',action==='stop');
@@ -6085,6 +6415,7 @@ function updateSendBtn(){
   btn.title=_btnTitle;
   btn.setAttribute('aria-label',_btnTitle);
   _setComposerPrimaryButtonIcon(btn,action);
+  if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   // Single primary action button: while busy/no-draft it becomes the red Stop
   // action; while busy with a draft it reflects queue/interrupt/steer.
   btn.style.display='';
@@ -6875,6 +7206,10 @@ function speakMessage(btn){
   if(!clean) return;
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='openai'){
+    _playOpenaiTts(clean, btn);
+    return;
+  }
   if(engine==='elevenlabs'){
     _playElevenLabsTts(clean, btn);
     return;
@@ -6945,6 +7280,33 @@ function _playElevenLabsTts(text, btn){
     return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
+}
+
+function _playOpenaiTts(text, btn){
+  if(btn) btn.dataset.speaking='1';
+  _ttsSpeaking=true;
+  const _fail=function(msg){
+    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(btn)btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
+  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text, engine:'openai'})
+  })
+  .then(function(r){
+    if(!r.ok){
+      return r.json().catch(function(){return {};}).then(function(j){
+        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+      });
+    }
+    return r.arrayBuffer();
+  })
+  .then(function(buf){
+    return _playAudioBuf(buf, btn, 'OpenAI TTS');
+  })
+  .catch(function(e){ _fail((e&&e.message)||'OpenAI TTS failed'); });
 }
 
 // ── Shared AudioContext for TTS playback (no blob URLs needed) ──
@@ -7026,6 +7388,10 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
+  if(engine==='openai'){
+    _playOpenaiTts(clean, null);
+    return;
+  }
   if(engine==='elevenlabs'){
     _playElevenLabsTts(clean, null);
     return;
@@ -8617,6 +8983,24 @@ function _createAssistantTurn(tsTitle='', tpsText=''){
   row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText)}<div class="assistant-turn-blocks"></div>`;
   return row;
 }
+function _setLatestAssistantTurnLandmark(turn, isLatest){
+  if(!turn) return;
+  const label='Latest Hermes response';
+  if(isLatest){
+    if(typeof document!=='undefined'){
+      document.querySelectorAll('.assistant-turn[data-latest-assistant-response="true"]').forEach(el=>{
+        if(el!==turn) _setLatestAssistantTurnLandmark(el, false);
+      });
+    }
+    turn.setAttribute('role','region');
+    turn.setAttribute('aria-label',label);
+    turn.dataset.latestAssistantResponse='true';
+    return;
+  }
+  if(turn.getAttribute('role')==='region') turn.removeAttribute('role');
+  if(turn.getAttribute('aria-label')===label) turn.removeAttribute('aria-label');
+  delete turn.dataset.latestAssistantResponse;
+}
 function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
@@ -10028,6 +10412,7 @@ function _anchorSceneNodeForRow(row, opts){
 }
 function _anchorSceneTransparentNodeForRow(row, opts){
   const settled=!!(opts&&opts.settled);
+  const live=!!(opts&&opts.live);
   if(!row) return null;
   let node=null;
   const meta={
@@ -10079,10 +10464,14 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   }
   if(!node) return null;
   node.setAttribute('data-anchor-scene-row','1');
-  node.setAttribute('data-anchor-settled-scene-row','1');
+  if(settled) node.setAttribute('data-anchor-settled-scene-row','1');
+  if(live) node.setAttribute('data-anchor-live-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
+  if(opts&&opts.streamId) node.setAttribute('data-anchor-stream-id',String(opts.streamId));
+  if(opts&&opts.sessionId) node.setAttribute('data-session-id',String(opts.sessionId));
+  if(live) node.setAttribute('data-live-stream-owned','1');
   return node;
 }
 // Whitespace-insensitive compare so a scene prose row that IS the final answer
@@ -10259,6 +10648,9 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
 }
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
+  if(typeof isTransparentStream==='function'&&isTransparentStream()){
+    return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
+  }
   if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
@@ -10269,11 +10661,11 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!turn){
     turn=_createAssistantTurn();
     turn.id='liveAssistantTurn';
-    if(S.session) turn.dataset.sessionId=S.session.session_id;
     $('msgInner').appendChild(turn);
   }
   turn.setAttribute('data-anchor-scene-live-owner','1');
   turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  // Re-stamp when reusing a turn restored or previously rendered in another mode.
   if(S.session) turn.dataset.sessionId=S.session.session_id;
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return false;
@@ -10319,8 +10711,79 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
+function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
+  opts=opts||{};
+  if(!S.session||!S.activeStreamId) return false;
+  if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
+  if(streamId&&S.activeStreamId!==streamId) return false;
+  const rows=_anchorSceneRowsForRendering(scene,{settled:false});
+  if(!rows.length) return false;
+  $('emptyState').style.display='none';
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    $('msgInner').appendChild(turn);
+  }
+  turn.setAttribute('data-anchor-scene-live-owner','1');
+  turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  turn.setAttribute('data-live-assistant-turn','1');
+  if(S.session) turn.dataset.sessionId=S.session.session_id;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return false;
+  const scrollSnapshot=_captureMessageScrollSnapshot();
+  const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  // Clear every legacy live activity surface this renderer can replace. The
+  // anchor-scene rows are now the source of truth for visible live activity.
+  blocks.querySelectorAll(
+    '.live-worklog[data-live-worklog-shell="1"],'+
+    '.tool-worklog-group[data-live-tool-call-group="1"],'+
+    '.tool-call-group[data-live-tool-call-group="1"],'+
+    '.tool-card-row[data-live-tid],'+
+    '.agent-activity-thinking[data-live-thinking="1"],'+
+    '.transparent-event-row[data-live-tid],'+
+    '[data-live-stream-owned="1"],'+
+    '.interim-collapse-toggle'
+  ).forEach(el=>el.remove());
+  // Match the compact path: keep legacy live segments as hidden anchors so
+  // stream-owned metadata survives while the anchor scene owns visible activity.
+  blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
+    el.classList.add('assistant-segment-worklog-source');
+    el.setAttribute('aria-hidden','true');
+    el.hidden=true;
+  });
+  const liveFooter=blocks.querySelector('#liveRunStatus');
+  let wrote=false;
+  for(const row of rows){
+    const node=_anchorSceneTransparentNodeForRow(row,{
+      live:true,
+      settled:false,
+      streamId:streamId||S.activeStreamId||'',
+      sessionId:S.session&&S.session.session_id,
+    });
+    if(!node) continue;
+    if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(node,liveFooter);
+    else blocks.appendChild(node);
+    wrote=true;
+  }
+  if(wrote) _syncTransparentEventControls(turn);
+  if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
+  _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+  if(scrollRebuildGuard&&scrollRebuildGuard.release){
+    requestAnimationFrame(()=>{
+      scrollRebuildGuard.release();
+      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+    });
+  }
+  if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
+  return wrote;
+}
 function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
-  const scene=_projectLiveAnchorActivitySceneForStream(streamId,(opts&&opts.mode)||'compact_worklog');
+  const mode=(typeof isTransparentStream==='function'&&isTransparentStream())
+    ? 'transparent_stream'
+    : ((opts&&opts.mode)||'compact_worklog');
+  const scene=_projectLiveAnchorActivitySceneForStream(streamId,mode);
   if(!scene) return false;
   return renderLiveAnchorActivityScene(streamId,scene,{...(opts||{}),sessionId});
 }
@@ -10405,24 +10868,33 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
 // renderMessages({preserveScroll:true}) call and cleared after the settled-scene
 // render pass; null at all other times.
 let _keepSettledWorklogOpenForStreamId=null;
-function _shouldKeepSettledWorklogOpenForPinnedFollow(streamId){
-  // Round 6 scroll-jump guard: while the reader is pinned at the live tail,
-  // collapsing the JUST-settled live worklog into a compact summary can shrink
-  // the transcript by hundreds of px at STREAM_DONE. The browser clamps scrollTop
-  // to the new max, which looks like a large backward jump even though pinned
-  // state is correct. Keep that one worklog open for pinned followers so the
-  // live->settled DOM swap is height-stable; unpinned readers still get compact
-  // settled worklogs and preserve their viewport normally. This intentionally
-  // wins over a transient user-collapsed live worklog while the reader remains
-  // pinned: avoiding the visible STREAM_DONE jump takes precedence for followers.
+function _shouldKeepSettledWorklogOpenForStreamSettle(streamId){
+  // Round 6 scroll-jump guard: collapsing the JUST-settled live worklog into a
+  // compact summary at STREAM_DONE shrinks the transcript by hundreds of px. The
+  // resulting backward jump hits readers in TWO positions, so keep that one
+  // worklog open for BOTH on the settle render — the live->settled DOM swap is
+  // then height-stable and there is no shrink for any scroll path to mishandle:
+  //
+  //  1. PINNED follower at the live tail: the shrink lowers scrollHeight, the
+  //     browser clamps scrollTop to the new max, and the viewport snaps upward
+  //     even though pin state is correct.
+  //  2. UNPINNED reader who scrolled UP to read inside the just-settled turn
+  //     (the mobile "往回大跳" report, #MOBILESCROLL follow-up): the worklog sits
+  //     ABOVE their viewport, so collapsing it pulls their content up to the top
+  //     of the turn. On desktop overflow-anchor:none + the JS snapshot restore
+  //     keep them put, but on mobile the CSS resting value is overflow-anchor:
+  //     auto AND _fixMobileScrollJank() flips an inline overflow-anchor:none over
+  //     the settle render — which is exactly the wrong state: native anchoring is
+  //     suppressed during the one frame the unpinned reader needs it to absorb
+  //     the above-viewport shrink, so the content leaps to the turn's top. Keeping
+  //     the worklog open removes the shrink entirely, which fixes it for every
+  //     device/anchor-mode combination instead of fighting the anchor engine.
+  //
   // SCOPING: the exception is gated on the one-shot token matching this turn's
   // stream id, so it applies ONLY to the turn that just settled — not to every
-  // historical settled worklog on every pinned re-render (which would defeat the
-  // compact-worklog default for past turns). Pin flags use the sticky pin state
-  // because during live DOM rebuilds the raw bottom distance can transiently
-  // exceed a threshold even for a pinned follower.
-  if(!streamId||_keepSettledWorklogOpenForStreamId!==streamId) return false;
-  return !!(_scrollPinned && !_messageUserUnpinned);
+  // historical settled worklog on every re-render (which would defeat the
+  // compact-worklog default for past turns).
+  return !!(streamId&&_keepSettledWorklogOpenForStreamId===streamId);
 }
 // One-shot token set/clear API used by the STREAM_DONE handler (messages.js):
 // arm the keep-open exception for exactly the turn that just settled, render,
@@ -10432,6 +10904,15 @@ function _armKeepSettledWorklogOpen(streamId){
 }
 function _disarmKeepSettledWorklogOpen(){
   _keepSettledWorklogOpenForStreamId=null;
+}
+// True while a just-settled worklog is being force-rendered open (between
+// _armKeepSettledWorklogOpen and _disarmKeepSettledWorklogOpen). renderMessages()
+// consults this so it does NOT write the forced-open DOM into _sessionHtmlCache:
+// the keep-open is a transient settle-frame device, and caching it would persist
+// the forced-open worklog across session switches / restores, silently overriding
+// a user-collapsed worklog. (#5260 gate-cert: keep-open must not leak into cache.)
+function _isKeepSettledWorklogOpenArmed(){
+  return _keepSettledWorklogOpenForStreamId!==null;
 }
 if(typeof window!=='undefined'){
   window._armKeepSettledWorklogOpen=_armKeepSettledWorklogOpen;
@@ -10459,11 +10940,20 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   });
   blocks.querySelectorAll('.tool-worklog-group:not([data-anchor-scene-owner="1"]),.tool-call-group:not([data-anchor-scene-owner="1"]),.agent-activity-thinking:not([data-anchor-scene-row="1"]),.wl-reason').forEach(el=>el.remove());
   const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');
-  const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForPinnedFollow(streamId);
+  const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForStreamSettle(streamId);
   const activityKey=`anchor-scene:${rawIdx}`;
   if(streamId&&!_readActivityDisclosureState(activityKey)){
     _copyActivityDisclosureState(`live:${streamId}`, activityKey);
   }
+  // keepSettledWorklogOpen forces collapsed:false for the ONE height-stable settle
+  // render of the just-settled turn (no STREAM_DONE shrink jump) for both pinned
+  // followers AND unpinned mid-turn readers. The keep-open is made genuinely
+  // transient by the STREAM_DONE handler (messages.js): right after this render it
+  // disarms the token and runs a scroll-PRESERVING collapse pass, so a worklog the
+  // reader had manually collapsed returns to its copied disclosure state
+  // (_copyActivityDisclosureState above) without the jump. While the token is
+  // armed this forced-open DOM is also kept OUT of _sessionHtmlCache
+  // (_isKeepSettledWorklogOpenArmed), so it never persists across restores.
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
     collapsed:!keepSettledWorklogOpen,
@@ -11606,13 +12096,18 @@ function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
   const bottom=Math.max(0,el.scrollHeight-el.scrollTop-el.clientHeight);
+  const readerAwayFromBottom=bottom>250&&(
+    _messageUserUnpinned ||
+    _scrollPinned===false ||
+    (typeof _recentMessageScrollIntent==='function'&&_recentMessageScrollIntent())
+  );
   return {
     anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null,
     top:el.scrollTop,
     bottom,
     scrollHeight:el.scrollHeight,
-    pinned:_shouldFollowMessagesOnDomReplace(),
-    userUnpinned:_messageUserUnpinned,
+    pinned:readerAwayFromBottom?false:_shouldFollowMessagesOnDomReplace(),
+    userUnpinned:readerAwayFromBottom?true:_messageUserUnpinned,
   };
 }
 function _restorePinnedMessageScrollSnapshot(snapshot){
@@ -12214,6 +12709,13 @@ function renderMessages(options){
     }catch(e){}
   }
   const transparentToolResultsByTid=_transparentModeActive?_collectToolResultSnippetsByTid(S.messages):{};
+  const latestRenderedAssistantRawIdx=(()=>{
+    for(let i=renderVisWithIdx.length-1;i>=0;i--){
+      const entry=renderVisWithIdx[i];
+      if(entry&&entry.m&&entry.m.role==='assistant'&&!entry.m._live) return entry.rawIdx;
+    }
+    return -1;
+  })();
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
@@ -12401,6 +12903,7 @@ function renderMessages(options){
       currentAssistantTurn.dataset.recycleKey=rawIdx;
       inner.appendChild(currentAssistantTurn);
     }
+    _setLatestAssistantTurnLandmark(currentAssistantTurn, !m._live&&rawIdx===latestRenderedAssistantRawIdx);
     const seg=document.createElement('div');
     if(Array.isArray(orderedTransparentParts)&&orderedTransparentParts.length){
       const blocks=_assistantTurnBlocks(currentAssistantTurn);
@@ -13335,7 +13838,15 @@ function renderMessages(options){
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
-  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
+  // Skip caching while the just-settled keep-open token is armed: that render
+  // force-opens the settled worklog for height-stability, and caching it would
+  // persist the forced-open DOM across session switches / restores, overriding a
+  // user-collapsed worklog. The follow-up collapse pass (after disarm) produces
+  // the correct cacheable DOM on its own render. (#5260 gate-cert.) The typeof
+  // guard keeps standalone renderMessages() test harnesses (which don't define
+  // the helper) working — absent helper == not armed == cache normally.
+  const _keepOpenArmed=(typeof _isKeepSettledWorklogOpenArmed==='function')&&_isKeepSettledWorklogOpenArmed();
+  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi&&!_keepOpenArmed){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
@@ -15035,6 +15546,8 @@ function renderMermaidBlocks(container){
       const tmp=document.getElementById('d'+id);
       if(tmp) tmp.remove();
       block.innerHTML=svg;
+      const renderedSvg = block.querySelector('svg');
+      if(renderedSvg) _mountMermaidViewer(renderedSvg, {mode:'inline'});
       block.classList.add('mermaid-rendered');
     }catch(e){
       const tmp=document.getElementById('d'+id);

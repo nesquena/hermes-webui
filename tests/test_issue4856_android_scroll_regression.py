@@ -420,9 +420,13 @@ def test_keyboard_scroll_intent_tracked_and_gated():
     assert "let _lastMessageKeyScrollIntentMs=-Infinity" in UI_JS
     assert "function _recentMessageKeyScrollIntent" in UI_JS
     # A keydown listener must stamp the intent for the pane scroll keys.
-    assert "_lastMessageKeyScrollIntentMs=performance.now()" in UI_JS, (
+    assert "_lastMessageKeyScrollIntentMs=now;" in UI_JS, (
         "a keydown handler must stamp _lastMessageKeyScrollIntentMs when the "
         "reader uses the keyboard to scroll the message pane."
+    )
+    assert "if(bottomDistance>120) _lastMessageScrollIntentMs=now;" in UI_JS, (
+        "keyboard-driven manual-reader snapshot intent must be guarded by "
+        "distance from the live tail."
     )
     assert "'PageUp'" in UI_JS and "'PageDown'" in UI_JS
     # The suppression branch must consult it.

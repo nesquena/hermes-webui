@@ -604,6 +604,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           return turn;
         }}
         function _assistantTurnBlocks(turn) {{ return turn ? turn.querySelector('.assistant-turn-blocks') : null; }}
+        function _setLatestAssistantTurnLandmark() {{}}
         function _assistantRoleHtml() {{ return ''; }}
         function _userMessageDomId(rawIdx) {{ return `user-${{rawIdx}}`; }}
         function _messageSessionIndexForRawIdx(rawIdx) {{ return rawIdx; }}

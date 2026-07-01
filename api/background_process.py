@@ -288,6 +288,71 @@ def active_stream_id_for_session(session_id: str) -> Optional[str]:
     return None
 
 
+def persisted_message_count_for_session(session_id: str) -> Optional[int]:
+    """Cheap, metadata-only persisted ``message_count`` for *session_id*, or None.
+
+    Companion to ``active_stream_id_for_session`` for the per-session SSE
+    on-subscribe self-heal. ``active_stream_id_for_session`` recovers a turn
+    that is live RIGHT NOW (replay ``server_turn_started``). But a
+    SERVER-initiated turn (self-wake / cron / restart hook) can start AND
+    finish entirely inside an SSE gap: the fire-and-forget
+    ``server_turn_started`` reached no subscriber AND the run already cleared
+    from ``ACTIVE_RUNS`` by the time the tab reconnects, so the replay finds
+    nothing (returns None) and the tab's transcript stays stale until a hard
+    refresh — the reported visible-tab defect. To detect that case the handler
+    compares the freshly-(re)subscribed tab's last-known count against this
+    persisted count; a server that is AHEAD means a turn landed during the gap.
+
+    Reads via ``metadata_only=True`` so it never parses the full transcript
+    (this runs on every per-session SSE (re)connect). The persisted count is
+    written by ``Session.save`` as ``meta['message_count'] = len(messages)`` —
+    the SAME basis the frontend's ``S.session.message_count`` is built from —
+    so the comparison is apples-to-apples. Returns None when the count is
+    unknown (legacy sidecars without a persisted count); the caller treats
+    None as "cannot tell, do nothing", never as a trigger.
+    """
+    try:
+        from api.models import get_session
+
+        s = get_session(session_id, metadata_only=True)
+        count = getattr(s, "_metadata_message_count", None)
+        if count is None:
+            msgs = getattr(s, "messages", None)
+            count = len(msgs) if isinstance(msgs, list) and msgs else None
+        return int(count) if count is not None else None
+    except Exception:
+        logger.debug(
+            "persisted_message_count_for_session lookup failed for %s",
+            session_id,
+            exc_info=True,
+        )
+        return None
+
+
+def should_emit_session_updated(
+    subscriber_known_count: Optional[int],
+    persisted_count: Optional[int],
+) -> bool:
+    """Gate for the per-session SSE "finished during the gap" self-heal emit.
+
+    Single source of truth shared by the SSE handler and its tests so the two
+    cannot drift (the handler MUST call this, not inline the comparison).
+    Emit a ``session-updated`` frame ONLY when:
+      * the (re)subscribing tab reported a last-known count (``?known_count``),
+        AND
+      * the persisted server-side count is known, AND
+      * the server is STRICTLY ahead (a turn landed during the gap).
+    A missing known count (tab didn't report), an unknown persisted count
+    (legacy sidecar), or an equal/behind count all return False — never a
+    spurious reload.
+    """
+    if subscriber_known_count is None:
+        return False
+    if persisted_count is None:
+        return False
+    return persisted_count > subscriber_known_count
+
+
 def _reaper_loop() -> None:
     logger.info("SessionChannel reaper thread started")
     while not _REAPER_STOP.is_set():

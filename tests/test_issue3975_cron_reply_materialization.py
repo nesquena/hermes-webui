@@ -47,7 +47,7 @@ def test_chat_start_materializes_cron_session_before_reply(monkeypatch, tmp_path
     def fail_get_session(_sid):
         raise KeyError(_sid)
 
-    def materialize(_sid):
+    def materialize(_sid, **_kwargs):
         captured["materialize_sid"] = _sid
         return materialized
 

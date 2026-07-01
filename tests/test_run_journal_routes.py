@@ -265,7 +265,7 @@ def test_session_payload_exposes_runtime_journal_for_stale_streams():
     assert "original_stream_id = getattr(s, \"active_stream_id\", None)" in ROUTES_SRC
     assert '"runtime_journal"' in ROUTES_SRC
     assert '"runtime_journal_snapshot"' in ROUTES_SRC
-    assert "_run_journal_live_snapshot(original_stream_id)" in ROUTES_SRC
+    assert "_run_journal_live_snapshot(original_stream_id, handler=handler)" in ROUTES_SRC
     assert 'terminal_state = "lost-worker-bookkeeping"' in ROUTES_SRC
     assert "active=journal_active" in ROUTES_SRC
     assert "journal_active = bool(original_stream_id in active_stream_ids)" in ROUTES_SRC
