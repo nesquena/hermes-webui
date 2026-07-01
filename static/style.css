@@ -2007,6 +2007,13 @@
   .queue-card-text:focus{white-space:pre-wrap;overflow:auto;text-overflow:clip;}
   .queue-card-badges{display:flex;align-items:center;gap:5px;flex-shrink:0;font-size:10px;color:var(--muted);opacity:.6;}
   .queue-card-file-badge{display:flex;align-items:center;gap:2px;}
+  /* ── Busy hint bar ─────────────────────────────────────────────────── */
+  .busy-hint-bar{display:flex;align-items:center;gap:4px;padding:4px 10px;flex-wrap:wrap;border-top:1px solid var(--border);background:var(--bg);}
+  .busy-hint-bar[hidden]{display:none;}
+  .busy-hint-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:0.75em;cursor:pointer;transition:background .15s,color .15s;white-space:nowrap;}
+  .busy-hint-pill[hidden]{display:none;}
+  .busy-hint-pill:hover{background:var(--hover);color:var(--fg);}
+  .busy-hint-pill--new-chat{margin-left:auto;}
   .approval-btn-icon{font-size:13px;line-height:1;}
   .approval-btn-label{line-height:1;}
   .approval-kbd{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:4px;font-size:10px;font-family:inherit;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:var(--muted);line-height:1.4;margin-left:2px;}

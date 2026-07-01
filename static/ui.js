@@ -6478,6 +6478,41 @@ function updateSendBtn(){
   } else if(action==='disabled'){
     btn.classList.remove('visible');
   }
+  if(typeof _updateBusyHintBar==='function') _updateBusyHintBar();
+}
+
+function _updateBusyHintBar(){
+  const bar=$('busyHintBar');
+  if(!bar) return;
+  const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  const isBusy=!!S.busy||compressionRunning;
+  bar.hidden=!isBusy;
+  if(!isBusy) return;
+  const canInterrupt=!!(S.activeStreamId&&typeof cancelStream==='function');
+  const canSteer=!!(S.activeStreamId&&typeof _trySteer==='function');
+  const pills=bar.querySelectorAll('.busy-hint-pill');
+  pills.forEach(pill=>{
+    const action=pill.dataset.action;
+    if(action==='interrupt') pill.hidden=!canInterrupt;
+    if(action==='steer') pill.hidden=!canSteer;
+  });
+}
+
+function _handleBusyHintPill(action){
+  if(action==='new_chat'){
+    const btn=$('btnNewChat');
+    if(btn) btn.click();
+    return;
+  }
+  const msg=$('msg');
+  if(!msg) return;
+  if(!msg.value.trim()){
+    msg.value='/'+action+' ';
+    msg.dispatchEvent(new Event('input',{bubbles:true}));
+    if(typeof autoResize==='function') autoResize();
+    msg.focus();
+    msg.setSelectionRange(msg.value.length,msg.value.length);
+  }
 }
 
 async function handleComposerPrimaryAction(){
