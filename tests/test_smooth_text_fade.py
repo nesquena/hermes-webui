@@ -234,6 +234,33 @@ def test_live_streaming_assistant_content_opts_out_of_global_theme_transitions()
     )
 
 
+def test_live_anchor_transparent_rows_do_not_replay_entrance_animation_on_stream_updates():
+    """Live Transparent Stream rows are rebuilt during token/reasoning updates.
+
+    The base live-row entrance animation starts at opacity 0. If it applies to
+    anchor-scene rows that are replaced on every stream update, the visible trace
+    flashes/fades repeatedly even when the assistant text node itself is stable.
+    """
+    assert "#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter" in STYLE_CSS
+    guard = STYLE_CSS[
+        STYLE_CSS.index("Live transparent anchor scene rows are rebuilt during streaming") : STYLE_CSS.index(
+            ".transparent-event-row[data-event-type=\"thinking\"]"
+        )
+    ]
+    assert_contains_all(
+        guard,
+        [
+            '#liveAssistantTurn .transparent-event-row[data-anchor-live-scene-row="1"]',
+            '#liveAssistantTurn .transparent-event-row[data-live-stream-owned="1"]',
+            "animation:none!important",
+            "opacity:1!important",
+            "transition-property:none!important",
+            "transition-duration:0s!important",
+            "transition-delay:0s!important",
+        ],
+    )
+
+
 def test_stream_fade_css_is_opacity_only_and_hides_live_cursor():
     fade_css = STYLE_CSS[STYLE_CSS.index("OpenWebUI-style streaming word fade") :]
     assert "filter:" not in STYLE_CSS[STYLE_CSS.index("OpenWebUI-style streaming word fade") :].split(
