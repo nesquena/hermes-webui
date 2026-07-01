@@ -118,6 +118,36 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
         return None
 
 
+def _gateway_client_identity_headers(session_id: str, api_key: str, client_identity=None) -> dict[str, str]:
+    """Build sanitized client identity headers for Gateway chat transports."""
+    headers: dict[str, str] = {}
+    client_session_key = ""
+    if isinstance(client_identity, dict):
+        from api.streaming import _clean_webui_client_identity_value
+
+        client_name = _clean_webui_client_identity_value(client_identity.get("name"))
+        client_id = _clean_webui_client_identity_value(client_identity.get("id"), max_len=160)
+        client_session_key = _clean_webui_client_identity_value(client_identity.get("session_key"), max_len=256)
+        if client_name:
+            headers["X-Hermes-Client-Name"] = client_name
+        if client_id:
+            headers["X-Hermes-Client-Id"] = client_id
+    if api_key:
+        # Scope Gateway long-term continuity to this WebUI conversation without
+        # exposing the browser's auth cookie or CSRF material. A client-supplied
+        # session_key is namespaced under the server-owned webui:{session_id}
+        # scope instead of forwarded verbatim. WebUI multiplexes browser turns
+        # through one shared gateway Bearer key, so the agent-side API-key guard
+        # cannot distinguish sibling browser clients.
+        if client_session_key:
+            headers["X-Hermes-Session-Key"] = f"webui:{session_id}:{client_session_key}"
+        else:
+            headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+    # On an unauthenticated gateway, do not send X-Hermes-Session-Key at all.
+    # The gateway rejects that header with 403 when no API key is configured.
+    return headers
+
+
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
     """Return redacted Gateway-backed chat configuration status."""
     mode = webui_chat_backend_mode(config_data, environ)
@@ -282,7 +312,7 @@ def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None, session=None,
+    attachments=None, cfg=None, session=None, client_identity=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     url_runs = f"{base_url.rstrip('/')}/v1/runs"
@@ -290,10 +320,10 @@ def _run_gateway_runs_api_streaming(
         "Content-Type": "application/json",
         "Accept": "application/json",
         "X-Hermes-Session-Id": session_id,
+        **_gateway_client_identity_headers(session_id, api_key, client_identity),
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-        headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
     message_content: Any = str(msg_text or "")
     if attachments:
         try:
@@ -654,6 +684,7 @@ def _run_gateway_chat_streaming(
                     attachments=attachments,
                     cfg=cfg,
                     session=s,
+                    client_identity=client_identity,
                 )
             except Exception as exc:
                 put_gateway_event("apperror", {
@@ -689,43 +720,10 @@ def _run_gateway_chat_streaming(
                 "Content-Type": "application/json",
                 "Accept": "text/event-stream",
                 "X-Hermes-Session-Id": session_id,
+                **_gateway_client_identity_headers(session_id, api_key, client_identity),
             }
-            client_name = None
-            client_id = None
-            client_session_key = None
-            if isinstance(client_identity, dict):
-                from api.streaming import _clean_webui_client_identity_value
-
-                client_name = _clean_webui_client_identity_value(client_identity.get("name"))
-                client_id = _clean_webui_client_identity_value(client_identity.get("id"), max_len=160)
-                client_session_key = _clean_webui_client_identity_value(client_identity.get("session_key"), max_len=256)
-                if client_name:
-                    headers["X-Hermes-Client-Name"] = client_name
-                if client_id:
-                    headers["X-Hermes-Client-Id"] = client_id
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
-                # Scope Gateway long-term continuity to this WebUI conversation
-                # without exposing the browser's auth cookie or CSRF material.
-                # A client-supplied session_key is namespaced under the
-                # server-owned webui:{session_id} scope rather than forwarded
-                # verbatim: the agent-side gateway gates a caller-supplied
-                # session key behind API-key auth specifically to stop one
-                # caller from guessing another's memory scope, and WebUI
-                # multiplexes every browser turn through a single shared
-                # gateway Bearer key, so distinct browser clients are
-                # indistinguishable to that guard. Namespacing lets a client
-                # sub-scope within its own conversation boundary without being
-                # able to collide with or steer into a sibling's scope.
-                if client_session_key:
-                    headers["X-Hermes-Session-Key"] = f"webui:{session_id}:{client_session_key}"
-                else:
-                    headers.setdefault("X-Hermes-Session-Key", f"webui:{session_id}")
-            # Note: on an unauthenticated gateway (no api_key), we intentionally
-            # do not send X-Hermes-Session-Key at all, even if the client
-            # supplied identity metadata — the gateway hard-rejects that header
-            # with 403 when no API key is configured, so sending it here would
-            # break an otherwise-working open local gateway chat turn.
 
             message_content: Any = str(msg_text or "")
             if attachments:

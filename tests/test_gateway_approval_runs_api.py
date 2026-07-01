@@ -235,6 +235,7 @@ def test_gateway_runs_api_submission():
     ):
         runs_called["called"] = True
         captured["body_extras"] = body_extras
+        captured["client_identity"] = kwargs.get("client_identity")
         return (original_text, {"input_tokens": 10, "output_tokens": 5})
 
     mock_session = MagicMock()
@@ -263,6 +264,7 @@ def test_gateway_runs_api_submission():
                     model="test-model",
                     workspace="/tmp",
                     stream_id=stream_id,
+                    client_identity={"name": "Person A", "session_key": "team:person-a:ios"},
                 )
     finally:
         with STREAMS_LOCK:
@@ -270,6 +272,7 @@ def test_gateway_runs_api_submission():
 
     assert runs_called["called"], "The runs-API streaming path should have been invoked"
     assert captured["body_extras"]["reasoning_effort"] == "high"
+    assert captured["client_identity"] == {"name": "Person A", "session_key": "team:person-a:ios"}
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +415,144 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
     assert events[0][1]["approval_id"] == "appr-1"
     assert events[1] == ("reasoning", {"text": "thinking..."})
     assert events[2] == ("token", {"text": "Hello"})
+
+
+def test_gateway_runs_api_streaming_forwards_sanitized_client_identity_headers():
+    """Runs API requests must keep the same identity header contract as legacy chat completions."""
+    from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT
+    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming
+
+    requests = []
+    stream_id = "sid-runs-identity"
+    STREAM_PARTIAL_TEXT[stream_id] = ""
+    STREAM_REASONING_TEXT[stream_id] = ""
+
+    class _JsonResponse:
+        def read(self, _limit=None):
+            return json.dumps({"run_id": "run-identity"}).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    class _SseResponse:
+        def __iter__(self):
+            return iter([
+                b'data: {"event":"run.completed","output":"done","usage":{"input_tokens":1,"output_tokens":1}}\n',
+                b'\n',
+            ])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    def fake_urlopen(req, *, timeout=None):
+        requests.append(req)
+        if req.full_url.endswith("/v1/runs"):
+            return _JsonResponse()
+        return _SseResponse()
+
+    try:
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            final_text, usage = _run_gateway_runs_api_streaming(
+                session_id="sess-identity",
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+                base_url="http://gw:8642",
+                api_key="secret",
+                prefill_messages=[],
+                body_extras={},
+                put_gateway_event=lambda *_args, **_kwargs: None,
+                cancel_event=threading.Event(),
+                client_identity={
+                    "name": " Person A\nInjected: nope ",
+                    "id": " person-a-ios\tclient ",
+                    "session_key": " team:person-a:ios\r\nInjected: nope ",
+                },
+            )
+    finally:
+        STREAM_PARTIAL_TEXT.pop(stream_id, None)
+        STREAM_REASONING_TEXT.pop(stream_id, None)
+        _STREAM_RUN_IDS.pop(stream_id, None)
+
+    assert final_text == "done"
+    assert usage["input_tokens"] == 1
+    assert len(requests) == 2
+    run_req, events_req = requests
+    expected_session_key = "webui:sess-identity:team:person-a:ios Injected: nope"
+    for req in (run_req, events_req):
+        assert req.get_header("X-hermes-client-name") == "Person A Injected: nope"
+        assert req.get_header("X-hermes-client-id") == "person-a-ios client"
+        assert req.get_header("X-hermes-session-key") == expected_session_key
+        assert "\n" not in req.get_header("X-hermes-client-name")
+        assert "\r" not in req.get_header("X-hermes-session-key")
+    assert run_req.get_header("Authorization") == "Bearer secret"
+    assert events_req.get_header("Accept") == "text/event-stream"
+
+
+def test_gateway_runs_api_streaming_omits_session_key_header_when_gateway_unauthenticated():
+    """Runs API must not send X-Hermes-Session-Key without gateway auth."""
+    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_runs_api_streaming
+
+    requests = []
+    stream_id = "sid-runs-identity-no-auth"
+
+    class _JsonResponse:
+        def read(self, _limit=None):
+            return json.dumps({"run_id": "run-no-auth"}).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    class _SseResponse:
+        def __iter__(self):
+            return iter([b'data: {"event":"run.completed","output":"done"}\n', b'\n'])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    def fake_urlopen(req, *, timeout=None):
+        requests.append(req)
+        if req.full_url.endswith("/v1/runs"):
+            return _JsonResponse()
+        return _SseResponse()
+
+    try:
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_runs_api_streaming(
+                session_id="sess-no-auth",
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+                base_url="http://gw:8642",
+                api_key="",
+                prefill_messages=[],
+                body_extras={},
+                put_gateway_event=lambda *_args, **_kwargs: None,
+                cancel_event=threading.Event(),
+                client_identity={"name": "Person A", "session_key": "team:person-a:ios"},
+            )
+    finally:
+        _STREAM_RUN_IDS.pop(stream_id, None)
+
+    assert len(requests) == 2
+    for req in requests:
+        assert req.get_header("X-hermes-client-name") == "Person A"
+        assert req.get_header("X-hermes-session-key") is None
+        assert req.get_header("Authorization") is None
 
 
 def test_gateway_runs_api_streaming_preserves_multimodal_input():
