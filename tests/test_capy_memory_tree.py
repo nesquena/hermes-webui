@@ -62255,7 +62255,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_actions_selected
     assert "raw_prompt" not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_selected_actions_final_url_query_fragment_drift(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_selected_actions_final_url_query_fragment_drift_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
 ):
@@ -62281,6 +62281,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_selected
         "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
     }).encode("utf-8")
     calls = []
+    read_calls = []
 
     class FakeResponse:
         headers = {"Content-Type": "application/json; charset=utf-8"}
@@ -62298,6 +62299,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_selected
             )
 
         def read(self, _limit=-1):
+            read_calls.append("called")
             return selected_actions_body
 
     def fake_refresh_open(request, *, timeout):
@@ -62309,6 +62311,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_selected
     result = run_source_refresh_jobs(limit=1)
     public_outputs = {
         "catalog": capy_memory.source_catalog(limit=5),
+        "relevant": relevant_memory_for_space("space-actions-selected-actions", limit=5),
         "result": result,
         "search": search_memory("actions selected actions", limit=5),
     }
@@ -62319,10 +62322,12 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_selected
         "timeout": 8,
         "accept": "application/json",
     }]
+    assert read_calls == []
     assert result["processed"] == 1
     assert result["jobs"][0]["job_id"] == receipt["job_id"]
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
+    assert public_outputs["relevant"]["results"] == []
     assert not (root / "vault" / "github-actions-selected-actions-final-url-drift.md").exists()
     for unsafe in (
         "secret_value_do_not_leak",
