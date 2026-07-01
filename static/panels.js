@@ -7645,7 +7645,7 @@ function _initLogoUpload(){
   }
 
   function _logoRequirementMessage(details){
-    var base="Logo must be PNG, SVG, or ICO, max 256x256 px and 200 KB.";
+    var base="Logo must be PNG or ICO, max 256x256 px and 200 KB.";
     return details?base+" Your file: "+details+".":base;
   }
 
@@ -7669,11 +7669,7 @@ function _initLogoUpload(){
     if(isPng) return "png";
     var isIco=prefix.length>=4&&prefix[0]===0x00&&prefix[1]===0x00&&prefix[2]===0x01&&prefix[3]===0x00;
     if(isIco) return "ico";
-    var text="";
-    for(var i=0;i<prefix.length;i++) text+=String.fromCharCode(prefix[i]);
-    if(text.trim().slice(0,200).toLowerCase().indexOf("<svg")!==-1) return "svg";
     if(type==="image/png"||name.endsWith(".png")) return "png";
-    if(type==="image/svg+xml"||name.endsWith(".svg")) return "svg";
     if(type==="image/x-icon"||type==="image/vnd.microsoft.icon"||name.endsWith(".ico")) return "ico";
     return "";
   }

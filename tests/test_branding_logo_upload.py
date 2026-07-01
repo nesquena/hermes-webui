@@ -97,26 +97,21 @@ def test_logo_upload_accepts_small_ico():
 @pytest.mark.parametrize(
     "svg",
     [
+        b'<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>',
         b"<svg><script>alert(1)</script></svg>",
         b'<svg onload="alert(1)"></svg>',
         b'<svg><a href="javascript:alert(1)">x</a></svg>',
         b"<svg><foreignObject><body></body></foreignObject></svg>",
+        b'<svg><animate attributeName="href" values="javascript:alert(1)" /></svg>',
+        b'<svg><set attributeName="onload" to="alert(1)" /></svg>',
+        b'<svg &#111;nload="alert(1)"></svg>',
     ],
 )
-def test_logo_upload_rejects_active_svg_content(svg):
+def test_logo_upload_rejects_svg_content(svg):
     with pytest.raises(ValueError) as exc:
         _validate_upload(svg, "logo.svg")
 
-    assert "Invalid SVG: active content is not allowed" in str(exc.value)
-
-
-def test_logo_upload_accepts_inert_svg():
-    body = b'<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>'
-
-    data, ext = _validate_upload(body, "logo.svg")
-
-    assert data == body
-    assert ext == ".svg"
+    assert "Logo must be PNG or ICO" in str(exc.value)
 
 
 def test_branding_version_uses_file_mtime_token(tmp_path):
@@ -240,7 +235,7 @@ def test_logo_upload_rejects_oversized_multipart_length_without_reading():
 
     branding.handle_logo_upload(handler)
     assert handler.status == 413
-    assert b"Logo must be PNG, SVG, or ICO" in bytes(handler.body)
+    assert b"Logo must be PNG or ICO" in bytes(handler.body)
 
 
 def test_custom_logo_dom_hooks_exist():
@@ -252,7 +247,9 @@ def test_custom_logo_dom_hooks_exist():
     assert "<label>Logo</label>" in html
     assert "<label>Avatar</label>" not in html
     assert "logo-upload-grid" in html
-    assert "PNG, SVG, or ICO. Max 256&times;256 px and 200 KB." in html
+    assert "PNG or ICO. Max 256&times;256 px and 200 KB." in html
+    logo_block = html[html.index("logoUploadAreas") : html.index("settingsWorkspaceTodosTab")]
+    assert "image/svg+xml" not in logo_block
 
 
 def test_custom_logo_favicon_uses_resolved_theme_variant():
@@ -321,7 +318,10 @@ def test_custom_logo_upload_cache_busting_contract():
     assert "logo_version_for_settings_value" in routes
     assert 'Cache-Control", "no-store, max-age=0"' in routes
     assert 'X-Content-Type-Options", "nosniff"' in routes
-    assert 'Content-Security-Policy", "sandbox"' in routes
+    assert 're.fullmatch(r"logo-(light|dark)\\.(png|ico)", rel)' in routes
+    assert '".svg"' in branding
+    assert "_LOGO_FILE_EXTENSIONS_TO_DELETE" in branding
+    assert "_ALLOWED_EXTENSIONS = {\".png\", \".ico\"}" in branding
     assert "window._customLogoLightVersion=version" in panels
     assert "window._customLogoDarkVersion=version" in panels
     assert "settings.custom_logo_light_version || ''" in panels
@@ -333,7 +333,7 @@ def test_custom_logo_upload_cache_busting_contract():
     assert "_restoreLogoPreview(preview,previousPath,mode);" in panels
 
 
-def test_branding_svg_response_is_sandboxed(tmp_path, monkeypatch):
+def test_branding_svg_response_is_not_served(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "BRANDING_DIR", tmp_path)
     logo = tmp_path / "logo-light.svg"
     logo.write_text("<svg></svg>", encoding="utf-8")
@@ -365,8 +365,5 @@ def test_branding_svg_response_is_sandboxed(tmp_path, monkeypatch):
 
     handler = Handler()
 
-    assert routes._serve_branding(handler, SimpleNamespace(path="/branding/logo-light.svg"))
-    assert handler.status == 200
-    assert handler.sent_headers["Content-Type"] == "image/svg+xml; charset=utf-8"
-    assert handler.sent_headers["Content-Security-Policy"] == "sandbox"
-    assert handler.sent_headers["X-Content-Type-Options"] == "nosniff"
+    routes._serve_branding(handler, SimpleNamespace(path="/branding/logo-light.svg"))
+    assert handler.status == 404

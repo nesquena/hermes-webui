@@ -16,12 +16,13 @@ BRANDING_DIR = STATE_DIR / "branding"
 # Allowed image formats and their MIME types
 _ALLOWED_CONTENT_TYPES = {
     "image/png",
-    "image/svg+xml",
     "image/x-icon",
     "image/vnd.microsoft.icon",
 }
 
-_ALLOWED_EXTENSIONS = {".png", ".svg", ".ico"}
+_ALLOWED_EXTENSIONS = {".png", ".ico"}
+_LEGACY_LOGO_EXTENSIONS = {".svg"}
+_LOGO_FILE_EXTENSIONS_TO_DELETE = _ALLOWED_EXTENSIONS | _LEGACY_LOGO_EXTENSIONS
 
 # 256x256 px at 4 bytes/pixel RGBA is roughly 262 KB uncompressed.
 # 200 KB after PNG compression is generous headroom.
@@ -43,7 +44,7 @@ def _logo_path_from_settings_value(value: str) -> Path | None:
         return None
     if raw != name:
         return None
-    if not _re.fullmatch(r"logo-(light|dark)\.(png|svg|ico)", name):
+    if not _re.fullmatch(r"logo-(light|dark)\.(png|ico)", name):
         return None
     path = (BRANDING_DIR / name).resolve()
     try:
@@ -117,7 +118,7 @@ def _ico_dimensions(data: bytes) -> tuple[int, int]:
 
 def _logo_requirements() -> str:
     return (
-        f"Logo must be PNG, SVG, or ICO, max {_MAX_LOGO_DIMENSION}x"
+        f"Logo must be PNG or ICO, max {_MAX_LOGO_DIMENSION}x"
         f"{_MAX_LOGO_DIMENSION} px and {_MAX_LOGO_BYTES // 1024} KB."
     )
 
@@ -129,24 +130,6 @@ def _format_kb(size: int) -> str:
 def _raise_logo_requirement_error(issues: list[str]) -> None:
     suffix = f" Your file: {'; '.join(issues)}." if issues else ""
     raise ValueError(_logo_requirements() + suffix)
-
-
-def _validate_svg_logo(body: bytes) -> bytes:
-    """Reject SVG features that can execute active content when directly opened."""
-    text = body.decode("utf-8", errors="replace")
-    if "<svg" not in text[:4096] and "<SVG" not in text[:4096]:
-        raise ValueError("Invalid SVG: missing <svg> element")
-
-    active_patterns = (
-        r"<\s*script\b",
-        r"<\s*foreignObject\b",
-        r"\bon[a-z0-9_-]+\s*=",
-        r"\b(?:href|xlink:href|src)\s*=\s*['\"]?\s*javascript:",
-    )
-    for pattern in active_patterns:
-        if _re.search(pattern, text, flags=_re.IGNORECASE):
-            raise ValueError("Invalid SVG: active content is not allowed")
-    return body
 
 
 def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
@@ -192,22 +175,9 @@ def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
             _raise_logo_requirement_error(issues)
         return body, ".ico"
 
-    # Try SVG detection (text-based)
-    text = body.decode("utf-8", errors="replace")[:4096].strip()
-    if text and ("<svg" in text[:200] or "<SVG" in text[:200]):
-        if size_issue:
-            _raise_logo_requirement_error([size_issue])
-        _validate_svg_logo(body)
-        return body, ".svg"
-
     # Fallback: detect by filename extension
     ext = Path(filename).suffix.lower() if filename else ""
     if ext in _ALLOWED_EXTENSIONS:
-        if ext == ".svg":
-            if size_issue:
-                _raise_logo_requirement_error([size_issue])
-            _validate_svg_logo(body)
-            return body, ".svg"
         if ext == ".png":
             try:
                 w, h = _png_dimensions(body)
@@ -241,7 +211,7 @@ def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
 def _delete_logo_files_for_mode(mode: str) -> list[str]:
     """Delete every canonical logo file for a mode, regardless of extension."""
     deleted: list[str] = []
-    for ext in _ALLOWED_EXTENSIONS:
+    for ext in _LOGO_FILE_EXTENSIONS_TO_DELETE:
         path = BRANDING_DIR / f"logo-{mode}{ext}"
         try:
             path.relative_to(BRANDING_DIR)
@@ -257,7 +227,7 @@ def handle_logo_upload(handler) -> bool:
     """POST /api/settings/upload-logo
 
     Expects multipart/form-data with:
-      - file: the image file (PNG, SVG, or ICO)
+      - file: the image file (PNG or ICO)
       - mode: "light" or "dark"
 
     Saves to BRANDING_DIR/logo-{mode}.{ext} and returns the
@@ -295,8 +265,7 @@ def handle_logo_upload(handler) -> bool:
     except ValueError as e:
         return bad(handler, str(e))
 
-    # Convert SVG/ICO to PNG naming for consistency? No — keep original ext
-    # but save to the canonical path. For PNG we use .png, SVG .svg, ICO .ico.
+    # Keep the original validated extension on the canonical path.
     BRANDING_DIR.mkdir(parents=True, exist_ok=True)
     deleted = _delete_logo_files_for_mode(mode)
     dest = BRANDING_DIR / f"logo-{mode}{ext}"

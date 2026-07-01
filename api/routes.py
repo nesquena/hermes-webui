@@ -14314,6 +14314,8 @@ def _serve_branding(handler, parsed):
     branding_root = BRANDING_DIR.resolve()
     # Strip '/branding/' prefix
     rel = parsed.path[len("/branding/"):]
+    if not re.fullmatch(r"logo-(light|dark)\.(png|ico)", rel):
+        return j(handler, {"error": "not found"}, status=404)
     branding_file = (branding_root / rel).resolve()
     try:
         branding_file.relative_to(branding_root)
@@ -14332,8 +14334,6 @@ def _serve_branding(handler, parsed):
     handler.send_header("Content-Length", str(len(raw)))
     handler.send_header("Cache-Control", "no-store, max-age=0")
     handler.send_header("X-Content-Type-Options", "nosniff")
-    if ct == "image/svg+xml":
-        handler.send_header("Content-Security-Policy", "sandbox")
     handler.end_headers()
     handler.wfile.write(raw)
     return True
