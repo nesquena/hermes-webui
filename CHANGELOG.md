@@ -35,6 +35,8 @@
 
 ### Fixed
 
+- **Orphaned zero-message native/CLI sidebar sessions are pruned from the sidebar.** When a CLI or API-server session that was clicked in WebUI (creating a WebUI-owned sidecar) is later deleted outside WebUI, the stale zero-message row no longer lingers in the sidebar forever — it's pruned once the backing agent session is confirmed gone. A session with any real transcript (`message_count > 0`), attention signal, or active/pending stream is always preserved (never pruned), so no transcript is lost. Thanks @enihcam. (#4988, fixes #4985)
+
 - **Extension skins can declare a base scheme (`light`/`dark`).** A registered extension skin may now set `scheme: "light" | "dark"` via `registerHermesSkin()`, so a light-only or dark-only skin forces the effective base (`.dark` class) it needs while selected — without rewriting the user's saved Theme preference. Core owns the light/dark base decision for registered skins, so extensions no longer need broad workaround CSS. The scheme value is sanitized to only `light`/`dark` and never enters the CSS token path (no injection vector); the base initializes from the pre-painted theme so a no-scheme skin can't flash a saved dark theme to light during boot. Thanks @franksong2702. (#5271)
 
 - **More complete Simplified Chinese (zhCN) localization.** Previously-unlocalized UI strings now have zhCN translations. Thanks @Loukky. (#5279)
