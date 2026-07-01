@@ -197,6 +197,35 @@ def test_stream_fade_done_drain_has_hard_cap_for_large_buffered_responses():
     )
 
 
+def test_live_streaming_assistant_content_opts_out_of_global_theme_transitions():
+    """Per-token markdown rewrites must not inherit global div color/background fades.
+
+    The global theme transition is useful for dark/light switches, but live
+    assistant DOM updates happen for every streamed token. If those live nodes
+    inherit color/background transitions, light themes visibly flash/fade on
+    each word.
+    """
+    live_transition_guard = STYLE_CSS[
+        STYLE_CSS.index("Live assistant content is updated token-by-token") : STYLE_CSS.index(
+            ":root{--app-titlebar-safe-top"
+        )
+    ]
+    assert_contains_all(
+        live_transition_guard,
+        [
+            "#liveAssistantTurn *",
+            "#thinkingRow *",
+            '.assistant-segment[data-live-assistant="1"] *',
+            '.agent-activity-thinking[data-thinking-active="1"] *',
+            '.agent-activity-thinking[data-live-thinking="1"] *',
+            '.live-worklog[data-live-worklog-shell="1"] *',
+            "transition-property:none!important",
+            "transition-duration:0s!important",
+            "transition-delay:0s!important",
+        ],
+    )
+
+
 def test_stream_fade_css_is_opacity_only_and_hides_live_cursor():
     fade_css = STYLE_CSS[STYLE_CSS.index("OpenWebUI-style streaming word fade") :]
     assert "filter:" not in STYLE_CSS[STYLE_CSS.index("OpenWebUI-style streaming word fade") :].split(

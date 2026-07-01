@@ -1458,6 +1458,21 @@
   :root:not(.dark) .cron-btn:hover{background:rgba(0,0,0,.08);}
   /* ── Smooth dark mode transitions ── */
   body,header,footer,aside,nav,main,div,button,input,textarea,select{transition-property:background-color,border-color,color;transition-duration:.15s;transition-timing-function:ease;}
+  /* Live assistant content is updated token-by-token. The global div color/background
+     transition above makes each streamed markdown rewrite briefly fade/flash on light
+     themes. Keep theme transitions elsewhere, but make the live turn paint instantly. */
+  #liveAssistantTurn,
+  #liveAssistantTurn *,
+  #thinkingRow,
+  #thinkingRow *,
+  .assistant-segment[data-live-assistant="1"],
+  .assistant-segment[data-live-assistant="1"] *,
+  .agent-activity-thinking[data-thinking-active="1"],
+  .agent-activity-thinking[data-thinking-active="1"] *,
+  .agent-activity-thinking[data-live-thinking="1"],
+  .agent-activity-thinking[data-live-thinking="1"] *,
+  .live-worklog[data-live-worklog-shell="1"],
+  .live-worklog[data-live-worklog-shell="1"] *{transition-property:none!important;transition-duration:0s!important;transition-delay:0s!important;}
   :root{--app-titlebar-safe-top:0px;}
   .pwa-standalone{overscroll-behavior:none;}
   .pwa-standalone body{-webkit-tap-highlight-color:transparent;}
