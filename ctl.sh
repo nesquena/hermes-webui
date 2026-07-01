@@ -35,8 +35,8 @@ _apply_env_file_safely() {
   while IFS= read -r line || [[ -n "${line}" ]]; do
     line="${line#${line%%[![:space:]]*}}"
     [[ -z "${line}" || "${line}" == \#* ]] && continue
-    if [[ "${line}" == export[[:space:]]* ]]; then
-      line="${line#export }"
+    if [[ "${line}" =~ ^export[[:space:]]+(.+)$ ]]; then
+      line="${BASH_REMATCH[1]}"
       line="${line#${line%%[![:space:]]*}}"
     fi
     [[ "${line}" == *=* ]] || continue
@@ -50,8 +50,8 @@ _apply_env_file_safely() {
     esac
 
     value="${value#${value%%[![:space:]]*}}"
-    if [[ ${#value} -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
-      value="${value:1:${#value}-2}"
+    if [[ "${value}" =~ ^\"(([^\"\\]|\\.)*)\"([[:space:]]*\#.*)?[[:space:]]*$ ]]; then
+      value="${BASH_REMATCH[1]}"
       value="$(printf '%s' "$value" | awk '{
         i = 1
         len = length($0)
@@ -72,8 +72,8 @@ _apply_env_file_safely() {
           }
         }
       }')"
-    elif [[ ${#value} -ge 2 && "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
-      value="${value:1:${#value}-2}"
+    elif [[ "${value}" =~ ^\'([^\']*)\'([[:space:]]*\#.*)?[[:space:]]*$ ]]; then
+      value="${BASH_REMATCH[1]}"
     else
       value="${value%%[[:space:]]\#*}"
       value="${value%${value##*[![:space:]]}}"
@@ -94,7 +94,9 @@ _load_repo_dotenv_preserving_env() {
     line="${line#${line%%[![:space:]]*}}"
     [[ -z "${line}" || "${line}" == \#* || "${line}" != *=* ]] && continue
     key="${line%%=*}"
-    key="${key#export }"
+    if [[ "${key}" =~ ^export[[:space:]]+(.+)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+    fi
     key="${key//[[:space:]]/}"
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     # Skip shell-readonly names (UID/GID/EUID/EGID/PPID); re-exporting them
@@ -137,7 +139,9 @@ _load_hermes_dotenv() {
     line="${line#${line%%[![:space:]]*}}"
     [[ -z "${line}" || "${line}" == \#* || "${line}" != *=* ]] && continue
     key="${line%%=*}"
-    key="${key#export }"
+    if [[ "${key}" =~ ^export[[:space:]]+(.+)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+    fi
     key="${key//[[:space:]]/}"
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     case "${key}" in
