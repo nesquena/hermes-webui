@@ -387,6 +387,99 @@ def _session_counts_toward_pin_quota(session) -> bool:
     return not _hide_from_default_sidebar(row)
 
 
+# ── Safe config.yaml viewer (#2929 / salvage of #3228) ───────────────────────
+#
+# Credential key-path fragments. A scalar value is replaced with "[REDACTED]"
+# when ANY segment of its key path (ancestor-aware) contains one of these
+# fragments — so a value nested anywhere under e.g. `secrets:` / `oauth:` /
+# `*api_key*` is masked regardless of its own leaf name or its Python type.
+#
+# This set mirrors the canonical "sensitive" key-name vocabulary used by
+# api.helpers._SENSITIVE_LOWER_MARKERS (access_token, refresh_token, id_token,
+# api_key, apikey, client_secret, auth_token, raw_secret, secret_input,
+# key_material, "token"/"secret"/"password"/"bearer") and expands it for the
+# full config surface (the redaction-completeness pass for #2929).
+#
+# Fragments are deliberately SPECIFIC rather than bare words: we use
+# "api_key"/"access_key"/"secret_key"/"signing_key"/"private_key" instead of a
+# bare "key", and explicit "session_*" credential names instead of a bare
+# "session". A bare "key"/"private"/"session" fragment would over-redact
+# harmless knobs (e.g. `voice.record_key`, `browser.allow_private_urls`,
+# `session_ttl_seconds`, `max_live_sessions`) while adding no credential
+# coverage — every actual credential is already named by a specific fragment.
+_SENSITIVE_CONFIG_KEY_FRAGMENTS = (
+    # provider / API credentials
+    "api_key", "apikey", "api-key", "x-api-key",
+    "access_key", "secret_key", "signing_key", "private_key",
+    # generic secrets
+    "client_secret", "secret", "raw_secret", "secret_input",
+    "password", "passwd", "passphrase",
+    # tokens (access/refresh/id/auth/bearer/session)
+    "access_token", "refresh_token", "id_token", "auth_token", "token",
+    "bearer", "authorization", "oauth", "auth",
+    # credentials / key material
+    "credential", "key_material",
+    # sessions / cookies (credential-bearing only)
+    "cookie", "session_id", "sessionid", "session_key",
+    "session_token", "session_secret",
+    # capability URLs / signatures
+    "webhook", "signature", "salt",
+)
+
+
+def _config_path_is_sensitive(path: tuple[str, ...]) -> bool:
+    """True when any segment of ``path`` names a credential-bearing key."""
+    path_text = ".".join(path).lower()
+    return any(fragment in path_text for fragment in _SENSITIVE_CONFIG_KEY_FRAGMENTS)
+
+
+def _redact_config_for_display(value, *, path: tuple[str, ...] = ()):
+    """Return a config structure safe to display in the browser.
+
+    Security contract (#2929): no credential value — of ANY type (str, int,
+    float, bool) — under any sensitive key path may reach the client.
+
+    Ordering matters (maintainer fix #1): the sensitive KEY-PATH check runs
+    BEFORE the ``isinstance(value, (bool, int, float))`` passthrough, so a
+    numeric/bool secret such as ``{"providers": {"x": {"token": 12345}}}`` is
+    masked to ``[REDACTED]`` instead of leaking the raw number. Reordering these
+    two branches (path-check after the type passthrough) reintroduces the leak —
+    see tests/test_safe_config_viewer.py for the non-vacuous regression.
+
+    Non-secret strings still pass through the existing value-level redactor
+    (``_redact_text``) so accidentally pasted tokens do not leak from unrelated
+    fields. NOTE: that value-level scrub respects ``api_redact_enabled`` and is a
+    no-op when an operator has disabled redaction; the path-based ``[REDACTED]``
+    above is unconditional (maintainer fix #3 documents this in the UI).
+    """
+    if isinstance(value, dict):
+        return {
+            str(k): _redact_config_for_display(v, path=path + (str(k),))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_config_for_display(v, path=path) for v in value]
+    # Maintainer fix #1: mask by sensitive key path FIRST, regardless of type.
+    if _config_path_is_sensitive(path):
+        return "[REDACTED]" if value not in (None, "") else value
+    # Non-sensitive key path: pass scalars through; scrub free-text values.
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _redact_text(str(value))
+
+
+def _safe_config_yaml_text() -> tuple[str, int]:
+    """Return (yaml_text, redacted_count) for the active profile config."""
+    redacted = _redact_config_for_display(get_config())
+    try:
+        import yaml as _yaml
+
+        text = _yaml.safe_dump(redacted, sort_keys=False, allow_unicode=True)
+    except Exception:
+        text = json.dumps(redacted, indent=2, ensure_ascii=False)
+    return text, text.count("[REDACTED]")
+
+
 def _session_row_lineage_root_id(session, sessions_by_id) -> str:
     sid = str(_session_field(session, "session_id", "") or "")
     explicit = _session_field(session, "_lineage_root_id", None)
@@ -10625,6 +10718,24 @@ def handle_get(handler, parsed) -> bool:
         except (ValueError, TypeError):
             days = 7
         return j(handler, get_provider_cost_history(provider_id, days))
+
+    if parsed.path == "/api/config/safe":
+        # Read-only, redacted view of the active profile's config.yaml (#2929).
+        # Drops the absolute server path (maintainer fix #2): only the basename
+        # is returned, so the host filesystem layout is never disclosed.
+        try:
+            text, redacted_count = _safe_config_yaml_text()
+            cfg_path = _get_config_path()
+            return j(handler, {
+                "ok": True,
+                "filename": cfg_path.name,
+                "text": text,
+                "redacted_count": redacted_count,
+                "read_only": True,
+            })
+        except Exception as exc:
+            logger.debug("Safe config view failed", exc_info=True)
+            return bad(handler, f"Could not read config safely: {exc}", 500)
 
     if parsed.path == "/api/settings":
         settings = load_settings()

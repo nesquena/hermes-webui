@@ -6864,6 +6864,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
 
 #composerMobileCtxBadge { display: none !important; }
 
+.safe-config-viewer{max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;padding:10px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px;font-size:11px;line-height:1.45;}
+
 /* Interim progress note collapse (#2403) */
 .interim-collapsed { display: none; }
 .interim-collapse-toggle {

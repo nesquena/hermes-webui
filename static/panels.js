@@ -11659,6 +11659,37 @@ function loadGatewayStatus(){
   if(!card) return;
   return api('/api/gateway/status').then(r=>_renderGatewayStatus(r)).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_status_load_failed'))}</div>`});
 }
+
+async function loadSafeConfig(force=false){
+  const box=$('safeConfigText');
+  const meta=$('safeConfigMeta');
+  if(!box) return;
+  if(box.dataset.loaded==='1'&&!force) return;
+  box.textContent=t('safe_config_loading')||'Loading…';
+  if(meta) meta.textContent='';
+  try{
+    const data=await api('/api/config/safe');
+    box.dataset.loaded='1';
+    box.textContent=data.text||'';
+    if(meta){
+      const count=Number(data.redacted_count||0);
+      const filename=data.filename||'config.yaml';
+      meta.textContent=t('safe_config_meta', filename, count);
+    }
+  }catch(err){
+    box.textContent=(t('safe_config_failed')||'Failed to load config: ')+(err&&err.message?err.message:String(err));
+  }
+}
+async function copySafeConfig(){
+  const box=$('safeConfigText');
+  if(!box) return;
+  try{
+    await navigator.clipboard.writeText(box.textContent||'');
+    if(typeof showToast==='function') showToast(t('safe_config_copied'),1800);
+  }catch(err){
+    if(typeof showToast==='function') showToast((t('safe_config_copy_failed')||'Copy failed: ')+(err&&err.message?err.message:String(err)),3000,'error');
+  }
+}
 async function _gatewayAction(action){
   if(_gatewayActionInFlight) return;
   _gatewayActionInFlight=true;
@@ -11680,7 +11711,7 @@ const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name, opts){
   _origSwitchSettings(name, opts);
   if(name==='preferences') updateNotificationPermissionStatus();
-  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
+  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();loadSafeConfig();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────
