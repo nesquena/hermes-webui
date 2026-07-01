@@ -1,0 +1,152 @@
+/* ── Chat Tiling Extension — CSS ───────────────────────────────────── */
+
+/* Tile grid container — inserted into #messages by extension JS */
+#ext-tile-grid {
+  position: relative; overflow: hidden;
+  display: none; flex: 1 1 0%; min-height: 0; min-width: 0;
+  gap: 4px; padding: 4px; background: var(--bg);
+}
+#ext-tile-grid.ext-tile-grid--active {
+  display: grid; align-items: normal; justify-content: normal;
+}
+/* When grid is active, hide all non-grid children of #messages except the grid */
+body.ext-tiling-body #messages > :not(#ext-tile-grid) {
+  display: none !important;
+}
+body.ext-tiling-body #messages {
+  overflow: hidden;
+}
+/* Accent bar on top of the grid when active */
+#ext-tile-grid.ext-tile-grid--active {
+  border-top: 2px solid var(--accent);
+}
+
+/* Individual tile */
+.ext-tile {
+  display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px; overflow: hidden;
+}
+.ext-tile--hidden { display: none !important; }
+.ext-tile--focused {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-bg-strong);
+}
+.ext-tile--maximized {
+  border-radius: 0; border: none;
+  grid-column: 1 / -1; grid-row: 1 / -1;
+  z-index: 1;
+}
+
+/* Tile header */
+.ext-tile-header {
+  display: flex; align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px; gap: 6px;
+  flex-shrink: 0; min-height: 32px;
+  background: var(--sidebar); color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.ext-tile-header-left {
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0; flex: 1;
+}
+.ext-tile-dot {
+  width: 7px; height: 7px; border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+  flex-shrink: 0;
+}
+.ext-tile-dot[hidden] { display: none; }
+.ext-tile-title {
+  font-size: 12px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: none; min-width: 0;
+}
+.ext-tile-header-actions {
+  display: flex; align-items: center; gap: 2px; flex-shrink: 0;
+}
+.ext-tile-btn {
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: transparent;
+  border-radius: 5px; color: var(--muted);
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.ext-tile-btn[hidden] { display: none !important; }
+.ext-tile-btn:hover { background: var(--hover-bg); color: var(--text); }
+
+/* Tile body */
+.ext-tile-body {
+  flex: 1; min-height: 0; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.ext-tile-msg-inner {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 0;
+  scroll-behavior: smooth;
+  display: flex; flex-direction: column;
+}
+
+/* Sidebar badge */
+.ext-tile-sidebar-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 999px; background: var(--accent); color: #fff;
+  font-size: 10px; font-weight: 700; line-height: 1;
+  margin-left: 4px; vertical-align: middle;
+}
+
+/* ── Titlebar toolbar (moved into header.app-titlebar) ──────────────────── */
+#ext-tiling-toolbar {
+  display: none;
+  flex-direction: row; align-items: center;
+  gap: 1px;
+  margin-left: 2px;
+  padding: 0 4px;
+  height: 28px;
+  border-left: 1px solid var(--border);
+  position: relative;
+}
+#ext-tiling-toolbar.ext-tiling-toolbar--visible {
+  display: flex;
+}
+.ext-toolbar-label {
+  display: none; /* hidden — too cramped in titlebar */
+}
+.ext-toolbar-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px;
+  border: none; background: transparent;
+  border-radius: 6px; color: var(--muted);
+  cursor: pointer; position: relative;
+  transition: background .15s, color .15s;
+  -webkit-app-region: no-drag;
+}
+.ext-toolbar-btn:hover { background: var(--hover-bg); color: var(--text); }
+.ext-toolbar-btn.ext-toolbar-btn--active {
+  background: var(--accent-bg); color: var(--accent);
+}
+.ext-toolbar-btn svg {
+  width: 16px; height: 16px;
+}
+.ext-toolbar-divider {
+  width: 1px; height: 16px;
+  margin: 0 3px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+/* Button label tooltip (shoots below since we're in the titlebar) */
+.ext-toolbar-btn[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute; top: 100%;
+  margin-top: 4px;
+  padding: 4px 8px; border-radius: 6px;
+  background: var(--text); color: var(--bg);
+  font-size: 11px; white-space: nowrap;
+  pointer-events: none;
+  z-index: 10000;
+}
+
