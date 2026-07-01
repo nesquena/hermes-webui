@@ -19206,11 +19206,11 @@ def _handle_chat_start(handler, body, diag=None):
             if "model_provider" in body
             else getattr(s, "model_provider", None)
         )
-        _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
+        gateway_chat_enabled = webui_gateway_chat_enabled(get_config())
         if body.get("moa_config"):
-            if webui_gateway_chat_enabled(get_config()):
+            if gateway_chat_enabled:
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
             from api.commands import resolve_moa_config
 
@@ -19218,6 +19218,7 @@ def _handle_chat_start(handler, body, diag=None):
                 moa_config = resolve_moa_config()
             except RuntimeError as e:
                 return bad(handler, str(e), 503)
+        _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
         diag.stage("resolve_model_provider") if diag else None
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
@@ -19230,18 +19231,22 @@ def _handle_chat_start(handler, body, diag=None):
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
         # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
+        start_run_kwargs = {
+            "msg": msg,
+            "attachments": attachments,
+            "workspace": workspace,
+            "model": model,
+            "model_provider": model_provider,
+            "normalized_model": normalized_model,
+            "source": "webui",
+            "route": "/api/chat/start",
+            "diag": diag,
+        }
+        if not gateway_chat_enabled and moa_config is not None:
+            start_run_kwargs["moa_config"] = moa_config
         response = _start_run(
             s,
-            msg=msg,
-            attachments=attachments,
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            normalized_model=normalized_model,
-            source="webui",
-            route="/api/chat/start",
-            diag=diag,
-            moa_config=moa_config,
+            **start_run_kwargs,
         )
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically
