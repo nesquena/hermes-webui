@@ -310,8 +310,8 @@ def test_all_profiles_scans_claude_code_only_once(monkeypatch):
     ]
 
 
-def test_preferences_autosave_maps_claude_code_toggle():
-    """Preferences autosave payloads keep the child toggle gated by the parent."""
+def test_preferences_autosave_preserves_claude_code_opt_out_default():
+    """Autosave must not stomp the opt-out child when the parent is off."""
     autosave_block = _extract_between(
         PANELS_JS.read_text(encoding="utf-8"),
         "  const showCliCb=$('settingsShowCliSessions');",
@@ -336,7 +336,7 @@ console.log(JSON.stringify(payload));
     payload = json.loads(result.stdout)
 
     assert payload["show_cli_sessions"] is False
-    assert payload["show_claude_code_sessions"] is False
+    assert payload["show_claude_code_sessions"] is True
 
 
 def test_claude_code_checkbox_is_parent_gated_in_ui():
@@ -456,8 +456,8 @@ console.log(JSON.stringify({{
     }
 
 
-def test_save_settings_gates_claude_code_toggle_under_parent():
-    """The explicit Save Settings path should keep the child toggle subordinate."""
+def test_save_settings_preserves_claude_code_opt_out_default():
+    """Explicit save must not persist the opt-out child as false via the parent gate."""
     save_block = _extract_between(
         PANELS_JS.read_text(encoding="utf-8"),
         "  body.show_cli_sessions=showCliSessions;",
@@ -477,7 +477,7 @@ console.log(JSON.stringify(body));
     body = json.loads(result.stdout)
 
     assert body["show_cli_sessions"] is False
-    assert body["show_claude_code_sessions"] is False
+    assert body["show_claude_code_sessions"] is True
 
 
 def test_locale_keys_exist_in_every_locale_block():

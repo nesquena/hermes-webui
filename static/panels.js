@@ -7690,7 +7690,7 @@ function _preferencesPayloadFromUi(){
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
   const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
-  if(showClaudeCodeCb) payload.show_claude_code_sessions=!!(showCliCb&&showCliCb.checked&&showClaudeCodeCb.checked);
+  if(showClaudeCodeCb) payload.show_claude_code_sessions=showClaudeCodeCb.checked;
   const showCronCb=$('settingsShowCronSessions');
   // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
   // identically to the explicit saveSettings() path, so neither save route can
@@ -11027,8 +11027,8 @@ async function saveSettings(andClose){
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
-  // Claude Code sessions are subordinate to non-WebUI sessions.
-  body.show_claude_code_sessions=showCliSessions&&showClaudeCodeSessions;
+  // Persist the opt-out child independently; the read path applies the parent gate.
+  body.show_claude_code_sessions=showClaudeCodeSessions;
   // Cron and webhook sessions are gated on CLI sessions (server short-circuits otherwise);
   // mirror the autosave path so the explicit Save Settings button persists them too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;
