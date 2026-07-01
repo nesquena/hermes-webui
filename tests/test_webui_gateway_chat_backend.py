@@ -335,7 +335,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-session-id"] == s.session_id
     assert captured["headers"]["X-hermes-client-name"] == "Person A Injected: nope"
     assert captured["headers"]["X-hermes-client-id"] == "person-a-ios client"
-    assert captured["headers"]["X-hermes-session-key"] == "team:person-a:ios Injected: nope"
+    assert captured["headers"]["X-hermes-session-key"] == "webui:" + s.session_id + ":team:person-a:ios Injected: nope"
     assert "\n" not in captured["headers"]["X-hermes-client-name"]
     assert "\r" not in captured["headers"]["X-hermes-session-key"]
     assert '"stream": true' in captured["body"]
@@ -385,6 +385,137 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "tid": "call-1",
     }) in event_pairs
     assert all(len(item) == 3 and item[2] for item in events)
+
+
+def test_gateway_chat_worker_omits_session_key_header_when_gateway_unauthenticated(tmp_path, monkeypatch):
+    """Regression: on an unauthenticated gateway (no api_key configured), a
+    client-supplied session_key must NOT be forwarded as X-Hermes-Session-Key.
+
+    The gateway hard-rejects that header with 403 when no API key is
+    configured, so sending it here breaks an otherwise-working open local
+    gateway chat turn. X-Hermes-Client-Name/Id are harmless and may still be
+    sent unconditionally.
+    """
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        captured["headers"] = dict(req.header_items())
+        return FakeResponse()
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.setattr(gateway_chat, "_gateway_api_key", lambda: None)
+    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "empty"})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    stream_id = "stream-no-auth-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "hi"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "hi",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        client_identity={"session_key": "team:person-a:ios"},
+    )
+
+    assert "Authorization" not in captured["headers"]
+    assert "X-hermes-session-key" not in captured["headers"]
+
+
+def test_gateway_chat_worker_namespaces_client_session_key_under_server_scope(tmp_path, monkeypatch):
+    """Regression: a client-supplied session_key must be namespaced under the
+    server-owned webui:{session_id} scope, not forwarded verbatim.
+
+    Forwarding it verbatim would let one browser client steer another
+    client's long-term memory scope, since WebUI multiplexes every browser
+    turn through a single shared gateway Bearer key and the agent-side
+    gateway can't otherwise distinguish callers.
+    """
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        captured["headers"] = dict(req.header_items())
+        return FakeResponse()
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "empty"})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    stream_id = "stream-namespace-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "hi"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "hi",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        client_identity={"session_key": "team:person-a:ios"},
+    )
+
+    expected = f"webui:{s.session_id}:team:person-a:ios"
+    assert captured["headers"]["X-hermes-session-key"] == expected
+    # A raw/un-namespaced client key must never be forwarded verbatim.
+    assert captured["headers"]["X-hermes-session-key"] != "team:person-a:ios"
 
 
 def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_reasoning(tmp_path, monkeypatch):

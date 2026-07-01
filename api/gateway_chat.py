@@ -690,6 +690,9 @@ def _run_gateway_chat_streaming(
                 "Accept": "text/event-stream",
                 "X-Hermes-Session-Id": session_id,
             }
+            client_name = None
+            client_id = None
+            client_session_key = None
             if isinstance(client_identity, dict):
                 from api.streaming import _clean_webui_client_identity_value
 
@@ -700,13 +703,30 @@ def _run_gateway_chat_streaming(
                     headers["X-Hermes-Client-Name"] = client_name
                 if client_id:
                     headers["X-Hermes-Client-Id"] = client_id
-                if client_session_key:
-                    headers["X-Hermes-Session-Key"] = client_session_key
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
                 # Scope Gateway long-term continuity to this WebUI conversation
                 # without exposing the browser's auth cookie or CSRF material.
-                headers.setdefault("X-Hermes-Session-Key", f"webui:{session_id}")
+                # A client-supplied session_key is namespaced under the
+                # server-owned webui:{session_id} scope rather than forwarded
+                # verbatim: the agent-side gateway gates a caller-supplied
+                # session key behind API-key auth specifically to stop one
+                # caller from guessing another's memory scope, and WebUI
+                # multiplexes every browser turn through a single shared
+                # gateway Bearer key, so distinct browser clients are
+                # indistinguishable to that guard. Namespacing lets a client
+                # sub-scope within its own conversation boundary without being
+                # able to collide with or steer into a sibling's scope.
+                if client_session_key:
+                    headers["X-Hermes-Session-Key"] = f"webui:{session_id}:{client_session_key}"
+                else:
+                    headers.setdefault("X-Hermes-Session-Key", f"webui:{session_id}")
+            # Note: on an unauthenticated gateway (no api_key), we intentionally
+            # do not send X-Hermes-Session-Key at all, even if the client
+            # supplied identity metadata — the gateway hard-rejects that header
+            # with 403 when no API key is configured, so sending it here would
+            # break an otherwise-working open local gateway chat turn.
+
             message_content: Any = str(msg_text or "")
             if attachments:
                 try:

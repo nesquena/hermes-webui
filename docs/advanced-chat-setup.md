@@ -121,6 +121,14 @@ that already trust the calling client, connection, or reverse proxy. Keep using
 WebUI auth, TLS, and normal access controls for security decisions.
 
 `X-Hermes-Session-Key` is also forwarded when browser chat is routed through the
-Gateway-backed chat bridge. That lets downstream runtimes use the same stable
-per-client memory scope when they support it. If a client does not provide a
-session key, the bridge keeps the existing WebUI conversation scoped fallback.
+Gateway-backed chat bridge, but only when the bridge call is authenticated
+(an API key is configured for the Gateway). A client-supplied `session_key` is
+namespaced under the server-owned `webui:{session_id}` scope
+(`webui:{session_id}:{client_session_key}`) rather than forwarded verbatim,
+since WebUI multiplexes every browser turn through one shared Gateway Bearer
+key and a raw client-supplied key could otherwise let one browser client
+steer into another client's long-term memory scope. On an unauthenticated
+Gateway, the header is omitted entirely, even if a client supplies a session
+key, because the Gateway rejects that header with 403 when no API key is
+configured. If a client does not provide a session key, the bridge keeps the
+existing WebUI conversation scoped fallback.
