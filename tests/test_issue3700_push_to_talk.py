@@ -14,7 +14,8 @@ def test_start_mic_capture_extracted():
     src = _boot_src()
     assert re.search(r"async function _startMicCapture\([^)]*\)\{", src)
     assert "_activeCaptureMode='speech'" in src
-    assert "_activeCaptureMode=_rawAudioMode?'media-raw':'media-transcribe';" in src
+    assert "const captureMode=_rawAudioMode?'media-raw':'media-transcribe';" in src
+    assert "_activeCaptureMode=captureMode;" in src
 
 
 def test_toggle_mic_capture_exposed_on_window():
@@ -48,6 +49,7 @@ def test_pointer_hold_wiring_present():
     assert "let _micHoldTimer=null;" in src
     assert "let _micHoldActive=false;" in src
     assert "let _micPointerDown=false;" in src
+    assert "let _micStartSeq=0;" in src
     assert "const _micHoldThresholdMs=300;" in src
     assert "btn.addEventListener('pointerdown'" in src
     assert "btn.addEventListener('pointerup'" in src
@@ -71,6 +73,9 @@ def test_hold_release_routes_to_stop_mic():
         src,
         re.DOTALL,
     )
+    assert "const startSeq=++_micStartSeq;" in src
+    assert "if(startSeq!==_micStartSeq||(holdRequired&&!_micHoldActive)){" in src
+    assert "_stopTracks(captureStream);" in src
 
 
 def test_ctrl_shift_d_routes_through_toggle_helper():
