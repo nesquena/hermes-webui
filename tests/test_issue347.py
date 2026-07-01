@@ -204,8 +204,14 @@ def test_katex_throw_on_error_false():
 
 def test_render_katex_blocks_wired_into_raf():
     """renderKatexBlocks() must run from the post-render requestAnimationFrame pass."""
-    raf_call = 'requestAnimationFrame(()=>postProcessRenderedMessages(inner))'
+    # Behavior assertion (#5338): post-render is scheduled through
+    # _postProcessWithAnchorSuppression, which still calls postProcessRenderedMessages.
+    raf_call = 'requestAnimationFrame(()=>_postProcessWithAnchorSuppression('
     assert raf_call in UI_JS, 'post-render requestAnimationFrame pass not found'
+    _wrap = UI_JS.find('function _postProcessWithAnchorSuppression')
+    assert _wrap != -1, "post-render should be wrapped by _postProcessWithAnchorSuppression"
+    assert 'postProcessRenderedMessages(container)' in UI_JS[_wrap:_wrap + 500], \
+        "the wrapper must still invoke postProcessRenderedMessages"
     idx = UI_JS.find('function postProcessRenderedMessages')
     body = UI_JS[idx:idx + 500]
     assert 'renderMermaidBlocks(container)' in body
