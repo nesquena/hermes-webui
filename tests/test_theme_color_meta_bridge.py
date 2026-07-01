@@ -109,18 +109,19 @@ class TestBootJsThemeColorSync:
         must update the meta tag so the Mac chrome flips with the page.
         """
         src = BOOT.read_text(encoding="utf-8")
-        # The end of _applySkin must call the sync.
-        # We assert the literal anchor block from the recent edit so any drift
-        # in surrounding code triggers a clear test failure.
+        # The end of _applySkin must re-run resolved-theme application. That
+        # path now accounts for extension skin light/dark schemes and still
+        # calls _syncThemeColorMeta() through _setResolvedTheme().
         anchor = (
             "function _applySkin(name){\n"
             "  const key=(name||'default').toLowerCase();\n"
             "  if(key==='default') delete document.documentElement.dataset.skin;\n"
             "  else document.documentElement.dataset.skin=key;\n"
-            "  _syncThemeColorMeta();\n"
+            "  _setResolvedTheme(_resolvedThemeBaseDark);\n"
             "}"
         )
         assert anchor in src
+        assert "if(!link){ _syncThemeColorMeta(); return; }" in src
 
 
 class TestStyleCssBgVarPresent:

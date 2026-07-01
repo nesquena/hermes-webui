@@ -1351,6 +1351,23 @@ async function send(){
       }
     }
     if(_parsedCmd&&!_cmd){
+      if(_parsedCmd.name==='pet'){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        let _petOutput=null;
+        try{
+          _petOutput=typeof handlePetSlashCommand==='function'
+            ? await handlePetSlashCommand(text,{name:'pet'})
+            : {handled:false,message:'Desktop Companion is unavailable in WebUI.'};
+        }catch(e){
+          _petOutput={handled:false,message:`Desktop Companion command error: ${e&&e.message||e}`};
+        }
+        if(_petOutput&&_petOutput.message){
+          S.messages.push({role:'assistant',content:String(_petOutput.message),_ts:Date.now()/1000});
+        }
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
@@ -5640,6 +5657,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // The GET path guarantees it via the URL; the embedded path via the stream→session
         // binding — but reject a mismatched id so a stray payload can't overwrite the view.
         if(sessionPayload.session_id&&sessionPayload.session_id!==activeSid) return false;
+        // Capture follow-intent BEFORE replacing S.messages: a reader who was
+        // following the live stream when it got cancelled/reconnected must land at
+        // the bottom (where the cancellation notice renders), not be stranded at a
+        // stale mid-stream scrollTop by preserveScroll's restore path. Same
+        // jump-on-recovery class as the Connection-interrupted path below.
+        const _wasFollowingAtCancel=((typeof _isMessagePaneNearBottom==='function')
+            ? _isMessagePaneNearBottom(1200)
+            : true)
+          && !((typeof _isMessageReaderUnpinned==='function')
+            ? _isMessageReaderUnpinned()
+            : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
         S.session=sessionPayload;
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
@@ -5648,6 +5676,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         clearLiveToolCards();if(!assistantText)removeThinking();
         _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
         renderMessages({preserveScroll:true});
+        if(_wasFollowingAtCancel && typeof scrollToBottom==='function') scrollToBottom();
         return true;
       };
       // Prefer the canonical session snapshot embedded in the terminal cancel event.
@@ -5666,11 +5695,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }catch(_){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
+            const _wasFollowingAtCancelFb=((typeof _isMessagePaneNearBottom==='function')
+                ? _isMessagePaneNearBottom(1200)
+                : true)
+              && !((typeof _isMessageReaderUnpinned==='function')
+                ? _isMessageReaderUnpinned()
+                : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
             clearLiveToolCards();if(!assistantText)removeThinking();
             const cancelAgentName=(assistantDisplayName()+'').trim()||'Hermes';
             S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});
             _attachProjectedAnchorSceneToLastAssistant(S.messages);
             renderMessages({preserveScroll:true});
+            if(_wasFollowingAtCancelFb && typeof scrollToBottom==='function') scrollToBottom();
             _markSessionViewed(activeSid, S.messages.length);
           }
         }
@@ -5846,6 +5882,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _clearClarifyForOwner('terminal');
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;
+      // Capture the reader's follow-intent BEFORE mutating S.messages. If the SSE
+      // dropped while they were following the live stream (pinned / near the
+      // bottom), the disconnect-recovery render must land them at the bottom where
+      // the "Connection interrupted" notice appears — NOT restore a stale
+      // mid-stream scrollTop. preserveScroll's restore path keys on the pre-render
+      // snapshot's bottom-distance, which during a live stream can read large
+      // (content was still growing under a followed viewport), so it would yank a
+      // following reader up to a historical position on a process restart / SSE
+      // drop. This is the "restart/disconnect jump-back" report: the jump is the
+      // recovery render restoring an old position into a DOM whose height changed.
+      // Follow-intent must be STICKY-aware: a reader who manually scrolled up
+      // (sets _messageUserUnpinned, ui.js scroll listener) but stayed within
+      // 1200px of the bottom would read _isMessagePaneNearBottom(1200)===true,
+      // so a proximity-only check would re-follow them on recovery and clobber
+      // their position (maintainer-reproduced bounce). Require near-bottom AND
+      // not-unpinned. scrollToBottom() clears _messageUserUnpinned, so a genuine
+      // follower stays pinned; only a manually-unpinned reader is spared.
+      const _wasFollowingAtDisconnect=((typeof _isMessagePaneNearBottom==='function')
+          ? _isMessagePaneNearBottom(1200)
+          : true)
+        && !((typeof _isMessageReaderUnpinned==='function')
+          ? _isMessageReaderUnpinned()
+          : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
       _flushReasoningToAnchor();
       _applyToAnchor('error',{
         status:'connection_lost',
@@ -5856,6 +5915,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _ensureSingleTerminalStreamErrorMarker(S.messages);
       _attachProjectedAnchorSceneToLastAssistant(S.messages);
       renderMessages({preserveScroll:true});
+      // If they were following the stream, force the viewport to the bottom after
+      // the recovery render so they see the interruption notice in place instead
+      // of being thrown back into the transcript. Readers who had scrolled up to
+      // read history are left where they were (the near-bottom guard above is
+      // false for them).
+      if(_wasFollowingAtDisconnect && typeof scrollToBottom==='function') scrollToBottom();
       _markSessionViewed(activeSid, S.messages.length);
     }else{
       if(typeof trackBackgroundError==='function'){
@@ -5880,12 +5945,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _clearApprovalForOwner();
           _clearClarifyForOwner('terminal');
           if(S.session&&S.session.session_id===activeSid){
+            // Follow-intent BEFORE removing live placeholders: a reader following
+            // the (now-dead) stream should stay pinned to the bottom as the
+            // thinking/tool placeholders are cleared, not be stranded mid-transcript
+            // by preserveScroll restoring a stale scrollTop after the height shrinks.
+            const _wasFollowingAtReconnectDead=((typeof _isMessagePaneNearBottom==='function')
+                ? _isMessagePaneNearBottom(1200)
+                : true)
+              && !((typeof _isMessageReaderUnpinned==='function')
+                ? _isMessageReaderUnpinned()
+                : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
             S.activeStreamId=null;
             clearLiveToolCards();
             removeThinking();
             if(_isActiveSession()) _queueDrainSid=activeSid;
             _setActivePaneIdleIfOwner();
             renderMessages({preserveScroll:true});
+            if(_wasFollowingAtReconnectDead && typeof scrollToBottom==='function') scrollToBottom();
             renderSessionList();
           }
           _scheduleAnchorRegistryCleanup(120000);

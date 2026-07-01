@@ -147,6 +147,19 @@ _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 
+# Serializes ``_record_webui_zero_message_orphan_tombstone`` /
+# ``_clear_webui_zero_message_orphan_tombstone`` so two concurrent sidebar
+# polls (or a poll racing ``Session.save`` / ``new_session`` /
+# ``import_cli_session``) cannot lose each other's load-modify-write/unlink.
+# Without this lock each operation rewrites the entire tombstone file from
+# scratch, so a concurrent recorder and clearer can land last-writer-wins and
+# silently drop each other's update — defeating the self-healing invariant
+# that ``Session.save`` clears the tombstone the same poll that re-prunes
+# would otherwise re-add the row for. ``threading.Lock`` is sufficient (the
+# WebUI sidebar polling path is single-process) but must wrap the WHOLE
+# load-modify-write/unlink sequence in both helpers.
+_WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK = threading.Lock()
+
 # Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
 # hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
 # through filesystem load/save/delete/worktree paths without traversal risk.
@@ -466,6 +479,200 @@ def prune_session_from_index(session_id: str) -> None:
 
     if _fallback:
         _write_session_index(updates=None)
+
+
+# ---------------------------------------------------------------------------
+# #4985 webui zero-message orphan tombstone
+# ---------------------------------------------------------------------------
+# ``prune_session_from_index()`` only removes a row from SESSION_INDEX_FILE —
+# the on-disk sidecar at ``SESSION_DIR / f"{sid}.json"`` is intentionally
+# kept (it may hold legitimate WebUI-owned metadata a future code path wants
+# to recover). On the next ``/api/sessions`` poll, ``all_sessions()``'s
+# ``recover_missing_index_sidecars`` pass (``missing_persisted_ids``) sees
+# the orphaned sidecar, re-loads it via ``Session.load_metadata_only()``,
+# and writes it back to SESSION_INDEX_FILE — undoing the prune.
+#
+# For #4985 zero-message webui orphans, that round-trip would also re-add
+# the row to the sidebar (it survives #1171 because it is titled or has a
+# stale positive message_count), so the next prune fires again. N orphans
+# therefore cost 2N fsync'd index writes + N state.db probes per poll,
+# forever. The fix is a small, dedicated tombstone set written alongside
+# the prune: any sid in the tombstone is skipped by
+# ``recover_missing_index_sidecars`` (no re-add to index) and is therefore
+# never re-presented to the prune batch.
+#
+# The file lives in SESSION_DIR (sibling of _index.json) so it is
+# profile-local and survives across processes, and is intentionally NOT
+# itself listed as a session sidecar — it is excluded from
+# ``_persisted_session_ids_snapshot()`` via the same ``name.startswith('_')``
+# convention (its name starts with ``.``, a dot — but we add a dedicated
+# check below for paranoia). Bounded size keeps the file from growing
+# without limit on long-running installs.
+# ---------------------------------------------------------------------------
+
+WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_CAP = 500
+WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_VERSION = 1
+
+
+def _webui_zero_message_orphan_tombstone_file() -> "Path":
+    """Return the current tombstone file path.
+
+    Resolved at call time (not module load) so tests that monkeypatch
+    ``SESSION_DIR`` (e.g. ``_real_pipeline``) get a per-test path without
+    having to also rewrite the module-level constant. Mirrors how
+    ``SESSION_INDEX_FILE`` is computed but resolved at call time so the
+    real path tracks the live ``SESSION_DIR``.
+    """
+    return SESSION_DIR / "_pruned_webui_orphans.json"
+
+
+def _load_webui_zero_message_orphan_tombstone() -> frozenset[str]:
+    """Return sids we've explicitly pruned as webui zero-message orphans.
+
+    Degrades to ``frozenset()`` on any read error, missing file, version
+    mismatch, or schema mismatch so the recovery path never accidentally
+    admits a row that should stay tombstoned.
+    """
+    p = _webui_zero_message_orphan_tombstone_file()
+    if not p.exists():
+        return frozenset()
+    try:
+        raw = json.loads(p.read_text(encoding='utf-8'))
+    except Exception:
+        logger.debug(
+            "Failed to load webui zero-message orphan tombstone",
+            exc_info=True,
+        )
+        return frozenset()
+    if not isinstance(raw, dict):
+        return frozenset()
+    try:
+        if int(raw.get("version", 0)) != WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_VERSION:
+            return frozenset()
+    except (TypeError, ValueError):
+        return frozenset()
+    ids = raw.get("ids", [])
+    if not isinstance(ids, list):
+        return frozenset()
+    return frozenset(
+        str(sid).strip() for sid in ids if str(sid or "").strip()
+    )
+
+
+def _save_webui_zero_message_orphan_tombstone(ids) -> None:
+    """Persist the tombstone set with a bounded size cap (lexicographically-first N entries).
+
+    Sorts + dedupes so the on-disk file is deterministic and diff-friendly.
+    Atomic write via ``.tmp.<pid>.<tid>`` + ``os.replace`` mirrors
+    ``_write_session_index`` and ``Session.save`` so a crash mid-write does
+    not leave a half-written tombstone file.
+
+    Note on eviction order: ``sorted_ids[:WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_CAP]``
+    keeps the lexicographically-FIRST ``N`` sids (sorted ascending), not the
+    last-pruned ``N``. Session ids are random UUIDs (``uuid.uuid4().hex[:12]``),
+    so the eviction is effectively random across installs; the cap exists to
+    keep the file bounded on long-running installs, not to implement FIFO
+    pruning. If true FIFO is ever needed, switch the slice to ``[-N:]`` and
+    keep an insertion-ordered data structure.
+    """
+    try:
+        sorted_ids = sorted(set(
+            str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
+        ))
+    except TypeError:
+        return
+    if len(sorted_ids) > WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_CAP:
+        sorted_ids = sorted_ids[-WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_CAP:]
+    payload = {
+        "version": WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_VERSION,
+        "ids": sorted_ids,
+    }
+    p = _webui_zero_message_orphan_tombstone_file()
+    _tmp = None
+    try:
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        _tmp = p.with_suffix(
+            f'.tmp.{os.getpid()}.{threading.current_thread().ident}'
+        )
+        with open(_tmp, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(_tmp, p)
+    except Exception:
+        logger.debug(
+            "Failed to save webui zero-message orphan tombstone",
+            exc_info=True,
+        )
+        if _tmp is not None:
+            try:
+                _tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _record_webui_zero_message_orphan_tombstone(sid: str) -> None:
+    """Add ``sid`` to the tombstone.
+
+    No-op if already present (avoids re-sorting and re-fsync'ing on every
+    redundant prune). Called from the ``#4985`` prune helper in
+    ``api.routes`` immediately after ``prune_session_from_index``.
+
+    Wraps the entire load-modify-write in ``_WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK``
+    so two concurrent sidebar polls (or a poll racing ``Session.save`` /
+    ``new_session`` / ``import_cli_session``) cannot lose each other's
+    writes. Without the lock each operation rewrites the entire tombstone
+    file from scratch, so a concurrent recorder and clearer can land
+    last-writer-wins and silently drop each other's update — defeating the
+    self-healing invariant that ``Session.save`` clears the tombstone the
+    same poll that the prune helper re-prunes would otherwise re-add the
+    row for.
+    """
+    sid = str(sid or "").strip()
+    if not sid:
+        return
+    with _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK:
+        current = set(_load_webui_zero_message_orphan_tombstone())
+        if sid in current:
+            return
+        current.add(sid)
+        _save_webui_zero_message_orphan_tombstone(current)
+
+
+def _clear_webui_zero_message_orphan_tombstone(sid: str) -> None:
+    """Remove ``sid`` from the tombstone.
+
+    Called when a new Session is created with an explicit sid (e.g.
+    ``new_session()`` / ``import_cli_session()``) and belt-and-suspenders
+    whenever ``Session.save`` writes a real conversation (a save with
+    ``len(messages) > 0`` proves the row is alive, so the tombstone entry
+    must drop). Safe to call with an unknown sid (no-op). If the tombstone
+    becomes empty as a result, the file is removed entirely so an empty
+    poll-time load stays free.
+
+    Wraps the entire load-modify-write/unlink in
+    ``_WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK`` so concurrent
+    recorders/clearers cannot lose each other's writes — see the docstring
+    on ``_record_webui_zero_message_orphan_tombstone``.
+    """
+    sid = str(sid or "").strip()
+    if not sid:
+        return
+    with _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK:
+        current = set(_load_webui_zero_message_orphan_tombstone())
+        if sid not in current:
+            return
+        current.discard(sid)
+        if current:
+            _save_webui_zero_message_orphan_tombstone(current)
+            return
+        try:
+            _webui_zero_message_orphan_tombstone_file().unlink(missing_ok=True)
+        except Exception:
+            logger.debug(
+                "Failed to remove empty webui zero-message orphan tombstone",
+                exc_info=True,
+            )
 
 
 def _active_stream_ids():
@@ -965,6 +1172,29 @@ class Session:
             raise
         if not skip_index:
             _write_session_index(updates=[self])
+
+        # #4985 belt-and-suspenders self-heal: a successful save with at
+        # least one real message on the sidecar is unconditional proof the
+        # row is alive (the #4985 "zero-message orphan" only ever exists
+        # when ``len(self.messages) == 0``). Clear the tombstone so the
+        # next ``/api/sessions`` poll does not need the prune helper to
+        # run before the row re-appears — useful when the message-commit
+        # happens on a poll that does not yet see state.db.messages rows
+        # (e.g. the WebUI's own sidecar commit lands before the agent's
+        # state.db append, or the helper is skipped via a different code
+        # path). Wrapped because a tombstone failure must never block a
+        # save. The helper's self-healing branch in
+        # ``_prune_orphaned_webui_zero_message_sessions`` is the primary
+        # fix; this is the belt.
+        if self.messages:
+            try:
+                _clear_webui_zero_message_orphan_tombstone(self.session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to clear webui zero-message orphan tombstone for %s",
+                    self.session_id,
+                    exc_info=True,
+                )
 
     @classmethod
     def load(cls, sid):
@@ -2898,6 +3128,19 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_created_at=wt.get('created_at') if wt else None,
         enabled_toolsets=enabled_toolsets,
     )
+    # #4985: defensive — auto-generated uuids don't collide with the
+    # tombstone, but if a future caller ever passes an explicit id that
+    # was previously pruned, clear the entry so the new session isn't
+    # shadowed on the next poll. Wrapped because a tombstone failure
+    # must never block new-session creation.
+    try:
+        _clear_webui_zero_message_orphan_tombstone(s.session_id)
+    except Exception:
+        logger.debug(
+            "Failed to clear webui zero-message orphan tombstone for %s",
+            s.session_id,
+            exc_info=True,
+        )
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
@@ -3512,6 +3755,70 @@ def agent_session_rows_existing(
         return frozenset(wanted)
 
 
+def agent_session_zero_message_sids(
+    session_ids: list[str] | set[str] | frozenset[str],
+    *,
+    profile=None,
+) -> frozenset[str]:
+    """Return session ids confirmed to have zero rows in the agent ``messages`` table.
+
+    Used by the sidebar orphan-prune path (#4985) to detect native-WebUI sessions
+    whose backing agent row exists but was never written to (boot-time ``+`` click,
+    profile switch that resets the active id, sidebar nav that opens a session then
+    closes the tab before the first message commits). Such rows linger in the
+    sidebar forever because the WebUI delete affordance is not exposed for them,
+    and the existing #3238/#4591 orphan prune explicitly excludes webui sources.
+
+    Mirrors ``agent_session_rows_existing``'s batched chunked probe, safe-degrade
+    contract (returns ``frozenset()`` on any error so a transient failure NEVER
+    causes a stale-prune data loss), and ``messages`` table absence handling.
+    """
+    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
+    if not wanted:
+        return frozenset()
+    try:
+        import sqlite3
+    except ImportError:
+        return frozenset()
+    db_path = _agent_state_db_path(profile=profile)
+    if db_path is None:
+        return frozenset()
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            sessions_cols = {str(row[1]) for row in cur.fetchall()}
+            if 'id' not in sessions_cols:
+                return frozenset()
+            cur.execute("PRAGMA table_info(messages)")
+            messages_cols = {str(row[1]) for row in cur.fetchall()}
+            if 'session_id' not in messages_cols:
+                return frozenset()
+            zero_message: set[str] = set()
+            ids = list(wanted)
+            chunk_size = 500
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i:i + chunk_size]
+                placeholders = ','.join('?' * len(chunk))
+                cur.execute(
+                    f"SELECT s.id FROM sessions s "
+                    f"WHERE s.id IN ({placeholders}) "
+                    f"AND NOT EXISTS ("
+                    f"  SELECT 1 FROM messages m WHERE m.session_id = s.id"
+                    f")",
+                    chunk,
+                )
+                zero_message.update(str(row[0]).strip() for row in cur.fetchall())
+            return frozenset(zero_message)
+    except Exception:
+        logger.debug(
+            "agent_session_zero_message_sids probe failed for %d ids",
+            len(wanted),
+            exc_info=True,
+        )
+        return frozenset()
+
+
 def agent_session_row_exists(session_id: str, *, profile=None) -> bool:
     """Return True if ``session_id`` still has a backing row in the agent state.db.
 
@@ -3885,6 +4192,17 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
                     str(sid) for sid in persisted_ids
                     if sid and str(sid) not in indexed_ids
                 )
+            # #4985: the tombstone is intentionally NOT a blind-drop filter
+            # on missing_persisted_ids. A tombstoned sid whose sidecar is
+            # still on disk is recovered into the index here so the
+            # post-recovery prune helper (``_prune_orphaned_webui_zero_message_sessions``
+            # below) gets a chance to self-heal: if the row's state.db.messages
+            # is still empty the helper leaves the tombstone in place (no
+            # redundant re-prune); if state.db.messages now has rows the
+            # helper clears the tombstone and the row stays visible. A
+            # blind-drop here would be strictly worse than the orphan it
+            # suppresses — it would silently swallow a legitimately-resurfaced
+            # row forever, even after the user actually sent messages.
             recovered_sidecars = []
             if missing_persisted_ids:
                 _diag_stage(diag, "all_sessions.recover_missing_index_sidecars")
@@ -3961,6 +4279,15 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     # Full scan fallback
     _diag_stage(diag, "all_sessions.full_scan")
     out = []
+    # #4985: the tombstone is intentionally NOT a blind-drop filter on the
+    # full-scan fallback either. A tombstoned sid whose sidecar is still
+    # on disk must be loaded here so the post-recovery prune helper
+    # (``_prune_orphaned_webui_zero_message_sessions`` in api/routes) gets a
+    # chance to self-heal: if state.db.messages is still empty the helper
+    # leaves the tombstone in place; if state.db.messages now has rows the
+    # helper clears the tombstone and the row stays visible. A blind-drop
+    # here would be strictly worse than the orphan it suppresses — silently
+    # swallowing a legitimately-resurfaced row forever.
     for p in SESSION_DIR.glob('*.json'):
         if p.name.startswith('_'): continue
         try:
@@ -3982,7 +4309,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
         and not s.active_stream_id
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
-    )]
+    )]  # fmt: skip
     if include_lineage_metadata:
         _diag_stage(diag, "all_sessions.lineage_metadata")
         _enrich_sidebar_lineage_metadata(result)
@@ -4239,6 +4566,19 @@ def import_cli_session(
         updated_at=updated_at,
         parent_session_id=parent_session_id,
     )
+    # #4985: import_cli_session uses an explicit sid (the CLI sidecar's id).
+    # If that sid was previously tombstoned as a webui zero-message orphan,
+    # clear the tombstone entry so the freshly-imported session is visible
+    # on the next poll. Wrapped because a tombstone failure must never block
+    # an import.
+    try:
+        _clear_webui_zero_message_orphan_tombstone(s.session_id)
+    except Exception:
+        logger.debug(
+            "Failed to clear webui zero-message orphan tombstone for %s",
+            s.session_id,
+            exc_info=True,
+        )
     s.save(touch_updated_at=False)
     return s
 

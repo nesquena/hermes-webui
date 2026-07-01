@@ -59,7 +59,7 @@ function syncAppTitlebar() {
   if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
     mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
     const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
-    if (typeof t === 'function') subText = t('n_messages', vis.length);
+    subText = String(vis.length);
     sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
     // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
     if (/^webui$/i.test(sourceLabel)) sourceLabel = '';
@@ -152,6 +152,102 @@ function syncAppTitlebar() {
       inp.focus();
       inp.select();
     };
+  }
+
+  // Dismiss stale popover on session/panel switch
+  const _existingPop = document.querySelector('.app-titlebar-title-popover');
+  if (_existingPop) {
+    _existingPop.remove(); titleEl._titlePopover = null;
+    if (titleEl._popoverOutsideHandler) {
+      document.removeEventListener('click', titleEl._popoverOutsideHandler, true);
+      titleEl._popoverOutsideHandler = null;
+    }
+  }
+
+  // Mobile touch interactions
+  if ('ontouchstart' in window) {
+    // Tap-to-reveal full title popover — wired once per element lifetime
+    if (!titleEl._mobileTouchWired) {
+      titleEl._mobileTouchWired = true;
+      titleEl._titlePopover = null;
+      const _dismissTitlePopover = () => {
+        if (titleEl._titlePopover) { titleEl._titlePopover.remove(); titleEl._titlePopover = null; }
+        if (titleEl._popoverOutsideHandler) {
+          document.removeEventListener('click', titleEl._popoverOutsideHandler, true);
+          titleEl._popoverOutsideHandler = null;
+        }
+      };
+      titleEl.addEventListener('click', function _onTitleClick(e) {
+        if (_renamingAppTitlebar) return;
+        if (titleEl._titlePopover) {
+          _dismissTitlePopover();
+          return;
+        }
+        e.stopPropagation();
+        const pop = document.createElement('div');
+        pop.className = 'app-titlebar-title-popover';
+        pop.textContent = (S && S.session && S.session.title) ||
+          (typeof t === 'function' ? t('untitled') : 'Untitled');
+        document.body.appendChild(pop);
+        const rect = titleEl.getBoundingClientRect();
+        pop.style.top = (rect.bottom + 6) + 'px';
+        pop.style.left = Math.max(8, rect.left) + 'px';
+        pop.style.maxWidth = (window.innerWidth - 16) + 'px';
+        titleEl._titlePopover = pop;
+        const _outside = titleEl._popoverOutsideHandler = (ev) => {
+          if (!pop.contains(ev.target) && ev.target !== titleEl) {
+            _dismissTitlePopover();
+            document.removeEventListener('click', _outside, true);
+            titleEl._popoverOutsideHandler = null;
+          }
+        };
+        setTimeout(() => document.addEventListener('click', _outside, true), 0);
+      }, { passive: true });
+    }
+
+    // Long-press → session action menu (re-evaluated each sync so late-arriving sessions attach)
+    if (!titleEl._mobileLpWired && panel === 'chat' && S && S.session &&
+        !S.session.read_only && !S.session.is_read_only &&
+        typeof _openSessionActionMenu === 'function') {
+      titleEl._mobileLpWired = true;
+      let _lpTimer = null;
+      let _lpHandled = false;
+      let _lpStartX = 0, _lpStartY = 0;
+      const _lpDelay = typeof SESSION_LONG_PRESS_DELAY_MS !== 'undefined' ?
+        SESSION_LONG_PRESS_DELAY_MS : 400;
+      titleEl.addEventListener('touchstart', (e) => {
+        const touch = e.changedTouches && e.changedTouches[0];
+        if (!touch) return;
+        if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+        _lpHandled = false; _lpStartX = touch.clientX; _lpStartY = touch.clientY;
+        titleEl.classList.add('long-pressing');
+        _lpTimer = setTimeout(() => {
+          _lpTimer = null;
+          if (_lpHandled) return;
+          _lpHandled = true;
+          titleEl.classList.remove('long-pressing');
+          _openSessionActionMenu(S.session, titleEl);
+        }, _lpDelay);
+      }, { passive: true });
+      titleEl.addEventListener('touchmove', (e) => {
+        if (!_lpTimer) return;
+        const touch = e.changedTouches && e.changedTouches[0];
+        if (!touch) return;
+        if (Math.abs(touch.clientX - _lpStartX) > 10 || Math.abs(touch.clientY - _lpStartY) > 10) {
+          clearTimeout(_lpTimer); _lpTimer = null;
+          titleEl.classList.remove('long-pressing');
+        }
+      }, { passive: true });
+      titleEl.addEventListener('touchend', (e) => {
+        clearTimeout(_lpTimer); _lpTimer = null;
+        titleEl.classList.remove('long-pressing');
+        if (_lpHandled) { e.preventDefault(); e.stopPropagation(); }
+      }, { passive: false });
+      titleEl.addEventListener('touchcancel', () => {
+        clearTimeout(_lpTimer); _lpTimer = null; _lpHandled = false;
+        titleEl.classList.remove('long-pressing');
+      }, { passive: true });
+    }
   }
 }
 
@@ -2284,10 +2380,6 @@ async function runKanbanDispatcher(){
   // Confirmation dialog first because this actually consumes API budget on
   // each spawned worker.  Result toast surfaces what happened so users see
   // the dispatcher actually doing work.
-  if (!_kanbanCurrentBoard) {
-    showToast(t('kanban_unavailable') || 'Kanban unavailable', 'error');
-    return;
-  }
 
   _kanbanIsDispatching = true;
   _setKanbanDispatcherButtonsDisabled(true);
@@ -2688,6 +2780,8 @@ function openKanbanCreate(){
     }
   });
   _kanbanPopulateTenantDatalist();
+  _kanbanPopulateWorkspacePathDatalist();
+  _kanbanPopulateParentsDatalist();
   modal.hidden = false;
   if (_kanbanTaskModalFocusCleanup) {
     _kanbanTaskModalFocusCleanup();
@@ -2778,6 +2872,9 @@ function _kanbanResetTaskModalFields(values){
   // .value before the options exist would silently fail.
   set('kanbanTaskModalTenant', v.tenant || '');
   set('kanbanTaskModalPriority', v.priority != null ? v.priority : 0);
+  set('kanbanTaskModalSkills', Array.isArray(v.skills) ? v.skills.join(', ') : (v.skills || ''));
+  set('kanbanTaskModalMaxRuntimeSeconds', v.max_runtime_seconds != null ? v.max_runtime_seconds : '');
+  set('kanbanTaskModalParents', '');
   const errEl = document.getElementById('kanbanTaskModalError');
   if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
@@ -2787,20 +2884,25 @@ function _kanbanResetTaskModalFields(values){
 function _kanbanSetTaskModalLabels(mode){
   const titleH = document.getElementById('kanbanTaskModalTitle');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
-  const workspaceKindEl = document.getElementById('kanbanTaskModalWorkspaceKind');
-  const workspacePathEl = document.getElementById('kanbanTaskModalWorkspacePath');
   if (mode === 'edit') {
     if (titleH) titleH.textContent = t('kanban_edit_task') || 'Edit task';
     if (submitBtn) submitBtn.textContent = t('save') || 'Save';
-    // Disable workspace fields during edit since they are not handled by the backend
-    if (workspaceKindEl) workspaceKindEl.disabled = true;
-    if (workspacePathEl) workspacePathEl.disabled = true;
   } else {
     if (titleH) titleH.textContent = t('kanban_new_task') || 'New task';
     if (submitBtn) submitBtn.textContent = t('create') || 'Create';
-    // Enable workspace fields during create
-    if (workspaceKindEl) workspaceKindEl.disabled = false;
-    if (workspacePathEl) workspacePathEl.disabled = false;
+  }
+  // Workspace and new backend fields are create-only; backend patch doesn't handle them.
+  const createOnlyIds = [
+    'kanbanTaskModalWorkspaceKind',
+    'kanbanTaskModalWorkspacePath',
+    'kanbanTaskModalSkills',
+    'kanbanTaskModalMaxRuntimeSeconds',
+    'kanbanTaskModalParents',
+  ];
+  const disabled = mode === 'edit';
+  for (const id of createOnlyIds) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = disabled;
   }
 }
 
@@ -2821,6 +2923,27 @@ function _kanbanPopulateTenantDatalist(){
   const tenants = (_kanbanBoard && Array.isArray(_kanbanBoard.tenants)) ? _kanbanBoard.tenants : [];
   const tList = document.getElementById('kanbanTaskModalTenantList');
   if (tList) tList.innerHTML = tenants.map(v => `<option value="${esc(v)}"></option>`).join('');
+}
+
+function _kanbanPopulateWorkspacePathDatalist(){
+  const cols = (_kanbanBoard && _kanbanBoard.columns) || [];
+  const seen = new Set();
+  const opts = [];
+  for (const col of cols) {
+    for (const task of (col.tasks || [])) {
+      const path = task && task.workspace_path;
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      opts.push(`<option value="${esc(path)}"></option>`);
+    }
+  }
+  const list = document.getElementById('kanbanTaskModalWorkspacePathList');
+  if (list) list.innerHTML = opts.join('');
+}
+
+function _kanbanPopulateParentsDatalist(){
+  const list = document.getElementById('kanbanTaskModalParentsList');
+  if (list) list.innerHTML = _kanbanLinkableTaskOptions(null);
 }
 
 function _trapModalFocus(modalEl){
@@ -2911,6 +3034,9 @@ async function submitKanbanTaskModal(){
   const priorityEl = document.getElementById('kanbanTaskModalPriority');
   const workspaceKindEl = document.getElementById('kanbanTaskModalWorkspaceKind');
   const workspacePathEl = document.getElementById('kanbanTaskModalWorkspacePath');
+  const skillsEl = document.getElementById('kanbanTaskModalSkills');
+  const maxRuntimeEl = document.getElementById('kanbanTaskModalMaxRuntimeSeconds');
+  const parentsEl = document.getElementById('kanbanTaskModalParents');
   const errEl = document.getElementById('kanbanTaskModalError');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
   const title = titleEl ? titleEl.value.trim() : '';
@@ -2939,6 +3065,9 @@ async function submitKanbanTaskModal(){
   const statusVal = statusEl ? statusEl.value : '';
   const priorityRaw = priorityEl ? priorityEl.value : '';
   const workspacePathVal = workspacePathEl ? workspacePathEl.value.trim() : '';
+  const skillsRaw = skillsEl ? skillsEl.value.trim() : '';
+  const maxRuntimeRaw = maxRuntimeEl ? maxRuntimeEl.value.trim() : '';
+  const parentsRaw = parentsEl ? parentsEl.value.trim() : '';
   if (isEdit) {
     payload.body = bodyVal;
     payload.assignee = assigneeVal || null;
@@ -2965,6 +3094,19 @@ async function submitKanbanTaskModal(){
     }
     payload.workspace_kind = workspaceKind;
     if (workspacePathVal) payload.workspace_path = workspacePathVal;
+    if (skillsRaw) {
+      payload.skills = skillsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    if (maxRuntimeRaw) {
+      if (!/^[1-9]\d*$/.test(maxRuntimeRaw)) {
+        if (errEl) errEl.textContent = t('kanban_max_runtime_invalid')
+          || 'Max runtime must be a whole number of seconds greater than 0.';
+        if (maxRuntimeEl) maxRuntimeEl.focus();
+        return;
+      }
+      payload.max_runtime_seconds = Number(maxRuntimeRaw);
+    }
+    if (parentsRaw) payload.parents = [parentsRaw];
   }
   // Soft warning: a Ready task with the explicit "Unassigned" option will sit
   // forever because the dispatcher skips unassigned rows (kanban_db.py:3567).
@@ -6911,6 +7053,47 @@ function switchSettingsSection(name,opts){
   if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection();
 }
 
+function _normalizeSettingsSearchText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function _extractSettingsDescriptionText(field, labelEl) {
+  const chunks = [];
+  const settingsSearch = (field.dataset && field.dataset.settingsSearch) || '';
+  if (settingsSearch) chunks.push(settingsSearch);
+  field.querySelectorAll('[data-i18n]').forEach(node => {
+    if (labelEl && (node === labelEl || labelEl.contains(node))) return;
+    const key = node.dataset ? node.dataset.i18n : null;
+    if (key) chunks.push(t(key));
+  });
+  return chunks.join(' ');
+}
+
+function _extractSettingsValueText(field) {
+  const chunks = [];
+  const controls = [...field.querySelectorAll('select, input, textarea')];
+  controls.forEach(control => {
+    const tagName = (control.tagName || '').toLowerCase();
+    if (tagName === 'select') {
+      control.querySelectorAll('option').forEach(option => {
+        if (option.dataset && option.dataset.i18n) {
+          chunks.push(t(option.dataset.i18n));
+        } else {
+          chunks.push(option.textContent);
+        }
+      });
+      return;
+    }
+    const type = (control.getAttribute && control.getAttribute('type')) || control.type || '';
+    if (tagName === 'input' && ['checkbox', 'radio', 'file', 'submit', 'reset', 'button'].includes(type)) return;
+    if (control.value) chunks.push(control.value);
+  });
+  return chunks.join(' ');
+}
+
 async function _buildSettingsIndex() {
   if (_settingsIndex) return;
   // Memoize the in-flight build so concurrent searches share one pass; the
@@ -6920,6 +7103,9 @@ async function _buildSettingsIndex() {
     // Ensure lazy-loaded panes are populated before reading the DOM
     await Promise.all([loadProvidersPanel(), loadPluginsPanel(), loadExtensionsPanel()]);
     const index = [];
+    const add = (entry) => {
+      index.push({ ...entry, _settingsSearchIndex: index.length });
+    };
     const sectionMap = {
       settingsPaneConversation: 'conversation',
       settingsPaneAppearance: 'appearance',
@@ -6943,31 +7129,96 @@ async function _buildSettingsIndex() {
         const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
         if (!labelEl) return;
         const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
-        const label = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
-        if (label) {
-          const searchBlob = [label, field.textContent, field.dataset ? field.dataset.settingsSearch : '']
-            .filter(Boolean)
-            .join(' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          index.push({ label, searchBlob, sectionKey, i18nKey, el: field });
-        }
+        const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
+        if (!titleText) return;
+        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
+        const searchBlob = [titleText, valueText, descriptionText, field.textContent]
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        add({
+          label: titleText,
+          titleText,
+          valueText,
+          descriptionText,
+          searchBlob,
+          sectionKey,
+          i18nKey,
+          el: field,
+        });
       });
       if (sectionKey === 'providers') {
         pane.querySelectorAll('.provider-card').forEach(card => {
           const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+          if (cardName) {
+            const titleText = cardName;
+            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+            const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            add({
+              label: cardName,
+              titleText,
+              valueText,
+              descriptionText,
+              searchBlob,
+              sectionKey,
+              el: card,
+              cardName,
+            });
+          }
           card.querySelectorAll('.provider-card-field').forEach(field => {
             const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
             const label = [cardName, fieldLabel].filter(Boolean).join(' ');
-            if (label) index.push({ label, sectionKey, el: field, cardName, fieldLabel });
+            if (!label) return;
+            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
+            const searchBlob = [label, valueText, descriptionText, field.textContent]
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            add({
+              label,
+              titleText: label,
+              valueText,
+              descriptionText,
+              searchBlob,
+              sectionKey,
+              el: field,
+              cardName,
+              fieldLabel,
+            });
           });
         });
       }
       if (sectionKey === 'plugins') {
         pane.querySelectorAll('.plugin-card').forEach(card => {
           const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+          if (!cardName) return;
+          const titleText = cardName;
+          const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+          const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+          const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          add({
+            label: cardName,
+            titleText,
+            valueText,
+            descriptionText,
+            searchBlob,
+            sectionKey,
+            el: card,
+            cardName,
+          });
         });
       }
     }
@@ -6998,16 +7249,26 @@ async function filterSettings(query) {
     system: t('settings_tab_system') || 'System',
     help: t('settings_tab_help') || 'Help',
   };
-  const matches = (_settingsIndex || []).filter(entry =>
-    (entry.searchBlob || entry.label).toLowerCase().includes(q)
-  );
+  const matches = (_settingsIndex || []).map((entry) => {
+    const score = _scoreSettingsSearchMatch(entry, q);
+    return score ? { entry, score, index: entry._settingsSearchIndex } : null;
+  }).filter(Boolean);
   if (!matches.length) {
     resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
     resultsEl.style.display = '';
     return;
   }
   resultsEl.innerHTML = '';
-  for (const m of matches.slice(0, 12)) {
+  matches.sort((left, right) => {
+    if (left.score.bucketIndex !== right.score.bucketIndex) {
+      return left.score.bucketIndex - right.score.bucketIndex;
+    }
+    if (left.score.matchIndex !== right.score.matchIndex) {
+      return left.score.matchIndex - right.score.matchIndex;
+    }
+    return left.index - right.index;
+  });
+  for (const { entry: m } of matches.slice(0, 12)) {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'settings-search-result';
@@ -7024,6 +7285,29 @@ async function filterSettings(query) {
     resultsEl.appendChild(item);
   }
   resultsEl.style.display = '';
+}
+
+function _scoreSettingsSearchMatch(entry, q) {
+  const query = (q || '').toLowerCase().trim();
+  if (!query) return null;
+  const buckets = [
+    ['titleText', 0],
+    ['valueText', 1],
+    ['descriptionText', 2],
+    ['searchBlob', 3],
+  ];
+  for (const [bucketName, bucketIndex] of buckets) {
+    const hay = _normalizeSettingsSearchText(entry[bucketName]);
+    if (!hay) continue;
+    const matchIndex = hay.indexOf(query);
+    if (matchIndex < 0) continue;
+    return {
+      bucketIndex,
+      matchType: matchIndex === 0 ? 'prefix' : 'contains',
+      matchIndex,
+    };
+  }
+  return null;
 }
 
 function _navigateToSettingsField(entry) {
@@ -7237,6 +7521,7 @@ function _appearancePayloadFromUi(){
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
     large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
+    project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
     ..._structuredCodeViewFromUi(),
     show_titlebar_profile: !!($('settingsShowTitlebarProfile')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
@@ -7327,6 +7612,7 @@ async function _autosaveAppearanceSettings(payload){
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
     window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
     window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
+    window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){
       // Re-sync from the server-validated/clamped values so the UI and runtime
       // globals match exactly what was persisted.
@@ -7689,6 +7975,18 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    const pqcCb=$('settingsProjectQuickCreate');
+    if(pqcCb){
+      pqcCb.checked=!!(settings.project_quick_create_buttons);
+      window._projectQuickCreate=pqcCb.checked;
+      pqcCb.onchange=function(){
+        window._projectQuickCreate=this.checked;
+        // Rebuild the sidebar so the per-project + buttons appear/disappear
+        // immediately, rather than only on the next render.
+        try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+        _scheduleAppearanceAutosave();
+      };
+    }
     const structuredCodeModeSel=$('settingsStructuredCodeMode');
     const structuredCodeLinesField=$('settingsStructuredCodeAutoLines');
     if(structuredCodeModeSel){
@@ -8005,6 +8303,8 @@ async function loadSettingsPanel(){
       const current=localStorage.getItem('hermes-tts-voice')||'';
       if(engine==='elevenlabs'){
         ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
+      } else if(engine==='openai'){
+        ttsVoiceSel.innerHTML='<option value="">OpenAI voice (server-configured)</option>';
       } else if(engine==='edge'){
         const edgeVoices=[
           {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
@@ -9512,7 +9812,13 @@ async function renderProviderCostChart(card){
   }
   const body=card.querySelector('.provider-quota-body');
   if(!body||body.querySelector('.provider-cost-chart-wrap')) return;
-  if(!history||history.ok===false) return;
+  if(!history||history.ok===false){
+    const wrap=document.createElement('div');
+    wrap.className='provider-cost-chart-wrap';
+    _attachBudgetControls(wrap,history||{},card,0);
+    body.appendChild(wrap);
+    return;
+  }
   const snaps=Array.isArray(history.snapshots)?history.snapshots:[];
   // need at least 2 snapshots to have one non-null delta
   const hasData=snaps.filter(s=>s.delta!=null).length>=1;
@@ -9521,12 +9827,14 @@ async function renderProviderCostChart(card){
     empty.className='provider-cost-chart-wrap';
     empty.innerHTML='<div class="provider-cost-chart-title">7-day spend</div><div class="provider-quota-message">Not enough data yet. Cost chart builds after 2 daily snapshots.</div>';
     body.appendChild(empty);
+    _attachBudgetControls(empty,history,card,0);
     return;
   }
   const maxDelta=Math.max(...snaps.map(s=>s.delta!=null?Number(s.delta):0),1e-9);
   const nonNull=snaps.filter(s=>s.delta!=null).map(s=>Number(s.delta));
   const avg=nonNull.length?nonNull.reduce((a,b)=>a+b,0)/nonNull.length:0;
-  const pace='$'+(avg*30).toFixed(2);
+  const paceNum=avg*30;
+  const pace='$'+paceNum.toFixed(2);
   const bars=snaps.map(s=>{
     const delta=s.delta!=null?Number(s.delta):null;
     const pct=delta!=null?Math.max((delta/maxDelta)*100,delta>0?2:0).toFixed(1):'0';
@@ -9537,7 +9845,103 @@ async function renderProviderCostChart(card){
   const wrap=document.createElement('div');
   wrap.className='provider-cost-chart-wrap';
   wrap.innerHTML=`<div class="provider-cost-chart-title">7-day spend <span class="provider-cost-chart-pace">Monthly pace: ${esc(pace)}</span></div><div class="provider-cost-chart-bars insights-daily-token-chart">${bars}</div>`;
+  const monthly_budget=history&&history.monthly_budget!=null?history.monthly_budget:null;
+  if(monthly_budget!=null&&paceNum>0){
+    const paceSpan=wrap.querySelector('.provider-cost-chart-pace');
+    if(paceSpan){
+      const pct=Math.round((paceNum/monthly_budget)*100);
+      const pctSpan=document.createElement('span');
+      pctSpan.className='provider-cost-chart-pct'+(pct>=100?' over':pct>=80?' warn':'');
+      pctSpan.textContent=`(${pct}%)`;
+      paceSpan.appendChild(pctSpan);
+    }
+  }
   body.appendChild(wrap);
+  _attachBudgetControls(wrap,history,card,paceNum);
+}
+
+function _attachBudgetControls(wrap,history,card,paceNum){
+  const budget=history&&history.monthly_budget!=null?Number(history.monthly_budget):null;
+  const row=document.createElement('div');
+  row.className='provider-cost-budget-row';
+
+  const titleDiv=document.createElement('div');
+  titleDiv.className='provider-cost-budget-title';
+  titleDiv.textContent=t('provider_cost_budget_label');
+  row.appendChild(titleDiv);
+
+  const inputGroup=document.createElement('div');
+  inputGroup.className='provider-cost-budget-input-group';
+
+  const prefix=document.createElement('span');
+  prefix.className='provider-cost-budget-prefix';
+  prefix.textContent='$';
+  inputGroup.appendChild(prefix);
+
+  const input=document.createElement('input');
+  input.type='number';
+  input.min='0.01';
+  input.step='0.01';
+  input.className='provider-cost-budget-input';
+  input.placeholder=t('provider_cost_budget_placeholder')||'e.g. 50.00';
+  if(budget!=null) input.value=budget.toFixed(2);
+  inputGroup.appendChild(input);
+
+  const setBtn=document.createElement('button');
+  setBtn.type='button';
+  setBtn.className='provider-cost-budget-set';
+  setBtn.textContent=t('provider_cost_budget_set');
+  inputGroup.appendChild(setBtn);
+
+  const clearBtn=document.createElement('button');
+  clearBtn.type='button';
+  clearBtn.className='provider-cost-budget-clear';
+  clearBtn.textContent=t('provider_cost_budget_clear');
+  if(budget==null) clearBtn.style.display='none';
+  inputGroup.appendChild(clearBtn);
+
+  row.appendChild(inputGroup);
+
+  if(budget!=null&&paceNum>0){
+    const pct=Math.round((paceNum/budget)*100);
+    const barWrap=document.createElement('div');
+    barWrap.className='provider-cost-budget-bar-wrap';
+    const bar=document.createElement('div');
+    bar.className='provider-cost-budget-bar';
+    const fill=document.createElement('div');
+    fill.className='provider-cost-budget-bar-fill'+(pct>=100?' over':pct>=80?' warn':'');
+    fill.style.width=Math.min(100,pct)+'%';
+    bar.appendChild(fill);
+    barWrap.appendChild(bar);
+    const pctLabel=document.createElement('span');
+    pctLabel.className='provider-cost-budget-pct-label';
+    pctLabel.textContent=t('provider_cost_budget_pct',pct,budget.toFixed(2));
+    barWrap.appendChild(pctLabel);
+    row.appendChild(barWrap);
+  }
+
+  wrap.appendChild(row);
+
+  async function _saveBudget(value){
+    try{
+      await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
+      const existing=card.querySelector('.provider-cost-chart-wrap');
+      if(existing) existing.remove();
+      renderProviderCostChart(card);
+    }catch(e){
+      if(typeof showToast==='function') showToast(t('provider_cost_budget_save_failed'));
+    }
+  }
+
+  setBtn.addEventListener('click',()=>{
+    const val=parseFloat(input.value);
+    if(!isFinite(val)||val<=0) return;
+    _saveBudget(val);
+  });
+
+  clearBtn.addEventListener('click',()=>{
+    _saveBudget(null);
+  });
 }
 
 function _buildProviderCard(p){
@@ -10017,6 +10421,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
   window._autoScrollFollow=body.auto_scroll_follow!==false;
   window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;
+  window._projectQuickCreate=!!body.project_quick_create_buttons;
   if(Object.prototype.hasOwnProperty.call(body,'structured_code_default_view')){
     _applyStructuredCodeViewSettings(body.structured_code_default_view,body.structured_code_auto_tree_lines,false);
   }
@@ -10587,6 +10992,7 @@ async function saveSettings(andClose){
   body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
+  body.project_quick_create_buttons=!!($('settingsProjectQuickCreate')||{}).checked;
   Object.assign(body,_structuredCodeViewFromUi());
   body.language=language;
   body.show_token_usage=showTokenUsage;

@@ -20,9 +20,15 @@ def _style_css() -> str:
 class TestMermaidLightboxHelper:
     def test_mermaid_lightbox_has_dedicated_helper(self):
         src = _ui_js()
+        assert re.search(r"function\s+_mountMermaidViewer\(svgEl,\s*options\s*=\s*\{\}\)\s*\{", src)
         assert re.search(r"function\s+_openMermaidLightbox\(svgEl\)\s*\{", src)
-        assert "svgEl.cloneNode(true)" in src
+        assert "const viewer = _mountMermaidViewer(clone, {mode:'lightbox'});" in src
         assert "mermaid-lightbox-svg" in src
+
+    def test_mermaid_render_path_mounts_inline_viewer_shell(self):
+        src = _ui_js()
+        assert "const renderedSvg = block.querySelector('svg');" in src
+        assert "if(renderedSvg) _mountMermaidViewer(renderedSvg, {mode:'inline'});" in src
 
     def test_mermaid_lightbox_reuses_existing_modal_chrome(self):
         src = _ui_js()
@@ -67,12 +73,12 @@ class TestDocumentClickDelegate:
 class TestMermaidLightboxCss:
     def test_rendered_mermaid_svg_advertises_zoom(self):
         src = _style_css()
-        assert ".mermaid-rendered svg{max-width:100%;height:auto;cursor:zoom-in;}" in src
+        assert ".mermaid-rendered svg{max-width:100%;height:auto;cursor:default;}" in src
 
     def test_lightbox_svg_uses_modal_viewport_limits(self):
         src = _style_css()
-        rule = ".img-lightbox .mermaid-lightbox-svg{max-width:90vw;max-height:90vh;"
-        assert rule in src
+        assert ".mermaid-viewer--lightbox .mermaid-viewer-viewport{max-width:90vw;max-height:90vh;" in src
+        assert ".img-lightbox .mermaid-lightbox-svg{background:var(--code-bg);cursor:default;}" in src
         assert "background:var(--code-bg);" in src
 
 

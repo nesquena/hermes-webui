@@ -135,3 +135,38 @@ def test_elevenlabs_overlong_text_rejected_before_engine(monkeypatch):
     routes._handle_tts(h, None)
     assert h.status == 400
     assert "too long" in (h.payload() or {}).get("error", "")
+
+
+def test_elevenlabs_rejects_oversized_upstream_audio(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-test")
+    import api.config as _cfg
+    monkeypatch.setattr(_cfg, "get_config", lambda: {
+        "tts": {"elevenlabs": {"voice_id": "pNInz6obpgDQGcFmaJgB", "model": "eleven_multilingual_v2"}}
+    })
+
+    class _Resp:
+        def __init__(self):
+            self.headers = {"Content-Type": "audio/mpeg"}
+            self._chunks = [b"1234", b"5", b""]
+            self._i = 0
+        def read(self, n=-1):
+            c = self._chunks[self._i] if self._i < len(self._chunks) else b""
+            self._i += 1
+            return c
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=30):
+        return _Resp()
+
+    import urllib.request as _ur
+    monkeypatch.setattr(routes, "_TTS_PROXY_MAX_BYTES", 4)
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    h = _post({"text": "hello world", "engine": "elevenlabs"}, client="9.9.9.5")
+    routes._handle_tts(h, None)
+
+    assert h.status == 502
+    assert "ElevenLabs TTS generation failed" in (h.payload() or {}).get("error", "")

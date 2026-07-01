@@ -50,6 +50,15 @@ class TestSettingsSearch:
         assert "searchBlob" in body, (
             "_buildSettingsIndex must store a searchBlob for settings fields"
         )
+        assert "titleText" in body, (
+            "_buildSettingsIndex must store title bucket text"
+        )
+        assert "valueText" in body, (
+            "_buildSettingsIndex must store value bucket text"
+        )
+        assert "descriptionText" in body, (
+            "_buildSettingsIndex must store description bucket text"
+        )
 
     def test_panels_js_has_filter_settings_function(self):
         """panels.js must contain filterSettings function."""
@@ -57,11 +66,14 @@ class TestSettingsSearch:
             "panels.js must contain filterSettings(query) function"
         )
         body = PANELS_JS[PANELS_JS.find("function filterSettings(query)"):]
-        assert "(entry.searchBlob || entry.label).toLowerCase().includes(q)" in body, (
-            "filterSettings must do case-insensitive substring matching over the search blob"
+        assert "_scoreSettingsSearchMatch" in body, (
+            "filterSettings must call _scoreSettingsSearchMatch for ranking"
         )
         assert "esc(m.label)" in body, (
             "filterSettings must keep rendering the visible label text"
+        )
+        assert ".sort(" in body, (
+            "filterSettings must order matches deterministically"
         )
 
     def test_panels_js_has_navigate_to_field_function(self):
@@ -198,7 +210,11 @@ class TestSettingsSearch:
         """Plugins pane entries must index plugin cards by plugin name."""
         idx = PANELS_JS.find("function _buildSettingsIndex()")
         assert idx >= 0, "_buildSettingsIndex not found"
-        body = PANELS_JS[idx:idx + 3500]
+        end = PANELS_JS.find("function _resolveSettingsField(entry)", idx)
+        body = PANELS_JS[idx:end]
+        assert "if (sectionKey === 'plugins')" in body, (
+            "_buildSettingsIndex should include a plugins section branch"
+        )
         assert "pane.querySelectorAll('.plugin-card')" in body, (
             "_buildSettingsIndex must scan plugin cards so Plugins search is not empty"
         )
@@ -243,8 +259,11 @@ class TestSettingsSearchReviewFixes:
         label[data-i18n]. Otherwise most checkbox settings are unsearchable."""
         idx = PANELS_JS.find("function _buildSettingsIndex")
         assert idx >= 0, "_buildSettingsIndex not found"
-        body = PANELS_JS[idx:idx + 1600]
-        assert "label[data-i18n], label [data-i18n], label" in body, (
+        body = PANELS_JS[idx:idx + 2600]
+        assert "field.querySelector(" in body, (
+            "field index query should run a querySelector against field"
+        )
+        assert "label[data-i18n]" in body, (
             "field index query must include 'label [data-i18n]' (span-in-label) "
             "and plain 'label' so toggle settings are searchable"
         )

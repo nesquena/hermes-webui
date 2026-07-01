@@ -17,7 +17,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Hermes">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
-<script>(function(){try{var themes={light:1,dark:1,system:1},skins={codex:1,terracotta:1,default:1,ares:1,mono:1,graphite:1,github:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1,zeus:1,'verdigris':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark');var pendingExt=s&&s!=='default'&&!skins[s]&&!legacy[s];var skin=skins[s]?s:(pendingExt?s:(m?m[1]:'default'));localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
+<script>(function(){try{var themes={light:1,dark:1,system:1},skins={codex:1,terracotta:1,default:1,ares:1,mono:1,graphite:1,github:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1,'neon-soft':1,'neon-paint':1,zeus:1,'verdigris':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark');var pendingExt=s&&s!=='default'&&!skins[s]&&!legacy[s];var skin=skins[s]?s:(pendingExt?s:(m?m[1]:'default'));localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
 <script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
@@ -1064,6 +1064,13 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_large_text_paste_as_attachment">When enabled, long pasted text becomes a .md attachment instead of filling the composer.</div>
             </div>
             <div class="settings-field" style="margin-top:8px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsProjectQuickCreate" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_project_quick_create">Show per-project new-conversation buttons</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_project_quick_create">When enabled, each project chip in the sidebar gets a + button to start a conversation in that project.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
               <label for="settingsStructuredCodeMode" data-i18n="settings_label_structured_code">JSON/YAML code blocks</label>
               <select id="settingsStructuredCodeMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="auto" data-i18n="settings_option_structured_code_auto">Auto: Tree for long blocks</option>
@@ -1150,6 +1157,7 @@
               <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="enter">Enter (Shift+Enter for newline)</option>
                 <option value="ctrl+enter">Ctrl+Enter (Enter for newline)</option>
+                <option value="shift+enter">Shift+Enter (Enter for newline)</option>
               </select>
             </div>
             <div class="settings-field">
@@ -1199,7 +1207,7 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_raw_audio">Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram's voice message behavior.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser">Browser speech synthesis</option><option value="edge">Edge TTS (server)</option><option value="elevenlabs">ElevenLabs (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
+              <label for="settingsTtsEngine" data-i18n="settings_label_tts_engine">TTS Engine</label><select id="settingsTtsEngine" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"><option value="browser">Browser speech synthesis</option><option value="edge">Edge TTS (server)</option><option value="elevenlabs">ElevenLabs (server)</option><option value="openai">OpenAI TTS (server)</option></select><div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_engine">Choose speech engine. Edge TTS uses Microsoft neural voices via the server.</div></div><div class="settings-field"><label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
               <select id="settingsTtsVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="">Default system voice</option>
               </select>
@@ -1752,6 +1760,7 @@
       <div class="kanban-modal-row">
         <label for="kanbanTaskModalPriority" data-i18n="kanban_priority">Priority</label>
         <input type="number" id="kanbanTaskModalPriority" value="0" min="-100" max="100" step="1">
+        <div class="kanban-modal-hint" id="kanbanTaskModalPriorityHint" data-i18n="kanban_priority_hint">Higher numbers run first. Default 0.</div>
       </div>
     </div>
     <div class="kanban-modal-row">
@@ -1776,7 +1785,22 @@
     </div>
     <div class="kanban-modal-row" id="kanbanTaskModalWorkspacePathRow" style="display:none">
       <label for="kanbanTaskModalWorkspacePath" data-i18n="kanban_workspace_path">Workspace path</label>
-      <input type="text" id="kanbanTaskModalWorkspacePath" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_workspace_path_placeholder" placeholder="Path to workspace">
+      <input type="text" id="kanbanTaskModalWorkspacePath" list="kanbanTaskModalWorkspacePathList" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_workspace_path_placeholder" placeholder="Path to workspace">
+      <datalist id="kanbanTaskModalWorkspacePathList"></datalist>
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanTaskModalSkills" data-i18n="kanban_skills">Skills</label>
+      <input type="text" id="kanbanTaskModalSkills" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_skills_placeholder" placeholder="Comma-separated skill names, e.g. python,git">
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanTaskModalMaxRuntimeSeconds" data-i18n="kanban_max_runtime_seconds">Max runtime (seconds)</label>
+      <input type="number" id="kanbanTaskModalMaxRuntimeSeconds" min="1" step="1" autocomplete="off">
+      <div class="kanban-modal-hint" data-i18n="kanban_max_runtime_hint">Leave empty for unlimited.</div>
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanTaskModalParents" data-i18n="kanban_parents_modal">Parent dependencies</label>
+      <input type="text" id="kanbanTaskModalParents" list="kanbanTaskModalParentsList" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_parents_placeholder" placeholder="Parent task ID">
+      <datalist id="kanbanTaskModalParentsList"></datalist>
     </div>
     <div class="kanban-modal-error" id="kanbanTaskModalError" aria-live="polite"></div>
     <div class="kanban-modal-actions">

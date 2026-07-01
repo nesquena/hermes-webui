@@ -934,7 +934,11 @@ async function newSession(flash, options={}){
     };
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
-    if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
+    if(Object.prototype.hasOwnProperty.call(options,'project_id')){
+      reqBody.project_id=options.project_id;
+    } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
+      reqBody.project_id=_activeProject;
+    }
     // Forward a pre-session toolset override only from the empty composer (#4490).
     if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
     const modelSelForNew=$('modelSelect');
@@ -3299,6 +3303,38 @@ function _sessionIdFromLocation(){
     return qs.get('session')||qs.get('session_id')||null;
   }catch(_e){return null;}
 }
+function _composerPrefillIntentFromLocation(){
+  const empty={hasParams:false,hasText:false,text:'',autoSend:false};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    const hasQ=qs.has('q');
+    const hasPrompt=qs.has('prompt');
+    const hasSend=qs.has('send');
+    if(!hasQ&&!hasPrompt&&!hasSend) return empty;
+    const text=hasQ?(qs.get('q')||''):(hasPrompt?(qs.get('prompt')||''):'');
+    return {
+      hasParams:true,
+      hasText:!!String(text).trim(),
+      text,
+      autoSend:false
+    };
+  }catch(_e){return empty;}
+}
+function _consumeComposerPrefillParamsFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('q');
+    current.searchParams.delete('prompt');
+    current.searchParams.delete('send');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _appRootPath(){
   try{
     const base = new URL(document.baseURI||window.location.origin+'/', window.location.origin);
@@ -3314,6 +3350,9 @@ function _sessionUrlForSid(sid){
     const current=new URL(window.location.href);
     current.searchParams.delete('session');
     current.searchParams.delete('session_id');
+    current.searchParams.delete('q');
+    current.searchParams.delete('prompt');
+    current.searchParams.delete('send');
     base.search=current.searchParams.toString();
     base.hash=current.hash;
   }catch(_e){}
@@ -6144,6 +6183,56 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
 }
 
+function _attachProjectQuickCreateButton(chip, project){
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.className='project-chip-quick-create';
+  btn.textContent='+';
+  btn.title='New conversation in this project';
+  btn.setAttribute('aria-label','New conversation in this project');
+  const stop=function(e){
+    if(!e) return;
+    if(typeof e.preventDefault==='function') e.preventDefault();
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    if(typeof e.stopImmediatePropagation==='function') e.stopImmediatePropagation();
+  };
+  const stopTouchBubble=function(e){
+    if(!e) return;
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    if(typeof e.stopImmediatePropagation==='function') e.stopImmediatePropagation();
+  };
+  btn.onclick=async(e)=>{
+    stop(e);
+    if(_newSessionInFlight){
+      // The initiating tap already owns the filter change and rollback path.
+      try{
+        await newSession(false,{project_id:project.project_id});
+      }catch(_){
+        // The initiating tap already owns the visible failure path.
+      }
+      return;
+    }
+    const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
+    _setActiveProjectFilter(project.project_id);
+    try{
+      await newSession(false,{project_id:project.project_id});
+      // newSession() does not repaint the sidebar (callers own that — see the
+      // newSession contract). Repaint from the post-create state so the new
+      // project-assigned session appears deterministically.
+      try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+      try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+    }catch(err){
+      _setActiveProjectFilter(previousProject);
+      if(typeof showToast==='function') showToast('New conversation failed: '+(err&&err.message||err));
+    }
+  };
+  btn.ondblclick=(e)=>{stop(e);};
+  btn.oncontextmenu=(e)=>{stop(e);};
+  btn.ontouchstart=(e)=>{stopTouchBubble(e);};
+  btn.ontouchend=(e)=>{stopTouchBubble(e);};
+  chip.appendChild(btn);
+}
+
 
 function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
@@ -6358,6 +6447,7 @@ function renderSessionListFromCache(){
         clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
         chip.classList.remove('long-pressing');
       },{passive:true});
+      if(window._projectQuickCreate) _attachProjectQuickCreateButton(chip,p);
       bar.appendChild(chip);
     }
     // Create button

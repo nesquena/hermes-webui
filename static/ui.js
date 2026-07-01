@@ -1343,6 +1343,274 @@ function _openImgLightbox(imgEl) {
   }
   _openImgLightboxWithNav(src, alt, allImages, startIndex);
 }
+
+const _MERMAID_VIEWER_MIN_SCALE = 0.25;
+const _MERMAID_VIEWER_MAX_SCALE = 8;
+const _MERMAID_VIEWER_ZOOM_STEP = 1.2;
+
+function _mermaidViewerIcon(kind) {
+  const icons = {
+    zoomIn: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"></circle><path d="M10 7v6M7 10h6"></path><path d="M15 15l4 4"></path></svg>',
+    zoomOut: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"></circle><path d="M7 10h6"></path><path d="M15 15l4 4"></path></svg>',
+    reset: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9V4H1"></path><path d="M1 4l4 4"></path><path d="M10 4a8 8 0 1 1-5.66 13.66"></path></svg>',
+    fit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"></path></svg>',
+    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"></path></svg>',
+  };
+  return icons[kind] || '';
+}
+
+function _createMermaidViewerButton(label, iconKind, onClick) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'mermaid-viewer-btn';
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('title', label);
+  btn.innerHTML = _mermaidViewerIcon(iconKind);
+  btn.onclick = e => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick(e);
+  };
+  return btn;
+}
+
+function _mermaidSvgBox(svgEl) {
+  const box = {x: 0, y: 0, width: 0, height: 0};
+  if(!svgEl) return box;
+  const viewBox = svgEl.viewBox && svgEl.viewBox.baseVal;
+  if(viewBox && viewBox.width && viewBox.height){
+    box.x = Number(viewBox.x) || 0;
+    box.y = Number(viewBox.y) || 0;
+    box.width = Number(viewBox.width) || 0;
+    box.height = Number(viewBox.height) || 0;
+    return box;
+  }
+  const rawViewBox = svgEl.getAttribute && svgEl.getAttribute('viewBox');
+  if(rawViewBox){
+    const parts = rawViewBox.trim().split(/[,\s]+/).map(Number);
+    if(parts.length >= 4 && parts.every(n => Number.isFinite(n))){
+      box.x = parts[0] || 0;
+      box.y = parts[1] || 0;
+      box.width = parts[2] || 0;
+      box.height = parts[3] || 0;
+      return box;
+    }
+  }
+  const width = Number.parseFloat(svgEl.getAttribute && svgEl.getAttribute('width')) || (svgEl.getBoundingClientRect ? svgEl.getBoundingClientRect().width : 0) || 0;
+  const height = Number.parseFloat(svgEl.getAttribute && svgEl.getAttribute('height')) || (svgEl.getBoundingClientRect ? svgEl.getBoundingClientRect().height : 0) || 0;
+  box.width = width || 800;
+  box.height = height || 450;
+  return box;
+}
+
+function _mountMermaidViewer(svgEl, options = {}) {
+  if(!svgEl) return null;
+  const mode = options.mode === 'lightbox' ? 'lightbox' : 'inline';
+  const openLightbox = typeof options.openLightbox === 'function' ? options.openLightbox : () => _openMermaidLightbox(svgEl);
+  const box = _mermaidSvgBox(svgEl);
+  const host = svgEl.parentNode;
+  const root = document.createElement('div');
+  root.className = 'mermaid-viewer mermaid-viewer--' + mode;
+  const toolbar = document.createElement('div');
+  toolbar.className = 'mermaid-viewer-toolbar';
+  const viewport = document.createElement('div');
+  viewport.className = 'mermaid-viewer-viewport';
+  const canvas = document.createElement('div');
+  canvas.className = 'mermaid-viewer-canvas';
+  canvas.style.width = Math.max(1, Math.round(box.width)) + 'px';
+  canvas.style.height = Math.max(1, Math.round(box.height)) + 'px';
+  svgEl.classList.add('mermaid-viewer-svg');
+  if(mode === 'lightbox') svgEl.classList.add('mermaid-lightbox-svg');
+  svgEl.style.width = '100%';
+  svgEl.style.height = '100%';
+  svgEl.style.display = 'block';
+  viewport.appendChild(canvas);
+  root.appendChild(toolbar);
+  root.appendChild(viewport);
+  if(host) host.replaceChild(root, svgEl);
+  canvas.appendChild(svgEl);
+
+  const state = {
+    box,
+    canvas,
+    dragging: false,
+    dragOriginX: 0,
+    dragOriginY: 0,
+    dragPointerId: null,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragged: false,
+    mode,
+    root,
+    toolbar,
+    scale: 1,
+    svg: svgEl,
+    viewport,
+    x: 0,
+    y: 0,
+  };
+  root._mermaidViewer = state;
+
+  function _viewportSize(){
+    const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+    const width = viewport.clientWidth || (rect && rect.width) || (mode === 'lightbox' ? Math.round((window.innerWidth || box.width) * 0.9) : Math.round(window.innerWidth || box.width));
+    const height = viewport.clientHeight || (rect && rect.height) || (mode === 'lightbox' ? Math.round((window.innerHeight || box.height) * 0.9) : Math.round((window.innerHeight || box.height) * 0.7));
+    return {
+      width: Math.max(1, Number(width) || box.width || 1),
+      height: Math.max(1, Number(height) || box.height || 1),
+    };
+  }
+
+  function _applyTransform(){
+    canvas.style.transform = `translate(${Math.round(state.x)}px, ${Math.round(state.y)}px) scale(${state.scale})`;
+    canvas.style.transformOrigin = '0 0';
+  }
+
+  function _centerForScale(nextScale){
+    const size = _viewportSize();
+    const scaledWidth = box.width * nextScale;
+    const scaledHeight = box.height * nextScale;
+    state.x = scaledWidth < size.width ? Math.round((size.width - scaledWidth) / 2) : 0;
+    state.y = scaledHeight < size.height ? Math.round((size.height - scaledHeight) / 2) : 0;
+  }
+
+  function _fitScale(){
+    const size = _viewportSize();
+    return Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, Math.min(size.width / box.width, size.height / box.height)));
+  }
+
+  function _setScale(nextScale, anchorX, anchorY){
+    const bounded = Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, nextScale));
+    if(!Number.isFinite(bounded) || !box.width || !box.height) return;
+    const focusX = Number.isFinite(anchorX) ? anchorX : _viewportSize().width / 2;
+    const focusY = Number.isFinite(anchorY) ? anchorY : _viewportSize().height / 2;
+    if(state.scale){
+      const ratio = bounded / state.scale;
+      state.x = focusX - (focusX - state.x) * ratio;
+      state.y = focusY - (focusY - state.y) * ratio;
+    }
+    state.scale = bounded;
+    _applyTransform();
+  }
+
+  function _fitViewer(){
+    const nextScale = _fitScale();
+    state.scale = nextScale;
+    _centerForScale(nextScale);
+    _applyTransform();
+  }
+
+  function _resetViewer(){
+    state.scale = 1;
+    _centerForScale(1);
+    _applyTransform();
+  }
+
+  function _zoomIn(){
+    const size = _viewportSize();
+    _setScale(state.scale * _MERMAID_VIEWER_ZOOM_STEP, size.width / 2, size.height / 2);
+  }
+
+  function _zoomOut(){
+    const size = _viewportSize();
+    _setScale(state.scale / _MERMAID_VIEWER_ZOOM_STEP, size.width / 2, size.height / 2);
+  }
+
+  function _zoomFromWheel(e){
+    if(e.preventDefault) e.preventDefault();
+    const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : {left: 0, top: 0};
+    const anchorX = Number.isFinite(e.clientX) ? e.clientX - rect.left : undefined;
+    const anchorY = Number.isFinite(e.clientY) ? e.clientY - rect.top : undefined;
+    const deltaMode = Number(e.deltaMode) || 0;
+    const lineScale = deltaMode === 1 ? 30 : deltaMode === 2 ? 600 : 1;
+    const factor = Math.exp((-(Number(e.deltaY) || 0)) * lineScale * 0.0015);
+    _setScale(state.scale * factor, anchorX, anchorY);
+  }
+
+  function _onPointerDown(e){
+    if(e.button != null && e.button !== 0) return;
+    state.dragging = true;
+    state.dragged = false;
+    state.dragOriginX = Number(e.clientX) || 0;
+    state.dragOriginY = Number(e.clientY) || 0;
+    state.dragPointerId = e.pointerId != null ? e.pointerId : null;
+    state.dragStartX = state.x;
+    state.dragStartY = state.y;
+    viewport.classList.add('is-panning');
+    if(state.dragPointerId != null && viewport.setPointerCapture) viewport.setPointerCapture(state.dragPointerId);
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _onPointerMove(e){
+    if(!state.dragging) return;
+    const dx = (Number(e.clientX) || 0) - state.dragOriginX;
+    const dy = (Number(e.clientY) || 0) - state.dragOriginY;
+    if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
+    state.x = state.dragStartX + dx;
+    state.y = state.dragStartY + dy;
+    _applyTransform();
+  }
+
+  function _endPointerDrag(){
+    if(!state.dragging) return;
+    state.dragging = false;
+    if(state.dragPointerId != null && viewport.releasePointerCapture){
+      try{ viewport.releasePointerCapture(state.dragPointerId); }catch(_){}
+    }
+    state.dragPointerId = null;
+    viewport.classList.remove('is-panning');
+  }
+
+  function _openViewerOnClick(e){
+    if(mode !== 'inline') return;
+    if(state.dragged){
+      state.dragged = false;
+      return;
+    }
+    if(e.preventDefault) e.preventDefault();
+    if(e.stopPropagation) e.stopPropagation();
+    openLightbox();
+  }
+
+  viewport.onpointerdown = _onPointerDown;
+  viewport.onpointermove = _onPointerMove;
+  viewport.onpointerup = _endPointerDrag;
+  viewport.onpointercancel = _endPointerDrag;
+  viewport.onpointerleave = _endPointerDrag;
+  viewport.onwheel = _zoomFromWheel;
+  viewport.onclick = _openViewerOnClick;
+  root.onclick = e => e.stopPropagation();
+  state.fit = _fitViewer;
+  state.reset = _resetViewer;
+  state.zoomIn = _zoomIn;
+  state.zoomOut = _zoomOut;
+  state.zoomAt = _setScale;
+  state.applyTransform = _applyTransform;
+  state.openLightbox = openLightbox;
+
+  toolbar.appendChild(_createMermaidViewerButton('Zoom in', 'zoomIn', _zoomIn));
+  toolbar.appendChild(_createMermaidViewerButton('Zoom out', 'zoomOut', _zoomOut));
+  toolbar.appendChild(_createMermaidViewerButton('Reset view', 'reset', _resetViewer));
+  toolbar.appendChild(_createMermaidViewerButton('Fit to screen', 'fit', _fitViewer));
+  if(mode === 'inline'){
+    toolbar.appendChild(_createMermaidViewerButton('Fullscreen', 'fullscreen', openLightbox));
+  }
+
+  const initialFit = _fitScale();
+  state.scale = initialFit;
+  _centerForScale(initialFit);
+  _applyTransform();
+  if(mode === 'lightbox'){
+    viewport.style.width = Math.max(1, Math.round(box.width * initialFit)) + 'px';
+    viewport.style.height = Math.max(1, Math.round(box.height * initialFit)) + 'px';
+  } else {
+    viewport.style.width = '100%';
+    viewport.style.height = Math.max(1, Math.round(box.height * initialFit)) + 'px';
+  }
+
+  return root;
+}
+
 function _openMermaidLightbox(svgEl) {
   if(!svgEl) return;
   const lb = document.createElement('div');
@@ -1384,16 +1652,15 @@ function _openMermaidLightbox(svgEl) {
       styleEl.textContent = styleText;
     });
   }
-  clone.classList.add('mermaid-lightbox-svg');
   clone.removeAttribute('width');
   clone.removeAttribute('height');
-  clone.onclick = e => e.stopPropagation();
+  const viewer = _mountMermaidViewer(clone, {mode:'lightbox'});
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
   cls.setAttribute('aria-label', 'Close');
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
-  lb.appendChild(clone);
+  lb.appendChild(viewer);
   lb.appendChild(cls);
   lb.onclick = () => _closeImgLightbox(lb);
   lb._keyHandler = e => {
@@ -4433,6 +4700,19 @@ if(typeof window!=='undefined'){
         if(nearBottom){
           _nearBottomCount=_nearBottomCount+1;
           if(_nearBottomCount>=2){_scrollPinned=true;_nearBottomCount=0;}
+        }else if(!movedUp && _autoScrollFollow && _scrollPinned){
+          // Content-grew-beneath-a-pinned-viewport case (NOT a user scroll-away).
+          // During streaming on a tall transcript (esp. mobile, where chunks land
+          // fast), new content increases scrollHeight under a stationary viewport,
+          // so bottomDistance crosses the nearBottom threshold even though the
+          // reader never scrolled (top did NOT move up, _messageUserUnpinned is
+          // false). Previously this fell through to `_scrollPinned=false`, killing
+          // auto-follow mid-stream: the follow writer and this listener then fought
+          // frame-by-frame, the viewport stalled while content kept growing, and it
+          // was progressively stranded mid-transcript (the "jump back" report).
+          // Keep the pin and re-snap to the true bottom instead of unpinning.
+          _nearBottomCount=0;
+          if(typeof _setMessageScrollToBottom==='function') _setMessageScrollToBottom();
         }else{
           _nearBottomCount=0;
           _scrollPinned=false;
@@ -6926,6 +7206,10 @@ function speakMessage(btn){
   if(!clean) return;
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='openai'){
+    _playOpenaiTts(clean, btn);
+    return;
+  }
   if(engine==='elevenlabs'){
     _playElevenLabsTts(clean, btn);
     return;
@@ -6996,6 +7280,33 @@ function _playElevenLabsTts(text, btn){
     return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
+}
+
+function _playOpenaiTts(text, btn){
+  if(btn) btn.dataset.speaking='1';
+  _ttsSpeaking=true;
+  const _fail=function(msg){
+    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(btn)btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
+  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text, engine:'openai'})
+  })
+  .then(function(r){
+    if(!r.ok){
+      return r.json().catch(function(){return {};}).then(function(j){
+        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+      });
+    }
+    return r.arrayBuffer();
+  })
+  .then(function(buf){
+    return _playAudioBuf(buf, btn, 'OpenAI TTS');
+  })
+  .catch(function(e){ _fail((e&&e.message)||'OpenAI TTS failed'); });
 }
 
 // ── Shared AudioContext for TTS playback (no blob URLs needed) ──
@@ -7077,6 +7388,10 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
+  if(engine==='openai'){
+    _playOpenaiTts(clean, null);
+    return;
+  }
   if(engine==='elevenlabs'){
     _playElevenLabsTts(clean, null);
     return;
@@ -15231,6 +15546,8 @@ function renderMermaidBlocks(container){
       const tmp=document.getElementById('d'+id);
       if(tmp) tmp.remove();
       block.innerHTML=svg;
+      const renderedSvg = block.querySelector('svg');
+      if(renderedSvg) _mountMermaidViewer(renderedSvg, {mode:'inline'});
       block.classList.add('mermaid-rendered');
     }catch(e){
       const tmp=document.getElementById('d'+id);

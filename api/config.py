@@ -14,6 +14,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -7791,7 +7792,7 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
 _SETTINGS_DEFAULTS = {
     "default_workspace": str(DEFAULT_WORKSPACE),
     "onboarding_completed": False,
-    "send_key": "enter",  # 'enter' or 'ctrl+enter'
+    "send_key": "enter",  # 'enter', 'ctrl+enter', or 'shift+enter'
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
@@ -7815,6 +7816,7 @@ _SETTINGS_DEFAULTS = {
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "render_user_markdown": False,  # opt-in: render full markdown in user messages (#3870)
     "large_text_paste_as_attachment": True,  # convert very large composer text pastes into .md attachments by default
+    "project_quick_create_buttons": False,  # opt-in: show per-project "+" quick-create buttons on sidebar project chips (#4676)
     "structured_code_default_view": "auto",  # JSON/YAML fenced-block default render: auto | on | off (#484 follow-up). auto => Tree when line count >= structured_code_auto_tree_lines, else Raw.
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
@@ -7863,6 +7865,7 @@ _SETTINGS_DEFAULTS = {
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
+    "provider_cost_budget": None,
 }
 _SETTINGS_LEGACY_DROP_KEYS = {
     "assistant_language",
@@ -7887,6 +7890,8 @@ _SETTINGS_SKIN_VALUES = {
     "geist-contrast",
     "zeus",
     "verdigris",
+    "neon-soft",
+    "neon-paint",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.
@@ -8019,7 +8024,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "simplified_tool_calling",
 }
 _SETTINGS_ENUM_VALUES = {
-    "send_key": {"enter", "ctrl+enter"},
+    "send_key": {"enter", "ctrl+enter", "shift+enter"},
     "sidebar_density": {"compact", "detailed"},
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
@@ -8065,6 +8070,7 @@ _SETTINGS_BOOL_KEYS = {
     "session_jump_buttons",
     "render_user_markdown",
     "large_text_paste_as_attachment",
+    "project_quick_create_buttons",
     "session_endless_scroll",
     "auto_scroll_follow",
     "worklog_details_expanded_default",
@@ -8091,6 +8097,17 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 
 _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").Lock()
+
+
+def _coerce_provider_cost_budget(value: Any) -> float | None:
+    """Normalize a monthly budget to the persisted two-decimal representation."""
+    try:
+        rounded = round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < rounded < 1e9) or not math.isfinite(rounded):
+        return None
+    return rounded
 
 
 def save_settings(settings: dict) -> dict:
@@ -8180,6 +8197,15 @@ def save_settings(settings: dict) -> dict:
                     seen.add(s)
                     cleaned.append(s)
                 v = cleaned
+            if k == "provider_cost_budget":
+                if v is None or v == "":
+                    current[k] = None
+                    continue
+                budget = _coerce_provider_cost_budget(v)
+                if budget is None:
+                    continue
+                current[k] = budget
+                continue
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)
