@@ -67891,7 +67891,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_environment_vari
         ),
     ],
 )
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_variables_final_url_drift_before_parse(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_variables_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     drift_name,
@@ -67951,7 +67951,9 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_vari
     monkeypatch.setattr(capy_memory.json, "loads", fail_json_loads)
 
     result = run_source_refresh_jobs(limit=1)
-    serialized = json.dumps({"result": result, "search": search_memory("environment variables", limit=5)}, sort_keys=True).lower()
+    search = search_memory("environment variable drift safety", limit=5)
+    relevant = relevant_memory_for_space("space-environment-variables-final-url-drift", limit=5)
+    serialized = json.dumps({"result": result, "search": search, "relevant": relevant}, sort_keys=True).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
@@ -67963,6 +67965,8 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_vari
     }]
     assert read_calls == []
     assert parse_calls == []
+    assert search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / f"{source_id}.md").exists()
     for unsafe in (
         final_url.lower(),
