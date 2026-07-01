@@ -1938,7 +1938,8 @@ function _shouldAttachLargePastedText(text){
 }
 function _largeTextPasteFileName(now){
   const d=new Date(now||Date.now());
-  const stamp=d.toISOString().replace(/[:.]/g,'-').replace('T','_').replace('Z','');
+  const p=n=>String(n).padStart(2,'0');
+  const stamp=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}-${String(d.getMilliseconds()).padStart(3,'0')}`;
   const existing=new Set((S.pendingFiles||[]).map(f=>f&&f.name).filter(Boolean));
   let name=`pasted-text-${stamp}.md`;
   for(let i=2;existing.has(name);i++)name=`pasted-text-${stamp}-${i}.md`;

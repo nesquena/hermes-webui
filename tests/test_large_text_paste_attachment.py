@@ -1,5 +1,12 @@
 """Regression tests for large composer text paste attachment behavior."""
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import textwrap
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
@@ -8,6 +15,46 @@ CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+UTC_2026_07_01_12_41_11_610 = 1782909671610
+
+
+def _extract_function(source: str, name: str) -> str:
+    marker = f"function {name}("
+    start = source.index(marker)
+    brace_start = source.index("{", start)
+    depth = 0
+    for idx in range(brace_start, len(source)):
+        char = source[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise AssertionError(f"could not extract function {name}")
+
+
+def _run_large_text_filename(now_value: int, pending_files: list[dict[str, str]]) -> str:
+    if NODE is None:
+        raise AssertionError("node not on PATH")
+    fn_source = _extract_function(BOOT_JS, "_largeTextPasteFileName")
+    script = textwrap.dedent(
+        f"""
+        const fnSource = {json.dumps(fn_source)};
+        globalThis.S = {{pendingFiles: {json.dumps(pending_files)}}};
+        eval(fnSource);
+        process.stdout.write(_largeTextPasteFileName({json.dumps(now_value)}));
+        """
+    )
+    result = subprocess.run(
+        [NODE, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TZ": "Asia/Shanghai"},
+    )
+    return result.stdout.strip()
 
 
 def test_large_text_paste_threshold_helpers_are_defined():
@@ -103,3 +150,27 @@ def test_oversize_large_text_paste_falls_back_to_native_paste_instead_of_being_d
 
 def test_changelog_mentions_large_text_paste_attachment():
     assert "Large plain-text pastes in the composer now become `.md` attachments" in CHANGELOG
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_large_text_paste_filename_uses_local_time():
+    assert _run_large_text_filename(
+        now_value=UTC_2026_07_01_12_41_11_610,
+        pending_files=[],
+    ) == "pasted-text-2026-07-01_20-41-11-610.md"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_large_text_paste_filename_duplicate_suffix_uses_local_stamp():
+    assert _run_large_text_filename(
+        now_value=UTC_2026_07_01_12_41_11_610,
+        pending_files=[{"name": "pasted-text-2026-07-01_20-41-11-610.md"}],
+    ) == "pasted-text-2026-07-01_20-41-11-610-2.md"
+
+
+def test_large_text_paste_filename_no_longer_uses_toISOString():
+    fn_source = _extract_function(BOOT_JS, "_largeTextPasteFileName")
+    assert "toISOString" not in fn_source
+    assert "getFullYear" in fn_source
+    assert "getHours" in fn_source
+    assert "getMilliseconds" in fn_source
