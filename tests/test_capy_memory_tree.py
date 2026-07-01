@@ -7502,7 +7502,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_pull_comment_rea
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_comment_reactions_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_comment_reactions_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch
 ):
     root = tmp_path / "capy-memory"
@@ -7561,7 +7561,11 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_comment_rea
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("nothing-indexed-after-pull-comment-reaction-drift", limit=5)
     sentinel_search = search_memory("pull comment reaction indexed after drift", limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search": search, "sentinel_search": sentinel_search}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("space-pull-comment-reactions-final-url-drift", limit=5)
+    serialized = json.dumps(
+        {"result": result, "jobs": jobs, "search": search, "sentinel_search": sentinel_search, "relevant": relevant},
+        sort_keys=True,
+    ).lower()
 
     assert calls == [{"url": "https://api.github.com/repos/capy/spaces/pulls/comments/1001/reactions", "timeout": 8, "accept": "application/json"}]
     assert read_calls == []
@@ -7572,6 +7576,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_comment_rea
     assert jobs["jobs"][0]["status"] == "pending"
     assert search["results"] == []
     assert sentinel_search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / "github-pull-comment-reactions-final-url-drift.md").exists()
     for forbidden in (
         drifted_final_url.lower(),
