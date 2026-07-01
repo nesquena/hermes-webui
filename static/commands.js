@@ -1644,7 +1644,15 @@ function cmdReasoning(args){
 }
 function cmdVoice(){
   const mic=document.getElementById('btnMic');
-  if(mic&&mic.style.display!=='none'&&!mic.disabled){try{mic.click();return;}catch(_){}}
+  const micVisible=!!(
+    mic
+    && mic.style.display!=='none'
+    && !mic.disabled
+    && !mic.classList.contains('composer-control-hidden')
+    && mic.getAttribute('aria-hidden')!=='true'
+    && (!window.getComputedStyle||window.getComputedStyle(mic).display!=='none')
+  );
+  if(micVisible){try{mic.click();return;}catch(_){}}
   showToast(t('cmd_voice_use_mic'));
 }
 
