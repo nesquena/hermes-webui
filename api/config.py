@@ -7847,6 +7847,7 @@ _SETTINGS_DEFAULTS = {
     "inflight_state_max_json_chars": 1500000,  # max serialized recovery snapshot payload before pruning
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "tab_order": [],  # user-defined sidebar/rail tab order for reorderable tabs; chat/settings stay fixed
+    "composer_control_order": [],  # user-defined composer footer control order; invalid/duplicate keys are ignored
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
@@ -7877,6 +7878,9 @@ _SETTINGS_LEGACY_DROP_KEYS = {
     "default_model",
     "activity_feed_expanded_default",
     "simplified_tool_calling",
+}
+_COMPOSER_CONTROL_ORDER_KEYS = {
+    key for key in _SETTINGS_DEFAULTS if key.startswith("hide_composer_")
 }
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
 _SETTINGS_SKIN_VALUES = {
@@ -8186,10 +8190,10 @@ def save_settings(settings: dict) -> dict:
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)
             ):
                 continue
-            # Validate list-valued sidebar tab settings. Chat/settings stay fixed
-            # even if a tampered POST tries to persist them, and duplicates are
-            # collapsed while preserving the first requested order.
-            if k in {"hidden_tabs", "tab_order"}:
+            # Validate list-valued ordering settings. Chat/settings stay fixed
+            # for tabs; composer ordering only accepts known control keys.
+            # Duplicates are collapsed while preserving the first requested order.
+            if k in {"hidden_tabs", "tab_order", "composer_control_order"}:
                 if not isinstance(v, list):
                     continue
                 seen = set()
@@ -8198,7 +8202,11 @@ def save_settings(settings: dict) -> dict:
                     if not isinstance(s, str):
                         continue
                     s = s.strip()
-                    if not s or s in {"chat", "settings"} or s in seen:
+                    if not s or s in seen:
+                        continue
+                    if k in {"hidden_tabs", "tab_order"} and s in {"chat", "settings"}:
+                        continue
+                    if k == "composer_control_order" and s not in _COMPOSER_CONTROL_ORDER_KEYS:
                         continue
                     seen.add(s)
                     cleaned.append(s)

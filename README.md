@@ -259,6 +259,8 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Enable via `HERMES_WEBUI_PASSWORD` env var or Settings panel
 - Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
 - After registering at least one passkey, Settings -> System can remove the password and keep passkey-only sign-in enabled. Password auth remains the bootstrap/recovery path until you choose to go passwordless; passkeys are same-origin and stored locally in the WebUI state directory
+- Optional native OIDC login for WebUI sessions -- configure `webui_oidc.issuer`, `client_id`, `allow_claim`, and `allow_values` in `config.yaml`, or set the matching `HERMES_WEBUI_OIDC_*` environment variables. OIDC stays disabled until all four are present, and startup prints a warning if the config is partial.
+- Native OIDC stores the PKCE/state nonce flow in process memory. That works for the shipped single-process server, and it also works behind a load balancer when callbacks stay sticky to the same WebUI instance. Multi-instance deployments need session affinity, or the callback can land on a different process and fail state validation.
 - Signed HMAC HTTP-only cookie with 24h TTL
 - Minimal dark-themed login page at `/login`
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)

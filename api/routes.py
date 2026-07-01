@@ -28,7 +28,7 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 from contextlib import closing
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
@@ -5079,6 +5079,31 @@ def _onboarding_gate_allows(handler, auth_enabled: bool | None = None) -> bool:
     return _onboarding_request_is_local(handler)
 
 
+# Operator-facing copy reused by every embedded-terminal endpoint refusal.
+_EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE = (
+    "Embedded terminal is only available from local networks when authentication "
+    "is not configured. Configure a password/passkey, or set "
+    "HERMES_WEBUI_ONBOARDING_OPEN=1 to allow it on a deliberately-exposed server."
+)
+
+
+def _embedded_terminal_gate_allows(handler) -> bool:
+    """Local-origin gate for the embedded-terminal endpoints.
+
+    The embedded terminal spawns a PTY shell that runs arbitrary commands as the
+    server-process user, so admitting an unauthenticated remote caller is remote
+    code execution. When auth is enabled, ``check_auth()`` has already verified
+    the session cookie before the request reaches these handlers, so this returns
+    True. When auth is DISABLED (the default out-of-the-box state) ``check_auth()``
+    admits every caller unconditionally, so restrict the terminal to local/private
+    origins — the same trust model the onboarding/bootstrap endpoints use, ignoring
+    spoofable forwarded headers unless an operator has opted into trusting them.
+    A deliberately-exposed passwordless server (access secured at another layer)
+    opts out with ``HERMES_WEBUI_ONBOARDING_OPEN=1``.
+    """
+    return _onboarding_gate_allows(handler)
+
+
 def _csp_report_rate_limited(handler, *, now: float | None = None) -> bool:
     now = time.time() if now is None else now
     key = _client_ip_for_rate_limit(handler)
@@ -8473,6 +8498,10 @@ button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(12
   border:1px solid rgba(124,185,255,.3);color:#7cb9ff;font-size:14px;font-weight:600;cursor:pointer;
   transition:all .15s}
 button:hover{background:rgba(124,185,255,.25)}
+.oidc-login{display:block;margin-top:10px;padding:10px;border-radius:10px;text-decoration:none;
+  background:rgba(255,255,255,.04);border:1px solid rgba(111,214,164,.35);color:#6fd6a4;
+  font-size:14px;font-weight:600;cursor:pointer;transition:all .15s}
+.oidc-login:hover{background:rgba(111,214,164,.12)}
 .passkey-login{margin-top:10px;background:rgba(255,255,255,.04);border-color:rgba(232,160,48,.35);color:#e8a030}
 .err{color:#e94560;font-size:12px;margin-top:10px;display:none}
 </style></head><body>
@@ -8484,12 +8513,53 @@ button:hover{background:rgba(124,185,255,.25)}
     <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
     <button type="submit">{{LOGIN_BTN}}</button>
     <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
+    {{OIDC_LOGIN_HTML}}
   </form>
   <div class="err" id="err"></div>
 </div>
 <!-- Keep login.js relative so subpath mounts load it under the current scope. -->
 <script src="static/login.js?v={{WEBUI_VERSION}}"></script>
 </body></html>"""
+
+
+def _safe_login_redirect_path(raw_path: str | None) -> str:
+    path = str(raw_path or "").strip()
+    if not path:
+        return "/"
+    if path[0] != "/":
+        return "/"
+    if path[1:2] in {"/", "\\"}:
+        return "/"
+    if re.search(r"[\x00-\x1f\x7f\s]", path):
+        return "/"
+    return path
+
+
+def _request_base_url(handler) -> str:
+    from api.auth import _is_secure_context
+
+    scheme = "https" if _is_secure_context(handler) else "http"
+    host = str(handler.headers.get("Host") or "").strip() or "127.0.0.1:8787"
+    return f"{scheme}://{host}"
+
+
+def _oidc_login_html(parsed) -> str:
+    try:
+        from api.auth_oidc import is_oidc_enabled
+    except Exception:
+        return ""
+    if not is_oidc_enabled():
+        return ""
+    next_path = _safe_login_redirect_path(
+        parse_qs(parsed.query or "").get("next", [""])[0]
+    )
+    href = "/api/auth/oidc/start"
+    if next_path != "/":
+        href += "?next=" + quote(next_path, safe="/")
+    return (
+        '<a id="oidc-login" class="oidc-login" '
+        f'href="{_html.escape(href, quote=True)}">Continue with SSO</a>'
+    )
 
 
 # ── Logs endpoint ─────────────────────────────────────────────────────────────
@@ -10365,15 +10435,73 @@ def handle_get(handler, parsed) -> bool:
             .replace(
                 "{{LOGIN_CONN_FAILED}}", _html.escape(_login_strings["conn_failed"])
             )
+            .replace("{{OIDC_LOGIN_HTML}}", _oidc_login_html(parsed))
         )
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
+    if parsed.path == "/api/auth/oidc/start":
+        from api.auth_oidc import OIDCAuthError, OIDCConfigError, build_authorization_redirect
+
+        next_path = _safe_login_redirect_path(
+            parse_qs(parsed.query or "").get("next", [""])[0]
+        )
+        try:
+            location = build_authorization_redirect(
+                _request_base_url(handler), next_path
+            )
+        except OIDCConfigError as exc:
+            return j(handler, {"error": str(exc)}, status=404)
+        except OIDCAuthError as exc:
+            return j(handler, {"error": str(exc)}, status=exc.status_code)
+        handler.send_response(302)
+        handler.send_header("Location", location)
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", "0")
+        _security_headers(handler)
+        handler.end_headers()
+        return True
+
+    if parsed.path == "/api/auth/oidc/callback":
+        from api.auth import create_session, set_auth_cookie
+        from api.auth_oidc import OIDCAuthError, OIDCConfigError, complete_authorization_code_flow
+
+        query = parse_qs(parsed.query or "")
+        error = str(query.get("error", [""])[0] or "").strip()
+        if error:
+            description = str(query.get("error_description", [""])[0] or "").strip()
+            return j(handler, {"error": description or error}, status=401)
+        state = str(query.get("state", [""])[0] or "").strip()
+        code = str(query.get("code", [""])[0] or "").strip()
+        if not state or not code:
+            return j(handler, {"error": "Missing OIDC callback state or code"}, status=400)
+        try:
+            result = complete_authorization_code_flow(
+                _request_base_url(handler), state, code
+            )
+        except OIDCConfigError as exc:
+            return j(handler, {"error": str(exc)}, status=404)
+        except OIDCAuthError as exc:
+            return j(handler, {"error": str(exc)}, status=exc.status_code)
+        cookie_val = create_session()
+        handler.send_response(302)
+        handler.send_header(
+            "Location",
+            _safe_login_redirect_path(result.get("next_path")),
+        )
+        handler.send_header("Cache-Control", "no-store")
+        _security_headers(handler)
+        set_auth_cookie(handler, cookie_val)
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+        return True
+
     if parsed.path == "/api/auth/status":
-        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, parse_cookie, verify_session
+        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, is_oidc_auth_enabled, parse_cookie, verify_session
         from api.passkeys import registered_credentials
 
         logged_in = False
         auth_enabled = is_auth_enabled()
+        oidc_enabled = is_oidc_auth_enabled()
         if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
@@ -10383,6 +10511,7 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
+            "oidc_enabled": oidc_enabled,
             "password_auth_enabled": password_auth_enabled,
             "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
             "passkeys_enabled": bool(passkeys),
@@ -15010,6 +15139,8 @@ def _terminal_remote_backend_enabled() -> bool:
 
 def _handle_terminal_start(handler, body):
     try:
+        if not _embedded_terminal_gate_allows(handler):
+            return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
         sid, session = _terminal_session_lookup(body)
         if _terminal_remote_backend_enabled():
             return j(
@@ -15048,6 +15179,8 @@ def _handle_terminal_start(handler, body):
 
 def _handle_terminal_input(handler, body):
     try:
+        if not _embedded_terminal_gate_allows(handler):
+            return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
         require(body, "session_id")
         data = str(body.get("data", ""))
         if len(data) > 8192:
@@ -15065,6 +15198,8 @@ def _handle_terminal_input(handler, body):
 
 def _handle_terminal_resize(handler, body):
     try:
+        if not _embedded_terminal_gate_allows(handler):
+            return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
         require(body, "session_id")
         from api.terminal import resize_terminal
         resize_terminal(
@@ -15083,6 +15218,8 @@ def _handle_terminal_resize(handler, body):
 
 def _handle_terminal_close(handler, body):
     try:
+        if not _embedded_terminal_gate_allows(handler):
+            return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
         require(body, "session_id")
         from api.terminal import close_terminal
         closed = close_terminal(body["session_id"])
@@ -15092,6 +15229,8 @@ def _handle_terminal_close(handler, body):
 
 
 def _handle_terminal_output(handler, parsed):
+    if not _embedded_terminal_gate_allows(handler):
+        return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
     if not sid:
@@ -19077,7 +19216,13 @@ def _handle_chat_sync(handler, body):
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=get_config()),
+                conversation_history=_sanitize_messages_for_api(
+                    _previous_context_messages,
+                    cfg=get_config(),
+                    effective_model=_model,
+                    effective_provider=_provider,
+                    effective_base_url=_base_url,
+                ),
                 task_id=s.session_id,
                 persist_user_message=msg,
             )

@@ -3739,7 +3739,136 @@ def _is_reasoning_only_assistant_message(msg) -> bool:
     return _content_has_reasoning_only_parts(content)
 
 
-def _sanitize_messages_for_api(messages, *, cfg: dict = None):
+def _is_local_reasoning_replay_base_url(base_url: str | None) -> bool:
+    """Return True when a custom provider base URL confidently points at localhost."""
+    if not base_url:
+        return False
+    try:
+        from urllib.parse import urlsplit
+
+        raw = str(base_url or '').strip()
+        if not raw:
+            return False
+        parsed = urlsplit(raw)
+        if not parsed.hostname and '://' not in raw:
+            parsed = urlsplit(f"http://{raw}")
+        host = (parsed.hostname or '').strip().lower()
+    except Exception:
+        return False
+    return host in {'localhost', '127.0.0.1', '::1', 'localhost.localdomain'}
+
+
+def _should_strip_reasoning_content(
+    cfg: dict | None,
+    *,
+    mode: str | None = None,
+    effective_model: str | None = None,
+    effective_provider: str | None = None,
+    effective_base_url: str | None = None,
+) -> bool:
+    """Decide whether historical assistant reasoning_content should be stripped from model-facing history.
+
+    This is a provider/protocol decision, not a model-capability heuristic.
+    Local/generic backends (LM Studio, llama.cpp, Ollama, and custom localhost
+    OpenAI-compatible endpoints) do not require historical reasoning replay and
+    receive stale content when it's preserved. Unknown providers preserve by
+    default so replay does not break providers that require reasoning/tool-call
+    continuity.
+
+    Args:
+        cfg: Config dict from get_config(), expected to contain webui.reasoning_content_replay.
+        mode: Explicit override mode ("strip", "preserve", "auto"). If provided, bypasses config lookup.
+        effective_model: Runtime-resolved model for the current session/request.
+        effective_provider: Runtime-resolved provider for the current session/request.
+        effective_base_url: Runtime-resolved base URL for custom providers.
+
+    Returns:
+        True if reasoning_content should be stripped from sanitized output.
+        False if it should be preserved in sanitized output.
+    """
+    # Explicit mode override takes priority
+    if mode is not None:
+        return mode == "strip"
+
+    # Config lookup. Missing/invalid config preserves shipped behavior: do not
+    # strip reasoning_content unless config explicitly requests it or auto can
+    # identify a local/generic effective backend.
+    if cfg is None:
+        return False
+
+    webui_cfg = cfg.get("webui", {}) or {}
+    if not isinstance(webui_cfg, dict):
+        return False
+
+    replay_mode = webui_cfg.get("reasoning_content_replay")
+    if not isinstance(replay_mode, str):
+        return False
+
+    normalized = replay_mode.strip().lower()
+
+    if normalized == "preserve":
+        return False
+    if normalized == "strip":
+        return True
+    if normalized == "auto":
+        # Auto mode: prefer runtime-resolved provider/model because profile
+        # defaults may differ from a per-session/request override.
+        model_cfg = cfg.get("model", {}) or {}
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
+
+        provider_id = str(effective_provider or model_cfg.get("provider", "") or "").strip().lower()
+        model_id = str(
+            effective_model or model_cfg.get("default") or model_cfg.get("name") or ""
+        ).strip().lower()
+        base_url = effective_base_url or model_cfg.get("base_url")
+
+        if not provider_id:
+            return False
+
+        # Known providers that require historical reasoning_content replay:
+        # - DeepSeek thinking mode distinguishes normal history from tool-call reasoning chains
+        # - Anthropic Claude 4+/3.7+ uses structured reasoning in tool-use contexts
+        # - OpenAI GPT-5+/o-series requires reasoning replay for tool-use continuity
+        if provider_id == "deepseek":
+            return False  # preserve for DeepSeek
+
+        if provider_id == "anthropic" and model_id.startswith("claude"):
+            return False  # preserve for Claude models
+
+        if provider_id == "openai":
+            # Preserve for GPT-5+ and o-series (not GPT-4o, etc.)
+            # Use exact match + dash-prefixed suffix to avoid broad substring matches.
+            _is_reasoning_model = (
+                model_id == "gpt-5"
+                or model_id.startswith("gpt-5-")
+                or model_id in {"o1", "o3", "o4"}
+                or model_id.startswith(("o1-", "o3-", "o4-"))
+            )
+            if _is_reasoning_model:
+                return False  # preserve for reasoning-capable OpenAI models
+
+        if provider_id in {"lmstudio", "ollama", "llamacpp", "llama.cpp"}:
+            return True
+
+        if provider_id == "custom" or provider_id.startswith("custom:"):
+            return _is_local_reasoning_replay_base_url(base_url)
+
+        # Unknown/cloud providers preserve by default.
+        return False
+
+    # Unknown mode -- preserve default behavior.
+    return False
+
+
+def _sanitize_messages_for_api(
+    messages,
+    *,
+    cfg: dict = None,
+    effective_model: str | None = None,
+    effective_provider: str | None = None,
+    effective_base_url: str | None = None,
+):
     """Return a deep copy of messages with only API-safe fields.
 
     The webui stores extra metadata on messages (attachments, timestamp, _ts)
@@ -3805,6 +3934,18 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        # Provider-aware reasoning_content stripping from model-facing history.
+        # Historical assistant reasoning_content is stripped only when the user
+        # explicitly requests strip mode or auto mode identifies a local/generic
+        # effective backend.
+        if msg.get('role') == 'assistant' and 'reasoning_content' in sanitized:
+            if _should_strip_reasoning_content(
+                cfg,
+                effective_model=effective_model,
+                effective_provider=effective_provider,
+                effective_base_url=effective_base_url,
+            ):
+                del sanitized['reasoning_content']
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
         if 'content' in sanitized:
@@ -7824,7 +7965,13 @@ def _run_agent_streaming(
             _run_conversation_kwargs = dict(
                 user_message=user_message,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                conversation_history=_sanitize_messages_for_api(
+                    _previous_context_messages,
+                    cfg=_cfg,
+                    effective_model=resolved_model,
+                    effective_provider=resolved_provider,
+                    effective_base_url=resolved_base_url,
+                ),
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
@@ -8219,7 +8366,13 @@ def _run_agent_streaming(
                                 _heal_kwargs = dict(
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
-                                    conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                                    conversation_history=_sanitize_messages_for_api(
+                                        _previous_context_messages,
+                                        cfg=_cfg,
+                                        effective_model=resolved_model,
+                                        effective_provider=resolved_provider,
+                                        effective_base_url=resolved_base_url,
+                                    ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                 )
@@ -9278,7 +9431,13 @@ def _run_agent_streaming(
                         _heal_kwargs2 = dict(
                             user_message=user_message,
                             system_message=workspace_system_msg,
-                            conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                            conversation_history=_sanitize_messages_for_api(
+                                _previous_context_messages,
+                                cfg=_cfg,
+                                effective_model=resolved_model,
+                                effective_provider=resolved_provider,
+                                effective_base_url=resolved_base_url,
+                            ),
                             task_id=session_id,
                             persist_user_message=msg_text,
                         )
