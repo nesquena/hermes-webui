@@ -63,6 +63,16 @@ function syncAppTitlebar() {
     sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
     // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
     if (/^webui$/i.test(sourceLabel)) sourceLabel = '';
+    // Append active model/provider chip so it's always visible in the titlebar.
+    const _routing = typeof _latestGatewayRoutingForSession === 'function'
+      ? _latestGatewayRoutingForSession(S.session) : null;
+    const _usedModel = (_routing && _routing.used_model) || S.session.model || '';
+    const _usedProvider = (_routing && (_routing.used_provider || _routing.provider)) || S.session.model_provider || '';
+    if (_usedModel || _usedProvider) {
+      const _modelShort = _usedModel.includes('/') ? _usedModel.split('/').pop() : _usedModel;
+      subText = subText ? subText + '  ·  ' + _modelShort : _modelShort;
+      if (_usedProvider) subText += ' via ' + _usedProvider;
+    }
   } else {
     const key = APP_TITLEBAR_KEYS[panel];
     mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
