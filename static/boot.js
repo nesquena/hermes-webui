@@ -2238,9 +2238,13 @@ function _refreshSystemThemePoll(){
 
 function _installSystemThemeFallbacks(){
   _refreshSystemThemePoll();
-  window.addEventListener('focus',_syncSystemThemeFromMedia);
-  document.addEventListener('visibilitychange',_syncSystemThemeFromMedia);
-  window.addEventListener(_SYSTEM_THEME_PAGESHOW_EVENT,_syncSystemThemeFromMedia);
+  if(typeof window.addEventListener==='function'){
+    window.addEventListener('focus',_syncSystemThemeFromMedia);
+    window.addEventListener(_SYSTEM_THEME_PAGESHOW_EVENT,_syncSystemThemeFromMedia);
+  }
+  if(typeof document.addEventListener==='function'){
+    document.addEventListener('visibilitychange',_syncSystemThemeFromMedia);
+  }
 }
 
 function _removeSystemThemeFallbacks(){
@@ -2248,9 +2252,13 @@ function _removeSystemThemeFallbacks(){
     clearInterval(_systemThemePollTimer);
     _systemThemePollTimer=null;
   }
-  window.removeEventListener('focus',_syncSystemThemeFromMedia);
-  document.removeEventListener('visibilitychange',_syncSystemThemeFromMedia);
-  window.removeEventListener(_SYSTEM_THEME_PAGESHOW_EVENT,_syncSystemThemeFromMedia);
+  if(typeof window.removeEventListener==='function'){
+    window.removeEventListener('focus',_syncSystemThemeFromMedia);
+    window.removeEventListener(_SYSTEM_THEME_PAGESHOW_EVENT,_syncSystemThemeFromMedia);
+  }
+  if(typeof document.removeEventListener==='function'){
+    document.removeEventListener('visibilitychange',_syncSystemThemeFromMedia);
+  }
 }
 
 function _addSystemThemeListener(){
