@@ -19211,6 +19211,7 @@ def _handle_chat_start(handler, body, diag=None):
         )
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
+        gateway_chat_enabled = webui_gateway_chat_enabled(get_config())
         if body.get("moa_config"):
             from api.commands import resolve_moa_config
 
@@ -19218,7 +19219,7 @@ def _handle_chat_start(handler, body, diag=None):
                 moa_config = resolve_moa_config()
             except RuntimeError as e:
                 return bad(handler, str(e), 503)
-            if webui_gateway_chat_enabled(get_config()):
+            if gateway_chat_enabled:
                 requested_model = str(
                     moa_config.get("preset") or moa_config.get("default_preset") or ""
                 ).strip()
@@ -19239,18 +19240,22 @@ def _handle_chat_start(handler, body, diag=None):
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
         # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
+        start_run_kwargs = {
+            "msg": msg,
+            "attachments": attachments,
+            "workspace": workspace,
+            "model": model,
+            "model_provider": model_provider,
+            "normalized_model": normalized_model,
+            "source": "webui",
+            "route": "/api/chat/start",
+            "diag": diag,
+        }
+        if not gateway_chat_enabled and moa_config is not None:
+            start_run_kwargs["moa_config"] = moa_config
         response = _start_run(
             s,
-            msg=msg,
-            attachments=attachments,
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            normalized_model=normalized_model,
-            source="webui",
-            route="/api/chat/start",
-            diag=diag,
-            moa_config=moa_config,
+            **start_run_kwargs,
         )
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically

@@ -199,3 +199,4 @@ def test_moa_gateway_chat_start_routes_to_moa_provider(monkeypatch, tmp_path):
     assert captured["resolve_model"] == ("moa-fast", "moa")
     assert captured["kwargs"]["model"] == "moa-fast"
     assert captured["kwargs"]["model_provider"] == "moa"
+    assert "moa_config" not in captured["kwargs"]
