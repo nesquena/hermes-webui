@@ -203,10 +203,18 @@ def _palette_to_css(palette: dict) -> str:
             continue
         if len(val) > 120:
             continue
+        # Reject IE-only expression() — it evaluates JS in older IE and
+        # contradicts the "no active code in <style>" guarantee.
+        if re.search(r"expression\s*\(", val, re.IGNORECASE):
+            continue
         decls.append(f"--{name}:{val};")
     if not decls:
         return ""
-    return ":root{" + "".join(decls) + "}"
+    # Use both :root and :root.dark so the captured palette wins regardless of
+    # theme mode. _CSS defines :root.dark{…} at specificity (0,0,2,0) which
+    # beats a plain :root{…} (0,0,1,0). By emitting both selectors the override
+    # matches dark-mode specificity and source-order ensures it wins in light too.
+    return ":root,:root.dark{" + "".join(decls) + "}"
 
 
 def render_session_html(session: dict, theme: str = "dark", palette: dict | None = None) -> str:

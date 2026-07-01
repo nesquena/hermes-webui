@@ -41,7 +41,7 @@ def test_palette_to_css_accepts_hex_rgb_and_color_mix() -> None:
         "accent": "rgb(184, 134, 11)",
         "border": "color-mix(in srgb, #000 60%, transparent)",
     })
-    assert out.startswith(":root{")
+    assert out.startswith(":root,:root.dark{")
     assert "--bg:#FAF7F0;" in out
     assert "--accent:rgb(184, 134, 11);" in out
     assert "color-mix" in out
@@ -109,7 +109,7 @@ def test_render_with_palette_appends_override_after_builtin() -> None:
     palette = {"bg": "#FAF7F0", "text": "#1A1610", "accent": "#B8860B"}
     html = render_session_html(_fake_session(), theme="light", palette=palette)
     builtin_pos = html.find(":root{--bg:#FEFCF7")          # light fallback marker
-    override_pos = html.rfind(":root{--bg:#FAF7F0")        # our override
+    override_pos = html.rfind(":root,:root.dark{--bg:#FAF7F0")  # our override
     assert builtin_pos > 0, "light fallback should still be inlined"
     assert override_pos > builtin_pos, (
         "palette override must come AFTER the built-in CSS so it actually wins; "
@@ -128,6 +128,46 @@ def test_render_with_hostile_palette_drops_bad_entries_but_keeps_safe_ones() -> 
     )
     assert "display:none" not in html
     assert "--border:#abc;" in html
+
+
+def test_render_dark_mode_palette_overrides_builtin_dark() -> None:
+    """Regression: captured palette must win in dark mode (the default theme).
+
+    _CSS defines :root.dark{…} at specificity (0,0,2,0).  The palette override
+    must match or beat that specificity so it actually applies when the export is
+    rendered with <html class="dark">.  Without the fix the palette was silently
+    ignored and the export fell back to the generic dark theme.
+    """
+    palette = {"bg": "#112233", "text": "#EEDDCC", "accent": "#FF5500"}
+    html = render_session_html(_fake_session(), theme="dark", palette=palette)
+    # The exported HTML uses dark mode.
+    assert '<html lang="en" class="dark">' in html
+    # The palette override block is present with both selectors.
+    assert ":root,:root.dark{" in html
+    # The captured values appear in the override block (not just the fallback).
+    assert "--bg:#112233;" in html
+    assert "--text:#EEDDCC;" in html
+    assert "--accent:#FF5500;" in html
+    # The override comes AFTER the built-in :root.dark block so source-order wins.
+    builtin_dark_pos = html.find(":root.dark{--bg:#0D0D1A")
+    override_pos = html.find(":root,:root.dark{--bg:#112233")
+    assert builtin_dark_pos > 0
+    assert override_pos > builtin_dark_pos, (
+        "palette override must come after built-in :root.dark so it wins; "
+        f"builtin_dark@{builtin_dark_pos} override@{override_pos}"
+    )
+
+
+def test_palette_to_css_drops_expression_values() -> None:
+    """expression() is IE-only CSS-eval; must be rejected as defense-in-depth."""
+    out = _palette_to_css({
+        "bg": "expression(alert(1))",
+        "fg": "Expression( document.cookie )",
+        "accent": "EXPRESSION(0)",
+        "ok": "#abc",  # legit sibling survives
+    })
+    assert "expression" not in out.lower()
+    assert "--ok:#abc;" in out
 
 
 # ----------------------------------------------------- self-contained images ---
