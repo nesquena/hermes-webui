@@ -50,6 +50,7 @@ def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
                 "space_demo_run",
                 "space_demo_list",
                 "space_demo_run_all",
+                "create_from_session",
             ],
         },
         "model_routing": {

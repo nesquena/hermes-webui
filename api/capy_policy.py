@@ -66,6 +66,7 @@ _PROTECTED_BOUNDARIES = [
     "space_demo_run",
     "space_demo_list",
     "space_demo_run_all",
+    "create_from_session",
 ]
 
 _MODEL_HINT_ORDER = [
