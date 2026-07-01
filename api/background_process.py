@@ -48,6 +48,11 @@ import time
 import uuid
 from typing import Any, Optional
 
+from api.process_event_utils import (
+    completion_delivery_id,
+    mark_async_delegation_record_consumed,
+)
+
 logger = logging.getLogger(__name__)
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
@@ -506,9 +511,9 @@ def _build_payload(evt: dict, session_id: str) -> dict:
       ``(session_id, event_id)`` to dedupe across reconnects.
     """
     # ProcessRegistry completion events use the field name ``session_id`` for
-    # the process id. Alias it locally before exposing it as payload ``task_id``
-    # to avoid confusing that wire-format name with the WebUI session id.
-    process_id = str(evt.get("session_id") or "")
+    # the process id. Async delegation completions carry ``delegation_id``
+    # instead; expose either stable delivery id as payload ``task_id``.
+    process_id = completion_delivery_id(evt)
     payload: dict[str, Any] = {
         "session_id": str(session_id),
         "task_id": process_id,
@@ -852,7 +857,7 @@ def _process_one(evt: dict) -> None:
     except Exception:
         _process_registry = None
 
-    process_id = str(evt.get("session_id") or "")
+    process_id = completion_delivery_id(evt)
     session_key = str(evt.get("session_key") or "")
     # Root-cause fix (t_0f447014): the notify_on_complete completion event
     # enqueued by ProcessRegistry._move_to_finished() carries NO "session_key"
@@ -998,6 +1003,8 @@ def _process_one(evt: dict) -> None:
                 # here cannot cause a double-fire — the atomic claim in
                 # ``claim_deferred_wakeups`` guarantees exactly one delivery.
                 record_deferred_wakeup(session_id, process_id, wakeup_prompt)
+                if evt.get("type") == "async_delegation":
+                    mark_async_delegation_record_consumed(process_id)
                 logger.debug(
                     "server-side wakeup deferred: turn active for session %s "
                     "(persisted for turn-teardown idle-hook redelivery)",
@@ -1015,6 +1022,8 @@ def _process_one(evt: dict) -> None:
                 _start_server_side_wakeup_turn(
                     session_id, wakeup_prompt, process_id=process_id
                 )
+                if evt.get("type") == "async_delegation":
+                    mark_async_delegation_record_consumed(process_id)
     except Exception:
         logger.warning(
             "server-side wakeup dispatch failed for session %s", session_id, exc_info=True
