@@ -21,13 +21,15 @@ def _function_body(src: str, name: str) -> str:
     raise AssertionError(f"function body not found for {name}")
 
 
-def test_steer_fallback_queues_without_interrupting_active_stream():
-    """If real steer is unavailable, /steer must not cancel the current model turn."""
+def test_steer_fallback_preserves_active_stream_without_forcing_interrupt():
+    """Fallbacks must either queue intentionally or restore recovery UI, never cancel the current turn."""
     body = _function_body(COMMANDS_JS, "_trySteer")
 
-    assert "queueSessionMessage" in body, "unaccepted steer text should be kept for a later turn"
+    assert "queueSessionMessage" in body, "gateway/busy fallback should keep text for a later turn"
+    assert "_showSteerRecovery" in body, "explicit legacy steer failure should restore the recovery banner"
+    assert "gateway_steer_unavailable" in body, "gateway unsupported fallback must be explicit"
     assert "cancelStream" not in body, "steer fallback must not interrupt the active stream"
-    assert "cmd_steer_fallback" in body or "busy_steer_fallback" in body
+    assert "steer_leftover_queued" in body or "cmd_steer_fallback" in body or "busy_steer_fallback" in body
 
 
 def test_interrupt_command_still_cancels_active_stream():

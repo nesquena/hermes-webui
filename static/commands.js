@@ -1404,16 +1404,16 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
 /**
  * Shared implementation for /steer and the busy_input_mode='steer' path.
  *
- * Tries the real steer endpoint first. On any non-accept response (no cached
- * agent, agent lacks steer, stream dead, etc.) falls back to queue-only mode:
- * queues the message for the next turn while preserving the active stream.
+ * Tries the real steer endpoint first. A gateway-backed session without a
+ * steer-capable API route queues intentionally for the next turn. Other
+ * explicit /steer failures restore the draft and keep the active stream
+ * running; failed Steer is not implicit permission to Queue or Interrupt.
  *
  * @param {string} msg - The steer text.
  * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
- *   (vs the busy-mode auto-fallback). Toast wording is determined by the
- *   failure reason code.
- * @returns {Promise<boolean>} true when the steer was delivered, false when the
- *   message was queued and the active stream was left untouched.
+ *   (vs the busy-mode auto-fallback).
+ * @returns {Promise<boolean>} true when the steer was delivered, false otherwise
+ *   without interrupting the active stream.
  */
 async function _trySteer(msg, explicitSteer){
   let result=null;
@@ -1423,7 +1423,7 @@ async function _trySteer(msg, explicitSteer){
       body:JSON.stringify({session_id:S.session.session_id,text:msg}),
     });
   }catch(e){
-    // Network or server error — queue without interrupting the active stream.
+    // Network or server error — keep the active stream running and restore the draft.
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
@@ -1435,22 +1435,31 @@ async function _trySteer(msg, explicitSteer){
     showToast(t('cmd_steer_delivered'),2500);
     return true;
   }
-  // Fall back to queue-only mode: preserve the active stream and let
-  // setBusy(false) drain the message after the current turn finishes.
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];
-  if(typeof renderTray==='function')renderTray();
-  // Toast wording differs based on why we're falling back so the user
-  // understands what just happened.
   const reason=(result&&result.fallback)||'unknown';
-  if(explicitSteer){
-    showToast(t('cmd_steer_fallback'),2500);
-  } else if(reason==='no_cached_agent'||reason==='no_active_agent'||reason==='not_running'||reason==='stream_dead'||reason==='gateway_steer_http_error'||reason==='gateway_steer_error'||reason==='gateway_steer_bad_response'){
-    showToast(t('cmd_steer_fallback'),2500);
-  } else {
-    showToast(t('busy_steer_fallback'),3500);
+  const shouldQueue=!explicitSteer||reason==='gateway_steer_unavailable';
+  if(shouldQueue){
+    // Queue-only mode preserves the active stream and lets setBusy(false) drain
+    // the message after the current turn finishes. This is intentional for the
+    // Gateway backend because the API server does not expose live /steer yet.
+    queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+    updateQueueBadge(S.session.session_id);
+    S.pendingFiles=[];
+    if(typeof renderTray==='function')renderTray();
+    const toastKey=reason==='gateway_steer_unavailable'?_steerFailureMessageKey(reason):'steer_leftover_queued';
+    showToast(t(toastKey),explicitSteer?2500:3500);
+    return false;
   }
+  // Do not fall back to interrupt or implicit queue for explicit legacy Steer
+  // failures. Restore the draft so the user can explicitly Queue or Interrupt
+  // if that is what they want next. Pending files remain staged.
+  const inp=$('msg');
+  if(inp){
+    inp.value=explicitSteer?`/steer ${msg}`:msg;
+    if(typeof autoResize==='function')autoResize();
+  }
+  if(typeof renderTray==='function')renderTray();
+  showToast(t(_steerFailureMessageKey(reason)),3500);
+  _showSteerRecovery(msg, explicitSteer, reason);
   return false;
 }
 

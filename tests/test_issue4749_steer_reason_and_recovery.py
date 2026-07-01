@@ -25,8 +25,7 @@ EXPECTED_I18N_KEYS = [
     "steer_fail_stream_dead",
     "steer_fail_steer_error",
     "steer_fail_network_error",
-    "steer_fail_gateway_steer_error",
-    "steer_fail_gateway_steer_bad_response",
+    "steer_fail_gateway_steer_unavailable",
     "steer_fail_unknown",
     "steer_recovery_retry",
     "steer_recovery_dismiss",
@@ -39,8 +38,7 @@ BACKEND_CODES = {
     "not_running",
     "stream_dead",
     "steer_error",
-    "gateway_steer_error",
-    "gateway_steer_bad_response",
+    "gateway_steer_unavailable",
 }
 
 FRONTEND_NETWORK_CODE = "network_error"
@@ -73,8 +71,7 @@ def test_reason_map_contract():
             steer_fail_stream_dead: 'x',
             steer_fail_steer_error: 'x',
             steer_fail_network_error: 'x',
-            steer_fail_gateway_steer_error: 'x',
-            steer_fail_gateway_steer_bad_response: 'x',
+            steer_fail_gateway_steer_unavailable: 'x',
             steer_fail_unknown: 'x',
         }};
 
@@ -86,8 +83,8 @@ def test_reason_map_contract():
 
         const codes = [
             'no_cached_agent', 'agent_lacks_steer', 'session_not_found',
-            'not_running', 'stream_dead', 'steer_error', 'gateway_steer_error',
-            'gateway_steer_bad_response', 'network_error',
+            'not_running', 'stream_dead', 'steer_error', 'gateway_steer_unavailable',
+            'network_error',
         ];
         let ok = true;
         for (const c of codes) {

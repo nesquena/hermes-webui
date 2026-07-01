@@ -17,7 +17,6 @@ emitted so the frontend can queue the leftover text as a next-turn message.
 """
 import sys
 import os
-import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -127,22 +126,15 @@ class TestHandleChatSteerFallbacks:
         assert body["accepted"] is False
         assert body["fallback"] == "no_cached_agent"
 
-    def test_gateway_backend_without_local_agent_relays_to_gateway_steer(self, _clear_caches):
+    def test_gateway_backend_without_local_agent_reports_unsupported(self, _clear_caches):
         from api.streaming import _handle_chat_steer
         handler = _make_handler()
-        with (
-            patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=True),
-            patch("api.gateway_chat.gateway_steer_session", return_value={
-                "accepted": False,
-                "fallback": "no_active_agent",
-                "session_id": "sid_gateway",
-            }) as steer,
-        ):
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=True):
             _handle_chat_steer(handler, {"session_id": "sid_gateway", "text": "hint"})
-        steer.assert_called_once_with("sid_gateway", "hint")
         body = _captured_response(handler)
         assert body["accepted"] is False
-        assert body["fallback"] == "no_active_agent"
+        assert body["fallback"] == "gateway_steer_unavailable"
+        assert body["stream_id"] is None
 
     def test_agent_lacks_steer_method(self, _clear_caches):
         from api.streaming import _handle_chat_steer
@@ -302,11 +294,10 @@ class TestFrontendWiring:
 
     def test_try_steer_has_noninterrupting_fallback_toasts(self):
         idx = self.cmds.find("async function _trySteer(")
-        body = self.cmds[idx:idx + 2200]
-        assert "gateway_backend_unsupported" not in body
-        assert "no_active_agent" in body
-        assert "gateway_steer_http_error" in body
-        assert "cmd_steer_fallback" in body
+        body = self.cmds[idx:idx + 2600]
+        assert "gateway_steer_unavailable" in body
+        assert "steer_leftover_queued" in body
+        assert "_showSteerRecovery" in body
 
     def test_send_busy_steer_uses_try_steer(self):
         # send() in messages.js: when busyMode === 'steer', should call _trySteer

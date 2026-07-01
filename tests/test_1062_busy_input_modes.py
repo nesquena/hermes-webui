@@ -108,7 +108,7 @@ class TestSlashCommandHandlers:
         helper_body = COMMANDS_JS[helper_idx:helper_idx + 2200]
         assert "queueSessionMessage" in helper_body
         assert "cancelStream" not in helper_body
-        assert "cmd_steer_fallback" in helper_body or "busy_steer_fallback" in helper_body
+        assert "steer_leftover_queued" in helper_body or "cmd_steer_fallback" in helper_body or "busy_steer_fallback" in helper_body
 
 
 # ── send() busy branch ───────────────────────────────────────────────────

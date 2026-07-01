@@ -9699,19 +9699,20 @@ def _handle_chat_steer(handler, body: dict) -> bool:
             logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
     if not cached:
         try:
-            from api.gateway_chat import gateway_steer_session, webui_gateway_chat_enabled
+            from api.gateway_chat import webui_gateway_chat_enabled
 
             if webui_gateway_chat_enabled():
-                result = gateway_steer_session(sid, text)
-                if isinstance(result, dict):
-                    return j(handler, result)
-                return j(handler, {"accepted": False, "fallback": "gateway_steer_bad_response",
+                # Hermes Gateway API server does not currently expose a steer route
+                # or a path-addressed live-agent registry. Fail explicitly so the
+                # frontend can queue intentionally instead of POSTing to a guaranteed 404.
+                return j(handler, {"accepted": False, "fallback": "gateway_steer_unavailable",
                                    "stream_id": None})
         except Exception:
-            logger.debug("Failed to forward gateway-backed chat steer", exc_info=True)
-            return j(handler, {"accepted": False, "fallback": "gateway_steer_error",
+            logger.debug("Failed to inspect gateway-backed chat steer availability", exc_info=True)
+            return j(handler, {"accepted": False, "fallback": "gateway_steer_unavailable",
                                "stream_id": None})
-        # No active local agent for this session — caller falls back to queue-only mode
+        # No active local agent for this session — caller restores the steer draft
+        # without interrupting the active run.
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
                            "stream_id": None})
     agent = cached[0]
