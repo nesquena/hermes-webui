@@ -19,7 +19,7 @@ Capy Memory Tree enables:
 - **Summary tree:** sealed summary nodes for source/topic/global/space scopes.
 - **Freshness:** stale/ok/error status per source plus last ingest/check metadata.
 - **Provenance:** every snippet points back to a source reference, line range, event id, or artifact path.
-- **Safety:** raw generated widget bodies, `renderer`/`html`/`script`/`source`/`data`/API-auth fields, raw prompts, credentials, and secret-looking sentinels never enter public memory snippets.
+- **Safety:** raw generated widget bodies, `renderer`/`html`/`script`/`source`/`data`/API-auth fields, raw prompts, credentials, and secret-looking sentinels never enter public memory snippets; ignored GitHub advisory IDs, version ranges, and raw URLs are omitted from persisted vault/search/public output rather than treated as persisted content.
 - **Spaces integration:** Space detail and creator preview can show relevant memory slices with citations and redaction status.
 
 ## Non-goals
@@ -32,7 +32,9 @@ Capy Memory Tree enables:
 
 ## Current source-refresh ingestion boundary
 
-The implemented refresh worker is intentionally narrow. It may ingest safe HTML/plain/Markdown, RSS/Atom, JSON Feed, and allow-listed GitHub API metadata only after the source origin is explicitly allowed. GitHub API refreshes are exact-shape parsers, not generic JSON fallbacks: supported metadata shapes include issue/PR (`/repos/{owner}/{repo}/{issues|pulls}/{number}`), repository (`/repos/{owner}/{repo}`), release (`/repos/{owner}/{repo}/releases/{id}`), branch and branch lists, repository languages, tag lists, workflow/workflow-run/workflow-job metadata, GitHub Actions workflow permissions (`/repos/{owner}/{repo}/actions/permissions/workflow`), workflow-run deployment approval history (`/repos/{owner}/{repo}/actions/runs/{run_id}/approvals`), check runs (`/repos/{owner}/{repo}/commits/{sha}/check-runs`), deployment lists (`/repos/{owner}/{repo}/deployments`), deployment status lists (`/repos/{owner}/{repo}/deployments/{deployment_id}/statuses`), PR file lists, issue/PR comments, contributors, commit, and commit-list metadata. Workflow-permission summaries are reconstructed only from repository path, default permission level, and pull-request-review approval boolean. Workflow-run approval summaries are reconstructed only from repository path, run id, approval count, allow-listed approval state, actor login, environment names, and timestamps. Deployment-status summaries are reconstructed only from repository path, deployment id, status counts/states, bounded status ids/environments/creator logins, and timestamps. Raw bodies, descriptions, payloads, target/log/status/environment URLs, API-auth fields, prompts, scripts, renderer/source fields, and secret-looking values stay out of vault Markdown, search results, and public receipts. For `api.github.com/repos/...` origins whose path matches a supported family, malformed payloads fail closed instead of falling through to JSON Feed or generic JSON summaries.
+GitHub Pages latest-build refresh supports only the exact `https://api.github.com/repos/{owner}/{repo}/pages/builds/latest` endpoint. It persists a metadata-only summary from allow-listed fields and ignores raw `url`, pusher URL/profile fields such as `avatar_url`, and error body text; raw body/API-auth/prompt/script/renderer/source/data/html/secret-looking content must not enter vault, search, or public output.
+
+The implemented refresh worker is intentionally narrow. It may ingest safe HTML/plain/Markdown, RSS/Atom, JSON Feed, and allow-listed GitHub API metadata only after the source origin is explicitly allowed. GitHub API refreshes are exact-shape parsers, not generic JSON fallbacks: supported metadata shapes include issue/PR (`/repos/{owner}/{repo}/{issues|pulls}/{number}`), repository (`/repos/{owner}/{repo}`), release (`/repos/{owner}/{repo}/releases/{id}`), branch and branch lists, repository languages, tag lists, workflow/workflow-run/workflow-job metadata, GitHub Actions workflow permissions (`/repos/{owner}/{repo}/actions/permissions/workflow`), workflow-run deployment approval history (`/repos/{owner}/{repo}/actions/runs/{run_id}/approvals`), environment private-name and public-key metadata (`/repos/{owner}/{repo}/environments/{environment_name}/secrets` and `/repos/{owner}/{repo}/environments/{environment_name}/secrets/public-key`), check runs (`/repos/{owner}/{repo}/commits/{sha}/check-runs`), deployment lists (`/repos/{owner}/{repo}/deployments`), deployment status lists (`/repos/{owner}/{repo}/deployments/{deployment_id}/statuses`), PR file lists, issue/PR comments, contributors, commit, and commit-list metadata. Workflow-permission summaries are reconstructed only from repository path, default permission level, and pull-request-review approval boolean. Workflow-run approval summaries are reconstructed only from repository path, run id, approval count, allow-listed approval state, actor login, environment names, and timestamps. Environment public-key summaries are reconstructed only from repository path, environment name, and safe key id; raw key material is omitted. Deployment-status summaries are reconstructed only from repository path, deployment id, status counts/states, bounded status ids/environments/creator logins, and timestamps. Dependabot single-alert summaries are reconstructed only from the route alert number, state, dependency ecosystem/package/manifest, and severity; ignored advisory IDs, version ranges, and raw URLs from realistic GitHub alert objects are omitted from vault Markdown, search results, and public receipts. Dependabot single-alert due requeues preserve hidden clean canonical fetch origins only for exact safe routes, while legacy rows with unsafe raw candidates fail closed to local `capy-memory://...` labels. Raw bodies, descriptions, payloads, target/log/status/environment URLs, API-auth fields, prompts, scripts, renderer/source fields, and secret-looking values stay out of vault Markdown, search results, and public receipts. For `api.github.com/repos/...` origins whose path matches a supported family, JSON Feed/generic bypass attempts, route mismatches, malformed origins/payloads, and hostile prompt/script/secret/API-auth markers fail closed instead of falling through to generic summaries.
 
 ## Relationship to existing systems
 
@@ -284,7 +286,7 @@ All public responses must remain metadata-only, bounded, and redacted.
 
 Still future / not complete:
 
-- A production refresh worker that consumes queued `source.refresh` jobs.
+- Broader production hardening for `source.refresh` workers beyond the current metadata-only allow-listed ingestion boundary.
 - Direct route(s) for controlled artifact ingestion only if they preserve the same metadata-only canonicalization boundary.
 - Automatic ingestion hooks at live Spaces revision/widget/repair/visual-QA boundaries.
 
@@ -300,7 +302,7 @@ Still future / not complete:
 
 - Run-all smoke receipt: compact `Memory/context` or compaction status checklist.
 - Per-action prompt-preflight status around high-risk memory/source boundaries.
-- Product-visible automated source refresh results after a refresh worker exists.
+- Product-visible automated source refresh results beyond current metadata-only catalog/search surfaces.
 
 UI requirements remain:
 

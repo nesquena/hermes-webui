@@ -64,6 +64,67 @@ _MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
 _MESSAGING_SESSION_METADATA_LOCK = threading.Lock()
 _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
 
+_SOURCE_REFRESH_PROGRESS_CREATED_AT_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z"
+)
+_SOURCE_REFRESH_PROGRESS_TYPES = ("run.started", "run.completed")
+
+
+def _sanitize_source_refresh_progress_event(
+    progress_event,
+    *,
+    expected_run_id: str,
+    safe_public_id,
+):
+    if not isinstance(progress_event, dict):
+        return None
+    event_type = str(progress_event.get("event_type") or "").strip().lower()
+    family = str(progress_event.get("family") or "").strip().lower()
+    run_id = safe_public_id(progress_event.get("run_id"), fallback="")
+    event_id = safe_public_id(progress_event.get("event_id"), fallback="")
+    created_at = str(progress_event.get("created_at") or "").strip()
+    safe_created_at = created_at if _SOURCE_REFRESH_PROGRESS_CREATED_AT_RE.fullmatch(created_at) else ""
+    if (
+        event_type in _SOURCE_REFRESH_PROGRESS_TYPES
+        and family == "run"
+        and run_id == expected_run_id
+        and event_id
+        and safe_created_at
+        and progress_event.get("redaction_status") == "metadata_only"
+    ):
+        return {
+            "stored": progress_event.get("stored") is True,
+            "queued": progress_event.get("queued") is True,
+            "event_id": event_id,
+            "event_type": event_type,
+            "family": family,
+            "run_id": run_id,
+            "created_at": safe_created_at,
+            "redaction_status": "metadata_only",
+        }
+    return None
+
+
+def _sanitize_source_refresh_progress_events(
+    progress_events,
+    *,
+    expected_run_id: str,
+    safe_public_id,
+):
+    raw_events = progress_events if isinstance(progress_events, list) else []
+    safe_events = []
+    for expected_type in _SOURCE_REFRESH_PROGRESS_TYPES:
+        for raw_event in raw_events:
+            safe_event = _sanitize_source_refresh_progress_event(
+                raw_event,
+                expected_run_id=expected_run_id,
+                safe_public_id=safe_public_id,
+            )
+            if safe_event and safe_event["event_type"] == expected_type:
+                safe_events.append(safe_event)
+                break
+    return safe_events if [event.get("event_type") for event in safe_events] == list(_SOURCE_REFRESH_PROGRESS_TYPES) else []
+
 
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
 #
@@ -3210,7 +3271,10 @@ def handle_get(handler, parsed) -> bool:
             qs = parse_qs(parsed.query)
             query = (qs.get("q") or qs.get("query") or [""])[0]
             space_id = _query_alias_value(qs, "space_id", "spaceId")
-            limit = int((qs.get("limit") or [10])[0] or 10)
+            try:
+                limit = int((qs.get("limit") or [10])[0] or 10)
+            except (TypeError, ValueError):
+                return bad(handler, "invalid limit", status=400)
             return j(handler, search_memory(query, space_id=space_id or None, limit=limit))
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
@@ -3776,7 +3840,9 @@ def handle_get(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
             return j(handler, {"enabled": False, "spaces": []})
-        return j(handler, {"enabled": True, "spaces": capy_spaces.list_spaces()})
+        result = capy_spaces.run_space_tool("space.list", {})
+        result["enabled"] = True
+        return j(handler, result)
 
     if parsed.path == "/api/spaces/demo/runs":
         from api import spaces as capy_spaces
@@ -3797,7 +3863,11 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         try:
             session = get_session(session_id)
-            return j(handler, capy_spaces.current_space_for_session(session))
+            current_space_id = str(getattr(session, "active_space_id", "") or "").strip()
+            tool_input = {"current_space_id": current_space_id} if current_space_id else {}
+            result = capy_spaces.run_space_tool("space.current", tool_input)
+            result["enabled"] = True
+            return j(handler, result)
         except KeyError:
             return bad(handler, "Session not found", 404)
         except ValueError as e:
@@ -3821,7 +3891,7 @@ def handle_get(handler, parsed) -> bool:
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
-            return j(handler, {"space": capy_spaces.read_space_detail(space_id)})
+            return j(handler, capy_spaces.run_space_tool("space.get", {"space_id": space_id}))
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:
@@ -3840,7 +3910,7 @@ def handle_get(handler, parsed) -> bool:
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
-            return j(handler, {"revisions": capy_spaces.list_revision_events(space_id, limit=limit)})
+            return j(handler, capy_spaces.run_space_tool("space.revisions", {"space_id": space_id, "limit": limit}))
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:
@@ -3874,7 +3944,7 @@ def handle_get(handler, parsed) -> bool:
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
-            return j(handler, {"widgets": capy_spaces.list_widgets(space_id)})
+            return j(handler, capy_spaces.run_space_tool("space.widget.list", {"space_id": space_id}))
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:
@@ -3894,7 +3964,10 @@ def handle_get(handler, parsed) -> bool:
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
-            return j(handler, {"events": capy_spaces.list_widget_events(space_id, widget_id=widget_id or None, limit=limit)})
+            tool_input = {"space_id": space_id, "limit": limit}
+            if widget_id:
+                tool_input["widget_id"] = widget_id
+            return j(handler, capy_spaces.run_space_tool("space.widget.events", tool_input))
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:
@@ -3913,7 +3986,13 @@ def handle_get(handler, parsed) -> bool:
         if not space_id or not widget_id:
             return bad(handler, "Missing space_id or widget_id")
         try:
-            return j(handler, {"widget": capy_spaces.read_widget_detail(space_id, widget_id)})
+            return j(
+                handler,
+                capy_spaces.run_space_tool(
+                    "space.widget.read",
+                    {"space_id": space_id, "widget_id": widget_id},
+                ),
+            )
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:
@@ -4385,6 +4464,12 @@ def handle_post(handler, parsed) -> bool:
             receipt.pop(key, None)
         return receipt
 
+    def _capy_spaces_create_from_session_receipt(session):
+        return {
+            "session_id": session.session_id,
+            "active_space_id": session.active_space_id,
+        }
+
     if parsed.path == "/api/capy-policy/preflight":
         try:
             from api.capy_policy import prompt_preflight
@@ -4412,9 +4497,12 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/capy-memory/source/refresh/scheduled":
         try:
             from api.capy_memory import (
+                _align_source_refresh_output_compaction_preflight_status,
+                _memory_advisory_envelope,
                 _safe_public_id,
                 _safe_source_refresh_public_jobs,
                 _safe_source_refresh_public_output_compaction,
+                _source_refresh_prompt_preflight_receipt,
                 scheduled_source_refresh_tick,
             )
 
@@ -4424,7 +4512,8 @@ def handle_post(handler, parsed) -> bool:
                 limit = 25
             limit = max(1, min(limit, 25))
             result = scheduled_source_refresh_tick(limit=limit)
-            safe_payload = {}
+            prompt_preflight = _source_refresh_prompt_preflight_receipt([])
+            safe_payload = {"memory_advisory": _memory_advisory_envelope(), "prompt_preflight": prompt_preflight}
             if isinstance(result, dict):
                 for key in ("ok", "metadata_only", "local_only"):
                     if result.get(key) is True:
@@ -4437,6 +4526,10 @@ def handle_post(handler, parsed) -> bool:
                 if "queue_jobs" in result:
                     safe_payload["queue_jobs"] = _safe_source_refresh_public_jobs(result.get("queue_jobs"), limit=limit)
                 safe_payload["jobs"] = _safe_source_refresh_public_jobs(result.get("jobs", []), limit=limit)
+                prompt_preflight = _source_refresh_prompt_preflight_receipt(
+                    list(safe_payload.get("queue_jobs", [])) + list(safe_payload.get("jobs", []))
+                )
+                safe_payload["prompt_preflight"] = prompt_preflight
                 policy = result.get("autonomy_policy")
                 if isinstance(policy, dict) and policy.get("action") == "capy.memory.refresh.scheduled":
                     safe_policy = {
@@ -4456,6 +4549,7 @@ def handle_post(handler, parsed) -> bool:
                             "local_only",
                         }
                     }
+                    safe_policy["prompt_preflight_status"] = prompt_preflight["status"]
                     route_resolution = policy.get("model_route_resolution")
                     if isinstance(route_resolution, dict) and route_resolution.get("metadata_only") is True:
                         from api.capy_policy import safe_model_route_field
@@ -4480,33 +4574,26 @@ def handle_post(handler, parsed) -> bool:
                     safe_payload["autonomy_policy"] = safe_policy
                 output_compaction = _safe_source_refresh_public_output_compaction(result.get("output_compaction"))
                 if output_compaction:
-                    safe_payload["output_compaction"] = output_compaction
-                progress_event = result.get("progress_event")
-                if isinstance(progress_event, dict):
-                    event_type = str(progress_event.get("event_type") or "").strip().lower()
-                    family = str(progress_event.get("family") or "").strip().lower()
-                    run_id = _safe_public_id(progress_event.get("run_id"), fallback="")
-                    event_id = _safe_public_id(progress_event.get("event_id"), fallback="")
-                    created_at = str(progress_event.get("created_at") or "").strip()
-                    safe_created_at = created_at if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z", created_at) else ""
-                    if (
-                        event_type == "run.completed"
-                        and family == "run"
-                        and run_id == "source-refresh.scheduled"
-                        and event_id
-                        and safe_created_at
-                        and progress_event.get("redaction_status") == "metadata_only"
-                    ):
-                        safe_payload["progress_event"] = {
-                            "stored": progress_event.get("stored") is True,
-                            "queued": progress_event.get("queued") is True,
-                            "event_id": event_id,
-                            "event_type": event_type,
-                            "family": family,
-                            "run_id": run_id,
-                            "created_at": safe_created_at,
-                            "redaction_status": "metadata_only",
-                        }
+                    safe_payload["output_compaction"] = _align_source_refresh_output_compaction_preflight_status(
+                        output_compaction,
+                        prompt_preflight["status"],
+                    )
+                safe_progress_events = _sanitize_source_refresh_progress_events(
+                    result.get("progress_events"),
+                    expected_run_id="source-refresh.scheduled",
+                    safe_public_id=_safe_public_id,
+                )
+                if safe_progress_events:
+                    safe_payload["progress_events"] = safe_progress_events
+                    safe_payload["progress_event"] = safe_progress_events[-1]
+                else:
+                    legacy_progress_event = _sanitize_source_refresh_progress_event(
+                        result.get("progress_event"),
+                        expected_run_id="source-refresh.scheduled",
+                        safe_public_id=_safe_public_id,
+                    )
+                    if legacy_progress_event and legacy_progress_event.get("event_type") == "run.completed":
+                        safe_payload["progress_event"] = legacy_progress_event
             j(handler, safe_payload)
             return True
         except ValueError as exc:
@@ -4518,9 +4605,11 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/capy-memory/source/refresh":
         try:
             from api.capy_memory import (
+                _memory_advisory_envelope,
                 _record_manual_source_refresh_progress,
                 _safe_public_id,
                 _source_refresh_output_compaction_receipt,
+                _source_refresh_prompt_preflight_receipt,
                 run_source_refresh_jobs,
             )
 
@@ -4570,19 +4659,8 @@ def handle_post(handler, parsed) -> bool:
             except (TypeError, ValueError):
                 processed = 0
             processed = max(0, min(processed, limit))
-            preflight_statuses = [
-                job.get("prompt_preflight", {}).get("status")
-                for job in safe_jobs
-                if isinstance(job.get("prompt_preflight"), dict)
-            ]
-            if "block" in preflight_statuses:
-                route_preflight_status = "block"
-            elif "warn" in preflight_statuses:
-                route_preflight_status = "warn"
-            elif "pass" in preflight_statuses:
-                route_preflight_status = "pass"
-            else:
-                route_preflight_status = "required"
+            prompt_preflight = _source_refresh_prompt_preflight_receipt(safe_jobs)
+            route_preflight_status = prompt_preflight["status"]
             from api.capy_policy import action_policy_receipt
 
             policy = action_policy_receipt(
@@ -4592,47 +4670,31 @@ def handle_post(handler, parsed) -> bool:
                 model_route_hint="hint:summarize",
             )
             command = "capy.memory.refresh_one" if target_source_id else "capy.memory.refresh"
-            progress_event = _record_manual_source_refresh_progress()
-            safe_progress_event = None
-            if isinstance(progress_event, dict):
-                event_type = str(progress_event.get("event_type") or "").strip().lower()
-                family = str(progress_event.get("family") or "").strip().lower()
-                run_id = _safe_public_id(progress_event.get("run_id"), fallback="")
-                event_id = _safe_public_id(progress_event.get("event_id"), fallback="")
-                created_at = str(progress_event.get("created_at") or "").strip()
-                safe_created_at = created_at if _capy_refresh_re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z", created_at) else ""
-                if (
-                    event_type == "run.completed"
-                    and family == "run"
-                    and run_id == "source-refresh.manual"
-                    and event_id
-                    and safe_created_at
-                    and progress_event.get("redaction_status") == "metadata_only"
-                ):
-                    safe_progress_event = {
-                        "stored": progress_event.get("stored") is True,
-                        "queued": progress_event.get("queued") is True,
-                        "event_id": event_id,
-                        "event_type": event_type,
-                        "family": family,
-                        "run_id": run_id,
-                        "created_at": safe_created_at,
-                        "redaction_status": "metadata_only",
-                    }
+            progress_events = _record_manual_source_refresh_progress()
+            safe_progress_events = _sanitize_source_refresh_progress_events(
+                progress_events,
+                expected_run_id="source-refresh.manual",
+                safe_public_id=_safe_public_id,
+            )
+            safe_progress_event = safe_progress_events[-1] if safe_progress_events else None
             response_payload = {
                 "ok": True,
                 "processed": processed,
                 "jobs": safe_jobs,
+                "prompt_preflight": prompt_preflight,
+                "memory_advisory": _memory_advisory_envelope(),
                 "autonomy_policy": policy,
                 "output_compaction": _source_refresh_output_compaction_receipt(
                     command=command,
                     processed=processed,
                     jobs=safe_jobs,
                     policy=policy,
+                    progress_events=safe_progress_events,
                     target_source_id=target_source_id or None,
                 ),
             }
             if safe_progress_event:
+                response_payload["progress_events"] = safe_progress_events
                 response_payload["progress_event"] = safe_progress_event
             if target_source_id:
                 response_payload["target_source_id"] = target_source_id
@@ -5474,18 +5536,34 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Missing session_id")
             s = get_session(session_id)
             created = capy_spaces.create_space_from_session_metadata(s)
-            space_id = capy_spaces.validate_space_id(created["space_id"])
+            created_space = created.get("space") if isinstance(created, dict) else None
+            if not isinstance(created_space, dict):
+                created_space = created
+            space_id = capy_spaces.validate_space_id(created_space["space_id"])
             with _get_session_agent_lock(session_id):
                 s.active_space_id = space_id
                 s.save()
-            return j(
-                handler,
-                {
-                    "ok": True,
-                    "space": capy_spaces.read_space_detail(space_id),
-                    "session": _capy_spaces_session_receipt(s),
-                },
-            )
+            response_space = capy_spaces.read_space_detail(space_id)
+            if isinstance(response_space, dict):
+                response_space["widget_count"] = len(response_space.get("widgets") or [])
+            session_receipt = _capy_spaces_create_from_session_receipt(s)
+            response = {
+                "ok": True,
+                "space": response_space,
+                "session": session_receipt,
+            }
+            if isinstance(created, dict):
+                for key in (
+                    "prompt_preflight",
+                    "autonomy_policy",
+                    "memory_advisory",
+                    "progress_event",
+                    "progress_events",
+                    "output_compaction",
+                ):
+                    if key in created:
+                        response[key] = created[key]
+            return j(handler, response)
         except KeyError:
             return bad(handler, "Session not found", 404)
         except RuntimeError as e:
@@ -6082,11 +6160,24 @@ def handle_post(handler, parsed) -> bool:
             if not space_id or not session_id:
                 return bad(handler, "Missing space_id or session_id")
             capy_spaces.read_space(space_id)
+            validated_space_id = capy_spaces.validate_space_id(space_id)
             s = get_session(session_id)
+            progress_started = capy_spaces.start_active_space_lifecycle_receipt(
+                "space.activate",
+                space_id=validated_space_id,
+            )
             with _get_session_agent_lock(session_id):
-                s.active_space_id = capy_spaces.validate_space_id(space_id)
+                s.active_space_id = validated_space_id
                 s.save()
-            return j(handler, {"ok": True, "session": _capy_spaces_session_receipt(s)})
+            response = {"ok": True, "session": _capy_spaces_session_receipt(s)}
+            response.update(
+                capy_spaces.active_space_lifecycle_receipts(
+                    "space.activate",
+                    space_id=validated_space_id,
+                    progress_started=progress_started,
+                )
+            )
+            return j(handler, response)
         except ValueError as e:
             return bad(handler, str(e))
         except (FileNotFoundError, KeyError):
@@ -6106,9 +6197,22 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(session_id):
+            previous_active_space_id = getattr(s, "active_space_id", None)
+            progress_started = capy_spaces.start_active_space_lifecycle_receipt(
+                "space.deactivate",
+                space_id=previous_active_space_id,
+            )
             s.active_space_id = None
             s.save()
-        return j(handler, {"ok": True, "session": _capy_spaces_session_receipt(s)})
+        response = {"ok": True, "session": _capy_spaces_session_receipt(s)}
+        response.update(
+            capy_spaces.active_space_lifecycle_receipts(
+                "space.deactivate",
+                space_id=previous_active_space_id,
+                progress_started=progress_started,
+            )
+        )
+        return j(handler, response)
 
     if parsed.path == "/api/workspaces/reorder":
         return _handle_workspace_reorder(handler, body)
