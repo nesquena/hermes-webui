@@ -3,6 +3,15 @@ import json
 from api.session_recovery import audit_session_recovery, repair_safe_session_recovery
 
 
+EXPECTED_MEMORY_ADVISORY = {
+    "metadata_only": True,
+    "advisory_context": True,
+    "context_authority": "untrusted_advisory",
+    "can_bypass_safety_gates": False,
+    "required_gates": ["prompt_preflight", "approval", "sandbox_preview", "visual_qa", "rollback_recovery"],
+}
+
+
 def _write_session(session_dir, sid, messages=1):
     path = session_dir / f"{sid}.json"
     path.write_text(
@@ -56,6 +65,7 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert progress["family"] == "tool"
     assert progress["run_id"] == "session.recovery.repair_safe"
     assert progress["redaction_status"] == "metadata_only"
+    assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
     compaction = result["output_compaction"]
     assert compaction["tool"] == "capy-session-recovery"
     assert compaction["command"] == "session.recovery.repair_safe"
@@ -64,6 +74,10 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert "repair_status: clean" in compaction["text"]
     assert "repaired_sessions: 1" in compaction["text"]
     assert "approval_required: yes" in compaction["text"]
+    assert "advisory_context: true" in compaction["text"]
+    assert "context_authority: untrusted_advisory" in compaction["text"]
+    assert "can_bypass_safety_gates: false" in compaction["text"]
+    assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in compaction["text"]
     assert live.exists()
     assert audit_session_recovery(tmp_path)["status"] == "ok"
     idx = json.loads(index.read_text(encoding="utf-8"))
@@ -90,6 +104,7 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
             "prompt_preflight": result["prompt_preflight"],
             "autonomy_policy": result["autonomy_policy"],
             "progress_event": result["progress_event"],
+            "memory_advisory": result["memory_advisory"],
             "output_compaction": result["output_compaction"],
         },
         sort_keys=True,
@@ -99,10 +114,15 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
     assert result["progress_event"]["event_type"] == "tool.failed"
     assert result["progress_event"]["run_id"] == "session.recovery.repair_safe"
     assert result["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
     compaction = result["output_compaction"]
     assert compaction["exit_status"] == 1
     assert "repair_status: manual_review_required" in compaction["text"]
     assert "unsafe_remaining: 1" in compaction["text"]
+    assert "advisory_context: true" in compaction["text"]
+    assert "context_authority: untrusted_advisory" in compaction["text"]
+    assert "can_bypass_safety_gates: false" in compaction["text"]
+    assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in compaction["text"]
     assert str(tmp_path).lower() not in serialized_receipts
     assert "secret" not in serialized_receipts
     assert "api_key" not in serialized_receipts
