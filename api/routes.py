@@ -5433,6 +5433,60 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     return model, None
 
 
+def _validate_resolved_model(model: str, model_provider: str | None) -> str:
+    """Fall back to the provider's default model if the resolved model is unknown.
+
+    The fast path in _resolve_compatible_session_model_state passes bare model
+    ids through without checking them against the model catalog. A truncated or
+    stale id (e.g. "e2b" instead of "gemma4:e2b") would be sent to the upstream
+    API and cause a 404. This guard checks the resolved model against the **same
+    catalog the model picker uses** (config.yaml models + _PROVIDER_MODELS static
+    fallback + live-discovered ids). If not found, returns the provider's default.
+
+    Only validates configured providers that appear in the picker catalog.
+    Cloud providers (openai, anthropic, openrouter, ...) and anything not in
+    the catalog pass through untouched.
+    """
+    if not model:
+        return model
+    _requested = str(model_provider or "").strip().lower()
+    if not _requested:
+        return model
+    try:
+        from api.config import get_available_models
+        catalog = get_available_models(prefer_cache=True)
+    except Exception:
+        return model
+    if not isinstance(catalog, dict):
+        return model
+    groups = catalog.get("groups", [])
+    if not isinstance(groups, list):
+        return model
+    _normalized = str(model).strip().lower()
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        group_provider = str(group.get("provider_id") or "").strip().lower()
+        # Match by provider key — only validate local/custom providers
+        if group_provider != _requested:
+            continue
+        # Provider found in catalog — check if model is in its model list
+        for m in group.get("models", []):
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("id") or "").strip().lower()
+            if mid == _normalized:
+                return model  # model is valid — pass through
+        # Model not found — use this provider's first model as fallback
+        _models = group.get("models", [])
+        if _models and isinstance(_models[0], dict):
+            _fallback = _models[0].get("id", "")
+            if _fallback:
+                return _fallback
+        break  # provider matched but empty catalog — don't fall through to global
+    return model
+
+
 def _model_matches_configured_default(
     session_model: str | None,
     cfg_default: str | None,
@@ -19226,6 +19280,12 @@ def _handle_chat_start(handler, body, diag=None):
             profile_default_model=_pp_default,
             explicit_model_pick=explicit_model_pick,
         )
+        # Validate the resolved model against configured providers. A truncated
+        # or malformed id (e.g. "e2b" from "gemma4:e2b" after a frontend ":"
+        # split) passes through _resolve_compatible_session_model_state's fast
+        # path without validation and would 404 at the upstream API. Fall back
+        # to the configured default when the model is not known.
+        model = _validate_resolved_model(model, model_provider)
         # NOTE: runtime-adapter selection is delegated to _start_run (shared
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
