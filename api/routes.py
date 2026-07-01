@@ -44,6 +44,7 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
+from api.shares import create_or_refresh_share, load_share, revoke_share
 
 logger = logging.getLogger(__name__)
 
@@ -10541,6 +10542,17 @@ def handle_get(handler, parsed) -> bool:
         except Exception as exc:
             return _serve_shell_unavailable(handler, exc)
 
+    if parsed.path == "/share" or parsed.path.startswith("/share/"):
+        share_path = (Path(__file__).parent.parent / "static" / "share.html").resolve()
+        return t(
+            handler,
+            share_path.read_text(encoding="utf-8"),
+            content_type="text/html; charset=utf-8",
+            extra_headers={
+                "X-Robots-Tag": "noindex, nofollow",
+            },
+        )
+
     if parsed.path == "/login":
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
@@ -10650,6 +10662,20 @@ def handle_get(handler, parsed) -> bool:
             "passkey_feature_flag": passkey_flag,
             "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
         })
+
+    if parsed.path.startswith("/api/share/"):
+        token = parsed.path[len("/api/share/"):].strip()
+        share = load_share(token)
+        if not share:
+            return bad(handler, "Shared conversation not found", 404)
+        return j(
+            handler,
+            {"share": share},
+            extra_headers={
+                "Cache-Control": "no-store",
+                "X-Robots-Tag": "noindex, nofollow",
+            },
+        )
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
@@ -12409,6 +12435,65 @@ def handle_post(handler, parsed) -> bool:
         prompts.append(new_prompt)
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True, "prompt": new_prompt})
+
+    if parsed.path == "/api/share/create":
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        try:
+            session = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        active_profile = _get_active_profile_name()
+        if not _profiles_match(getattr(session, "profile", None), active_profile):
+            return bad(handler, "Session not found", 404)
+        try:
+            share_meta = create_or_refresh_share(session)
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        session = _ensure_full_session_before_mutation(sid, session)
+        session.share_token = share_meta["share_token"]
+        session.share_created_at = share_meta["share_created_at"]
+        session.save()
+        return j(
+            handler,
+            {
+                "ok": True,
+                "share": {
+                    "token": share_meta["share_token"],
+                    "url": f"/share/{share_meta['share_token']}",
+                    "title": share_meta["share_title"],
+                    "message_count": share_meta["share_message_count"],
+                    "created_at": share_meta["share_created_at"],
+                    "updated_at": share_meta["share_updated_at"],
+                },
+                "session": session.compact() | {"messages": session.messages},
+            },
+        )
+
+    if parsed.path == "/api/share/revoke":
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        try:
+            session = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        active_profile = _get_active_profile_name()
+        if not _profiles_match(getattr(session, "profile", None), active_profile):
+            return bad(handler, "Session not found", 404)
+        revoke_share(session)
+        session = _ensure_full_session_before_mutation(sid, session)
+        session.share_token = None
+        session.share_created_at = None
+        session.save()
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session": session.compact() | {"messages": session.messages},
+            },
+        )
 
     if parsed.path == "/api/session/new":
         try:

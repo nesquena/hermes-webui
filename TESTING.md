@@ -557,6 +557,27 @@ EXPECT:
     (response text)
 FAIL: No download triggered, file is empty, file is corrupted JSON instead of markdown.
 
+### T8.2: Create and Revoke a Public Share Link
+SETUP: A session with at least 2 visible messages (1 user + 1 assistant).
+STEPS:
+  1. Click the "Hermes" button in the sidebar footer
+  2. In the Conversation section, click "Share"
+EXPECT:
+  - A public `/share/<token>` page opens in a new tab
+  - The link is copied to the clipboard
+  - The Conversation section meta line shows that a public share is active
+  - The shared page uses the current Hermes theme/skin and shows only a read-only transcript snapshot
+FAIL: No link opens, the page requires login unexpectedly, or the shared page exposes workspace/profile/live controls.
+
+STEPS:
+  3. Return to the app and click "Stop sharing"
+  4. Confirm the revoke dialog
+EXPECT:
+  - A toast confirms the link was revoked
+  - Reopening the old share URL shows an unavailable/not found state
+  - The active-share status disappears from the Conversation section
+FAIL: The old link still loads the transcript, or the session still appears as publicly shared after revocation.
+
 ---
 
 ## Section 9: Reconnect Banner (Sprint 1 - B4/B5)

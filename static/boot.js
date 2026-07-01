@@ -1610,6 +1610,53 @@ $('btnExportJSON').onclick=()=>{
   const a=document.createElement('a');a.href=url;
   a.download=`hermes-${S.session.session_id}.json`;a.click();
 };
+$('btnShareSession').onclick=async()=>{
+  if(!S.session) return;
+  try{
+    const existing=(S.session&&S.session.share_token)?new URL(`share/${encodeURIComponent(S.session.share_token)}`,document.baseURI||location.href).href:null;
+    if(existing){
+      const reuse=await showConfirmDialog({
+        title:t('share_session'),
+        message:t('share_session_existing_confirm'),
+        confirmLabel:t('share_session_copy_existing'),
+        cancelLabel:t('share_session_refresh_snapshot'),
+      });
+      if(reuse){
+        await _copyText(existing);
+        showToast(t('share_session_link_copied'));
+        window.open(existing,'_blank','noopener');
+        return;
+      }
+    }
+    const res=await api('/api/share/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
+    if(res&&res.session) S.session=res.session;
+    const href=new URL(String(res&&res.share&&res.share.url||''),document.baseURI||location.href).href;
+    await _copyText(href);
+    showToast(t('share_session_created'));
+    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+    window.open(href,'_blank','noopener');
+  }catch(err){
+    showToast(t('share_session_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
+  }
+};
+$('btnStopSharingSession').onclick=async()=>{
+  if(!S.session||!S.session.share_token) return;
+  const ok=await showConfirmDialog({
+    title:t('stop_sharing_session'),
+    message:t('stop_sharing_session_confirm'),
+    confirmLabel:t('stop_sharing_session'),
+    danger:true,
+  });
+  if(!ok) return;
+  try{
+    const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
+    if(res&&res.session) S.session=res.session;
+    showToast(t('share_session_revoked'));
+    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+  }catch(err){
+    showToast(t('share_session_revoke_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
+  }
+};
 $('btnImportJSON').onclick=()=>$('importFileInput').click();
 $('importFileInput').onchange=async(e)=>{
   const file=e.target.files[0];
