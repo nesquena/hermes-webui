@@ -5782,6 +5782,19 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       bubbleSidebarState(parentRow, childCopy);
       visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
     } else if(childRenderable) {
+      // #5305: a delegated subagent child whose WebUI parent is NOT a visible
+      // row in this render (filtered out by the active project / profile / source
+      // scope, or otherwise absent) must NOT be promoted to a contextless
+      // top-level "Subagent Session" orphan — that is the confusing orphan #5244
+      // set out to remove for the common case. The parent still exists; it is
+      // simply out of the current view, so the child follows its parent's scope
+      // and is suppressed here (it re-stacks under the parent once that scope is
+      // active). This mirrors the archived-hidden-parent suppression above
+      // (hasHiddenArchivedAncestor / #4293), generalizing the "parent hidden"
+      // trigger from archived to filtered-out. A cross-surface WebUI child of a
+      // genuinely external (messaging/CLI) parent is handled by the parentIsExternal
+      // branch above and still orphans as before.
+      if(child&&child._cross_surface_child_session&&_isChildSession(child)) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
   }
@@ -6105,6 +6118,15 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     !!s.pending_user_message ||
     !!s.has_pending_user_message ||
     (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
+    // #5306: a linked delegate child of the currently-active/streaming parent
+    // must stay rendered for the duration of the parent's turn. A subagent child
+    // that transiently reports message_count===0 between /api/sessions polls would
+    // otherwise be dropped HERE (before _attachChildSessionsToSidebarRows ever sees
+    // it), so it never reaches sessionsRaw, vanishes from the sidebar, then
+    // reappears on the next refresh once its list metadata catches up — the flicker.
+    // Scoped to children of the ACTIVE parent, mirroring the active-session
+    // exception above, so unrelated truly-empty sessions are still hidden.
+    (activeSidForSidebar&&s.parent_session_id===activeSidForSidebar&&_isChildSession(s)) ||
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
