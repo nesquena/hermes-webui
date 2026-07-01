@@ -1,6 +1,7 @@
 const TERMINAL_UI={
   open:false,
   collapsed:false,
+  mode:'dock',
   sessionId:null,
   workspace:null,
   source:null,
@@ -9,6 +10,8 @@ const TERMINAL_UI={
   resizeObserver:null,
   resizeTimer:null,
   closeTimer:null,
+  dockParent:null,
+  dockAnchor:null,
   typedLine:'',
   height:null,
   resizeHandleReady:false,
@@ -38,8 +41,60 @@ function _terminalEls(){
   };
 }
 
+function _terminalPresentationMode(){
+  return TERMINAL_UI.mode==='page'?'page':'dock';
+}
+
+function _terminalRememberDockPlacement(panel){
+  if(!panel||TERMINAL_UI.dockParent)return;
+  const parent=panel.parentElement;
+  if(!parent)return;
+  TERMINAL_UI.dockParent=parent;
+  const anchor=$('handoffHintContainer');
+  if(anchor&&anchor.parentElement===parent)TERMINAL_UI.dockAnchor=anchor;
+}
+
+function _terminalSetPresentationMode(mode){
+  const next=mode==='page'?'page':'dock';
+  const {panel}= _terminalEls();
+  TERMINAL_UI.mode=next;
+  if(!panel)return next;
+  _terminalRememberDockPlacement(panel);
+  if(next==='page'){
+    const host=$('panelTerminal');
+    if(host&&panel.parentElement!==host)host.appendChild(panel);
+    panel.classList.add('is-page-mode');
+    panel.classList.remove('is-dock-mode');
+  }else{
+    const parent=TERMINAL_UI.dockParent||panel.parentElement;
+    const anchor=TERMINAL_UI.dockAnchor;
+    if(parent&&panel.parentElement!==parent){
+      if(anchor&&anchor.parentElement===parent)parent.insertBefore(panel,anchor);
+      else parent.appendChild(panel);
+    }
+    panel.classList.remove('is-page-mode');
+    panel.classList.add('is-dock-mode');
+  }
+  return next;
+}
+
 function _terminalSessionId(){
   return S.session&&S.session.session_id;
+}
+
+function _canStartComposerTerminal(){
+  const sid=_terminalSessionId();
+  if(!sid||!(S.session&&S.session.workspace)){
+    showToast(t('terminal_no_workspace_title'),2600,'warning');
+    syncTerminalButton();
+    return false;
+  }
+  if(S.terminalRemoteBackend){
+    showToast(_terminalRemoteBackendUnsupportedMessage(),3200,'warning');
+    syncTerminalButton();
+    return false;
+  }
+  return true;
 }
 
 function _terminalWorkspaceName(){
@@ -286,6 +341,15 @@ function _syncTerminalTranscriptSpace(open,opts){
   const messages=_terminalMessagesEl();
   if(!messages)return;
   const wasNearBottom=_terminalIsMessagesNearBottom(messages);
+  if(TERMINAL_UI.mode==='page'){
+    messages.classList.remove('terminal-open');
+    messages.classList.remove('terminal-collapsed');
+    messages.classList.remove('terminal-expanding-from-dock');
+    messages.style.removeProperty('--terminal-card-height');
+    messages.style.removeProperty('--terminal-dock-height');
+    if(!open&&wasNearBottom&&typeof scrollToBottom==='function')requestAnimationFrame(scrollToBottom);
+    return;
+  }
   if(!open){
     messages.classList.remove('terminal-open');
     messages.classList.remove('terminal-collapsed');
@@ -325,7 +389,7 @@ function _fitTerminal(){
   try{
     if(TERMINAL_UI.fitAddon)TERMINAL_UI.fitAddon.fit();
   }catch(_){}
-  _syncTerminalTranscriptSpace(true);
+  if(TERMINAL_UI.mode!=='page')_syncTerminalTranscriptSpace(true);
   _scheduleTerminalResize();
 }
 
@@ -333,14 +397,17 @@ function _setTerminalChromeState(state){
   const {panel,inner,dock,workspace,dockWorkspace}= _terminalEls();
   const composerWrap=$('composerWrap');
   if(!panel)return;
+  const page=state==='page';
   const collapsed=state==='collapsed';
   const expanded=state==='expanded';
-  if(composerWrap)composerWrap.classList.toggle('terminal-dock-visible',collapsed);
-  panel.hidden=!(collapsed||expanded);
-  panel.classList.toggle('is-open',expanded);
-  panel.classList.toggle('is-collapsed',collapsed);
-  if(inner)inner.setAttribute('aria-hidden',collapsed?'true':'false');
-  if(dock)dock.hidden=!collapsed;
+  if(composerWrap)composerWrap.classList.toggle('terminal-dock-visible',collapsed&&!page);
+  panel.hidden=!(collapsed||expanded||page);
+  panel.classList.toggle('is-open',expanded||page);
+  panel.classList.toggle('is-collapsed',collapsed&&!page);
+  panel.classList.toggle('is-page-mode',page);
+  if(page)panel.classList.remove('is-expanding-from-dock');
+  if(inner)inner.setAttribute('aria-hidden',page?'false':(collapsed?'true':'false'));
+  if(dock)dock.hidden=page||!collapsed;
   const label=_terminalWorkspaceName();
   if(workspace)workspace.textContent=label;
   if(dockWorkspace)dockWorkspace.textContent=label;
@@ -434,19 +501,10 @@ function _connectTerminalOutput(){
 }
 
 async function _startComposerTerminal(restart=false){
+  if(!_canStartComposerTerminal())return false;
   const sid=_terminalSessionId();
-  if(!sid||!(S.session&&S.session.workspace)){
-    showToast(t('terminal_no_workspace_title'),2600,'warning');
-    syncTerminalButton();
-    return;
-  }
-  if(S.terminalRemoteBackend){
-    showToast(_terminalRemoteBackendUnsupportedMessage(),3200,'warning');
-    syncTerminalButton();
-    return;
-  }
   const term=_ensureXterm();
-  if(!term)return;
+  if(!term)return false;
   _fitTerminal();
   const dims=_terminalDimensions();
   try{
@@ -465,12 +523,45 @@ async function _startComposerTerminal(restart=false){
   TERMINAL_UI.typedLine='';
   _connectTerminalOutput();
   _resizeComposerTerminal();
+  return true;
 }
 
-async function toggleComposerTerminal(force){
+async function toggleComposerTerminal(force,opts){
+  opts=opts||{};
   const next=typeof force==='boolean'?force:!TERMINAL_UI.open;
+  const desiredMode=opts.mode==='page'?'page':'dock';
   if(next){
     if(TERMINAL_UI.open){
+      if(TERMINAL_UI.mode!==desiredMode){
+        _terminalSetPresentationMode(desiredMode);
+        const {panel,inner}= _terminalEls();
+        if(desiredMode==='page'){
+          TERMINAL_UI.collapsed=false;
+          _setTerminalChromeState('page');
+          _syncTerminalTranscriptSpace(false);
+          requestAnimationFrame(()=>_fitTerminal());
+        }else if(TERMINAL_UI.collapsed){
+          _setTerminalChromeState('collapsed');
+          _syncTerminalTranscriptSpace('collapsed');
+        }else{
+          _setTerminalChromeState('expanded');
+          _syncTerminalTranscriptSpace(true,{immediate:true});
+          requestAnimationFrame(()=>_fitTerminal());
+        }
+        if(!TERMINAL_UI.resizeObserver&&window.ResizeObserver){
+          TERMINAL_UI.resizeObserver=new ResizeObserver(()=>_fitTerminal());
+          TERMINAL_UI.resizeObserver.observe(inner||panel);
+        }
+        syncTerminalButton();
+        if(opts.focus!==false)focusComposerTerminalInput();
+        return;
+      }
+      if(desiredMode==='page'){
+        _fitTerminal();
+        syncTerminalButton();
+        if(opts.focus!==false)focusComposerTerminalInput();
+        return;
+      }
       if(TERMINAL_UI.collapsed)expandComposerTerminal();
       else focusComposerTerminalInput();
       return;
@@ -480,38 +571,59 @@ async function toggleComposerTerminal(force){
     if(!panel)return;
     clearTimeout(TERMINAL_UI.closeTimer);
     _initTerminalResizeHandle();
-    _resetTerminalHeightForViewport();
-    if(messages)messages.classList.add('terminal-expanding-from-dock');
-    _setTerminalChromeState('expanded');
+    _terminalSetPresentationMode(desiredMode);
+    if(desiredMode==='dock'&&messages)messages.classList.add('terminal-expanding-from-dock');
+    if(desiredMode==='dock')_resetTerminalHeightForViewport();
+    if(desiredMode==='page')TERMINAL_UI.collapsed=false;
+    _setTerminalChromeState(desiredMode==='dock'?'expanded':'page');
     TERMINAL_UI.open=true;
-    TERMINAL_UI.collapsed=false;
-    _syncTerminalTranscriptSpace(true,{immediate:true});
-    if(messages)void messages.offsetHeight;
-    requestAnimationFrame(()=>{
+    if(desiredMode==='dock')TERMINAL_UI.collapsed=false;
+    if(desiredMode==='dock'){
+      _syncTerminalTranscriptSpace(true,{immediate:true});
+      if(messages)void messages.offsetHeight;
+      requestAnimationFrame(()=>{
+        panel.classList.add('is-open');
+        window.setTimeout(_fitTerminal,80);
+        setTimeout(()=>{
+          if(messages)messages.classList.remove('terminal-expanding-from-dock');
+        },120);
+      });
+    }else{
+      _syncTerminalTranscriptSpace(false);
       panel.classList.add('is-open');
-      window.setTimeout(_fitTerminal,80);
-      setTimeout(()=>{
-        if(messages)messages.classList.remove('terminal-expanding-from-dock');
-      },120);
-    });
+      requestAnimationFrame(()=>_fitTerminal());
+    }
     syncTerminalButton();
     if(!TERMINAL_UI.resizeObserver&&window.ResizeObserver){
       TERMINAL_UI.resizeObserver=new ResizeObserver(()=>_fitTerminal());
       TERMINAL_UI.resizeObserver.observe(inner||panel);
     }
     try{
-      await _startComposerTerminal(false);
-      focusComposerTerminalInput();
+      const started=await _startComposerTerminal(false);
+      if(!started){
+        TERMINAL_UI.open=false;
+        TERMINAL_UI.collapsed=false;
+        _terminalSetPresentationMode('dock');
+        _setTerminalChromeState('closed');
+        return false;
+      }
+      if(opts.focus!==false)focusComposerTerminalInput();
     }catch(e){
+      TERMINAL_UI.open=false;
+      TERMINAL_UI.collapsed=false;
+      _terminalSetPresentationMode('dock');
+      _setTerminalChromeState('closed');
       showToast(t('terminal_start_failed')+e.message,3200,'error');
+      return false;
     }
+    return true;
   }else{
     await closeComposerTerminal();
   }
 }
 
 function collapseComposerTerminal(){
-  if(!TERMINAL_UI.open||TERMINAL_UI.collapsed)return;
+  if(!TERMINAL_UI.open||TERMINAL_UI.collapsed||TERMINAL_UI.mode==='page')return;
   TERMINAL_UI.collapsed=true;
   _setTerminalChromeState('collapsed');
   _syncTerminalTranscriptSpace('collapsed');
@@ -519,7 +631,7 @@ function collapseComposerTerminal(){
 }
 
 function expandComposerTerminal(opts){
-  if(!TERMINAL_UI.open)return;
+  if(!TERMINAL_UI.open||TERMINAL_UI.mode==='page')return;
   const focus = !opts || opts.focus !== false;
   const {panel}= _terminalEls();
   const messages=_terminalMessagesEl();
@@ -563,9 +675,11 @@ async function closeComposerTerminal(sessionId,opts){
   if(sid&&!opts.skipApi){
     api('/api/terminal/close',{method:'POST',body:JSON.stringify({session_id:sid})}).catch(()=>{});
   }
+  _terminalSetPresentationMode('dock');
   const {panel}= _terminalEls();
   if(panel){
     panel.classList.remove('is-open','is-collapsed','is-expanding-from-dock');
+    panel.classList.remove('is-page-mode');
     _syncTerminalTranscriptSpace(false);
     clearTimeout(TERMINAL_UI.closeTimer);
     TERMINAL_UI.closeTimer=setTimeout(()=>{
@@ -660,6 +774,10 @@ window.addEventListener('beforeunload',()=>{
 
 window.addEventListener('resize',()=>{
   if(!TERMINAL_UI.open)return;
+  if(TERMINAL_UI.mode==='page'){
+    _fitTerminal();
+    return;
+  }
   if(TERMINAL_UI.collapsed){
     _syncTerminalTranscriptSpace('collapsed');
     return;
