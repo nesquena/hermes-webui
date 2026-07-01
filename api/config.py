@@ -2902,10 +2902,32 @@ def parse_reasoning_effort(effort):
     return None
 
 
-def _strip_provider_hint_for_reasoning(model_id: str) -> str:
-    """Remove WebUI routing hints before provider-specific capability lookup."""
+def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = None) -> str:
+    """Remove WebUI routing hints before provider-specific capability lookup.
+
+    A plain ``@provider:model`` hint strips cleanly on the first colon. But a
+    *named* custom provider hint is ``@custom:<slug>:model`` — two colons —
+    and the naive first-colon split only strips the leading ``@custom:``,
+    leaving ``<slug>:model`` behind. That leftover slug fragment can hide a
+    nested gateway route from prefix-based checks like
+    ``_nested_route_reasoning_denied()`` (e.g. ``agg:vertex/gemini-image-1.0``
+    no longer starts with ``vertex/gemini-``), silently re-enabling reasoning
+    controls on routes that must never expose them.
+
+    When the resolved *provider* is known (e.g. ``"custom:agg"``), strip the
+    exact ``@{provider}:`` prefix first so both segments are removed in one
+    pass. Falls back to the generic first-colon split when no provider is
+    given or it doesn't match — preserving prior behavior for plain
+    ``@provider:model`` hints.
+    """
     model = str(model_id or "").strip()
-    if model.startswith("@") and ":" in model:
+    if not model.startswith("@"):
+        return model
+    if provider:
+        exact_prefix = f"@{provider}:".lower()
+        if model.lower().startswith(exact_prefix):
+            return model[len(exact_prefix) :]
+    if ":" in model:
         return model.split(":", 1)[1]
     return model
 
@@ -3001,17 +3023,38 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
     return False
 
 
+# Matches the nested Gemini gateway route prefix anywhere it appears in a
+# model id, as long as it isn't embedded inside a larger alphanumeric token
+# (the negative lookbehind excludes false positives like "notvertex/gemini-x").
+# Scanning for the pattern at any position — rather than requiring the whole
+# string to start with it — makes the check independent of how many wrapper
+# layers precede the route: ``@provider:``, a named custom-provider slug
+# (``@custom:<slug>:``), or any future nesting scheme none of us have
+# invented yet. This invariant (Gemini image/embedding routes must never
+# expose a reasoning toggle) was bypassed twice via different edge cases in
+# the prefix-stripping logic before being made structurally boundary-based
+# instead of prefix-based — see PR #5313 review history.
+_NESTED_ROUTE_PATTERN = re.compile(r"(?<![a-z0-9])(vertex/gemini-|gemini_cli/gemini-)(.*)$")
+
+
 def _nested_route_reasoning_denied(model: str) -> bool:
-    """Hard deny for nested Gemini gateway routes that must never show a reasoning toggle."""
+    """Hard deny for nested Gemini gateway routes that must never show a reasoning toggle.
+
+    Matches the route pattern anywhere in *model*, not just when the whole
+    string starts with it, so this check does not depend on a caller having
+    stripped exactly the right wrapper prefix first. Callers should still
+    pass the least-wrapped form they have (e.g. after
+    ``_strip_provider_hint_for_reasoning``) for clarity, but correctness no
+    longer hinges on it.
+    """
     lower = str(model or "").strip().lower()
     if not lower:
         return False
-    for prefix in ("vertex/gemini-", "gemini_cli/gemini-"):
-        if lower.startswith(prefix):
-            tail = lower[len(prefix) :]
-            if tail.startswith("embedding") or "image" in tail or "imagine" in tail:
-                return True
-    return False
+    match = _NESTED_ROUTE_PATTERN.search(lower)
+    if not match:
+        return False
+    tail = match.group(2)
+    return tail.startswith("embedding") or "image" in tail or "imagine" in tail
 
 
 def _nested_gateway_route_reasoning(model: str) -> bool:
@@ -3339,13 +3382,45 @@ def resolve_model_reasoning_efforts(
             provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
+
+    # IDE-copilot providers never expose reasoning effort options.
+    # Guard early so a stray config entry can't override this.
     if provider in {"cursor-acp", "copilot-acp"}:
         return []
 
-    hinted_model = _strip_provider_hint_for_reasoning(model)
+    hinted_model = _strip_provider_hint_for_reasoning(model, provider)
 
+    # Master hides reasoning controls for nested image/embedding routes. Keep
+    # that hard deny above provider config so an explicit allowlist cannot
+    # re-enable controls for routes that should never expose them.
     if _nested_route_reasoning_denied(hinted_model):
         return []
+
+    # 0. Provider config: providers.<name>.reasoning_efforts or named
+    # custom_providers[].reasoning_efforts. When the user has explicitly listed
+    # valid efforts for a provider, return that list directly — no heuristics,
+    # no models.dev lookup.
+    # Only short-circuits when the filtered list is non-empty; an all-invalid
+    # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
+    _re_list = None
+    try:
+        if provider and provider.startswith("custom:"):
+            for _entry in _custom_provider_entries():
+                if _custom_provider_slug_from_name(_entry.get("name")) == provider:
+                    _re_list = _entry.get("reasoning_efforts")
+                    break
+        elif provider:
+            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            if isinstance(_prov_entry, dict):
+                _re_list = _prov_entry.get("reasoning_efforts")
+        if isinstance(_re_list, list) and _re_list:
+            _filtered = [str(x).strip().lower() for x in _re_list
+                         if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
+            _filtered = list(dict.fromkeys(_filtered))
+            if _filtered:
+                return _filtered
+    except Exception:
+        pass
 
     if provider in {"copilot", "github-copilot"}:
         try:
