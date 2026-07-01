@@ -7528,7 +7528,18 @@ function _startClarifyFallbackPoll(sid) {
       else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
     } catch(e) {
       const msg = String((e && e.message) || "");
-      if (!_clarifyMissingEndpointWarned && /(^|\b)(404|not found)(\b|$)/i.test(msg)) {
+      const status = e && e.status;
+      // A profile switch can leave an old-profile session polling briefly under
+      // the new profile cookie.  The backend correctly returns 404 "Session not
+      // found" in that case; it is not a missing clarify endpoint and should not
+      // tell the user to restart the server.
+      if (status === 404 && /session\s+not\s+found/i.test(msg)) {
+        _clearClarifyPendingForSession(sid);
+        _hideClarifyCardIfOwner(sid, true, 'session');
+        stopClarifyPolling();
+        return;
+      }
+      if (!_clarifyMissingEndpointWarned && (status === 404 || /(^|\b)(404|not found)(\b|$)/i.test(msg))) {
         _clarifyMissingEndpointWarned = true;
         setComposerStatus("Clarify unavailable on current server build. Restart server.");
         if (typeof showToast === "function") {
