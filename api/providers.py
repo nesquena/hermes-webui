@@ -2619,10 +2619,13 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models from `models` list or `model` single
+            # Collect models from `models` dict/list or `model` single
             cp_models = []
             if isinstance(cp.get("models"), list):
                 cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"]]
+            elif isinstance(cp.get("models"), dict):
+                # Dict-form stores per-model metadata; use dict keys as model IDs
+                cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"].keys()]
             elif cp.get("model"):
                 cp_models = [{"id": cp["model"], "label": cp["model"]}]
             # Check for env var reference (${VAR_NAME} pattern)
@@ -2829,3 +2832,89 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             reload_config()
     except Exception:
         logger.exception("Failed to clean provider key from config.yaml for %s", provider_id)
+
+
+def set_custom_provider_models(provider_id: str, models: list[str]) -> dict[str, Any]:
+    """Set the active model list for a custom provider.
+
+    Updates the ``models`` field on the matching ``custom_providers[]`` entry in
+    config.yaml so the model picker only shows the selected models.
+
+    Args:
+        provider_id: Canonical custom provider slug (e.g. ``custom:9router``).
+        models: List of model ID strings to allowlist. Empty list removes the
+                ``models`` field, causing all live models to appear.
+
+    Returns:
+        A status dict with ``ok`` and optionally ``error``.
+    """
+    from api.config import _cfg_lock
+    import api.config as _config
+
+    try:
+        config_path = _config._get_config_path()
+    except Exception as exc:
+        return {"ok": False, "error": f"Cannot resolve config path: {exc}"}
+
+    if not config_path.exists():
+        return {"ok": False, "error": "config.yaml not found"}
+
+    try:
+        import yaml as _yaml
+
+        with _cfg_lock:
+            raw = config_path.read_text(encoding="utf-8")
+            cfg = _yaml.safe_load(raw)
+            if not isinstance(cfg, dict):
+                return {"ok": False, "error": "config.yaml is not a valid YAML dict"}
+
+            custom_providers = cfg.get("custom_providers", [])
+            if not isinstance(custom_providers, list):
+                return {"ok": False, "error": "custom_providers is not a list"}
+
+            found = False
+            for cp in custom_providers:
+                if not isinstance(cp, dict):
+                    continue
+                if _custom_provider_name_matches(provider_id, cp.get("name")):
+                    # Preserve the original format: if models was a dict, save
+                    # as dict keys so per-model metadata (context_length, etc.)
+                    # is not lost. If models was a list (or absent), save as list.
+                    existing_models = cp.get("models")
+                    if isinstance(existing_models, dict):
+                        if models:
+                            # Preserve any per-model metadata from the original
+                            # dict (context_length, label, etc.) for models that
+                            # are still in the list; new models get empty dict.
+                            cp["models"] = {
+                                m: dict(existing_models.get(m, {}))
+                                for m in models
+                            }
+                        else:
+                            cp.pop("models", None)
+                    else:
+                        if models:
+                            cp["models"] = list(models)
+                        else:
+                            cp.pop("models", None)
+                    found = True
+                    break
+
+            if not found:
+                return {"ok": False, "error": f"Custom provider '{provider_id}' not found in config.yaml"}
+
+            _save_yaml_config_file(config_path, cfg)
+
+        # Sync in-memory cache — own try/except so a reload hiccup
+        # doesn't produce a false {"ok": False} after a successful write.
+        try:
+            reload_config()
+            invalidate_models_cache()
+        except Exception:
+            logger.exception("Post-save cache sync failed for %s", provider_id)
+
+        return {"ok": True, "provider": provider_id, "models": list(models) if models else []}
+
+    except Exception as exc:
+        logger.exception("Failed to set custom provider models for %s", provider_id)
+        return {"ok": False, "error": str(exc)}

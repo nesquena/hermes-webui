@@ -10180,17 +10180,205 @@ function _buildProviderCard(p){
     }
     field.appendChild(row);
     body.appendChild(field);
+  }else if(p.is_custom){
+    // ── Custom provider: interactive model management ──────────────────────
+    const usedModels = (Array.isArray(p.models) ? p.models : []).map(m => (m.id||m.label||m));
+
+    // Build the model management UI inside a dedicated container
+    const mgmtWrap = document.createElement('div');
+    mgmtWrap.className = 'provider-card-models';
+
+    // --- Used models (pills with X) ---
+    const usedLabel = document.createElement('div');
+    usedLabel.className = 'provider-card-label';
+    usedLabel.textContent = 'Active models';
+    mgmtWrap.appendChild(usedLabel);
+    
+    const usedWrap = document.createElement('div');
+    usedWrap.className = 'provider-card-model-tags';
+    usedWrap.id = 'cp-used-' + p.id.replace(/[^a-z0-9]/g,'-');
+    
+    function _renderUsedTags(models){
+      usedWrap.innerHTML = '';
+      for(const m of models){
+        const tag = document.createElement('span');
+        tag.className = 'provider-card-model-tag';
+        tag.textContent = m;
+        const rm = document.createElement('span');
+        rm.className = 'remove-tag';
+        rm.textContent = '\u00d7';
+        rm.title = 'Remove';
+        rm.onclick = ()=>{
+          const idx = _usedModelList.indexOf(m);
+          if(idx>=0) _usedModelList.splice(idx,1);
+          _renderUsedTags(_usedModelList);
+          _renderAvailTags(_availModelList);
+        };
+        tag.appendChild(rm);
+        usedWrap.appendChild(tag);
+      }
+    }
+
+    let _usedModelList = [...usedModels];
+    _renderUsedTags(_usedModelList);
+    mgmtWrap.appendChild(usedWrap);
+
+    // --- Available / suggested models (pills with +) ---
+    const availLabel = document.createElement('div');
+    availLabel.className = 'provider-card-label';
+    availLabel.textContent = 'Available (from refresh)';
+    availLabel.style.marginTop = '8px';
+    mgmtWrap.appendChild(availLabel);
+
+    const availWrap = document.createElement('div');
+    availWrap.className = 'provider-card-model-tags';
+    availWrap.id = 'cp-avail-' + p.id.replace(/[^a-z0-9]/g,'-');
+    const availHint = document.createElement('div');
+    availHint.className = 'provider-card-hint';
+    availHint.textContent = 'Click "Refresh models" to discover models, then click + to add.';
+
+    function _renderAvailTags(models){
+      availWrap.innerHTML = '';
+      let visibleCount = 0;
+      for(const m of models){
+        if(_usedModelList.includes(m)) continue;
+        visibleCount++;
+        const tag = document.createElement('span');
+        tag.className = 'provider-card-model-tag provider-card-model-tag-avail';
+        tag.textContent = m;
+        const add = document.createElement('span');
+        add.className = 'add-tag';
+        add.textContent = '+';
+        add.style.marginLeft = '4px';
+        add.style.cursor = 'pointer';
+        add.style.fontWeight = 'bold';
+        add.style.color = 'var(--accent)';
+        add.title = 'Add';
+        add.onclick = ()=>{
+          if(!_usedModelList.includes(m)){
+            _usedModelList.push(m);
+            _renderUsedTags(_usedModelList);
+            _renderAvailTags(_availModelList);
+          }
+        };
+        tag.appendChild(add);
+        availWrap.appendChild(tag);
+      }
+      availHint.style.display = availWrap.children.length ? 'none' : '';
+    }
+    let _availModelList = [];
+    _renderAvailTags(_availModelList);
+    mgmtWrap.appendChild(availHint);
+    mgmtWrap.appendChild(availWrap);
+
+    // --- Add custom model row ---
+    const addRow = document.createElement('div');
+    addRow.className = 'provider-card-row';
+    addRow.style.marginTop = '6px';
+    const addInput = document.createElement('input');
+    addInput.type = 'text';
+    addInput.className = 'provider-card-input';
+    addInput.placeholder = 'Type model name and press Enter';
+    addInput.style.flex = '1';
+    addInput.style.marginRight = '4px';
+    addInput.onkeydown = (e) => {
+      if(e.key === 'Enter'){
+        e.preventDefault();
+        const val = addInput.value.trim();
+        if(val && !_usedModelList.includes(val)){
+          _usedModelList.push(val);
+          _renderUsedTags(_usedModelList);
+          _renderAvailTags(_availModelList);
+        }
+        addInput.value = '';
+      }
+    };
+    addRow.appendChild(addInput);
+    mgmtWrap.appendChild(addRow);
+
+    // --- Refresh button for custom provider (inside scope of _availModelList) ---
+    const custRefreshRow=document.createElement('div');
+    custRefreshRow.className='provider-card-row';
+    custRefreshRow.style.marginTop='6px';
+    const custRefreshBtn=document.createElement('button');
+    custRefreshBtn.type='button';
+    custRefreshBtn.className='provider-card-btn provider-card-btn-ghost';
+    custRefreshBtn.style.display='flex';
+    custRefreshBtn.style.alignItems='center';
+    custRefreshBtn.style.gap='5px';
+    custRefreshBtn.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg> Refresh Models`;
+    custRefreshBtn.onclick = async () => {
+      await _refreshProviderModels(p.id, custRefreshBtn);
+      try{
+        const data = await api('/api/models');
+        const groups = Array.isArray(data && data.groups) ? data.groups : [];
+        const slug = p.id;
+        const found = [];
+        for(const g of groups){
+          const gid = g.provider_id || '';
+          if(gid === slug || gid === p.display_name){
+            for(const m of [...(g.models||[]), ...(g.extra_models||[])]){
+              if(m.id) found.push(m.id);
+            }
+          }
+        }
+        if(found.length){
+          const prefix = '@'+slug+':';
+          const clean = found.map(id => id.startsWith(prefix) ? id.slice(prefix.length) : id);
+          _availModelList = [...new Set(clean)];
+          _renderAvailTags(_availModelList);
+        }else{
+          showToast('No custom models found. Try adding manually.');
+        }
+      }catch(e){
+        showToast('Failed to fetch models: ' + (e.message || e));
+      }
+    };
+    custRefreshRow.appendChild(custRefreshBtn);
+    mgmtWrap.appendChild(custRefreshRow);
+
+    // --- Save button ---
+    const saveRow = document.createElement('div');
+    saveRow.className = 'provider-card-row';
+    saveRow.style.marginTop = '6px';
+    const saveBtn2 = document.createElement('button');
+    saveBtn2.type = 'button';
+    saveBtn2.className = 'provider-card-btn provider-card-btn-primary';
+    saveBtn2.textContent = t('providers_save');
+    saveBtn2.onclick = async () => {
+      saveBtn2.disabled = true;
+      saveBtn2.textContent = t('providers_saving');
+      try{
+        const res = await api('/api/providers/models', {
+          method: 'POST',
+          body: JSON.stringify({provider: p.id, models: _usedModelList})
+        });
+        if(res.ok){
+          showToast(t('providers_models_refreshed') || 'Models updated');
+          await loadProvidersPanel();
+        } else {
+          showToast(res.error || 'Failed to save models');
+          saveBtn2.disabled = false;
+          saveBtn2.textContent = t('providers_save');
+        }
+      }catch(e){
+        showToast('Error: ' + e.message);
+        saveBtn2.disabled = false;
+        saveBtn2.textContent = t('providers_save');
+      }
+    };
+    saveRow.appendChild(saveBtn2);
+    mgmtWrap.appendChild(saveRow);
+    body.appendChild(mgmtWrap);
   }else{
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
-    hint.textContent=p.is_custom
-      ? 'Custom provider loaded from config.yaml / hermes model. Edit it from the CLI or config file.'
-      : 'Provider is managed outside the WebUI.';
+    hint.textContent='Provider is managed outside the WebUI.';
     body.appendChild(hint);
   }
 
-  // Model list — show when provider has known models
-  if(modelCount>0){
+  // Model list — show when provider has known models (non-custom providers)
+  if(!p.is_custom && modelCount>0){
     const modelSection=document.createElement('div');
     modelSection.className='provider-card-models';
     const modelLabel=document.createElement('div');
@@ -10206,12 +10394,6 @@ function _buildProviderCard(p){
       tag.textContent=m.id||m.label||m;
       modelList.appendChild(tag);
     }
-    // When the rendered list is a strict subset of the total catalog (Nous
-    // Portal large-tier accounts hit this with ~400-model catalogs), show
-    // a "+N more" trailing pill so the user knows the picker is intentionally
-    // capped — and they can still reach the full catalog via the /model
-    // slash command (its autocomplete consumes the un-trimmed list from
-    // /api/models's extra_models field). #1567.
     const totalCount=Number.isFinite(p.models_total)?p.models_total:renderedModels.length;
     const hiddenCount=Math.max(0, totalCount - renderedModels.length);
     if(hiddenCount>0){
@@ -10225,20 +10407,22 @@ function _buildProviderCard(p){
     body.appendChild(modelSection);
   }
 
-  // Refresh models for this provider
-  const refreshRow=document.createElement('div');
-  refreshRow.className='provider-card-row';
-  refreshRow.style.marginTop='6px';
-  const refreshBtn=document.createElement('button');
-  refreshBtn.type='button';
-  refreshBtn.className='provider-card-btn provider-card-btn-ghost';
-  refreshBtn.style.display='flex';
-  refreshBtn.style.alignItems='center';
-  refreshBtn.style.gap='5px';
-  refreshBtn.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg> ${t('providers_refresh_models')||'Refresh Models'}`;
-  refreshBtn.onclick=()=>_refreshProviderModels(p.id, refreshBtn);
-  refreshRow.appendChild(refreshBtn);
-  body.appendChild(refreshRow);
+  // Refresh models for non-custom providers
+  if(!p.is_custom){
+    const refreshRow=document.createElement('div');
+    refreshRow.className='provider-card-row';
+    refreshRow.style.marginTop='6px';
+    const refreshBtn=document.createElement('button');
+    refreshBtn.type='button';
+    refreshBtn.className='provider-card-btn provider-card-btn-ghost';
+    refreshBtn.style.display='flex';
+    refreshBtn.style.alignItems='center';
+    refreshBtn.style.gap='5px';
+    refreshBtn.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg> ${t('providers_refresh_models')||'Refresh Models'}`;
+    refreshBtn.onclick = ()=>_refreshProviderModels(p.id, refreshBtn);
+    refreshRow.appendChild(refreshBtn);
+    body.appendChild(refreshRow);
+  }
   card.appendChild(body);
 
   if(input&&saveBtn){
