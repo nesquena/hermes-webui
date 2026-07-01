@@ -3,13 +3,7 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- **The "Clarify endpoint unavailable. Please restart server." toast no longer fires falsely.** `/api/clarify/pending` always returns HTTP 200 when present (it answers `{"pending": null}` for an unknown session — it never 404s), yet the front-end poller warned "restart the server" on *any* caught error whose message merely contained "404" or "not found". An unrelated stale-session 404 (`Session not found`, e.g. an old-profile session still polling briefly after a profile switch) or a transient error therefore surfaced a misleading missing-endpoint toast pointing operators at the wrong layer. Clarify polling now branches on the structured HTTP status (`err.status`) that `api()` attaches: a `404 Session not found` is handled as a stale-session poll (stop + hide the card silently), and the restart-server warning fires only on a genuine route-not-found 404 whose body is not session-scoped. Poll failures are also logged with the request path, HTTP status, polling session id, and current session id for diagnosis. Thanks @claw-io for the report and @ruizanthony for the initial profile-switch fix. (#5345, absorbs #5343)
-
-- **Stream cancellation now records its provenance.** `cancelStream()` / `cancelSessionStream()` log a `[stream] cancel requested` line with the trigger (`composer-stop`, `slash-stop`, `slash-interrupt`, `busy-interrupt`, `sidebar-stop`) so a backend interrupt (SIGINT / exit code 130) can be attributed to an explicit user action. Passive UI lifecycle events (session switch, tab hide, page unload) continue to tear down only the local SSE transport and never send an interrupt to the running agent or tool — only explicit Stop/interrupt paths do. (#5345)
-
-_Entries are moved into their version block when a release is tagged._
+_No unreleased changes. Entries are moved into their version block when a release is tagged._
 
 ## [v0.51.792] — 2026-07-01
 

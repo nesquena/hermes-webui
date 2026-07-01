@@ -40,7 +40,7 @@ def _clarify_catch_block():
     idx = MESSAGES_JS.find("function _startClarifyFallbackPoll")
     assert idx != -1, "_startClarifyFallbackPoll not found in messages.js"
     # Grab a generous window covering the catch/finally of the poll tick.
-    return MESSAGES_JS[idx: idx + 3500]
+    return MESSAGES_JS[idx: idx + 5500]
 
 
 # ── Part 1: clarify toast false positive ────────────────────────────────────
@@ -77,24 +77,60 @@ def test_clarify_missing_endpoint_requires_404_and_non_session_body():
     assert "status === 404" in guard or "status===404" in guard, (
         "missing-endpoint guard must require a 404 status"
     )
-    assert "!/session/i.test(msg)" in guard.replace(" ", "") or "!/session/i.test(msg)" in guard, (
+    assert "!isSessionScoped404" in guard.replace(" ", ""), (
         "missing-endpoint guard must EXCLUDE session-scoped 404s so a "
         "'Session not found' error is not mistaken for a missing endpoint."
     )
 
 
+def test_stale_session_guard_is_not_tied_to_one_exact_backend_message():
+    """The stale-session branch should not depend only on the exact
+    'Session not found' wording: session-like 404 bodies and a current-session
+    mismatch after a profile switch are expected stale polls."""
+    block = _clarify_catch_block()
+    m = re.search(r"const\s+isSessionScoped404\s*=([^;]+);", block, re.DOTALL)
+    assert m, "expected an isSessionScoped404 guard expression in the catch block"
+    guard = m.group(1).replace(" ", "")
+    assert "status===404" in guard, "stale-session guard must require a 404 status"
+    assert "/session/i.test(msg)" in guard, (
+        "stale-session guard should classify session-scoped 404 bodies without "
+        "requiring the exact 'Session not found' wording"
+    )
+    assert "currentSid!==null&&currentSid!==sid" in guard, (
+        "stale-session guard should also cover the profile-switch race where the "
+        "active session changed while the old poll request was in flight"
+    )
+
+
 def test_stale_session_404_handled_before_missing_endpoint():
-    """A 404 'Session not found' must be treated as a stale-session poll (stop +
+    """A session-scoped 404 must be treated as a stale-session poll (stop +
     hide silently), and that branch must appear BEFORE the missing-endpoint
     warning branch so the warning can never fire for it."""
     block = _clarify_catch_block()
-    stale_idx = block.find("session\\s+not\\s+found")
+    stale_idx = block.find("isSessionScoped404")
     warn_idx = block.find("isMissingEndpoint")
-    assert stale_idx != -1, "stale-session 404 branch (session not found) not found"
+    assert stale_idx != -1, "stale-session 404 branch (isSessionScoped404) not found"
     assert warn_idx != -1, "missing-endpoint guard not found"
     assert stale_idx < warn_idx, (
         "the stale-session 404 branch must be evaluated before the "
         "missing-endpoint warning so a session-scoped 404 never warns."
+    )
+
+
+def test_expected_handled_clarify_404s_do_not_emit_poll_failed_warn():
+    """Routine stale-session 404s and handled missing-endpoint 404s should return
+    before the generic warn-level 'pending poll failed' diagnostic. Expected
+    profile-switch teardown must not create warn-level DevTools noise."""
+    block = _clarify_catch_block()
+    stale_idx = block.find("if (isSessionScoped404)")
+    missing_idx = block.find("if (isMissingEndpoint)")
+    warn_idx = block.find('console.warn("[clarify] pending poll failed"')
+    assert stale_idx != -1, "expected stale-session branch"
+    assert missing_idx != -1, "expected missing-endpoint branch"
+    assert warn_idx != -1, "expected generic unexpected-failure warning"
+    assert stale_idx < missing_idx < warn_idx, (
+        "generic warn-level clarify poll logging must come only after handled "
+        "stale-session and missing-endpoint branches return"
     )
 
 

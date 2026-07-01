@@ -7534,25 +7534,23 @@ function _startClarifyFallbackPoll(sid) {
       // a missing clarify endpoint. (#5345)
       const status = (e && typeof e.status === "number") ? e.status : null;
       const currentSid = (S.session && S.session.session_id) || null;
-      // Structured diagnostics: a clarify poll failure should be inspectable
-      // without guessing from a toast — log the failed path, HTTP status (if
-      // any), the session id we were polling, and the current active session
-      // id. (#5345)
-      if (typeof console !== "undefined" && console.warn) {
-        console.warn("[clarify] pending poll failed", {
-          path: "/api/clarify/pending",
-          status: status,
-          pollingSessionId: sid,
-          currentSessionId: currentSid,
-          message: msg,
-        });
-      }
-      // A 404 whose body is "Session not found" is a STALE-SESSION signal — e.g.
+      const logDetails = {
+        path: "/api/clarify/pending",
+        status: status,
+        pollingSessionId: sid,
+        currentSessionId: currentSid,
+        message: msg,
+      };
+      // A 404 from the active session domain is a STALE-SESSION signal — e.g.
       // the old profile's session still polling briefly after a profile switch,
       // or a session deleted server-side — NOT a missing clarify endpoint. Stop
       // this stale poll and hide its card silently instead of telling the user
-      // to restart the server. (#5343 / #5345)
-      if (status === 404 && /session\s+not\s+found/i.test(msg)) {
+      // to restart the server. Keep this branch before any warn-level logging:
+      // routine profile switches must not fill DevTools with expected warnings.
+      // (#5343 / #5345)
+      const isSessionScoped404 = status === 404
+        && (/session/i.test(msg) || (currentSid !== null && currentSid !== sid));
+      if (isSessionScoped404) {
         _clearClarifyPendingForSession(sid);
         _hideClarifyCardIfOwner(sid, true, 'session');
         stopClarifyPolling();
@@ -7569,14 +7567,26 @@ function _startClarifyFallbackPoll(sid) {
       // a session-scoped 404. (#5345)
       const isMissingEndpoint = status === 404
         && /(^|\b)not\s+found(\b|$)/i.test(msg)
-        && !/session/i.test(msg);
-      if (!_clarifyMissingEndpointWarned && isMissingEndpoint) {
-        _clarifyMissingEndpointWarned = true;
-        setComposerStatus("Clarify unavailable on current server build. Restart server.");
-        if (typeof showToast === "function") {
-          showToast("Clarify endpoint unavailable. Please restart server.", 5000);
+        && !isSessionScoped404;
+      if (isMissingEndpoint) {
+        if (!_clarifyMissingEndpointWarned) {
+          _clarifyMissingEndpointWarned = true;
+          setComposerStatus("Clarify unavailable on current server build. Restart server.");
+          if (typeof showToast === "function") {
+            showToast("Clarify endpoint unavailable. Please restart server.", 5000);
+          }
+          if (typeof console !== "undefined" && console.warn) {
+            console.warn("[clarify] pending poll endpoint unavailable", logDetails);
+          }
         }
         stopClarifyPolling();
+        return;
+      }
+      // Structured diagnostics: unexpected clarify poll failures should be
+      // inspectable without guessing from a toast. Expected stale-session 404s
+      // and the handled missing-endpoint route have already returned above.
+      if (typeof console !== "undefined" && console.warn) {
+        console.warn("[clarify] pending poll failed", logDetails);
       }
     } finally {
       _clarifyFallbackPollInFlight = false;
