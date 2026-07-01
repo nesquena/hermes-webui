@@ -256,7 +256,13 @@ def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bo
     _safe_write(handler, body)
 
 
-def t(handler, payload, status: int=200, content_type: str='text/plain; charset=utf-8') -> None:
+def t(
+    handler,
+    payload,
+    status: int=200,
+    content_type: str='text/plain; charset=utf-8',
+    extra_headers: dict=None,
+) -> None:
     """Send a plain text or HTML response."""
     body = payload if isinstance(payload, bytes) else str(payload).encode('utf-8')
     handler.send_response(status)
@@ -264,6 +270,9 @@ def t(handler, payload, status: int=200, content_type: str='text/plain; charset=
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
     _security_headers(handler)
+    if extra_headers:
+        for k, v in extra_headers.items():
+            handler.send_header(k, v)
     _safe_write(handler, body)
 
 
