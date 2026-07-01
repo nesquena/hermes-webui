@@ -69,6 +69,9 @@ Follow that checklist's safety rules:
   the manual verification performed.
 - For runtime, streaming, recovery, replay, compression, or sidebar metadata
   changes, name the state layer being mutated and prove the relevant invariant.
+- For Docker build changes in `docker_init.bash`, mirror directory exclusions
+  in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
+  with restricted permissions (e.g. `.playwright/`).
 
 ## Local state and secrets
 

@@ -35,6 +35,8 @@
 
 ### Fixed
 
+- **Docker build no longer fails when `/opt/hermes` contains a `.playwright/` directory.** The agent-source staging step now excludes `.playwright` in both the `rsync` and `cp -a` fallback paths, fixing `rsync error code 23` during the build. Thanks @enihcam. (#5316, fixes #5315)
+
 - **Reorder the chat-footer controls by dragging.** The composer footer controls (Attach, Saved prompts, Mic, Profile, Workspace, Model, Reasoning, Context, and the situational controls) can now be reordered by dragging their chips in Settings, in addition to toggling visibility. The order persists per profile and is validated/deduplicated server-side. Thanks @Paladin173. (#5075)
 
 - **Orphaned zero-message native/CLI sidebar sessions are pruned from the sidebar.** When a CLI or API-server session that was clicked in WebUI (creating a WebUI-owned sidecar) is later deleted outside WebUI, the stale zero-message row no longer lingers in the sidebar forever — it's pruned once the backing agent session is confirmed gone. A session with any real transcript (`message_count > 0`), attention signal, or active/pending stream is always preserved (never pruned), so no transcript is lost. Thanks @enihcam. (#4988, fixes #4985)
