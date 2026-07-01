@@ -122,16 +122,15 @@ def test_moa_config_is_per_turn_not_persisted():
     routes_source = routes_path.read_text(encoding="utf-8")
     assert re.search(r"if body\.get\(\"moa_config\"\):[\s\S]*?moa_config = resolve_moa_config\(\)", routes_source), \
         "chat-start must re-resolve MoA config server-side instead of trusting the browser payload"
-    assert "MoA override is unavailable on gateway-backed sessions" not in routes_source
-    assert 'requested_provider = "moa"' in routes_source
+    assert "MoA override is unavailable on gateway-backed sessions" in routes_source
     js_path = Path(__file__).resolve().parent.parent / "static" / "messages.js"
     js_source = js_path.read_text(encoding="utf-8")
     assert "moa_config:_pendingMoaConfig?true:undefined" in js_source
     assert "_pendingMoaConfig=null" in js_source
 
 
-def test_moa_gateway_chat_start_routes_to_moa_provider(monkeypatch, tmp_path):
-    """Gateway-backed WebUI sessions should send /moa as provider=moa + preset model."""
+def test_moa_gateway_chat_start_fails_closed(monkeypatch, tmp_path):
+    """Gateway-backed WebUI sessions must reject /moa until the gateway consumes runtime overrides."""
     import api.commands as commands
     import api.routes as routes
 
@@ -162,25 +161,18 @@ def test_moa_gateway_chat_start_routes_to_moa_provider(monkeypatch, tmp_path):
         context_messages = []
         pending_user_message = None
 
-    captured = {}
+    def start_run(*_args, **_kwargs):  # pragma: no cover - should fail before run start
+        raise AssertionError("gateway-backed /moa must fail closed before starting a run")
 
-    def start_run(session, **kwargs):
-        captured["session"] = session
-        captured["kwargs"] = kwargs
-        return {"stream_id": "stream-moa", "session_id": session.session_id}
-
-    def resolve_model(model, provider, **_kwargs):
-        captured["resolve_model"] = (model, provider)
-        return model, provider, False
+    def resolve_moa_config():  # pragma: no cover - should fail before resolving MoA
+        raise AssertionError("gateway-backed /moa must fail before resolving MoA config")
 
     monkeypatch.setattr(routes, "get_session", lambda _sid: _Session())
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
-    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _provider: (None, None))
-    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", resolve_model)
     monkeypatch.setattr(routes, "_start_run", start_run)
     monkeypatch.setattr(routes, "get_config", lambda: {"chat_backend": "gateway"})
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
-    monkeypatch.setattr(commands, "resolve_moa_config", lambda: {"preset": "moa-fast", "default_preset": "moa-fast"})
+    monkeypatch.setattr(commands, "resolve_moa_config", resolve_moa_config)
 
     handler = _Handler()
     routes._handle_chat_start(
@@ -194,9 +186,5 @@ def test_moa_gateway_chat_start_routes_to_moa_provider(monkeypatch, tmp_path):
     )
 
     body = json.loads(handler.wfile.getvalue().decode("utf-8"))
-    assert handler.status == 200
-    assert body["stream_id"] == "stream-moa"
-    assert captured["resolve_model"] == ("moa-fast", "moa")
-    assert captured["kwargs"]["model"] == "moa-fast"
-    assert captured["kwargs"]["model_provider"] == "moa"
-    assert "moa_config" not in captured["kwargs"]
+    assert handler.status == 409
+    assert body["error"] == "MoA override is unavailable on gateway-backed sessions"
