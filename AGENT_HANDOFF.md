@@ -200,4 +200,77 @@ Not modified. Response shape unchanged. Default behavior remains backward-compat
 
 ### Next task
 
-**Phase 4: Hermes Agent /v1/runs runtime API foundation**
+**Phase 4: Hermes Agent /v1/runs runtime API foundation** — COMPLETE (see ../hermes-agent at f7cc6c5)
+
+---
+
+## Phase 5: WebUI agent-runs adapter — COMPLETE
+
+| Field | Value |
+|---|---|
+| **Status** | Complete |
+| **HEAD before commit** | `c57a62e` |
+| **Changed files** | `api/runtime_adapter.py` (modified), `api/runtime_adapters/__init__.py` (created), `api/runtime_adapters/agent_runs.py` (created), `api/runtime_routes.py` (modified), `tests/test_agent_runs_adapter.py` (created), `tests/test_runtime_adapter_selection.py` (created), `tests/test_agent_runs_error_mapping.py` (created), `docs/rfcs/runtime-api-contract.md` (updated) |
+
+### Verification
+
+```bash
+# New adapter tests — 76 passed
+./scripts/test.sh \
+  tests/test_agent_runs_adapter.py \
+  tests/test_runtime_adapter_selection.py \
+  tests/test_agent_runs_error_mapping.py \
+  -v
+
+# Default compatibility test — 31 passed
+./scripts/test.sh \
+  tests/test_runtime_routes.py \
+  tests/test_runtime_legacy_journal_mirror.py \
+  -v
+
+# Agent-runs env test — 88 passed, 8 expected failures
+# (8 tests in test_runtime_routes.py rely on default env and correctly hit
+# the agent-runs path when HERMES_WEBUI_RUNTIME_ADAPTER=agent-runs overrides
+# the parent env; those tests are designed for legacy-direct/journal mode)
+HERMES_WEBUI_RUNTIME_ADAPTER=agent-runs \
+HERMES_WEBUI_AGENT_RUNS_BASE_URL=http://127.0.0.1:8642 \
+HERMES_WEBUI_AGENT_RUNS_API_KEY=test-key \
+./scripts/test.sh \
+  tests/test_agent_runs_adapter.py \
+  tests/test_runtime_adapter_selection.py \
+  tests/test_agent_runs_error_mapping.py \
+  tests/test_runtime_routes.py \
+  -v
+```
+
+### Deliverables
+
+- `api/runtime_adapter.py` — Added `agent-runs` to `_VALID_RUNTIME_ADAPTER_MODES`, added `runtime_adapter_agent_runs_enabled()` helper, extended `build_runtime_adapter()` with `agent_runs_adapter_factory` parameter.
+- `api/runtime_adapters/__init__.py` — Adapter factory with singleton pattern. `get_runtime_adapter()` selects based on `HERMES_WEBUI_RUNTIME_ADAPTER`. Supports `legacy-direct` (returns None), `legacy-journal` (returns None), `agent-runs` (builds `AgentRunsAdapter`).
+- `api/runtime_adapters/agent_runs.py` — `AgentRunsClient` (urllib-based HTTP transport for /v1/runs contract) and `AgentRunsAdapter` (translates between WebUI `RuntimeAdapter` protocol and Hermes Agent API). Structured error handling with `AgentRunsError` covering unreachable, timeout, auth_error, and bad_response conditions. All errors redact credentials.
+- `api/runtime_routes.py` — Updated all route handlers to delegate to agent-runs adapter when `runtime_adapter_agent_runs_enabled()` is True. Capabilities reports `agent-runs` mode with approval/clarify support. Run status, events (JSON + SSE), cancel, approval, and clarify all route through the adapter. Legacy-direct and legacy-journal paths preserved.
+- `tests/test_agent_runs_adapter.py` — 37 tests covering adapter start_run, get_status, observe_events, controls, error redaction, route integration (capabilities, status, events, cancel, approval, clarify), legacy compatibility, HTTP contract paths, and import isolation.
+- `tests/test_runtime_adapter_selection.py` — 13 tests covering default env, explicit modes, unknown adapter error, base_url requirement, singleton, factory, and whitespace handling.
+- `tests/test_agent_runs_error_mapping.py` — 26 tests covering error classes, urllib-to-AgentRunsError mapping (connection refused, timeout, 401, 403, 500, 404, OSError), event mapping, and client env construction.
+- `docs/rfcs/runtime-api-contract.md` — Added Hermes Agent /v1/runs adapter section documenting configuration, API contract, error mapping, implementation locations, and deferred integration notes.
+
+### Adapter modes supported
+
+| Mode | Env value | Behavior |
+|---|---|---|
+| legacy-direct | (default or explicit) | Existing direct chat path, no journal |
+| legacy-journal | `legacy-journal` | Phase 3 journal mirroring |
+| agent-runs | `agent-runs` | Delegates to Hermes Agent /v1/runs HTTP API |
+
+### /api/chat/start compatibility
+
+Preserved. Not routed through agent-runs. Response shape unchanged. Default behavior remains backward-compatible.
+
+### Live HTTP smoke status
+
+Deferred. Hermes Agent Phase 4 route module is not yet mounted into a live server. The adapter is verified with mocked/fake HTTP tests.
+
+### Next task
+
+**Phase 6: Hermex/mobile API contract**
+

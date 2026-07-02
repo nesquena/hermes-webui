@@ -261,3 +261,54 @@ via ``_dict_to_runtime_event()`` from the already-redacted stored form.
 | ``get_status`` | ``(run_id) -> RuntimeStatus | None`` | Return current run status from index. Returns ``None`` for unknown runs. |
 | ``get_active_run_for_session`` | ``(session_id) -> RuntimeStatus | None`` | Return the active (non-terminal) run for a session. Returns ``None`` if no active run. |
 | ``mark_terminal`` | ``(run_id, status, result=None, error=None) -> RuntimeStatus | None`` | Mark a run as terminal, clear active-session mapping. Returns ``None`` for unknown runs. |
+
+## Hermes Agent /v1/runs adapter (agent-runs)
+
+When ``HERMES_WEBUI_RUNTIME_ADAPTER=agent-runs`` is set, WebUI routes delegate
+to the Hermes Agent /v1/runs HTTP runtime contract instead of local journals.
+
+### Configuration
+
+| Variable | Required | Description |
+|---|---|---|
+| ``HERMES_WEBUI_RUNTIME_ADAPTER`` | Yes | Set to ``agent-runs`` |
+| ``HERMES_WEBUI_AGENT_RUNS_BASE_URL`` | Yes | Base URL of the Hermes Agent runtime API (e.g. ``http://127.0.0.1:8642``) |
+| ``HERMES_WEBUI_AGENT_RUNS_API_KEY`` | No | Bearer token for agent runtime authentication |
+
+### Agent API contract
+
+| Adapter method | HTTP call |
+|---|---|
+| ``start_run`` | ``POST {base_url}/v1/runs`` |
+| ``get_status`` | ``GET {base_url}/v1/runs/{run_id}`` |
+| ``observe_events`` | ``GET {base_url}/v1/runs/{run_id}/events?after_seq=&limit=`` |
+| ``cancel_run`` | ``POST {base_url}/v1/runs/{run_id}/stop`` |
+| ``resolve_approval`` | ``POST {base_url}/v1/runs/{run_id}/approval`` |
+| ``resolve_clarify`` | ``POST {base_url}/v1/runs/{run_id}/clarify`` |
+
+### Error mapping
+
+| Condition | Error code | Retryable |
+|---|---|---|
+| Connection refused / unreachable | ``agent_runtime_unreachable`` | Yes |
+| Timeout | ``agent_runtime_timeout`` | Yes |
+| HTTP 401 / 403 | ``agent_runtime_auth_error`` | No |
+| Malformed JSON / contract mismatch | ``agent_runtime_bad_response`` | Yes |
+| not_supported response | ``not_supported`` | No |
+
+All error responses are redacted: no API keys, Authorization headers, tokens,
+or stack traces are exposed.
+
+### Implementation
+
+- ``api/runtime_adapters/__init__.py`` — adapter factory, singleton, env-driven selection
+- ``api/runtime_adapters/agent_runs.py`` — ``AgentRunsClient`` (HTTP transport) and ``AgentRunsAdapter`` (protocol translator)
+- ``api/runtime_adapter.py`` — extended with ``agent-runs`` mode and helper functions
+- ``api/runtime_routes.py`` — wired to delegate to agent-runs adapter when mode is active
+
+### Deferred integration
+
+- ``/api/chat/start`` is **not** routed through the agent-runs adapter in this
+  phase. The legacy chat-start path remains unchanged.
+- Live Hermes Agent HTTP smoke is deferred because the Agent Phase 4 route
+  module is not yet mounted into a live server.
