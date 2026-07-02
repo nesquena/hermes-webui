@@ -72664,7 +72664,7 @@ def test_legacy_fallback_github_actions_runner_groups_public_outputs_scrub_raw_r
         "https://api.github.com.evil.test/repos/capy/spaces/actions/runner-groups",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_groups_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_groups_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, case_id, final_url
 ):
     root = tmp_path / "capy-memory"
