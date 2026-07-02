@@ -72,14 +72,33 @@ python tests/browser_smoke.py
 - [x] No feature code implemented
 - [x] Only safe inspection commands run
 
-## Next recommended phase
+## Phase 1: WebUI runtime contract — COMPLETE
 
-**Phase 1: Hermex/mobile WebUI contract design**
+| Field | Value |
+|---|---|
+| **Status** | Complete |
+| **HEAD before commit** | `5f63b4d` |
+| **Changed files** | `api/runtime_contract.py` (created), `tests/test_runtime_contract.py` (created), `docs/rfcs/runtime-api-contract.md` (created) |
 
-Define the Hermex contract (event shapes, control surface, diagnostic endpoints) on paper first, without changing the hot path. Derive from the existing `docs/rfcs/hermes-run-adapter-contract.md` and `api/runtime_adapter.py` event families. The contract should cover:
+### Verification
 
-1. Event envelope and cursor/reconnect semantics for mobile clients
-2. Control surface: observe, status, cancel, approval, clarify, queue, goal
-3. Diagnostic endpoints: `/api/hermex/health`, run status, session-to-run mapping
-4. Feature flag: `HERMES_WEBUI_RUNTIME_ADAPTER` already has `legacy-direct` / `legacy-journal` / `runner-local` modes; Hermex should be gated behind its own selector or re-use `legacy-journal` + explicit allowlisting
-5. Response-shape parity constraint: do not expand `/api/chat/start` public shape
+```bash
+# Import check
+python3 -c 'from api.runtime_contract import make_event, make_status, is_valid_event_type, is_valid_status; ...'  # passed
+
+# Test suite
+./scripts/test.sh tests/test_runtime_contract.py -v
+# 16 passed in 2.20s — all green
+```
+
+### Deliverables
+
+- `api/runtime_contract.py` — `RuntimeEvent`, `RuntimeStatus`, `make_event()`, `make_status()`, `is_valid_event_type()`, `is_valid_status()`, payload redaction
+- `tests/test_runtime_contract.py` — 16 tests covering serialization, event_id stability, type/status validation, secret redaction, import isolation
+- `docs/rfcs/runtime-api-contract.md` — event envelope, run status shape, reconnect behavior, control semantics, Hermex/mobile usage pattern, compatibility expectations
+
+### Next task
+
+**Phase 2: WebUI durable runtime journal**
+
+Wire `api/runtime_contract.py` types into `api/run_journal.py` so journal entries use the canonical `RuntimeEvent` and `RuntimeStatus` shapes. Do not change live streaming behavior. Do not modify `api/streaming.py` except for import discovery.
