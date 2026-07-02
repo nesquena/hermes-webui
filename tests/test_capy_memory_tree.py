@@ -73192,7 +73192,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_actions_runner_g
         "api.github.com.evil.test",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_group_repositories_final_url_drift_before_body_read_and_scrubs_public_outputs(tmp_path, monkeypatch, final_url, forbidden):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_group_repositories_final_url_drift_before_body_read_relevant_memory_empty_and_scrubs_public_outputs(tmp_path, monkeypatch, final_url, forbidden):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com,api.github.com.evil.test")
@@ -73247,13 +73247,15 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_g
     monkeypatch.setattr(capy_memory, "_refresh_open", fake_open)
 
     result = run_source_refresh_jobs(limit=1)
-    search = search_memory("evilrepo", limit=5)
+    search = search_memory("runner group repositories drift safety", limit=5)
+    relevant = relevant_memory_for_space("runner-group-repositories-drift-space", limit=5)
     serialized = json.dumps({
         "receipt": receipt,
         "result": result,
         "catalog": source_catalog(limit=5),
         "jobs": list_source_refresh_jobs(limit=5),
         "search_results": search["results"],
+        "relevant": relevant,
     }, sort_keys=True).lower()
 
     assert calls == [{"url": exact, "timeout": 8, "accept": "application/json"}]
@@ -73263,6 +73265,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_g
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         forbidden,
         "evilrepo",
