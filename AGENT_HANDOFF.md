@@ -99,6 +99,41 @@ python3 -c 'from api.runtime_contract import make_event, make_status, is_valid_e
 
 ### Next task
 
-**Phase 2: WebUI durable runtime journal**
+**Phase 2: WebUI durable runtime journal** — COMPLETE (see below)
 
-Wire `api/runtime_contract.py` types into `api/run_journal.py` so journal entries use the canonical `RuntimeEvent` and `RuntimeStatus` shapes. Do not change live streaming behavior. Do not modify `api/streaming.py` except for import discovery.
+---
+
+## Phase 2: WebUI durable runtime journal — COMPLETE
+
+| Field | Value |
+|---|---|
+| **Status** | Complete |
+| **HEAD before commit** | `6aa6a8c` |
+| **Changed files** | `api/runtime_journal.py` (created), `tests/test_runtime_journal.py` (created), `docs/rfcs/runtime-api-contract.md` (updated) |
+
+### Verification
+
+```bash
+# Focused test run
+./scripts/test.sh tests/test_runtime_contract.py tests/test_runtime_journal.py -v
+# 42 passed in 2.22s -- all green (16 contract + 26 journal)
+
+# Import smoke check
+python3 -c 'from api.runtime_journal import RuntimeJournal; print("OK")'
+```
+
+### Deliverables
+
+- `api/runtime_journal.py` -- `RuntimeJournal` class with durable append-only run event storage using `RuntimeEvent`/`RuntimeStatus` from `api/runtime_contract.py`. Required public methods: `create_run()`, `append_event()`, `read_events()`, `get_status()`, `get_active_run_for_session()`, `mark_terminal()`. Storage at `STATE_DIR / "runs" /` with `run_<id>.jsonl` + `_index.json`. Atomic index writes, monotonic seq per run, secret redaction on disk, active session mapping with terminal cleanup.
+- `tests/test_runtime_journal.py` -- 26 tests covering create, append, read (with after_seq and limit), get_status, terminal durability, active session mapping, secret redaction, unknown-run behavior, import isolation, event round-trip, and index survival across fresh object access.
+- `docs/rfcs/runtime-api-contract.md` -- updated with journal storage layout and RuntimeJournal reference.
+
+### Design decisions
+
+- **Extension vs new module**: `api/run_journal.py` serves legacy SSE mirroring (`_run_journal` dir, per-session). The new `api/runtime_journal.py` serves the full durable journal contract (`runs` dir, flat layout, active-session index). Keeping them separate avoids coupling the legacy journal to the contract types.
+- **Unknown run behavior**: `get_status()`, `read_events()`, `mark_terminal()`, and `get_active_run_for_session()` return `None` for unknown runs. `append_event()` raises `ValueError`. Documented in class docstring.
+- **Redaction**: Events are stored via `RuntimeEvent.to_dict()` which calls `api/runtime_contract._redact_payload()`. Secrets are redacted at the serialization layer before hitting disk.
+
+### Next task
+
+**Phase 3: WebUI runtime routes + legacy-journal mirror**

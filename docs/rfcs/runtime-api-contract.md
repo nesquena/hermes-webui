@@ -176,3 +176,53 @@ module. The recommended mobile usage pattern is:
 - `api/run_journal.py` — Slice 1 append-only journal (uses a compatible event
   shape internally).
 - `api/runtime_contract.py` — canonical Python implementation of this contract.
+- `api/runtime_journal.py` — ``RuntimeJournal`` class with durable append-only run event storage, active-session index, and replay support.
+
+## Journal storage layout
+
+The ``RuntimeJournal`` stores events and run metadata under ``STATE_DIR / "runs" /``:
+
+```
+runs/
+  run_<id>.jsonl   -- one JSONL file per run (redacted RuntimeEvent dicts)
+  _index.json       -- active-session mapping + per-run status snapshots
+```
+
+The index shape:
+
+```json
+{
+  "active_sessions": {"session_abc": "run_def456"},
+  "runs": {
+    "run_def456": {
+      "run_id": "run_def456",
+      "session_id": "session_abc",
+      "status": "running",
+      "last_event_id": "run_def456:7",
+      "last_seq": 7,
+      "terminal": false,
+      "controls": ["cancel"],
+      "pending_approval_ids": [],
+      "pending_clarify_ids": [],
+      "error": null,
+      "result": null,
+      "created_at": 1778750000.0
+    }
+  }
+}
+```
+
+Events are stored via ``RuntimeEvent.to_dict()`` which redacts secret-bearing
+keys before writing to disk. ``RuntimeEvent`` objects are reconstructed on read
+via ``_dict_to_runtime_event()`` from the already-redacted stored form.
+
+### Journal API
+
+| Method | Signature | Description |
+|---|---|---|
+| ``create_run`` | ``(session_id, metadata=None) -> RuntimeStatus`` | Create a new run, update active-session mapping, return status. |
+| ``append_event`` | ``(event: RuntimeEvent) -> RuntimeEvent`` | Append an event to the run's JSONL, update index. Raises ``ValueError`` for unknown runs. |
+| ``read_events`` | ``(run_id, after_seq=None, limit=None) -> list[RuntimeEvent] | None`` | Read events, optionally cursor-based replay. Returns ``None`` for unknown runs. |
+| ``get_status`` | ``(run_id) -> RuntimeStatus | None`` | Return current run status from index. Returns ``None`` for unknown runs. |
+| ``get_active_run_for_session`` | ``(session_id) -> RuntimeStatus | None`` | Return the active (non-terminal) run for a session. Returns ``None`` if no active run. |
+| ``mark_terminal`` | ``(run_id, status, result=None, error=None) -> RuntimeStatus | None`` | Mark a run as terminal, clear active-session mapping. Returns ``None`` for unknown runs. |
