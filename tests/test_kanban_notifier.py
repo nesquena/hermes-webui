@@ -582,6 +582,29 @@ class TestDeliver:
         )
         assert "@None" not in prompt
 
+    def test_deliver_when_task_is_none(self, fake_kanban, clean_notifier):
+        """When get_task returns None (task deleted), _deliver should still
+        work without AttributeError — title falls back to task_id, assignee
+        is empty, and the prompt is delivered."""
+        fake_kanban.tasks = []  # No tasks — get_task returns None
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "blocked", {"reason": "x"}, 100),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        deliveries = clean_notifier._poll_once()
+        assert len(deliveries) == 1
+        assert deliveries[0]["task"] is None
+
+        mock_resp = {"_status": 200, "stream_id": "s1"}
+        with patch("api.background_process._session_has_active_turn", return_value=False), \
+             patch("api.routes.start_session_turn", return_value=mock_resp) as mock_turn:
+            clean_notifier._deliver(deliveries)
+            mock_turn.assert_called_once()
+            prompt = mock_turn.call_args[0][1]
+            assert "t_1" in prompt
+            assert "@None" not in prompt
+
 
 class TestThreadLifecycle:
     def test_start_and_stop(self, clean_notifier):

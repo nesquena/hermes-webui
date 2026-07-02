@@ -196,7 +196,7 @@ def _deliver(deliveries: list[dict]) -> None:
 
         task_id = sub["task_id"]
         title = (task.title if task else task_id)[:120]
-        assignee = task.assignee or ""
+        assignee = (task.assignee if task else None) or ""
         kinds = {ev.kind for ev in d["events"]}
 
         prompt = _format_wakeup_prompt(task_id, title, assignee, board_slug, kinds)
