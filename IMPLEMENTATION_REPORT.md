@@ -444,3 +444,36 @@ Agent-runs env: 138 passed, 8 expected failures
 - `AGENT_HANDOFF.md` — Phase 18 section added
 - `IMPLEMENTATION_REPORT.md` — Phase 18 section added
 - `PR_DESCRIPTION.md` — Phase 18 changes added
+
+---
+
+## Phase 19 — Real-credential Smoke Readiness (verified)
+
+Phase 19 validates the WebUI side of real-credential smoke readiness. No
+WebUI code changes were required — the agent-runs adapter was already complete.
+
+### Test Results
+
+| Mode | Passed | Failed | Notes |
+|------|--------|--------|-------|
+| Default env | 146 | 0 | All tests pass |
+| Agent-runs env | 138 | 8 | 8 expected failures in test_runtime_routes.py (journal-specific) |
+
+### Cross-Repo Smoke
+
+Cross-repo live smoke (Agent + WebUI) was run in deterministic (`--fake`) mode:
+- **Agent direct:** 5/5 passed (health, create, status, events, stop)
+- **WebUI agent-runs:** 5/5 passed (capabilities, status proxy, events proxy, cancel, health)
+- **Login:** 1/1 passed
+- **Total: 11/11 PASSED**
+
+### Real DeepSeek Smoke
+
+**Skipped** — DEEPSEEK_API_KEY not set. No fake pass.
+
+### Architecture Preservation
+
+- Agent-runs adapter unchanged
+- Default adapter (legacy-direct) remains default
+- No changes to `/api/chat/start`, `/api/chat/stream`
+- Runtime routes, journal, mobile APIs, deployment health unchanged

@@ -121,6 +121,15 @@ Phase 15 verifies the WebUI side of cross-repo runtime integration. No code chan
 
 **No architecture changes.** agent-runs remains opt-in.
 
+### Phase 19 — Real-credential Smoke Readiness
+
+No WebUI code changes. Phase 19 validated:
+- Deterministic cross-repo smoke (--fake): 11/11 PASSED
+- Default tests: 146 passed, 0 failed
+- Agent-runs env tests: 138 passed, 8 expected failures
+- Real DeepSeek smoke: SKIPPED (no key)
+- Agent-side approval/clarify deterministic trigger wired (events verified)
+
 ## Rollback Plan
 
 ```bash

@@ -805,3 +805,26 @@ Existing tests already comprehensively cover the agent-runs adapter (6 test file
 - `IMPLEMENTATION_REPORT.md` — Phase 18 section added
 - `PR_DESCRIPTION.md` — Phase 18 changes added
 
+---
+
+## Phase 19 — Real-credential Smoke Readiness (verified)
+
+**Phase 19 completed on the Agent side.** No WebUI code changes were required.
+
+### Phase 19 Results
+
+- Agent deterministic smoke (Agent-only): 7/7 PASSED
+- Agent deterministic smoke (cross-repo): 11/11 PASSED
+- Agent runtime tests: 409 passed, 0 failed (16 files)
+- WebUI default env tests: 146 passed, 0 failed
+- WebUI agent-runs env tests: 138 passed, 8 expected failures
+- Real DeepSeek smoke: SKIPPED (DEEPSEEK_API_KEY not set in env)
+- Agent approval/clarify deterministic trigger: wired (events verified)
+- Messaging-adapter smoke plan: documented in `docs/messaging-adapter-live-smoke.md`
+
+### Architecture Preserved
+
+- WebUI agent-runs adapter unchanged
+- Default adapter (legacy-direct) remains default
+- Runtime routes, journal, mobile APIs, deployment health unchanged
+
