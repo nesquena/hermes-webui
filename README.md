@@ -48,6 +48,7 @@ This gives you nearly **1:1 parity with Hermes CLI from a convenient web UI** wh
 ## Contents
 
 - [Why Hermes](#why-hermes) — what it is and how it compares
+- [Companion X/Twitter Sessions](#companion-xtwitter-sessions) - third-party social monitoring context
 - [Quick start](#quick-start) — clone + `bootstrap.py` / `start.sh` / `ctl.sh`
 - [Features](#features) — chat, sessions, workspace, voice, profiles, security, themes, panels, mobile
 - [Configuration & access](#configuration--access) — auto-discovery, overrides, remote/Tailscale/phone, manual launch
@@ -56,6 +57,17 @@ This gives you nearly **1:1 parity with Hermes CLI from a convenient web UI** wh
 - [Architecture](#architecture) — backend/frontend layout, state dir
 - [Docs](#docs) — the full documentation index
 - [Contributors](#contributors)
+
+---
+
+## Companion X/Twitter Sessions
+
+For social monitoring sessions, pair Hermes WebUI with
+[Hermes Tweet](https://github.com/Xquik-dev/hermes-tweet). Hermes Tweet can
+collect X/Twitter account, post, or trend context inside Hermes, while WebUI
+keeps the chat, workspace files, session projects, tags, and mobile-friendly
+review flow in one browser surface. Hermes Tweet is a third-party project
+maintained by Xquik-dev, not by this repository.
 
 ---
 
