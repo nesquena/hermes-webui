@@ -1,7 +1,7 @@
 # Capy Spaces Source-Refresh Evidence Index
 
 Created: 2026-06-30 21:01 CDT
-Last count refresh: 2026-07-01 11:52 CDT
+Last count refresh: 2026-07-02 10:59 CDT
 Branch: `feat/capy-spaces-foundation`
 
 ## Purpose
@@ -27,13 +27,13 @@ The index is intentionally docs-only. It does not change the Memory Tree impleme
 
 ## Evidence snapshot
 
-Snapshot generated from the checked-out `tests/test_capy_memory_tree.py` on 2026-07-01 11:52 CDT:
+Snapshot generated from the checked-out `tests/test_capy_memory_tree.py` on 2026-07-02 10:59 CDT:
 
 | Search/count | Count | Meaning |
 | --- | ---: | --- |
 | `def test_.*github.*(?:final_url|redirect).*drift` | 134 | GitHub source-refresh drift regressions across route families. |
-| `def test_.*before_body_read` | 111 | Regressions that explicitly name no-body-read behavior. |
-| `def test_.*relevant_memory_empty` | 31 | Regressions that also prove Spaces relevant-memory remains empty after hostile drift. |
+| `def test_.*before_body_read` | 121 | Regressions that explicitly name no-body-read behavior. |
+| `def test_.*relevant_memory_empty` | 52 | Regressions that also prove Spaces relevant-memory remains empty after hostile drift. |
 | `def test_.*ingests_github.*metadata_only` | 154 | Positive metadata-only GitHub ingestion regressions. |
 
 ### Regeneration recipe
@@ -68,7 +68,7 @@ Coarse drift-test family buckets from function names:
 | Security / Dependabot / code scanning / secret scanning / private vulnerability reporting | 16 | Prioritize metadata-only output and no public leakage of advisory, secret, key, or vulnerability details. |
 | Deployments / Pages / environments | 16 | Check route-tail and ID drift; these routes mix repo IDs, deployment IDs, environment names, and status rows. |
 | Repository metadata / contents / README / license / languages / branches / tags / topics / rulesets / properties | 11 | Confirm raw content bodies and URLs remain out of public receipts. |
-| Traffic / stats / social surfaces | 10 | Confirm aggregate counts/previews only and no actor/body leakage. |
+| Traffic / stats / social surfaces | 11 | Confirm aggregate counts/previews only and no actor/body leakage. |
 
 These buckets are navigation aids, not a substitute for tests. Some tests cover multiple route concepts and may be counted in the most obvious bucket only.
 
