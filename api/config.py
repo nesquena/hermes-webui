@@ -8061,6 +8061,10 @@ _SETTINGS_DEFAULTS = {
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
     "default_message_mode": "steer",  # behavior when sending while agent is running: queue | interrupt | steer
+    "custom_logo_enabled": False,  # replace titlebar/empty-state/favicon with user-uploaded logo
+    "custom_logo_dark_mode": False,  # use separate light/dark logo images
+    "custom_logo_light_path": "",  # relative path under BRANDING_DIR for light/universal logo
+    "custom_logo_dark_path": "",  # relative path under BRANDING_DIR for dark logo
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
     "provider_cost_budget": None,
@@ -8280,6 +8284,8 @@ _SETTINGS_BOOL_KEYS = {
     "large_text_paste_as_attachment",
     "project_quick_create_buttons",
     "session_endless_scroll",
+    "custom_logo_enabled",
+    "custom_logo_dark_mode",
     "auto_scroll_follow",
     "worklog_details_expanded_default",
     "auth_disabled_acknowledged",

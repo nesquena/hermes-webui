@@ -8780,6 +8780,12 @@ from api.upload import (
     handle_transcribe_capability,
     handle_workspace_upload,
 )
+from api.branding import (
+    BRANDING_DIR,
+    handle_logo_delete,
+    handle_logo_upload,
+    logo_version_for_settings_value,
+)
 from api.streaming import (
     _sse,
     _sse_set_write_deadline,
@@ -11427,6 +11433,12 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/settings":
         settings = load_settings()
+        settings["custom_logo_light_version"] = logo_version_for_settings_value(
+            settings.get("custom_logo_light_path", "")
+        )
+        settings["custom_logo_dark_version"] = logo_version_for_settings_value(
+            settings.get("custom_logo_dark_path", "")
+        )
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
         settings.setdefault("max_tokens", None)
@@ -11508,6 +11520,9 @@ def handle_get(handler, parsed) -> bool:
         from api.extensions import serve_extension_static
 
         return serve_extension_static(handler, parsed)
+
+    if parsed.path.startswith("/branding/"):
+        return _serve_branding(handler, parsed)
 
     if parsed.path.startswith("/static/"):
         return _serve_static(handler, parsed)
@@ -12849,6 +12864,14 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.stage("read_client_event_body")
         return _handle_client_event_log(handler, _read_client_event_payload(handler))
+
+    # Logo upload/delete — multipart/form-data, must read rfile directly
+    # before read_body() consumes the request body as JSON.
+    if parsed.path == "/api/settings/upload-logo":
+        return handle_logo_upload(handler)
+
+    if parsed.path == "/api/settings/delete-logo":
+        return handle_logo_delete(handler)
 
     if diag:
         diag.stage("read_body")
@@ -15192,6 +15215,41 @@ _COMPRESSIBLE_MIME = {
 # enter the cache; memory cost is bounded by the static/ tree's served files.
 _STATIC_CACHE: dict = {}
 _STATIC_CACHE_LOCK = threading.Lock()
+
+
+def _serve_branding(handler, parsed):
+    """Serve user-uploaded branding images from BRANDING_DIR.
+
+    Mirrors _serve_static() but reads from the branding directory
+    instead of the static/ source tree.  No gzip (files are small),
+    no ETag cache (files can change).
+    """
+    branding_root = BRANDING_DIR.resolve()
+    # Strip '/branding/' prefix
+    rel = parsed.path[len("/branding/"):]
+    if not re.fullmatch(r"logo-(light|dark)\.(png|ico)", rel):
+        return j(handler, {"error": "not found"}, status=404)
+    branding_file = (branding_root / rel).resolve()
+    try:
+        branding_file.relative_to(branding_root)
+    except ValueError:
+        return j(handler, {"error": "not found"}, status=404)
+    if not branding_file.exists() or not branding_file.is_file():
+        return j(handler, {"error": "not found"}, status=404)
+
+    ext = branding_file.suffix.lower()
+    ct = _STATIC_MIME.get(ext.lstrip("."), "application/octet-stream")
+    ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
+
+    raw = branding_file.read_bytes()
+    handler.send_response(200)
+    handler.send_header("Content-Type", ct_header)
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Cache-Control", "no-store, max-age=0")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+    handler.wfile.write(raw)
+    return True
 
 
 def _serve_static(handler, parsed):
