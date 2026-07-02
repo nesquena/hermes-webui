@@ -463,25 +463,39 @@ def test_chat_stream_allows_unknown_dead_stream_fallback_replay_path(monkeypatch
     assert calls["replay"] == 0
 
 
-def test_session_new_blocks_prev_session_from_other_profile(monkeypatch):
+def test_session_new_skips_prev_session_commit_from_other_profile(monkeypatch):
+    """Cross-profile prev_session_id after a profile switch must not 404 (#5420)."""
     import api.session_lifecycle as session_lifecycle
     handler = _FakeHandler()
     foreign = _SimpleSession("foreign_session", profile="other")
     calls = {"commit": 0, "new": 0}
+
+    class _NewSession:
+        def __init__(self):
+            self.session_id = "new_session"
+            self.messages = []
+
+        def compact(self):
+            return {"session_id": self.session_id}
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"prev_session_id": "foreign_session"})
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
     monkeypatch.setattr(session_lifecycle, "commit_session_memory", lambda sid, agent=None: calls.__setitem__("commit", calls["commit"] + 1))
-    monkeypatch.setattr(routes, "new_session", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("new session should not be created")))
+    monkeypatch.setattr(
+        routes,
+        "new_session",
+        lambda **_kwargs: calls.__setitem__("new", calls["new"] + 1) or _NewSession(),
+    )
 
     cap = _capture(monkeypatch)
     routes.handle_post(handler, urlparse("/api/session/new"))
 
     assert calls["commit"] == 0
-    assert calls["new"] == 0
-    assert cap["bad"] == ("Session not found", 404)
+    assert calls["new"] == 1
+    assert "bad" not in cap
+    assert cap["ok"]["session"]["session_id"] == "new_session"
 
 
 def test_session_new_keeps_prev_session_commit_for_same_profile(monkeypatch):

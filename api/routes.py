@@ -12518,7 +12518,7 @@ def handle_get(handler, parsed) -> bool:
         return j(
             handler,
             {
-                "profiles": list_profiles_api(),
+                "profiles": profiles_api.list_profiles_api(),
                 "active": profiles_api.get_active_profile_name(),
                 "single_profile_mode": _is_isolated_profile_mode(),
             },
