@@ -439,6 +439,9 @@ async function _runAgentCommandTransport(text,_meta){
     method:'POST',
     body:JSON.stringify({command})
   });
+  if(data&&typeof data.message==='string'&&data.message.trim()){
+    return {message:data.message,output:String(data.output||'')};
+  }
   return String(data&&data.output||'(no output)');
 }
 
