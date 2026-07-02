@@ -4049,6 +4049,10 @@ document.addEventListener('scroll',e=>{
   if(_sessionActionMenu.contains(e.target)) return;
   if(_sessionActionMenuShouldIgnoreScrollTarget(e.target)) return;
   if(_sessionActionMenuShouldRepositionOnScroll(e.target) && _sessionActionAnchor){
+    if(!_sessionActionAnchor.isConnected){
+      closeSessionActionMenu();
+      return;
+    }
     _positionSessionActionMenu(_sessionActionAnchor);
     return;
   }
