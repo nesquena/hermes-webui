@@ -3561,6 +3561,17 @@ function closeSessionActionMenu(){
   _sessionActionSessionId = null;
 }
 
+function _sessionActionMenuShouldIgnoreScrollTarget(target){
+  if(!target || typeof target.closest !== 'function') return false;
+  // #5347: active-chat auto-scroll / manual wheel must not dismiss the sidebar menu.
+  return Boolean(target.closest('#messages, #msgInner, .messages-inner'));
+}
+
+function _sessionActionMenuShouldRepositionOnScroll(target){
+  if(!target || typeof target.closest !== 'function') return false;
+  return Boolean(target.closest('#sessionList, .session-list'));
+}
+
 function _positionSessionActionMenu(anchorEl){
   if(!_sessionActionMenu || !anchorEl) return;
   const rect=anchorEl.getBoundingClientRect();
@@ -4036,6 +4047,15 @@ document.addEventListener('click',e=>{
 document.addEventListener('scroll',e=>{
   if(!_sessionActionMenu) return;
   if(_sessionActionMenu.contains(e.target)) return;
+  if(_sessionActionMenuShouldIgnoreScrollTarget(e.target)) return;
+  if(_sessionActionMenuShouldRepositionOnScroll(e.target) && _sessionActionAnchor){
+    if(!_sessionActionAnchor.isConnected){
+      closeSessionActionMenu();
+      return;
+    }
+    _positionSessionActionMenu(_sessionActionAnchor);
+    return;
+  }
   closeSessionActionMenu();
 }, true);
 document.addEventListener('keydown',e=>{
