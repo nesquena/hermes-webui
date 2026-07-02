@@ -616,7 +616,6 @@ def _run_gateway_chat_streaming(
                 _prefill_messages_with_webui_context,
                 _normalize_prefill_messages_before_user_turn,
                 _public_prefill_context_status,
-                _webui_client_identity_context,
                 _webui_ephemeral_system_prompt,
                 _webui_system_prompt_with_client_identity,
             )
