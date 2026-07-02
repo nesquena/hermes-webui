@@ -8060,7 +8060,7 @@ _SETTINGS_DEFAULTS = {
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
-    "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
+    "default_message_mode": "steer",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
     "provider_cost_budget": None,
@@ -8171,6 +8171,12 @@ def load_settings() -> dict:
                         if k not in _SETTINGS_LEGACY_DROP_KEYS
                     }
                 )
+                if (
+                    "default_message_mode" not in stored
+                    and "busy_input_mode" in stored
+                ):
+                    settings["default_message_mode"] = stored.get("busy_input_mode")
+                settings.pop("busy_input_mode", None)
                 # Grandfather established installs OFF for show_cli_sessions (#3988).
                 # The default flipped True so NEW users see CLI/TUI/messaging
                 # sessions without hunting for the toggle — but an existing user
@@ -8229,7 +8235,7 @@ _SETTINGS_ENUM_VALUES = {
     "sidebar_density": {"compact", "detailed"},
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
-    "busy_input_mode": {"queue", "interrupt", "steer"},
+    "default_message_mode": {"queue", "interrupt", "steer"},
     "chat_activity_display_mode": {"compact_worklog", "transparent_stream"},
     "structured_code_default_view": {"auto", "on", "off"},
 }
@@ -8323,6 +8329,12 @@ def save_settings(settings: dict) -> dict:
             "activity_feed_expanded_default"
         )
     settings.pop("activity_feed_expanded_default", None)
+    if (
+        "default_message_mode" not in settings
+        and "busy_input_mode" in settings
+    ):
+        settings["default_message_mode"] = settings.get("busy_input_mode")
+    settings.pop("busy_input_mode", None)
     settings.pop("simplified_tool_calling", None)
     pending_theme = current.get("theme")
     pending_skin = current.get("skin")

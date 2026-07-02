@@ -50,7 +50,7 @@ PREFERENCE_FIELDS_AUTOSAVE = [
     ("settingsNotificationsEnabled", "notifications_enabled"),
     ("settingsSidebarDensity", "sidebar_density"),
     ("settingsAutoTitleRefresh", "auto_title_refresh_every"),
-    ("settingsBusyInputMode", "busy_input_mode"),
+    ("settingsDefaultMessageMode", "default_message_mode"),
     ("settingsShowBusyPlaceholderHint", "show_busy_placeholder_hint"),
     ("settingsBotName", "bot_name"),
 ]

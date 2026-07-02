@@ -1064,34 +1064,43 @@ function _micToastKeyForRecognitionError(error){
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;
 
-// ── Busy input mode eager default (#5167) ───────────────────────────────────
-// The Busy input mode preference (queue/interrupt/steer) is read on the send
-// path via `window._busyInputMode||'queue'`. The authoritative value only
-// arrives once the async boot IIFE below resolves the `/api/settings` fetch.
-// Without an eager value, every send during that boot window silently falls
-// back to 'queue', ignoring a saved 'steer'/'interrupt' preference (worse on
+// ── Default message mode eager default (#5167 / #5145) ──────────────────────
+// The Default message mode preference (queue/interrupt/steer) is read on the
+// send path via `window._defaultMessageMode||'steer'`. The authoritative value
+// only arrives once the async boot IIFE below resolves the `/api/settings`
+// fetch. Without an eager value, every send during that boot window silently
+// falls back, ignoring a saved 'queue'/'interrupt' preference (worse on
 // slow/contended environments like WSL2, see #5132). Mirror the resolved value
 // into localStorage — the same synchronous-source pattern used by hermes-lang /
 // hermes-theme — so the very first send after a reload honors the saved choice.
-const _BUSY_INPUT_MODES=['queue','interrupt','steer'];
-function _normalizeBusyInputMode(mode){
-  return _BUSY_INPUT_MODES.includes(mode)?mode:'queue';
+const _DEFAULT_MESSAGE_MODES=['queue','interrupt','steer'];
+// Legacy localStorage key (pre-#5145 rename); read it as a fallback so an
+// existing user's persisted busy-input-mode preference survives the rename.
+const _LEGACY_DEFAULT_MESSAGE_MODE_KEY='hermes-busy-input-mode';
+const _DEFAULT_MESSAGE_MODE_KEY='hermes-default-message-mode';
+function _normalizeDefaultMessageMode(mode){
+  return _DEFAULT_MESSAGE_MODES.includes(mode)?mode:'steer';
 }
-function _persistBusyInputMode(mode){
-  const m=_normalizeBusyInputMode(mode);
-  try{localStorage.setItem('hermes-busy-input-mode',m);}catch(_){}
+function _persistDefaultMessageMode(mode){
+  const m=_normalizeDefaultMessageMode(mode);
+  try{localStorage.setItem(_DEFAULT_MESSAGE_MODE_KEY,m);}catch(_){}
   return m;
 }
-function _readPersistedBusyInputMode(){
+function _readPersistedDefaultMessageMode(){
   let stored=null;
-  try{stored=localStorage.getItem('hermes-busy-input-mode');}catch(_){}
-  return _normalizeBusyInputMode(stored);
+  try{
+    // Prefer the new key; fall back to the legacy key so a pre-rename
+    // preference is honored until the next explicit save rewrites the new key.
+    stored=localStorage.getItem(_DEFAULT_MESSAGE_MODE_KEY);
+    if(stored===null||stored===undefined) stored=localStorage.getItem(_LEGACY_DEFAULT_MESSAGE_MODE_KEY);
+  }catch(_){}
+  return _normalizeDefaultMessageMode(stored);
 }
-window._persistBusyInputMode=_persistBusyInputMode;
-window._readPersistedBusyInputMode=_readPersistedBusyInputMode;
+window._persistDefaultMessageMode=_persistDefaultMessageMode;
+window._readPersistedDefaultMessageMode=_readPersistedDefaultMessageMode;
 // Eager default set BEFORE the async settings fetch resolves so first sends in
-// the boot window honor the persisted preference instead of defaulting to queue.
-window._busyInputMode=_readPersistedBusyInputMode();
+// the boot window honor the persisted preference instead of the raw default.
+window._defaultMessageMode=_readPersistedDefaultMessageMode();
 
 // ── Extension TTS-engine registry (registerHermesTtsEngine) ──────────────────
 // Defined at MODULE scope (not inside the voice-mode IIFE below) so the public
@@ -2764,7 +2773,11 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       stringChars:parseInt(s.inflight_state_max_string_chars||60000,10)||60000,
       jsonChars:parseInt(s.inflight_state_max_json_chars||1500000,10)||1500000,
     };
-    window._busyInputMode=_persistBusyInputMode(s.busy_input_mode);
+    // #5162 rename + steer default, layered on the #5170 localStorage mirror:
+    // resolve the mode (new key, legacy busy_input_mode fallback, else 'steer'
+    // via _normalizeDefaultMessageMode) and persist it so the very first send
+    // after a reload honors the saved choice.
+    window._defaultMessageMode=_persistDefaultMessageMode(s.default_message_mode||s.busy_input_mode);
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._autoScrollFollow=s.auto_scroll_follow!==false;
@@ -2890,12 +2903,12 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._structuredCodeAutoTreeLines=10;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
-    // Settings load failed: keep the persisted busy-input-mode preference (the
-    // eager default already read it from the localStorage mirror) instead of
-    // clobbering it with 'queue', so a saved 'steer'/'interrupt' still applies
+    // Settings load failed: keep the persisted default-message-mode preference
+    // (the eager default already read it from the localStorage mirror) instead
+    // of clobbering it, so a saved 'steer'/'interrupt'/'queue' still applies
     // when the server is unreachable (#5167). The placeholder-hint has no
     // persisted mirror, so it defaults off on failure.
-    window._busyInputMode=_readPersistedBusyInputMode();
+    window._defaultMessageMode=_readPersistedDefaultMessageMode();
     window._showBusyPlaceholderHint=false;
     window._sessionEndlessScrollEnabled=false;
     window._autoScrollFollow=true;
