@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head><title>Fixing Hermes WebUI model state...</title></head>
+<body>
+<script>
+// Clear the stale localStorage entry that's causing 404
+localStorage.removeItem('hermes-webui-model-state');
+// Also clear any other stale state
+localStorage.removeItem('hermes-webui-selected-model');
+// Redirect back to WebUI
+window.location.href = '/';
+</script>
+<p>Fixing model state... redirecting back to WebUI.</p>
+</body>
+</html>
