@@ -113,7 +113,7 @@ in
 
     host = lib.mkOption {
       type = lib.types.str;
-      default = "127.0.0.1";
+      default = "0.0.0.0";
       description = "Value for HERMES_WEBUI_HOST.";
     };
 

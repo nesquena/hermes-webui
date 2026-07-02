@@ -422,7 +422,7 @@ services.hermes-webui = {
 };
 ```
 
-Keep the module default host at `127.0.0.1`. Set `host = "0.0.0.0"` only when you also provide auth, for example `HERMES_WEBUI_PASSWORD` via `environmentFiles`.
+The module defaults to `0.0.0.0` for a network-reachable system service. Pair that with auth, for example `HERMES_WEBUI_PASSWORD` via `environmentFiles`, or override `host = "127.0.0.1"` when you want loopback-only access.
 
 You can also set `agent.package` instead of `agent.dir` when you are using a compatible Hermes Agent package layout. The module derives `HERMES_WEBUI_AGENT_DIR` from `<pkg>/share/hermes-agent` and sets `HERMES_WEBUI_PYTHON` from the package's `passthru.hermesVenv` interpreter so bootstrap can use agent dependencies without creating a local `.venv`.
 
