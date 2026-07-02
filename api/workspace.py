@@ -373,6 +373,45 @@ def save_workspaces(workspaces: list) -> None:
     ws_file.write_text(json.dumps(workspaces, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
+def get_profile_default_workspace() -> str:
+    """Resolve the ACTIVE PROFILE's default workspace, never the global file.
+
+    Like get_last_workspace() but WITHOUT the global ``_GLOBAL_LW_FILE``
+    fallback: for a named profile that has not yet written its own
+    profile-scoped ``last_workspace.txt``, that global fallback would leak the
+    *global* last-workspace instead of the profile's configured workspace —
+    which is exactly the #5169 bug (the composer chip on a blank new-chat page
+    showing the wrong/global workspace for a named profile). Used by
+    ``GET /api/profile/active`` so a cold boot under a profile cookie reflects
+    the profile's own configured working directory.
+
+    Priority: profile-scoped ``last_workspace.txt`` -> profile ``config.yaml``
+    ``workspace``/``default_workspace`` -> ``terminal.cwd`` -> process default.
+    """
+    remote_cwd = _remote_terminal_cwd()
+
+    def _valid(raw: str) -> str | None:
+        if not raw:
+            return None
+        if remote_cwd:
+            if _remote_terminal_workspace_candidate(raw) is not None:
+                return raw
+            return None
+        if Path(raw).is_dir():
+            return raw
+        return None
+
+    lw_file = _last_workspace_file()
+    if lw_file.exists():
+        try:
+            p = _valid(lw_file.read_text(encoding='utf-8').strip())
+            if p:
+                return p
+        except Exception:
+            logger.debug("Failed to read profile last workspace from %s", lw_file)
+    return _profile_default_workspace()
+
+
 def get_last_workspace() -> str:
     remote_cwd = _remote_terminal_cwd()
 
@@ -1432,6 +1471,10 @@ def read_file_content(workspace: Path, rel: str) -> dict:
         if st.st_size > MAX_FILE_BYTES:
             raise ValueError(f"File too large ({st.st_size} bytes, max {MAX_FILE_BYTES})")
         raw = fh.read(MAX_FILE_BYTES + 1)
+    if Path(str(rel)).suffix.lower() in {".docx", ".xlsx", ".pptx"}:
+        from api.office_documents import preview_office_document
+
+        return preview_office_document(rel, raw)
     content = raw.decode('utf-8', errors='replace')
     return {'path': rel, 'content': content, 'size': len(raw), 'lines': content.count('\n') + 1}
 

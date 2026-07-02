@@ -329,7 +329,16 @@ def _run_cancel_stream_scenarios() -> dict:
             f"--- stderr ---\n{completed.stderr}"
         )
     try:
-        return json.loads(completed.stdout)
+        # The function under test legitimately emits diagnostic lines on stdout
+        # (e.g. cancelStream's '[stream] cancel requested' provenance log, added
+        # for #5345). Those fire DURING runAll(); the result JSON is written by
+        # `console.log(JSON.stringify(r))` only after runAll() resolves, so it is
+        # always the LAST non-empty stdout line. Parse that rather than assuming
+        # stdout is pure JSON.
+        lines = [ln for ln in completed.stdout.splitlines() if ln.strip()]
+        if not lines:
+            raise json.JSONDecodeError("empty stdout", completed.stdout or "", 0)
+        return json.loads(lines[-1])
     except json.JSONDecodeError as e:
         raise AssertionError(
             f"node subprocess returned non-JSON output:\n"

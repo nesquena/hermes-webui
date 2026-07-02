@@ -71,6 +71,25 @@ class TestBootJsProfileDefaultWorkspace:
             "S._profileDefaultWorkspace must be set in the same settings-fetch block"
         )
 
+    def test_boot_sets_profile_default_workspace_from_profile_active(self):
+        """Profile active bootstrap must override settings with p.default_workspace (#5169)."""
+        src = read('static/boot.js')
+        active_idx = src.find("api('/api/profile/active'")
+        assert active_idx != -1, "/api/profile/active fetch not found in boot.js"
+        block = src[active_idx:active_idx + 1200]
+        assert 'p.default_workspace' in block, (
+            "boot.js must read default_workspace from /api/profile/active response"
+        )
+        assert '_profileDefaultWorkspace' in block, (
+            "boot.js must assign S._profileDefaultWorkspace from profile active bootstrap"
+        )
+        assert re.search(
+            r"if\s*\(\s*p\.default_workspace\s*\)\s*S\._profileDefaultWorkspace\s*=\s*p\.default_workspace",
+            block,
+        ), (
+            "boot.js must set S._profileDefaultWorkspace when p.default_workspace is present"
+        )
+
 
 class TestPromptNewFileNoSession:
     """promptNewFile/promptNewFolder must auto-create a session on blank page."""
@@ -166,4 +185,19 @@ class TestWorkspaceSwitcherBlankPage:
         )
         assert '!hasSession && composerDropdown' not in fn, (
             "Regression guard: !hasSession for dropdown close must be removed"
+        )
+
+
+class TestWorkspaceDropdownBlankPageCurrentWs:
+    """Blank-page workspace dropdown must highlight profile default (#5169)."""
+
+    def test_render_workspace_dropdown_uses_profile_default_on_blank_page(self):
+        src = read('static/panels.js')
+        assert re.search(
+            r"renderWorkspaceDropdownInto\([^,]+,\s*[^,]+,\s*"
+            r"S\.session\?\.workspace\|\|S\._profileDefaultWorkspace\|\|data\.last\|\|''\)",
+            src,
+        ), (
+            "renderWorkspaceDropdownInto must use session, profile default, or data.last "
+            "as current workspace on blank page"
         )

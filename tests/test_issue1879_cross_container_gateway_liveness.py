@@ -28,6 +28,7 @@ These tests pin every behavior the fix promises:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -44,6 +45,19 @@ class _FakeGatewayStatus:
     def get_running_pid(self, cleanup_stale=False):
         assert cleanup_stale is False
         return self._running_pid
+
+
+class _PathReadingGatewayStatus:
+    def __init__(self):
+        self.read_paths = []
+
+    def read_runtime_status(self, path=None):
+        self.read_paths.append(path)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def get_running_pid(self, cleanup_stale=False):
+        assert cleanup_stale is False
+        return None
 
 
 def _runtime_status(updated_at: str | None, **overrides):
@@ -114,6 +128,42 @@ def test_cross_container_alive_path_does_not_leak_raw_process_fields(monkeypatch
 
 
 # -- Stale / missing / malformed timestamps -----------------------------------
+
+
+def test_cross_container_runtime_status_reads_sibling_runtime_file(monkeypatch, tmp_path):
+    """#5030: the positional fallback must open gateway_state.json, not gateway.pid."""
+    from api import agent_health
+
+    pid_path = tmp_path / "gateway.pid"
+    runtime_status_path = tmp_path / "gateway_state.json"
+    fresh_ts = _iso(datetime.now(timezone.utc) - timedelta(seconds=30))
+
+    pid_path.write_text(
+        json.dumps(
+            {
+                "pid": 2468,
+                "command": "hermes-agent --gateway",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime_status_path.write_text(
+        json.dumps(_runtime_status(fresh_ts)),
+        encoding="utf-8",
+    )
+
+    gateway_status = _PathReadingGatewayStatus()
+    monkeypatch.setattr(agent_health, "_gateway_status_module", lambda: gateway_status)
+    monkeypatch.setattr(agent_health, "_gateway_root_pid_path", lambda: pid_path)
+
+    payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is True
+    assert payload["details"]["state"] == "alive"
+    assert payload["details"]["reason"] == "cross_container_freshness"
+    assert payload["details"]["gateway_state"] == "running"
+    assert payload["details"]["updated_at"] == fresh_ts
+    assert gateway_status.read_paths == [runtime_status_path]
 
 
 def test_stale_updated_at_with_running_state_reports_unknown(monkeypatch):

@@ -344,7 +344,7 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+1800]
+            delete_block = text[delete_idx:delete_idx+2400]
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -359,7 +359,7 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+1800]
+    delete_block = routes_src[delete_idx:delete_idx+2400]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
@@ -645,8 +645,11 @@ def test_reload_path_restores_pending_message_and_reattaches_live_stream(cleanup
     assert 'pending_user_message' in ui_src
     assert 'function attachLiveStream' in messages_src
     assert 'const pendingMsg=typeof getPendingSessionMessage' in sessions_src
-    assert ('const activeStreamId=data.session.active_stream_id||null;' in sessions_src or
-            'const activeStreamId=S.session.active_stream_id||null;' in sessions_src)
+    # `activeStreamId` declaration was widened const → let (#5248 race-guard
+    # re-reads it after the awaited message load). Accept either keyword via a
+    # prefix anchor that omits const/let.
+    assert ('activeStreamId=data.session.active_stream_id||null;' in sessions_src or
+            'activeStreamId=S.session.active_stream_id||null;' in sessions_src)
     assert 'attachLiveStream(sid, activeStreamId' in sessions_src
     assert 'if (S.activeStreamId && S.activeStreamId === streamId) return;' in ui_src
     active_branch_start = sessions_src.index("if(activeStreamId){\n      S.busy=true;")
@@ -751,7 +754,7 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+1200]
 
-    assert "await _ensureMessagesLoaded(sid);" in inflight_block, (
+    assert "await _ensureMessagesLoaded(sid" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
     )
     assert "_mergeInflightTailMessages(S.messages,inflightMessages)" in inflight_block, (
@@ -848,10 +851,13 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     merge must treat those as the same user turn instead of rendering both.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    assert "function _stripAttachedFilesMarker" in src, (
-        "sessions.js must normalize the server-side attached-files suffix before deduping user turns"
+    assert "function _normalizeUserTranscriptText" in src, (
+        "sessions.js should normalize user transcript text before deduping user turns"
     )
-    assert "_stripAttachedFilesMarker(aText)===_stripAttachedFilesMarker(bText)" in src, (
+    assert "_stripAttachedFilesMarker(_stripForcedSkillEnvelope(text))" in src, (
+        "user transcript normalization should still remove the server-side attached-files suffix"
+    )
+    assert "_normalizeUserTranscriptText(aText)===_normalizeUserTranscriptText(bText)" in src, (
         "INFLIGHT user-message comparison should dedupe optimistic upload text against final pending text"
     )
     assert "role==='user'" in src, (
@@ -860,8 +866,11 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     pending_idx = src.find("function _mergePendingSessionMessage")
     assert pending_idx >= 0, "pending session merge helper not found"
     pending_block = src[pending_idx:pending_idx+500]
-    assert "_sameTranscriptMessage(existing,pendingMsg)" in pending_block, (
-        "pending-user merge should reuse transcript identity dedupe before inserting the server pending message"
+    assert "_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)" in pending_block, (
+        "pending-user merge should dedupe only against the current active-turn user row"
+    )
+    assert "messages.some(" not in pending_block, (
+        "pending-user merge must not scan historical user rows by normalized content"
     )
 
 

@@ -138,7 +138,11 @@ def test_attach_live_stream_different_stream_still_reopens_transport():
 def test_load_session_reattach_path_uses_attach_live_stream_for_running_sessions():
     """The session switch-back path should still route through attachLiveStream()."""
     body = _function_body(SESSIONS_JS, "loadSession")
-    active_pos = body.find("const activeStreamId=S.session.active_stream_id||null")
+    # Anchor without the `const`/`let` keyword: the declaration was widened to
+    # `let` so the race-guard can re-read activeStreamId after the awaited
+    # message load (#5248). The invariant this test pins — the snapshot is taken
+    # before, and used by, the attachLiveStream reattach — is unchanged.
+    active_pos = body.find("activeStreamId=S.session.active_stream_id||null")
     reattach_pos = body.find("attachLiveStream(sid, activeStreamId")
     assert active_pos != -1
     assert reattach_pos != -1
@@ -290,13 +294,15 @@ def test_load_session_attaches_sse_before_auxiliary_work():
     # appendThinking, and renderMessages now takes a preserveScroll arg — so the
     # old contiguous "syncTopbar();renderMessages();appendThinking();loadDir('.');"
     # literal no longer exists. Assert each auxiliary call individually; all must
-    # still run AFTER attachLiveStream (the invariant this test protects).
+    # still run AFTER attachLiveStream (the invariant this test protects). The
+    # workspace refresh is now scheduled through a first-paint deferral helper
+    # rather than calling loadDir('.') inline.
     for marker in (
         "updateSendBtn();",
         "syncTopbar();",
         "renderMessages(",
         "appendThinking();",
-        "loadDir('.');",
+        "_deferWorkspaceRefreshForSession(sid);",
         "updateQueueBadge(sid);",
         "startApprovalPolling(sid)",
     ):
@@ -876,7 +882,9 @@ def test_load_session_restores_worklog_shell_before_reattach_replay():
     body = _function_body(SESSIONS_JS, "loadSession")
     fallback_pos = body.find("if(!restoredLiveTurn){")
     assert fallback_pos != -1, "loadSession must have a live-turn fallback branch"
-    fallback_block = body[fallback_pos:body.find("loadDir('.')", fallback_pos)]
+    refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid);", fallback_pos)
+    assert refresh_pos != -1, "fallback path should still schedule workspace refresh after first paint"
+    fallback_block = body[fallback_pos:refresh_pos]
     clear_pos = fallback_block.find("clearLiveToolCards();")
     shell_pos = fallback_block.find("ensureLiveWorklogShell()")
     legacy_pos = fallback_block.find("else appendThinking();")
@@ -939,7 +947,9 @@ def test_restore_succeeded_reconnect_skips_unkeyed_restored_tool_duplicates():
     assert "hasRestoredLiveToolRows&&!liveToolReplayId(tc)" in helper_block
     restore_block = body[restore_replay_pos:fallback_pos]
     assert "replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});" in restore_block
-    assert "replayPersistedLiveToolCards();" in body[fallback_pos:body.find("loadDir('.')", fallback_pos)]
+    refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid);", fallback_pos)
+    assert refresh_pos != -1, "fallback path should still schedule workspace refresh after first paint"
+    assert "replayPersistedLiveToolCards();" in body[fallback_pos:refresh_pos]
 
 
 def test_merge_inflight_tail_preserves_all_segmented_live_progress():
@@ -951,8 +961,10 @@ def test_merge_inflight_tail_preserves_all_segmented_live_progress():
     groups whose burst ids point to those anchors pile up at the bottom.
     """
     assert NODE, "node not on PATH"
+    helper_start = SESSIONS_JS.index("function _currentTailUserMessage")
     fn_start = SESSIONS_JS.index("function _mergeInflightTailMessages")
     fn_end = SESSIONS_JS.index("// Load older messages", fn_start)
+    tail_user_helpers = SESSIONS_JS[helper_start:fn_start]
     merge_fn = SESSIONS_JS[fn_start:fn_end]
     script = f"""
 const assert = require('assert');
@@ -960,6 +972,7 @@ function _messageComparableText(m) {{ return String((m&&m.content)||'').trim(); 
 function _sameTranscriptMessage(a,b) {{
   return !!(a&&b&&a.role===b.role&&_messageComparableText(a)===_messageComparableText(b));
 }}
+{tail_user_helpers}
 {merge_fn}
 const base = [{{role:'user', content:'go'}}];
 const inflight = [

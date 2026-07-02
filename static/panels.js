@@ -22,8 +22,11 @@ let _kanbanEventSourceFailures = 0;
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
+let _currentCronDetailKey = '';
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _showAllCronProfiles = false;
+let _cronOtherProfileCount = 0;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -59,7 +62,7 @@ function syncAppTitlebar() {
   if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
     mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
     const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
-    if (typeof t === 'function') subText = t('n_messages', vis.length);
+    subText = String(vis.length);
     sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
     // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
     if (/^webui$/i.test(sourceLabel)) sourceLabel = '';
@@ -152,6 +155,102 @@ function syncAppTitlebar() {
       inp.focus();
       inp.select();
     };
+  }
+
+  // Dismiss stale popover on session/panel switch
+  const _existingPop = document.querySelector('.app-titlebar-title-popover');
+  if (_existingPop) {
+    _existingPop.remove(); titleEl._titlePopover = null;
+    if (titleEl._popoverOutsideHandler) {
+      document.removeEventListener('click', titleEl._popoverOutsideHandler, true);
+      titleEl._popoverOutsideHandler = null;
+    }
+  }
+
+  // Mobile touch interactions
+  if ('ontouchstart' in window) {
+    // Tap-to-reveal full title popover — wired once per element lifetime
+    if (!titleEl._mobileTouchWired) {
+      titleEl._mobileTouchWired = true;
+      titleEl._titlePopover = null;
+      const _dismissTitlePopover = () => {
+        if (titleEl._titlePopover) { titleEl._titlePopover.remove(); titleEl._titlePopover = null; }
+        if (titleEl._popoverOutsideHandler) {
+          document.removeEventListener('click', titleEl._popoverOutsideHandler, true);
+          titleEl._popoverOutsideHandler = null;
+        }
+      };
+      titleEl.addEventListener('click', function _onTitleClick(e) {
+        if (_renamingAppTitlebar) return;
+        if (titleEl._titlePopover) {
+          _dismissTitlePopover();
+          return;
+        }
+        e.stopPropagation();
+        const pop = document.createElement('div');
+        pop.className = 'app-titlebar-title-popover';
+        pop.textContent = (S && S.session && S.session.title) ||
+          (typeof t === 'function' ? t('untitled') : 'Untitled');
+        document.body.appendChild(pop);
+        const rect = titleEl.getBoundingClientRect();
+        pop.style.top = (rect.bottom + 6) + 'px';
+        pop.style.left = Math.max(8, rect.left) + 'px';
+        pop.style.maxWidth = (window.innerWidth - 16) + 'px';
+        titleEl._titlePopover = pop;
+        const _outside = titleEl._popoverOutsideHandler = (ev) => {
+          if (!pop.contains(ev.target) && ev.target !== titleEl) {
+            _dismissTitlePopover();
+            document.removeEventListener('click', _outside, true);
+            titleEl._popoverOutsideHandler = null;
+          }
+        };
+        setTimeout(() => document.addEventListener('click', _outside, true), 0);
+      }, { passive: true });
+    }
+
+    // Long-press → session action menu (re-evaluated each sync so late-arriving sessions attach)
+    if (!titleEl._mobileLpWired && panel === 'chat' && S && S.session &&
+        !S.session.read_only && !S.session.is_read_only &&
+        typeof _openSessionActionMenu === 'function') {
+      titleEl._mobileLpWired = true;
+      let _lpTimer = null;
+      let _lpHandled = false;
+      let _lpStartX = 0, _lpStartY = 0;
+      const _lpDelay = typeof SESSION_LONG_PRESS_DELAY_MS !== 'undefined' ?
+        SESSION_LONG_PRESS_DELAY_MS : 400;
+      titleEl.addEventListener('touchstart', (e) => {
+        const touch = e.changedTouches && e.changedTouches[0];
+        if (!touch) return;
+        if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+        _lpHandled = false; _lpStartX = touch.clientX; _lpStartY = touch.clientY;
+        titleEl.classList.add('long-pressing');
+        _lpTimer = setTimeout(() => {
+          _lpTimer = null;
+          if (_lpHandled) return;
+          _lpHandled = true;
+          titleEl.classList.remove('long-pressing');
+          _openSessionActionMenu(S.session, titleEl);
+        }, _lpDelay);
+      }, { passive: true });
+      titleEl.addEventListener('touchmove', (e) => {
+        if (!_lpTimer) return;
+        const touch = e.changedTouches && e.changedTouches[0];
+        if (!touch) return;
+        if (Math.abs(touch.clientX - _lpStartX) > 10 || Math.abs(touch.clientY - _lpStartY) > 10) {
+          clearTimeout(_lpTimer); _lpTimer = null;
+          titleEl.classList.remove('long-pressing');
+        }
+      }, { passive: true });
+      titleEl.addEventListener('touchend', (e) => {
+        clearTimeout(_lpTimer); _lpTimer = null;
+        titleEl.classList.remove('long-pressing');
+        if (_lpHandled) { e.preventDefault(); e.stopPropagation(); }
+      }, { passive: false });
+      titleEl.addEventListener('touchcancel', () => {
+        clearTimeout(_lpTimer); _lpTimer = null; _lpHandled = false;
+        titleEl.classList.remove('long-pressing');
+      }, { passive: true });
+    }
   }
 }
 
@@ -440,6 +539,57 @@ function _cronProfileTitle(profile){
   return t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time';
 }
 
+function _cronOwnerProfileName(job){
+  return _cronProfileName(job && (job.owner_profile ?? job.profile));
+}
+
+function _cronJobKey(job){
+  return `${_cronOwnerProfileName(job)}\u0000${String(job && job.id || '')}`;
+}
+
+function _cronItemId(job){
+  return 'cron-' + encodeURIComponent(_cronJobKey(job));
+}
+
+function _cronDetailMatches(jobId, detailKey){
+  return !!(
+    detailKey &&
+    _currentCronDetail &&
+    !_currentCronDetail.read_only &&
+    String(_currentCronDetail.id) === String(jobId) &&
+    _currentCronDetailKey === detailKey &&
+    _cronJobKey(_currentCronDetail) === detailKey
+  );
+}
+
+function _findCronJob(jobOrId){
+  if (jobOrId && typeof jobOrId === 'object') return jobOrId;
+  const id = String(jobOrId || '');
+  if (!_cronList || !id) return null;
+  return _cronList.find(j => !j.read_only && String(j.id) === id) ||
+    _cronList.find(j => String(j.id) === id) ||
+    null;
+}
+
+function _appendCronProfileToggle(parent){
+  if (!parent || (!_showAllCronProfiles && _cronOtherProfileCount <= 0)) return;
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'padding:10px 0 0';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sm-btn';
+  btn.style.cssText = 'width:100%;justify-content:center';
+  btn.textContent = _showAllCronProfiles
+    ? 'Show active profile only'
+    : `Show ${_cronOtherProfileCount} from other profiles`;
+  btn.onclick = async () => {
+    _showAllCronProfiles = !_showAllCronProfiles;
+    await loadCrons();
+  };
+  wrap.appendChild(btn);
+  parent.appendChild(wrap);
+}
+
 async function loadCronProfiles(){
   if (_cronProfilesCache) return _cronProfilesCache;
   try {
@@ -561,12 +711,13 @@ async function loadCrons(animate) {
   }
   try {
     await loadCronProfiles();
-    const data = await api('/api/crons');
+    const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
+    const data = await api('/api/crons' + allProfilesQS);
     _cronList = data.jobs || [];
-    if (!_cronList.length) {
-      box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('cron_no_jobs'))}</div>`;
-      if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
-      return;
+    _cronOtherProfileCount = Number(data.other_profile_count || 0);
+    if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
+      _showAllCronProfiles = false;
+      _cronOtherProfileCount = 0;
     }
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
@@ -581,23 +732,40 @@ async function loadCrons(animate) {
     const _appendCronItem = (parent, { job, status }) => {
       const item = document.createElement('div');
       item.className = 'cron-item';
-      item.id = 'cron-' + job.id;
-      const isNewRun = _cronNewJobIds.has(String(job.id));
+      item.id = _cronItemId(job);
+      if (job.read_only) {
+        item.classList.add('readonly');
+        item.style.opacity = '0.78';
+      }
+      const isNewRun = !job.read_only && _cronNewJobIds.has(String(job.id));
       const isAgentMode = !job.no_agent;
-      const profileLabel = _cronProfileLabel(job.profile);
-      const profileTitle = _cronProfileTitle(job.profile);
+      const ownerProfileLabel = _cronProfileLabel(_cronOwnerProfileName(job));
+      const ownerProfileTitle = `Owner profile: ${ownerProfileLabel}`;
+      const readOnlyBadge = job.read_only
+        ? '<span class="cron-status disabled" title="Read-only from another profile">Read-only</span>'
+        : '';
       item.innerHTML = `
         <div class="cron-header">
           ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
           ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : `<span class="cron-script-badge" title="${esc(t('cron_script_badge_title') || 'Script job (no agent)')}">📜</span>`}
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
-          <span class="cron-profile-badge" title="${esc(profileTitle)}">${esc(profileLabel)}</span>
+          <span class="cron-profile-badge" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
+          ${readOnlyBadge}
         </div>`;
-      item.onclick = () => openCronDetail(job.id, item);
-      if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
+      item.onclick = () => openCronDetail(job, item);
+      if (_currentCronDetailKey && _currentCronDetailKey === _cronJobKey(job)) item.classList.add('active');
       parent.appendChild(item);
     };
+    if (!_cronList.length) {
+      const emptyText = (!_showAllCronProfiles && _cronOtherProfileCount > 0)
+        ? 'No cron jobs in the active profile.'
+        : (t('cron_no_jobs') || 'No jobs yet');
+      box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(emptyText)}</div>`;
+      _appendCronProfileToggle(box);
+      if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
+      return;
+    }
     for (const entry of _activeJobs) _appendCronItem(box, entry);
     if (_pausedJobs.length) {
       let collapsed = true;
@@ -620,9 +788,10 @@ async function loadCrons(animate) {
       for (const entry of _pausedJobs) _appendCronItem(inner, entry);
       box.appendChild(details);
     }
+    _appendCronProfileToggle(box);
     // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
-      const refreshed = _cronList.find(j => j.id === _currentCronDetail.id);
+      const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
       if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
@@ -725,6 +894,7 @@ function _cronAgentPromptCardHtml(job){
 
 function _renderCronDetail(job){
   _currentCronDetail = job;
+  _currentCronDetailKey = _cronJobKey(job);
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -737,6 +907,7 @@ function _renderCronDetail(job){
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
   const isNoAgent = _isCronScriptJob(job);
+  const isReadOnly = !!job.read_only;
   const cronJobMode = _cronModeLabel(job);
   const modelProvider =
     job.provider && job.model ? `${esc(job.provider)}/${esc(job.model)}` :
@@ -745,12 +916,16 @@ function _renderCronDetail(job){
     isNoAgent ? '' : esc(t('cron_model_use_default') || 'Use profile default');
   const profileLabel = _cronProfileLabel(job.profile);
   const profileTitle = _cronProfileTitle(job.profile);
+  const ownerProfileName = _cronOwnerProfileName(job);
+  const ownerProfileLabel = _cronProfileLabel(ownerProfileName);
+  const ownerProfileTitle = `Owner profile: ${ownerProfileLabel}`;
+  const showOwnerRow = !!ownerProfileName && (isReadOnly || ownerProfileName !== _cronProfileName(job.profile));
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
   const attention = status.state === 'needs_attention' || status.state === 'schedule_error';
   const croniterHint = job.last_error && /croniter/i.test(job.last_error)
     ? `<p>${esc(t('cron_attention_croniter_hint'))}</p>`
     : '';
-  const attentionBanner = attention ? `
+  const attentionBanner = !isReadOnly && attention ? `
       <div class="detail-alert cron-attention-panel">
         <div class="detail-alert-title">${esc(t('cron_status_needs_attention'))}</div>
         <p>${esc(t('cron_attention_desc'))}</p>
@@ -761,6 +936,11 @@ function _renderCronDetail(job){
           <button type="button" class="cron-btn" onclick="copyCurrentCronDiagnostics()">${esc(t('cron_attention_copy_diagnostics'))}</button>
         </div>
       </div>` : '';
+  const readOnlyBanner = isReadOnly ? `
+      <div class="detail-alert">
+        <div class="detail-alert-title">Read-only from another profile</div>
+        <p>Switch to ${esc(ownerProfileLabel)} to run, edit, or inspect live status and output for this cron job.</p>
+      </div>` : '';
   const toastNotifications = job.toast_notifications !== false;
   const outputTitle = _cronOutputTitle(job);
   const skillsRow = isNoAgent ? '' : `<div class="detail-row"><div class="detail-row-label">${esc(t('cron_skills_label') || 'Skills')}</div><div class="detail-row-value">${esc(skills)}</div></div>`;
@@ -768,6 +948,7 @@ function _renderCronDetail(job){
   body.innerHTML = `
     <div class="main-view-content">
       ${attentionBanner}
+      ${readOnlyBanner}
       ${isNoAgent ? _cronScriptJobBannerHtml() : ''}
       <div class="detail-card">
         <div class="detail-card-title">${esc(t('cron_status_active').replace(/./,c=>c.toUpperCase()))}</div>
@@ -777,15 +958,16 @@ function _renderCronDetail(job){
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_mode_label') || 'Mode')}</div><div class="detail-row-value"><span class="detail-badge cron-mode-badge ${isNoAgent ? 'script' : 'agent'}" id="cronJobMode">${esc(cronJobMode)}</span>${modelProvider ? ` <code>${modelProvider}</code>` : ''}</div></div>
+        ${showOwnerRow ? `<div class="detail-row"><div class="detail-row-label">Owner profile</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? (t('cron_toast_notifications_enabled') || 'Enabled') : (t('cron_toast_notifications_disabled') || 'Disabled'))}</span></div></div>
         ${skillsRow}
         ${lastError}
       </div>
       ${instructionCard}
-      <div class="detail-card ${_cronNewJobIds.has(String(job.id)) ? 'has-new-run' : ''}" id="cronDetailRuns">
+      <div class="detail-card ${!isReadOnly && _cronNewJobIds.has(String(job.id)) ? 'has-new-run' : ''}" id="cronDetailRuns">
         <div class="detail-card-title">${esc(outputTitle)}</div>
-        <div style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
+        <div style="color:var(--muted);font-size:12px">${esc(isReadOnly ? 'Live output is available only when this profile is active here.' : (t('loading') || 'Loading'))}</div>
       </div>
     </div>`;
   body.style.display = '';
@@ -793,7 +975,7 @@ function _renderCronDetail(job){
   _cronMode = 'read';
   _setCronHeaderButtons('read', job);
   // Load runs asynchronously
-  _loadCronDetailRuns(job.id);
+  if (!isReadOnly) _loadCronDetailRuns(job.id, _currentCronDetailKey);
 }
 
 function _setCronHeaderButtons(mode, job) {
@@ -810,6 +992,10 @@ function _setCronHeaderButtons(mode, job) {
   const show = b => b && (b.style.display = '');
   if (mode === 'read') {
     if (header) header.style.display = 'flex';
+    if (job && job.read_only) {
+      [runBtn,pauseBtn,resumeBtn,editBtn,dupBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
+      return;
+    }
     show(runBtn);
     const status = job ? _cronStatusMeta(job) : null;
     const resumable = job && (
@@ -829,10 +1015,10 @@ function _setCronHeaderButtons(mode, job) {
   }
 }
 
-async function _loadCronDetailRuns(jobId){
+async function _loadCronDetailRuns(jobId, detailKey){
   try {
     const data = await api(`/api/crons/history?job_id=${encodeURIComponent(jobId)}&limit=50`);
-    if (!_currentCronDetail || _currentCronDetail.id !== jobId) return;
+    if (!_cronDetailMatches(jobId, detailKey)) return;
     const card = $('cronDetailRuns');
     if (!card) return;
     const outputTitle = _cronOutputTitle(_currentCronDetail);
@@ -894,12 +1080,17 @@ async function _loadRunContent(jobId, filename, runId){
     const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
     const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
     body.classList.toggle('expanded', expanded);
-    // Render markdown content using the same renderer as chat messages
-    if (typeof renderMd === 'function') {
-      body.innerHTML = renderMd(output);
-    } else {
-      body.textContent = output;
-    }
+    // Cron run output is never authored Markdown — render as literal
+    // preformatted text using DOM-created <pre><code> so all content
+    // (including shapes starting with #, |, >, ``` and embedded fences)
+    // renders verbatim without Markdown interpretation.
+    body.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.className = 'cron-run-pre';
+    const code = document.createElement('code');
+    code.textContent = output;
+    pre.appendChild(code);
+    body.appendChild(pre);
     const usageStrip = _formatCronRunUsageStrip(data.usage);
     if (usageStrip) {
       const usage = document.createElement('div');
@@ -915,7 +1106,20 @@ async function _loadRunContent(jobId, filename, runId){
       btn.onclick = () => {
         _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
         body.classList.add('expanded');
-        body.innerHTML = renderMd ? renderMd(data.content) : data.content;
+        body.innerHTML = '';
+        const pre = document.createElement('pre');
+        pre.className = 'cron-run-pre';
+        const code = document.createElement('code');
+        code.textContent = data.content || '';
+        pre.appendChild(code);
+        body.appendChild(pre);
+        const usageStrip = _formatCronRunUsageStrip(data.usage);
+        if (usageStrip) {
+          const usage = document.createElement('div');
+          usage.className = 'cron-run-usage-strip cron-run-usage-footer';
+          usage.textContent = usageStrip;
+          body.appendChild(usage);
+        }
         btn.remove();
       };
       body.appendChild(btn);
@@ -925,26 +1129,28 @@ async function _loadRunContent(jobId, filename, runId){
   }
 }
 
-function openCronDetail(id, el){
-  const job = _cronList ? _cronList.find(j => j.id === id) : null;
+function openCronDetail(jobOrId, el){
+  const job = _findCronJob(jobOrId);
   if (!job) return;
+  const detailKey = _cronJobKey(job);
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
-  const target = el || $('cron-' + id);
+  const target = el || $(_cronItemId(job));
   if (target) target.classList.add('active');
   // Remove new-run dot from this job since user is now viewing it
-  _clearCronUnreadForJob(id);
+  if (!job.read_only) _clearCronUnreadForJob(job.id);
   const dot = target && target.querySelector('.cron-new-dot');
-  if (dot) dot.remove();
+  if (dot && !job.read_only) dot.remove();
   _cronPreFormDetail = null;
   _editingCronId = null;
   _stopCronWatch();
   _renderCronDetail(job);
-  _checkCronWatchOnDetail(id);
+  if (!job.read_only) _checkCronWatchOnDetail(job.id, detailKey);
   _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearCronDetail(){
   _currentCronDetail = null;
+  _currentCronDetailKey = '';
   _cronMode = 'empty';
   _stopCronWatch();
   const title = $('taskDetailTitle');
@@ -1376,7 +1582,7 @@ async function saveCronForm(){
       showToast(t('cron_job_updated'));
       await loadCrons();
       const job = _cronList && _cronList.find(j => j.id === editedId);
-      if (job) openCronDetail(editedId);
+      if (job) openCronDetail(job);
       return;
     }
     const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications};
@@ -1402,7 +1608,7 @@ async function saveCronForm(){
     await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
     if (newId) openCronDetail(newId);
-    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1].id);
+    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1]);
   }catch(e){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
   }
@@ -1446,7 +1652,7 @@ let _cronWatchInterval = null;
 let _cronWatchStart = null;
 let _cronWatchTimerInterval = null;
 
-function _startCronWatch(jobId) {
+function _startCronWatch(jobId, detailKey) {
   _stopCronWatch();
   _cronWatchStart = Date.now();
   _cronWatchInterval = setInterval(async () => {
@@ -1454,13 +1660,13 @@ function _startCronWatch(jobId) {
       const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
       if (!data.running) {
         _stopCronWatch();
-        if (_currentCronDetail && _currentCronDetail.id === jobId) {
-          _loadCronDetailRuns(jobId);
+        if (_cronDetailMatches(jobId, detailKey)) {
+          _loadCronDetailRuns(jobId, detailKey);
         }
         return;
       }
       // Still running — update elapsed
-      if (_currentCronDetail && _currentCronDetail.id === jobId) {
+      if (_cronDetailMatches(jobId, detailKey)) {
         const el = $('cronRunningIndicator');
         if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed(data.elapsed);
       }
@@ -1468,13 +1674,13 @@ function _startCronWatch(jobId) {
   }, 3000);
   // Timer update every second
   _cronWatchTimerInterval = setInterval(() => {
-    if (_currentCronDetail && _cronWatchStart) {
+    if (_cronDetailMatches(jobId, detailKey) && _cronWatchStart) {
       const el = $('cronRunningIndicator');
       if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed((Date.now() - _cronWatchStart) / 1000);
     }
   }, 1000);
   // Inject running indicator into detail card
-  if (_currentCronDetail && _currentCronDetail.id === jobId) {
+  if (_cronDetailMatches(jobId, detailKey)) {
     _injectRunningIndicator();
   }
 }
@@ -1504,11 +1710,11 @@ function _formatElapsed(seconds) {
   return m + 'm ' + s + 's';
 }
 
-function _checkCronWatchOnDetail(jobId) {
+function _checkCronWatchOnDetail(jobId, detailKey) {
   // When opening a detail view, check if job is running
   api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false}).then(data => {
-    if (data.running && _currentCronDetail && _currentCronDetail.id === jobId) {
-      _startCronWatch(jobId);
+    if (data.running && _cronDetailMatches(jobId, detailKey)) {
+      _startCronWatch(jobId, detailKey);
     }
   }).catch(() => {});
 }
@@ -1517,7 +1723,7 @@ async function cronRun(id) {
   try {
     await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
     showToast(t('cron_job_triggered'));
-    _startCronWatch(id);
+    _startCronWatch(id, _currentCronDetailKey);
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
@@ -2266,10 +2472,6 @@ async function runKanbanDispatcher(){
   // Confirmation dialog first because this actually consumes API budget on
   // each spawned worker.  Result toast surfaces what happened so users see
   // the dispatcher actually doing work.
-  if (!_kanbanCurrentBoard) {
-    showToast(t('kanban_unavailable') || 'Kanban unavailable', 'error');
-    return;
-  }
 
   _kanbanIsDispatching = true;
   _setKanbanDispatcherButtonsDisabled(true);
@@ -2670,6 +2872,8 @@ function openKanbanCreate(){
     }
   });
   _kanbanPopulateTenantDatalist();
+  _kanbanPopulateWorkspacePathDatalist();
+  _kanbanPopulateParentsDatalist();
   modal.hidden = false;
   if (_kanbanTaskModalFocusCleanup) {
     _kanbanTaskModalFocusCleanup();
@@ -2760,6 +2964,9 @@ function _kanbanResetTaskModalFields(values){
   // .value before the options exist would silently fail.
   set('kanbanTaskModalTenant', v.tenant || '');
   set('kanbanTaskModalPriority', v.priority != null ? v.priority : 0);
+  set('kanbanTaskModalSkills', Array.isArray(v.skills) ? v.skills.join(', ') : (v.skills || ''));
+  set('kanbanTaskModalMaxRuntimeSeconds', v.max_runtime_seconds != null ? v.max_runtime_seconds : '');
+  set('kanbanTaskModalParents', '');
   const errEl = document.getElementById('kanbanTaskModalError');
   if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
@@ -2769,20 +2976,25 @@ function _kanbanResetTaskModalFields(values){
 function _kanbanSetTaskModalLabels(mode){
   const titleH = document.getElementById('kanbanTaskModalTitle');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
-  const workspaceKindEl = document.getElementById('kanbanTaskModalWorkspaceKind');
-  const workspacePathEl = document.getElementById('kanbanTaskModalWorkspacePath');
   if (mode === 'edit') {
     if (titleH) titleH.textContent = t('kanban_edit_task') || 'Edit task';
     if (submitBtn) submitBtn.textContent = t('save') || 'Save';
-    // Disable workspace fields during edit since they are not handled by the backend
-    if (workspaceKindEl) workspaceKindEl.disabled = true;
-    if (workspacePathEl) workspacePathEl.disabled = true;
   } else {
     if (titleH) titleH.textContent = t('kanban_new_task') || 'New task';
     if (submitBtn) submitBtn.textContent = t('create') || 'Create';
-    // Enable workspace fields during create
-    if (workspaceKindEl) workspaceKindEl.disabled = false;
-    if (workspacePathEl) workspacePathEl.disabled = false;
+  }
+  // Workspace and new backend fields are create-only; backend patch doesn't handle them.
+  const createOnlyIds = [
+    'kanbanTaskModalWorkspaceKind',
+    'kanbanTaskModalWorkspacePath',
+    'kanbanTaskModalSkills',
+    'kanbanTaskModalMaxRuntimeSeconds',
+    'kanbanTaskModalParents',
+  ];
+  const disabled = mode === 'edit';
+  for (const id of createOnlyIds) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = disabled;
   }
 }
 
@@ -2803,6 +3015,27 @@ function _kanbanPopulateTenantDatalist(){
   const tenants = (_kanbanBoard && Array.isArray(_kanbanBoard.tenants)) ? _kanbanBoard.tenants : [];
   const tList = document.getElementById('kanbanTaskModalTenantList');
   if (tList) tList.innerHTML = tenants.map(v => `<option value="${esc(v)}"></option>`).join('');
+}
+
+function _kanbanPopulateWorkspacePathDatalist(){
+  const cols = (_kanbanBoard && _kanbanBoard.columns) || [];
+  const seen = new Set();
+  const opts = [];
+  for (const col of cols) {
+    for (const task of (col.tasks || [])) {
+      const path = task && task.workspace_path;
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      opts.push(`<option value="${esc(path)}"></option>`);
+    }
+  }
+  const list = document.getElementById('kanbanTaskModalWorkspacePathList');
+  if (list) list.innerHTML = opts.join('');
+}
+
+function _kanbanPopulateParentsDatalist(){
+  const list = document.getElementById('kanbanTaskModalParentsList');
+  if (list) list.innerHTML = _kanbanLinkableTaskOptions(null);
 }
 
 function _trapModalFocus(modalEl){
@@ -2893,6 +3126,9 @@ async function submitKanbanTaskModal(){
   const priorityEl = document.getElementById('kanbanTaskModalPriority');
   const workspaceKindEl = document.getElementById('kanbanTaskModalWorkspaceKind');
   const workspacePathEl = document.getElementById('kanbanTaskModalWorkspacePath');
+  const skillsEl = document.getElementById('kanbanTaskModalSkills');
+  const maxRuntimeEl = document.getElementById('kanbanTaskModalMaxRuntimeSeconds');
+  const parentsEl = document.getElementById('kanbanTaskModalParents');
   const errEl = document.getElementById('kanbanTaskModalError');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
   const title = titleEl ? titleEl.value.trim() : '';
@@ -2921,6 +3157,9 @@ async function submitKanbanTaskModal(){
   const statusVal = statusEl ? statusEl.value : '';
   const priorityRaw = priorityEl ? priorityEl.value : '';
   const workspacePathVal = workspacePathEl ? workspacePathEl.value.trim() : '';
+  const skillsRaw = skillsEl ? skillsEl.value.trim() : '';
+  const maxRuntimeRaw = maxRuntimeEl ? maxRuntimeEl.value.trim() : '';
+  const parentsRaw = parentsEl ? parentsEl.value.trim() : '';
   if (isEdit) {
     payload.body = bodyVal;
     payload.assignee = assigneeVal || null;
@@ -2947,6 +3186,19 @@ async function submitKanbanTaskModal(){
     }
     payload.workspace_kind = workspaceKind;
     if (workspacePathVal) payload.workspace_path = workspacePathVal;
+    if (skillsRaw) {
+      payload.skills = skillsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    if (maxRuntimeRaw) {
+      if (!/^[1-9]\d*$/.test(maxRuntimeRaw)) {
+        if (errEl) errEl.textContent = t('kanban_max_runtime_invalid')
+          || 'Max runtime must be a whole number of seconds greater than 0.';
+        if (maxRuntimeEl) maxRuntimeEl.focus();
+        return;
+      }
+      payload.max_runtime_seconds = Number(maxRuntimeRaw);
+    }
+    if (parentsRaw) payload.parents = [parentsRaw];
   }
   // Soft warning: a Ready task with the explicit "Unassigned" option will sit
   // forever because the dispatcher skips unassigned rows (kanban_db.py:3567).
@@ -3141,7 +3393,7 @@ function loadTodos() {
 
   if (!todos.length) {
     if (typeof _todosLastRenderedHash !== 'undefined' && _todosLastRenderedHash === '__empty__') return;
-    panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 0">${esc(t('todos_no_active'))}</div>`;
+    panel.innerHTML = renderTodoEmptyState();
     if (typeof _todosLastRenderedHash !== 'undefined') _todosLastRenderedHash = '__empty__';
     return;
   }
@@ -3152,18 +3404,9 @@ function loadTodos() {
     _todosLastRenderedHash = hash;
   }
 
-  const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14)};
-  const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)'};
   // Single innerHTML join is the cheapest correct way to materialize
   // ~10–50 leaf nodes.  All user-controlled content goes through esc().
-  panel.innerHTML = todos.map(td => `
-    <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[td.status]||'var(--muted)'}">${statusIcon[td.status]||li('square',14)}</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;color:${td.status==='completed'?'var(--muted)':td.status==='in_progress'?'var(--text)':'var(--text)'};${td.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(td.content)}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(td.status)}</div>
-      </div>
-    </div>`).join('');
+  panel.innerHTML = renderTodoRows(todos, {metadata:true});
 }
 
 // Legacy fallback: reverse-scan settled tool messages for the most
@@ -3964,6 +4207,7 @@ function _bucketDailyTokensForChart(rows) {
     const slice = rows.slice(i, i + bucketSize);
     const input_tokens = slice.reduce((s, r) => s + Number(r.input_tokens || 0), 0);
     const output_tokens = slice.reduce((s, r) => s + Number(r.output_tokens || 0), 0);
+    const cache_read_tokens = slice.reduce((s, r) => s + Number(r.cache_read_tokens || 0), 0);
     const sessions = slice.reduce((s, r) => s + Number(r.sessions || 0), 0);
     const cost = slice.reduce((s, r) => s + Number(r.cost || 0), 0);
 
@@ -3981,6 +4225,7 @@ function _bucketDailyTokensForChart(rows) {
       date: firstDate,
       input_tokens,
       output_tokens,
+      cache_read_tokens,
       sessions,
       cost,
     });
@@ -4041,7 +4286,13 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
         const outputPct = Math.max((output / maxDailyTokens) * 100, output ? 2 : 0).toFixed(1);
         const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
         const titleDate = r.title || r.date;
-        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
+        const cacheRead = Number(r.cache_read_tokens || 0);
+        // Bounded daily cache hit rate: reads / (input + reads), 0-100%.
+        const cacheDenom = input + cacheRead;
+        const cacheStr = (cacheRead > 0 && cacheDenom > 0)
+          ? ` · ${Math.min(100, Math.round((cacheRead / cacheDenom) * 100))}% ${t('insights_model_cache')}`
+          : '';
+        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')}${cacheStr} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
         const labelText = r.label !== undefined ? r.label : String(r.date).slice(5);
         return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(labelText) : ''}</span></div>`;
       }).join('') +
@@ -4053,11 +4304,15 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   // Models table
   let modelsHtml = '';
   if (d.models && d.models.length) {
-    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
+    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span title="${esc(t('insights_cache_hit'))}">${esc(t('insights_model_cache'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
       d.models.map(m => {
         const share = Number(m.cost_share || m.token_share || m.session_share || 0);
         const title = `${m.model} · ${fmtTokens(m.input_tokens)} ${t('insights_input_tokens')} · ${fmtTokens(m.output_tokens)} ${t('insights_output_tokens')}`;
-        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span><span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
+        const cachePct = (m.cache_hit_percent === null || m.cache_hit_percent === undefined) ? null : Number(m.cache_hit_percent);
+        const cacheCell = cachePct === null
+          ? '<span class="insights-model-cache insights-model-cache-empty">—</span>'
+          : `<span class="insights-model-cache" title="${esc(t('insights_cache_hit'))}: ${fmtTokens(m.cache_read_tokens || 0)}">${cachePct}%</span>`;
+        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span>${cacheCell}<span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
       }).join('') +
       `</div></div>`;
   } else {
@@ -4606,6 +4861,15 @@ function _memorySectionMtime(key) {
   return _memoryData.memory_mtime || 0;
 }
 
+function _memorySectionPath(key) {
+  if (!_memoryData) return '';
+  if (key === 'user') return _memoryData.user_path || '';
+  if (key === 'soul') return _memoryData.soul_path || '';
+  if (key === 'project_context') return _memoryData.project_context_path || '';
+  if (key === 'memory') return _memoryData.memory_path || '';
+  return '';
+}
+
 function _setMemoryHeaderButtons(mode) {
   const header = $('mainMemory') && $('mainMemory').querySelector('.main-view-header');
   const show = b => b && (b.style.display = '');
@@ -4709,8 +4973,10 @@ function _renderMemoryDetail(section) {
   const mtime = _memorySectionMtime(section);
   const mtimeStr = mtime ? new Date(mtime * 1000).toLocaleString() : '';
   const mtimeHtml = mtimeStr ? `<div class="memory-detail-mtime">${esc(mtimeStr)}</div>` : '';
-  const path = section === 'project_context' && _memoryData ? (_memoryData.project_context_path || '') : '';
-  const fileName = section === 'project_context' && _memoryData ? (_memoryData.project_context_name || (path.split(/[\\/]/).pop() || '')) : '';
+  const path = _memorySectionPath(section);
+  const fileName = section === 'project_context' && _memoryData
+    ? (_memoryData.project_context_name || (path.split(/[\\/]/).pop() || ''))
+    : (path.split(/[\\/]/).pop() || '');
   const pathHtml = path ? `<div class="memory-detail-mtime">${esc(fileName)} · ${esc(path)}</div>` : '';
   const shadowed = section === 'project_context' && _memoryData && Array.isArray(_memoryData.project_context_shadowed)
     ? _memoryData.project_context_shadowed
@@ -5155,7 +5421,7 @@ function toggleWsDropdown(){
   else{
     closeProfileDropdown(); // close profile dropdown if open
     loadWorkspaceList().then(data=>{
-      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
+      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
       dd.classList.add('open');
     });
   }
@@ -5175,7 +5441,7 @@ function toggleComposerWsDropdown(){
     if(typeof closeModelDropdown==='function') closeModelDropdown();
     if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
     loadWorkspaceList().then(data=>{
-      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
+      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
       dd.classList.add('open');
       _positionComposerWsDropdown();
       if(chip) chip.classList.add('active');
@@ -5659,6 +5925,14 @@ let _profileSwitchGeneration = 0;
 let _profileDropdownTrigger = null;  // tracks which element triggered the dropdown
 
 async function _profileSwitchPanelLoad(){
+  // Cross-profile cron visibility is an active-profile opt-in; never carry it
+  // into the next profile when the Tasks panel wasn't the visible panel.
+  _showAllCronProfiles = false;
+  _cronOtherProfileCount = 0;
+  _cronPreFormDetail = null;
+  _editingCronId = null;
+  _cronIsDuplicate = false;
+  _clearCronDetail();
   if (_currentPanel === 'skills') await loadSkills();
   if (_currentPanel === 'memory') await loadMemory();
   if (_currentPanel === 'tasks') await loadCrons();
@@ -5691,6 +5965,10 @@ function _refreshProfileSwitchBackground(gen){
     if (typeof _applyTabOrder === 'function') _applyTabOrder(order);
     if (typeof _applyTabVisibility === 'function') _applyTabVisibility(hidden);
     _ensureComposerControlVisibilityState(s||{});
+    if(Array.isArray(s&&s.composer_control_order)){
+      const nextOrder=_setComposerControlOrder(s.composer_control_order);
+      if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(nextOrder);
+    }
     _renderComposerControlChips();
     _renderComposerSituationalControlChips();
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
@@ -6454,6 +6732,8 @@ async function loadMemory(force) {
         el.className = 'side-menu-item';
         if (_currentMemorySection === s.key) el.classList.add('active');
         el.innerHTML = `${li(s.iconKey,16)}<span>${esc(_memorySectionLabel(s))}</span>`;
+        const sectionPath = _memorySectionPath(s.key);
+        if (sectionPath) el.title = sectionPath;
         el.onclick = () => openMemorySection(s.key, el);
         panel.appendChild(el);
       }
@@ -6532,7 +6812,10 @@ let _settingsPreferencesAutosaveRetryPayload = null;
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
 const _HIDDEN_TABS_LS_KEY = 'hermes-webui-hidden-tabs';
 const _TAB_ORDER_LS_KEY = 'hermes-webui-tab-order';
+const _COMPOSER_CONTROL_ORDER_LS_KEY = 'hermes-webui-composer-control-order';
 let _tabVisibilityDragSuppressUntil = 0;
+let _composerControlDragSuppressUntil = 0;
+let _composerControlDraggingKey = '';
 
 function _sanitizeTabPanelList(panels){
   if(!Array.isArray(panels)) return [];
@@ -6583,6 +6866,34 @@ function _orderedSidebarPanels(order){
   requested.forEach(function(panel){ if(available.indexOf(panel)!==-1&&out.indexOf(panel)===-1) out.push(panel); });
   available.forEach(function(panel){ if(out.indexOf(panel)===-1) out.push(panel); });
   return out;
+}
+
+function _dashboardPanelMode(){
+  var modeEl=$('settingsDashboardMode');
+  var mode=modeEl&&modeEl.value;
+  return mode==='never'||mode==='always'||mode==='auto'?mode:'auto';
+}
+
+function _isDashboardChipOn(){
+  return _dashboardPanelMode()!=='never';
+}
+
+function _renderDashboardVisibilityChip(container){
+  if(!container)return null;
+  var chip=document.createElement('button');
+  chip.type='button';
+  chip.className='tab-visibility-chip';
+  chip.setAttribute('data-tab-panel','__hermes_dashboard__');
+  chip.setAttribute('role','switch');
+  var isOn=_isDashboardChipOn();
+  chip.setAttribute('aria-checked',isOn?'true':'false');
+  if(!isOn) chip.classList.add('chip-off');
+  chip.textContent=typeof t==='function'?t('tab_dashboard'):'Dashboard';
+  chip.onclick=function(){
+    if(Date.now()<_tabVisibilityDragSuppressUntil)return;
+    _toggleDashboardVisibilityChip();
+  };
+  return chip;
 }
 
 function _applyTabOrder(order){
@@ -6657,6 +6968,8 @@ function _renderTabVisibilityChips(){
     _wireTabChipDrag(chip,panel);
     container.appendChild(chip);
   });
+  var dashboardChip=_renderDashboardVisibilityChip(container);
+  if(dashboardChip) container.appendChild(dashboardChip);
 }
 
 function _wireTabChipDrag(chip,panel){
@@ -6711,6 +7024,21 @@ function _toggleTabVisibilityChip(panel){
   _scheduleAppearanceAutosave();
 }
 
+function _toggleDashboardVisibilityChip(){
+  var modeEl=$('settingsDashboardMode');
+  if(!modeEl||typeof saveDashboardSettings!=='function') return;
+  var currentMode=_dashboardPanelMode();
+  var nextMode=currentMode==='never'
+    ? (typeof _getDashboardChipRestoreMode==='function' ? _getDashboardChipRestoreMode() : 'auto')
+    : 'never';
+  var previousMode=currentMode;
+  modeEl.value=nextMode;
+  Promise.resolve(saveDashboardSettings({raiseOnError:true})).catch(function(){
+    modeEl.value=previousMode;
+    if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
+  });
+}
+
 function _ensureComposerControlVisibilityState(settings){
   const fromSettings=(typeof _composerControlVisibilityFromSettings==='function')
     ? _composerControlVisibilityFromSettings(settings||{})
@@ -6719,11 +7047,123 @@ function _ensureComposerControlVisibilityState(settings){
   Object.assign(window._composerControlVisibility, fromSettings);
 }
 
-function _composerControlVisibilityPayload(){
-  const payload={};
+function _composerControlDefsForSettings(){
   const baseDefs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
   const situationalDefs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
-  const defs=baseDefs.concat(situationalDefs);
+  return baseDefs.concat(situationalDefs);
+}
+
+function _getComposerControlOrder(){
+  if(Array.isArray(window._composerControlOrder)){
+    return typeof window._sanitizeComposerControlOrder==='function'
+      ? window._sanitizeComposerControlOrder(window._composerControlOrder)
+      : window._composerControlOrder.slice();
+  }
+  try{
+    const raw=localStorage.getItem(_COMPOSER_CONTROL_ORDER_LS_KEY);
+    if(raw){
+      const parsed=JSON.parse(raw);
+      if(typeof window._sanitizeComposerControlOrder==='function') return window._sanitizeComposerControlOrder(parsed);
+      if(Array.isArray(parsed)) return parsed.filter(key=>typeof key==='string');
+    }
+  }catch(e){}
+  return [];
+}
+
+function _setComposerControlOrder(order){
+  const sanitized=typeof window._sanitizeComposerControlOrder==='function'
+    ? window._sanitizeComposerControlOrder(order)
+    : (Array.isArray(order)?order.filter(key=>typeof key==='string') : []);
+  window._composerControlOrder=sanitized;
+  try{localStorage.setItem(_COMPOSER_CONTROL_ORDER_LS_KEY,JSON.stringify(sanitized));}catch(e){}
+  return sanitized;
+}
+
+function _orderedComposerControlDefsForSettings(defs){
+  defs=Array.isArray(defs)?defs:[];
+  const byKey=new Map(defs.map(def=>[def.key,def]));
+  const out=[];
+  _getComposerControlOrder().forEach(function(key){
+    if(byKey.has(key)) out.push(byKey.get(key));
+  });
+  defs.forEach(function(def){if(out.indexOf(def)===-1) out.push(def);});
+  return out;
+}
+
+function _composerControlOrderGroupKey(key){
+  const def=_composerControlDefsForSettings().find(item=>item&&item.key===key);
+  return def&&def.orderGroup?def.orderGroup:'';
+}
+
+function _composerControlDropAllowed(sourceKey,targetKey){
+  if(!sourceKey||!targetKey||sourceKey===targetKey) return false;
+  const sourceGroup=_composerControlOrderGroupKey(sourceKey);
+  const targetGroup=_composerControlOrderGroupKey(targetKey);
+  return !!sourceGroup&&sourceGroup===targetGroup;
+}
+
+function _clearComposerControlDragOver(){
+  document.querySelectorAll('[data-composer-control-key].drag-over').forEach(function(el){el.classList.remove('drag-over');});
+}
+
+function _moveComposerControlOrderKey(sourceKey,targetKey){
+  if(!_composerControlDropAllowed(sourceKey,targetKey)) return false;
+  const order=_orderedComposerControlDefsForSettings(_composerControlDefsForSettings()).map(def=>def.key);
+  const from=order.indexOf(sourceKey);
+  const to=order.indexOf(targetKey);
+  if(from===-1||to===-1) return false;
+  order.splice(from,1);
+  order.splice(to,0,sourceKey);
+  const next=_setComposerControlOrder(order);
+  if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(next);
+  _renderComposerControlChips();
+  _renderComposerSituationalControlChips();
+  _scheduleAppearanceAutosave();
+  return true;
+}
+
+function _handleComposerControlChipDrop(e,targetKey){
+  if(e){e.preventDefault();e.stopPropagation();}
+  _clearComposerControlDragOver();
+  const sourceKey=e&&e.dataTransfer?e.dataTransfer.getData('text/plain'):_composerControlDraggingKey;
+  if(_moveComposerControlOrderKey(sourceKey,targetKey)) _composerControlDragSuppressUntil=Date.now()+250;
+  _composerControlDraggingKey='';
+}
+
+function _wireComposerControlChipDrag(chip,key){
+  if(!chip)return;
+  chip.setAttribute('data-composer-control-key',key);
+  chip.setAttribute('draggable','true');
+  chip.addEventListener('dragstart',function(e){
+    _composerControlDraggingKey=key;
+    chip.classList.add('dragging');
+    if(e.dataTransfer){
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain',key);
+    }
+  });
+  chip.addEventListener('dragend',function(){
+    chip.classList.remove('dragging');
+    _clearComposerControlDragOver();
+    _composerControlDraggingKey='';
+  });
+  chip.addEventListener('dragover',function(e){
+    const sourceKey=_composerControlDraggingKey;
+    if(!_composerControlDropAllowed(sourceKey,key)){
+      if(e.dataTransfer)e.dataTransfer.dropEffect='none';
+      return;
+    }
+    e.preventDefault();
+    chip.classList.add('drag-over');
+    if(e.dataTransfer)e.dataTransfer.dropEffect='move';
+  });
+  chip.addEventListener('dragleave',function(){chip.classList.remove('drag-over');});
+  chip.addEventListener('drop',function(e){_handleComposerControlChipDrop(e,key);});
+}
+
+function _composerControlVisibilityPayload(){
+  const payload={};
+  const defs=_composerControlDefsForSettings();
   const state=window._composerControlVisibility||{};
   defs.forEach(function(def){payload[def.key]=!!state[def.key];});
   return payload;
@@ -6753,7 +7193,7 @@ function _renderComposerControlChips(){
   const defs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
   const state=window._composerControlVisibility||{};
   container.innerHTML='';
-  defs.forEach(function(def){
+  _orderedComposerControlDefsForSettings(defs).forEach(function(def){
     const chip=document.createElement('button');
     chip.type='button';
     chip.className='tab-visibility-chip';
@@ -6762,7 +7202,8 @@ function _renderComposerControlChips(){
     chip.textContent=_composerControlChipLabel(def);
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',hidden?'false':'true');
-    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};
+    _wireComposerControlChipDrag(chip,def.key);
     container.appendChild(chip);
   });
 }
@@ -6773,7 +7214,7 @@ function _renderComposerSituationalControlChips(){
   const defs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
   const state=window._composerControlVisibility||{};
   container.innerHTML='';
-  defs.forEach(function(def){
+  _orderedComposerControlDefsForSettings(defs).forEach(function(def){
     const chip=document.createElement('button');
     chip.type='button';
     chip.className='tab-visibility-chip';
@@ -6782,7 +7223,8 @@ function _renderComposerSituationalControlChips(){
     chip.textContent=_composerControlChipLabel(def);
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',hidden?'false':'true');
-    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};
+    _wireComposerControlChipDrag(chip,def.key);
     container.appendChild(chip);
   });
 }
@@ -6832,6 +7274,47 @@ function switchSettingsSection(name,opts){
   if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection();
 }
 
+function _normalizeSettingsSearchText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function _extractSettingsDescriptionText(field, labelEl) {
+  const chunks = [];
+  const settingsSearch = (field.dataset && field.dataset.settingsSearch) || '';
+  if (settingsSearch) chunks.push(settingsSearch);
+  field.querySelectorAll('[data-i18n]').forEach(node => {
+    if (labelEl && (node === labelEl || labelEl.contains(node))) return;
+    const key = node.dataset ? node.dataset.i18n : null;
+    if (key) chunks.push(t(key));
+  });
+  return chunks.join(' ');
+}
+
+function _extractSettingsValueText(field) {
+  const chunks = [];
+  const controls = [...field.querySelectorAll('select, input, textarea')];
+  controls.forEach(control => {
+    const tagName = (control.tagName || '').toLowerCase();
+    if (tagName === 'select') {
+      control.querySelectorAll('option').forEach(option => {
+        if (option.dataset && option.dataset.i18n) {
+          chunks.push(t(option.dataset.i18n));
+        } else {
+          chunks.push(option.textContent);
+        }
+      });
+      return;
+    }
+    const type = (control.getAttribute && control.getAttribute('type')) || control.type || '';
+    if (tagName === 'input' && ['checkbox', 'radio', 'file', 'submit', 'reset', 'button'].includes(type)) return;
+    if (control.value) chunks.push(control.value);
+  });
+  return chunks.join(' ');
+}
+
 async function _buildSettingsIndex() {
   if (_settingsIndex) return;
   // Memoize the in-flight build so concurrent searches share one pass; the
@@ -6841,6 +7324,9 @@ async function _buildSettingsIndex() {
     // Ensure lazy-loaded panes are populated before reading the DOM
     await Promise.all([loadProvidersPanel(), loadPluginsPanel(), loadExtensionsPanel()]);
     const index = [];
+    const add = (entry) => {
+      index.push({ ...entry, _settingsSearchIndex: index.length });
+    };
     const sectionMap = {
       settingsPaneConversation: 'conversation',
       settingsPaneAppearance: 'appearance',
@@ -6864,24 +7350,96 @@ async function _buildSettingsIndex() {
         const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
         if (!labelEl) return;
         const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
-        const label = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
-        if (label) index.push({ label, sectionKey, i18nKey, el: field });
+        const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
+        if (!titleText) return;
+        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
+        const searchBlob = [titleText, valueText, descriptionText, field.textContent]
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        add({
+          label: titleText,
+          titleText,
+          valueText,
+          descriptionText,
+          searchBlob,
+          sectionKey,
+          i18nKey,
+          el: field,
+        });
       });
       if (sectionKey === 'providers') {
         pane.querySelectorAll('.provider-card').forEach(card => {
           const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+          if (cardName) {
+            const titleText = cardName;
+            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+            const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            add({
+              label: cardName,
+              titleText,
+              valueText,
+              descriptionText,
+              searchBlob,
+              sectionKey,
+              el: card,
+              cardName,
+            });
+          }
           card.querySelectorAll('.provider-card-field').forEach(field => {
             const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
             const label = [cardName, fieldLabel].filter(Boolean).join(' ');
-            if (label) index.push({ label, sectionKey, el: field, cardName, fieldLabel });
+            if (!label) return;
+            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
+            const searchBlob = [label, valueText, descriptionText, field.textContent]
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            add({
+              label,
+              titleText: label,
+              valueText,
+              descriptionText,
+              searchBlob,
+              sectionKey,
+              el: field,
+              cardName,
+              fieldLabel,
+            });
           });
         });
       }
       if (sectionKey === 'plugins') {
         pane.querySelectorAll('.plugin-card').forEach(card => {
           const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+          if (!cardName) return;
+          const titleText = cardName;
+          const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+          const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+          const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          add({
+            label: cardName,
+            titleText,
+            valueText,
+            descriptionText,
+            searchBlob,
+            sectionKey,
+            el: card,
+            cardName,
+          });
         });
       }
     }
@@ -6912,16 +7470,26 @@ async function filterSettings(query) {
     system: t('settings_tab_system') || 'System',
     help: t('settings_tab_help') || 'Help',
   };
-  const matches = (_settingsIndex || []).filter(entry =>
-    entry.label.toLowerCase().includes(q)
-  );
+  const matches = (_settingsIndex || []).map((entry) => {
+    const score = _scoreSettingsSearchMatch(entry, q);
+    return score ? { entry, score, index: entry._settingsSearchIndex } : null;
+  }).filter(Boolean);
   if (!matches.length) {
     resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
     resultsEl.style.display = '';
     return;
   }
   resultsEl.innerHTML = '';
-  for (const m of matches.slice(0, 12)) {
+  matches.sort((left, right) => {
+    if (left.score.bucketIndex !== right.score.bucketIndex) {
+      return left.score.bucketIndex - right.score.bucketIndex;
+    }
+    if (left.score.matchIndex !== right.score.matchIndex) {
+      return left.score.matchIndex - right.score.matchIndex;
+    }
+    return left.index - right.index;
+  });
+  for (const { entry: m } of matches.slice(0, 12)) {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'settings-search-result';
@@ -6938,6 +7506,29 @@ async function filterSettings(query) {
     resultsEl.appendChild(item);
   }
   resultsEl.style.display = '';
+}
+
+function _scoreSettingsSearchMatch(entry, q) {
+  const query = (q || '').toLowerCase().trim();
+  if (!query) return null;
+  const buckets = [
+    ['titleText', 0],
+    ['valueText', 1],
+    ['descriptionText', 2],
+    ['searchBlob', 3],
+  ];
+  for (const [bucketName, bucketIndex] of buckets) {
+    const hay = _normalizeSettingsSearchText(entry[bucketName]);
+    if (!hay) continue;
+    const matchIndex = hay.indexOf(query);
+    if (matchIndex < 0) continue;
+    return {
+      bucketIndex,
+      matchType: matchIndex === 0 ? 'prefix' : 'contains',
+      matchIndex,
+    };
+  }
+  return null;
 }
 
 function _navigateToSettingsField(entry) {
@@ -7150,11 +7741,14 @@ function _appearancePayloadFromUi(){
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
+    large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
+    project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
     ..._structuredCodeViewFromUi(),
     show_titlebar_profile: !!($('settingsShowTitlebarProfile')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
     activity_feed_expanded_default: worklogDetailsExpanded,
     ..._composerControlVisibilityPayload(),
+    composer_control_order: _getComposerControlOrder(),
     hidden_tabs: _getHiddenTabs(),
     tab_order: _getTabOrder(),
   };
@@ -7239,6 +7833,8 @@ async function _autosaveAppearanceSettings(payload){
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
     window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
+    window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
+    window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){
       // Re-sync from the server-validated/clamped values so the UI and runtime
       // globals match exactly what was persisted.
@@ -7261,6 +7857,10 @@ async function _autosaveAppearanceSettings(payload){
     }
     if(saved){
       _ensureComposerControlVisibilityState(saved);
+      if(Array.isArray(saved.composer_control_order)){
+        const nextOrder=_setComposerControlOrder(saved.composer_control_order);
+        if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(nextOrder);
+      }
       _renderComposerControlChips();
       _renderComposerSituationalControlChips();
       if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
@@ -7315,11 +7915,15 @@ function _preferencesPayloadFromUi(){
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
+  const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
+  if(showClaudeCodeCb) payload.show_claude_code_sessions=showClaudeCodeCb.checked;
   const showCronCb=$('settingsShowCronSessions');
   // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
   // identically to the explicit saveSettings() path, so neither save route can
   // persist show_cron_sessions=true while show_cli_sessions=false. (#3514)
   if(showCronCb) payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked);
+  const showWebhookCb=$('settingsShowWebhookSessions');
+  if(showWebhookCb) payload.show_webhook_sessions=!!(showCliCb&&showCliCb.checked&&showWebhookCb.checked);
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
@@ -7344,6 +7948,8 @@ function _preferencesPayloadFromUi(){
   if(autoTitleRefreshSel) payload.auto_title_refresh_every=parseInt(autoTitleRefreshSel.value,10);
   const busyInputModeSel=$('settingsBusyInputMode');
   if(busyInputModeSel) payload.busy_input_mode=busyInputModeSel.value;
+  const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
+  if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
   return payload;
@@ -7417,6 +8023,14 @@ async function _autosavePreferencesSettings(payload){
       document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
       if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     }
+    if(payload&&payload.busy_input_mode!==undefined){
+      window._busyInputMode=(typeof _persistBusyInputMode==='function')?_persistBusyInputMode(saved&&saved.busy_input_mode):((saved&&saved.busy_input_mode)||'queue');
+      if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    }
+    if(payload&&payload.show_busy_placeholder_hint!==undefined){
+      window._showBusyPlaceholderHint=!!(saved&&saved.show_busy_placeholder_hint);
+      if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
     // Only clear the global dirty flag and hide the unsaved-changes bar when
@@ -7439,9 +8053,16 @@ async function _autosavePreferencesSettings(payload){
       )
     );
     if(!pwDirty&&!modelDirty){
-      _settingsDirty=false;
-      const bar=$('settingsUnsavedBar');
-      if(bar) bar.style.display='none';
+      const maxTokensField=$('settingsMaxTokens');
+      const maxTokensDirty=!!(
+        maxTokensField&&
+        String(maxTokensField.value||'')!==String(maxTokensField.dataset.initialValue||'')
+      );
+      if(!maxTokensDirty){
+        _settingsDirty=false;
+        const bar=$('settingsUnsavedBar');
+        if(bar) bar.style.display='none';
+      }
     }
   }catch(e){
     console.warn('[settings] preferences autosave failed', e);
@@ -7453,6 +8074,18 @@ function _retryPreferencesAutosave(){
   const payload=_settingsPreferencesAutosaveRetryPayload||_preferencesPayloadFromUi();
   _setPreferencesAutosaveStatus('saving');
   _autosavePreferencesSettings(payload);
+}
+
+function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
+  if(!field) return;
+  const parsedFallback=parseInt(fallbackValue,10);
+  if(Number.isFinite(parsedFallback)&&parsedFallback>0&&typeof t==='function'){
+    field.placeholder=t('settings_placeholder_max_tokens_fallback', parsedFallback);
+    return;
+  }
+  field.placeholder=(typeof t==='function')
+    ? t('settings_placeholder_max_tokens_none')
+    : 'No override';
 }
 
 async function loadSettingsPanel(){
@@ -7561,6 +8194,27 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    const largeTextPasteCb=$('settingsLargeTextPasteAsAttachment');
+    if(largeTextPasteCb){
+      largeTextPasteCb.checked=settings.large_text_paste_as_attachment!==false;
+      window._largeTextPasteAsAttachment=largeTextPasteCb.checked;
+      largeTextPasteCb.onchange=function(){
+        window._largeTextPasteAsAttachment=this.checked;
+        _scheduleAppearanceAutosave();
+      };
+    }
+    const pqcCb=$('settingsProjectQuickCreate');
+    if(pqcCb){
+      pqcCb.checked=!!(settings.project_quick_create_buttons);
+      window._projectQuickCreate=pqcCb.checked;
+      pqcCb.onchange=function(){
+        window._projectQuickCreate=this.checked;
+        // Rebuild the sidebar so the per-project + buttons appear/disappear
+        // immediately, rather than only on the next render.
+        try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+        _scheduleAppearanceAutosave();
+      };
+    }
     const structuredCodeModeSel=$('settingsStructuredCodeMode');
     const structuredCodeLinesField=$('settingsStructuredCodeAutoLines');
     if(structuredCodeModeSel){
@@ -7599,6 +8253,10 @@ async function loadSettingsPanel(){
       };
     }
     _ensureComposerControlVisibilityState(settings);
+    if(Array.isArray(settings.composer_control_order)){
+      const composerOrder=_setComposerControlOrder(settings.composer_control_order);
+      if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(composerOrder);
+    }
     _renderComposerControlChips();
     _renderComposerSituationalControlChips();
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
@@ -7693,6 +8351,18 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const maxTokensField=$('settingsMaxTokens');
+    if(maxTokensField){
+      const rawMaxTokens=settings.max_tokens;
+      const parsedMaxTokens=parseInt(rawMaxTokens,10);
+      const hasRootOverride=Number.isFinite(parsedMaxTokens)&&parsedMaxTokens>0;
+      maxTokensField.value=hasRootOverride
+        ? String(parsedMaxTokens)
+        : '';
+      _syncSettingsMaxTokensPlaceholder(maxTokensField,settings.max_tokens_fallback);
+      maxTokensField.dataset.initialValue=maxTokensField.value;
+      maxTokensField.addEventListener('input',_markSettingsDirty,{once:false});
+    }
     // Ambient provider quota chip toggle — default off; only shows at ≥1400px viewport
     // when enabled (see style.css @media (max-width:1399.98px) rule).
     const showQuotaChipCb=$('settingsShowQuotaChip');
@@ -7779,12 +8449,30 @@ async function loadSettingsPanel(){
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=settings.show_cli_sessions!==false;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
+    if(showClaudeCodeCb){
+      showClaudeCodeCb.checked=!!settings.show_claude_code_sessions;
+      showClaudeCodeCb.disabled=showCliCb?!showCliCb.checked:true;
+      showClaudeCodeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    if(showCliCb){showCliCb.addEventListener('change',function(){
+      const enabled=!!showCliCb.checked;
+      if(showCronCb) showCronCb.disabled=!enabled;
+      if(showClaudeCodeCb) showClaudeCodeCb.disabled=!enabled;
+      _schedulePreferencesAutosave();
+    },{once:false});}
     const showCronCb=$('settingsShowCronSessions');
     if(showCronCb){
       showCronCb.checked=!!settings.show_cron_sessions;
       showCronCb.disabled=showCliCb?!showCliCb.checked:true;
       showCronCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-      if(showCliCb){showCliCb.addEventListener('change',function(){showCronCb.disabled=!showCliCb.checked;},{once:false});}
+    }
+    const showWebhookCb=$('settingsShowWebhookSessions');
+    if(showWebhookCb){
+      showWebhookCb.checked=!!settings.show_webhook_sessions;
+      showWebhookCb.disabled=showCliCb?!showCliCb.checked:true;
+      showWebhookCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      if(showCliCb){showCliCb.addEventListener('change',function(){showWebhookCb.disabled=!showCliCb.checked;},{once:false});}
     }
     const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -7831,6 +8519,18 @@ async function loadSettingsPanel(){
     // TTS engine selector
     const ttsEngineSel=$('settingsTtsEngine');
     if(ttsEngineSel){
+      // Re-add any extension-registered TTS engines (window.registerHermesTtsEngine)
+      // as options — the <select> markup only hardcodes the built-ins, and this
+      // settings panel can render after an extension registered its engine.
+      if(typeof window._hermesTtsEngineOptions==='function'){
+        window._hermesTtsEngineOptions().forEach(function(e){
+          if(!ttsEngineSel.querySelector('option[value="'+e.id+'"]')){
+            var opt=document.createElement('option');
+            opt.value=e.id; opt.textContent=e.label;
+            ttsEngineSel.appendChild(opt);
+          }
+        });
+      }
       const saved=localStorage.getItem('hermes-tts-engine')||'browser';
       ttsEngineSel.value=saved;
       ttsEngineSel.onchange=function(){
@@ -7846,6 +8546,8 @@ async function loadSettingsPanel(){
       const current=localStorage.getItem('hermes-tts-voice')||'';
       if(engine==='elevenlabs'){
         ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
+      } else if(engine==='openai'){
+        ttsVoiceSel.innerHTML='<option value="">OpenAI voice (server-configured)</option>';
       } else if(engine==='edge'){
         const edgeVoices=[
           {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
@@ -7923,8 +8625,16 @@ async function loadSettingsPanel(){
     if(busyInputModeSel){
       const val=String(settings.busy_input_mode||'queue');
       busyInputModeSel.value=['queue','interrupt','steer'].includes(val)?val:'queue';
+      window._busyInputMode=(typeof _persistBusyInputMode==='function')?_persistBusyInputMode(busyInputModeSel.value):busyInputModeSel.value;
       busyInputModeSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
+    const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
+    if(showBusyPlaceholderHintCb){
+      showBusyPlaceholderHintCb.checked=!!settings.show_busy_placeholder_hint;
+      window._showBusyPlaceholderHint=showBusyPlaceholderHintCb.checked;
+      showBusyPlaceholderHintCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');
     if(botNameField){
@@ -8037,6 +8747,67 @@ function _extensionEntryBadge(entry){
   return `<span class="extension-status-badge ${cls}">${esc(_extensionEntryStatusLabel(entry))}</span>`;
 }
 
+function _configureExtensionSettingsFromStatus(data){
+  if(!window.HermesExtensionSettings||!data||!Array.isArray(data.extensions)) return;
+  window.HermesExtensionSettings.primeFromStatus({extensions:data.extensions});
+}
+
+function _extensionSettingsFieldHtml(field,value){
+  const key=String(field&&field.key||'');
+  const type=String(field&&field.type||'');
+  const label=String(field&&field.label||key);
+  const desc=String(field&&field.description||'');
+  const dataAttrs=`data-extension-setting-input="${esc(key)}" data-extension-setting-type="${esc(type)}"`;
+  let control='';
+  if(type==='boolean'){
+    control=`<label class="extension-setting-check"><input type="checkbox" ${dataAttrs}${value?' checked':''}> <span>${esc(label)}</span></label>`;
+  }else if(type==='number'||type==='integer'){
+    const step=type==='integer'?'1':'any';
+    control=`<label><span>${esc(label)}</span><input type="number" step="${step}" ${dataAttrs} value="${esc(String(value??''))}"></label>`;
+  }else if(type==='enum'){
+    const options=Array.isArray(field.options)?field.options:[];
+    control=`<label><span>${esc(label)}</span><select ${dataAttrs}>${options.map(option=>{
+      const optionValue=String(option&&option.value||'');
+      const optionLabel=String(option&&option.label||optionValue);
+      return `<option value="${esc(optionValue)}"${optionValue===value?' selected':''}>${esc(optionLabel)}</option>`;
+    }).join('')}</select></label>`;
+  }else{
+    control=`<label><span>${esc(label)}</span><input type="text" ${dataAttrs} value="${esc(String(value??''))}"></label>`;
+  }
+  return `<div class="extension-setting-field">${control}${desc?`<div class="extension-setting-desc">${esc(desc)}</div>`:''}</div>`;
+}
+
+function _extensionSettingsControls(entry){
+  const id=(entry&&entry.id)||'';
+  const storageOwned=!!(entry&&entry.storage_owned);
+  if(!storageOwned){
+    return '<div class="extension-settings-empty">No extension-owned browser storage permission.</div>';
+  }
+  const settingsApi=window.HermesExtensionSettings&&id?window.HermesExtensionSettings.settingsForExtension(id):null;
+  if(!settingsApi||!settingsApi.trusted){
+    return '<div class="extension-settings-empty">Reload WebUI after enabling or installing this extension to edit browser-local settings.</div>';
+  }
+  const schema=Array.isArray(settingsApi&&settingsApi.schema)?settingsApi.schema:[];
+  const values=settingsApi?settingsApi.values:{};
+  const fields=schema.length
+    ? schema.map(field=>_extensionSettingsFieldHtml(field,values[field.key])).join('')
+    : '<div class="extension-settings-empty">No configurable settings declared.</div>';
+  return `<div class="extension-settings-box">
+    <div class="extension-settings-head">
+      <div>
+        <div class="extension-settings-title">Browser-local extension settings</div>
+        <div class="extension-settings-note">Settings and extension-owned storage stay in this browser. Do not store secrets here.</div>
+      </div>
+    </div>
+    <div class="extension-settings-fields">${fields}</div>
+    <div class="extension-settings-actions">
+      <button class="sm-btn" type="button" data-extension-settings-save="${esc(id)}"${schema.length?'':' disabled aria-disabled="true"'}>Save settings</button>
+      <button class="sm-btn" type="button" data-extension-settings-reset="${esc(id)}"${schema.length?'':' disabled aria-disabled="true"'}>Reset settings</button>
+      <button class="sm-btn" type="button" data-extension-storage-clear="${esc(id)}">Clear extension storage</button>
+    </div>
+  </div>`;
+}
+
 function _extensionInstalledList(extensions,extensionDirConfigured){
   const list=Array.isArray(extensions)?extensions:[];
   if(!list.length){
@@ -8061,6 +8832,7 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
           ${_extensionEntryBadge(entry)}
         </div>
         <div class="extension-installed-meta"><code>${esc(id)}</code><span>${esc(note)}</span></div>
+        ${_extensionSettingsControls(entry)}
       </div>
       <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
     </div>`;
@@ -8070,6 +8842,74 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
 function _extensionSidecarHealthBadge(status,label){
   const safeStatus=['checking','healthy','unhealthy','blocked'].includes(status)?status:'checking';
   return `<span class="extension-sidecar-status-badge extension-sidecar-status-${safeStatus}">${esc(label||safeStatus)}</span>`;
+}
+
+function _extensionRuntimeStatusValue(value){
+  const normalized=String(value||'').trim().toLowerCase();
+  return ['running','connected','waiting','stale','unloaded','stopped','not_registered','unknown'].includes(normalized)
+    ? normalized
+    : 'unknown';
+}
+
+function _extensionRuntimeStatusLabel(value){
+  const normalized=_extensionRuntimeStatusValue(value);
+  if(normalized==='not_registered') return 'not registered';
+  return normalized.replace(/_/g,' ');
+}
+
+function _extensionRuntimeLastSeen(value){
+  const text=String(value??'').trim();
+  if(!/^\d+(?:\.\d+)?$/.test(text)) return '';
+  const raw=Number(text);
+  if(!Number.isFinite(raw)||raw<=0) return '';
+  const seconds=raw>1000000000000?raw/1000:raw;
+  const now=Math.floor(Date.now()/1000);
+  if(seconds>now+300) return '';
+  const age=Math.max(0,Math.floor(now-seconds));
+  if(age<5) return 'just now';
+  if(age<60) return `${age}s ago`;
+  const minutes=Math.floor(age/60);
+  if(minutes<60) return `${minutes}m ago`;
+  const hours=Math.floor(minutes/60);
+  if(hours<24) return `${hours}h ago`;
+  return `${Math.floor(hours/24)}d ago`;
+}
+
+function _extensionRuntimeOrigin(value){
+  const text=String(value||'').trim();
+  if(!text) return '';
+  try{
+    const parsed=new URL(text);
+    if(parsed.protocol==='http:'&&(parsed.hostname==='127.0.0.1'||parsed.hostname==='localhost')){
+      return parsed.origin;
+    }
+  }catch(_e){}
+  return '';
+}
+
+function _extensionRuntimeRows(runtime){
+  if(!runtime||typeof runtime!=='object') return [];
+  const rows=[];
+  if(Object.prototype.hasOwnProperty.call(runtime,'sidecar')){
+    rows.push(['Sidecar',_extensionRuntimeStatusLabel(runtime.sidecar)]);
+  }
+  if(Object.prototype.hasOwnProperty.call(runtime,'native_host')){
+    rows.push(['Native host',_extensionRuntimeStatusLabel(runtime.native_host)]);
+  }
+  if(Object.prototype.hasOwnProperty.call(runtime,'bridge')){
+    rows.push(['Bridge',_extensionRuntimeStatusLabel(runtime.bridge)]);
+  }
+  const lastSeen=_extensionRuntimeLastSeen(runtime.last_seen_at);
+  if(lastSeen) rows.push(['Last update',lastSeen]);
+  const origin=_extensionRuntimeOrigin(runtime.webui_origin);
+  if(origin) rows.push(['WebUI origin',origin]);
+  return rows;
+}
+
+function _extensionRuntimeDetails(runtime){
+  const rows=_extensionRuntimeRows(runtime);
+  if(!rows.length) return '';
+  return rows.map(([label,value])=>`<div><span>${esc(label)}</span><code>${esc(value)}</code></div>`).join('');
 }
 
 function _extensionSidecarCard(sidecars){
@@ -8082,6 +8922,22 @@ function _extensionSidecarCard(sidecars){
     const origin=(sidecar&&sidecar.origin)||'';
     const healthPath=(sidecar&&sidecar.health_path)||'';
     const healthUrl=(sidecar&&sidecar.health_url)||'';
+    const proxy=(sidecar&&sidecar.proxy&&typeof sidecar.proxy==='object')?sidecar.proxy:{};
+    const proxyAvailable=proxy.available===true;
+    const proxyConsented=proxy.consented===true;
+    const proxyConsentRequired=proxy.consent_required===true;
+    const proxyOriginChanged=proxy.origin_changed===true;
+    const proxyPath=(proxy&&proxy.path)||'';
+    const proxyStatus=proxyConsented
+      ?'consented'
+      :(proxyOriginChanged
+        ?'reconfirm required'
+        :(proxyConsentRequired
+          ?'approval required'
+          :'unavailable'));
+    const proxyButton=(proxyAvailable&&id)
+      ?`<button class="sm-btn extension-toggle-btn" type="button" data-extension-sidecar-proxy-id="${esc(id)}" data-extension-sidecar-proxy-approved="${proxyConsented?'false':'true'}">${esc(proxyConsented?'Revoke proxy consent':'Approve proxy consent')}</button>`
+      :'';
     return `<div class="extension-sidecar-row" data-sidecar-index="${index}">
       <div class="extension-sidecar-row-head">
         <div class="extension-sidecar-title">${esc(title)}</div>
@@ -8092,7 +8948,11 @@ function _extensionSidecarCard(sidecars){
         <div><span>Origin</span><code>${esc(origin)}</code></div>
         <div><span>Health path</span><code>${esc(healthPath)}</code></div>
         <div><span>Health URL</span><code>${esc(healthUrl)}</code></div>
+        <div><span>Proxy</span><code>${esc(proxyStatus)}</code></div>
+        <div><span>Proxy path</span><code>${esc(proxyPath)}</code></div>
       </div>
+      <div class="extension-sidecar-actions">${proxyButton}</div>
+      <div class="extension-sidecar-runtime" data-sidecar-runtime-index="${index}" hidden></div>
     </div>`;
   }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
   return `
@@ -8114,10 +8974,24 @@ function _setExtensionSidecarHealth(index,status,label){
   if(el) el.innerHTML=_extensionSidecarHealthBadge(status,label);
 }
 
+function _setExtensionSidecarRuntime(index,runtime){
+  const el=document.querySelector(`[data-sidecar-runtime-index="${index}"]`);
+  if(!el) return;
+  const details=_extensionRuntimeDetails(runtime);
+  if(!details){
+    el.hidden=true;
+    el.innerHTML='';
+    return;
+  }
+  el.hidden=false;
+  el.innerHTML=details;
+}
+
 async function _checkExtensionSidecarHealth(sidecar,index,seq){
   const healthUrl=sidecar&&sidecar.health_url;
   if(!healthUrl){
     _setExtensionSidecarHealth(index,'blocked','unreachable / blocked');
+    _setExtensionSidecarRuntime(index,null);
     return;
   }
   let controller=null;
@@ -8129,11 +9003,22 @@ async function _checkExtensionSidecarHealth(sidecar,index,seq){
     }
     const res=await fetch(healthUrl,{credentials:'omit',cache:'no-store',signal:controller?controller.signal:undefined});
     if(seq!==_extensionsSidecarMonitorSeq) return;
-    if(res.ok) _setExtensionSidecarHealth(index,'healthy','healthy');
-    else _setExtensionSidecarHealth(index,'unhealthy','unhealthy');
+    if(res.ok){
+      _setExtensionSidecarHealth(index,'healthy','healthy');
+      let body=null;
+      try{
+        body=await res.json();
+      }catch(_e){}
+      if(seq!==_extensionsSidecarMonitorSeq) return;
+      _setExtensionSidecarRuntime(index,body&&typeof body==='object'?body.runtime:null);
+    }else{
+      _setExtensionSidecarHealth(index,'unhealthy','unhealthy');
+      _setExtensionSidecarRuntime(index,null);
+    }
   }catch(_e){
     if(seq!==_extensionsSidecarMonitorSeq) return;
     _setExtensionSidecarHealth(index,'blocked','unreachable / blocked');
+    _setExtensionSidecarRuntime(index,null);
   }finally{
     if(timeoutId) clearTimeout(timeoutId);
   }
@@ -8149,6 +9034,7 @@ function _renderExtensionsPanel(data,seq){
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
   _extensionsStatusData=data||null;
+  _configureExtensionSettingsFromStatus(data);
   if(copyBtn) copyBtn.disabled=!data;
   const manifest=(data&&data.manifest)||{};
   const counts=(data&&data.counts)||{};
@@ -8229,6 +9115,8 @@ function _renderExtensionsPanel(data,seq){
     </div>
   `;
   _bindExtensionToggleButtons(target);
+  _bindExtensionSidecarProxyButtons(target);
+  _bindExtensionSettingsButtons(target);
   _monitorExtensionSidecars(sidecars,seq);
 }
 
@@ -8236,6 +9124,13 @@ function _bindExtensionToggleButtons(root){
   if(!root) return;
   root.querySelectorAll('[data-extension-toggle-id]').forEach(btn=>{
     btn.addEventListener('click',()=>handleExtensionToggle(btn));
+  });
+}
+
+function _bindExtensionSidecarProxyButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-sidecar-proxy-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionSidecarProxyConsent(btn));
   });
 }
 
@@ -8258,18 +9153,115 @@ async function handleExtensionToggle(btn){
   }
 }
 
-async function loadExtensionsPanel(){
+async function handleExtensionSidecarProxyConsent(btn){
+  if(!btn||btn.disabled) return;
+  const id=btn.dataset.extensionSidecarProxyId||'';
+  const approved=btn.dataset.extensionSidecarProxyApproved==='true';
+  if(!id) return;
+  const previousText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent=approved?'Approving…':'Revoking…';
+  try{
+    const data=await api('/api/extensions/sidecar-proxy-consent',{method:'POST',body:JSON.stringify({id,approved})});
+    showToast(approved?'Extension sidecar proxy approved.':'Extension sidecar proxy consent revoked.');
+    _renderExtensionsPanel(data,++_extensionsSidecarMonitorSeq);
+  }catch(e){
+    btn.disabled=false;
+    btn.textContent=previousText;
+    showToast('Failed to update extension sidecar proxy consent: '+(e&&e.message?e.message:String(e)));
+  }
+}
+
+function _readExtensionSettingsForm(row){
+  const values={};
+  row.querySelectorAll('[data-extension-setting-input]').forEach(input=>{
+    const key=input.dataset.extensionSettingInput||'';
+    const type=input.dataset.extensionSettingType||'';
+    if(!key) return;
+    if(type==='boolean') values[key]=!!input.checked;
+    else if(type==='integer') values[key]=Number.parseInt(input.value,10);
+    else if(type==='number') values[key]=Number.parseFloat(input.value);
+    else values[key]=input.value;
+  });
+  return values;
+}
+
+function _fillExtensionSettingsForm(row,id){
+  if(!window.HermesExtensionSettings) return;
+  const values=window.HermesExtensionSettings.settingsForExtension(id).values;
+  row.querySelectorAll('[data-extension-setting-input]').forEach(input=>{
+    const key=input.dataset.extensionSettingInput||'';
+    const type=input.dataset.extensionSettingType||'';
+    const value=values[key];
+    if(type==='boolean') input.checked=!!value;
+    else input.value=value??'';
+  });
+}
+
+function _bindExtensionSettingsButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-settings-save]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionSettingsSave(btn));
+  });
+  root.querySelectorAll('[data-extension-settings-reset]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionSettingsReset(btn));
+  });
+  root.querySelectorAll('[data-extension-storage-clear]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionStorageClear(btn));
+  });
+}
+
+function handleExtensionSettingsSave(btn){
+  const id=btn&&btn.dataset.extensionSettingsSave;
+  const row=btn&&btn.closest('[data-extension-id]');
+  if(!id||!row||!window.HermesExtensionSettings) return;
+  const api=window.HermesExtensionSettings.settingsForExtension(id);
+  const result=api.setAll(_readExtensionSettingsForm(row));
+  if(!result.ok){
+    showToast('Extension settings contain invalid values.');
+    return;
+  }
+  _fillExtensionSettingsForm(row,id);
+  showToast('Extension settings saved in this browser.');
+}
+
+function handleExtensionSettingsReset(btn){
+  const id=btn&&btn.dataset.extensionSettingsReset;
+  const row=btn&&btn.closest('[data-extension-id]');
+  if(!id||!row||!window.HermesExtensionSettings) return;
+  window.HermesExtensionSettings.settingsForExtension(id).reset();
+  _fillExtensionSettingsForm(row,id);
+  showToast('Extension settings reset in this browser.');
+}
+
+function handleExtensionStorageClear(btn){
+  const id=btn&&btn.dataset.extensionStorageClear;
+  if(!id||!window.HermesExtensionSettings) return;
+  window.HermesExtensionSettings.storageForExtension(id).clear();
+  showToast('Extension storage cleared in this browser.');
+}
+
+async function loadExtensionsPanel(opts){
   const target=$('extensionsDiagnostics');
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
-  if(copyBtn) copyBtn.disabled=true;
+  // Only preserve REAL rendered diagnostics across a refresh — never the
+  // "Loading…" / error placeholders, or a failed refresh would leave the panel
+  // stuck on "Loading extension diagnostics…" instead of rendering the error.
+  const preserveExisting=!!(
+    opts&&opts.preserveExisting&&target.innerHTML.trim()
+    &&!target.querySelector('.extensions-loading,.extensions-error')
+  );
+  if(copyBtn&&!preserveExisting) copyBtn.disabled=true;
   const seq=++_extensionsSidecarMonitorSeq;
-  target.innerHTML='<div class="extensions-loading">Loading extension diagnostics…</div>';
+  if(!preserveExisting) target.innerHTML='<div class="extensions-loading">Loading extension diagnostics…</div>';
   try{
     const data=await api('/api/extensions/status');
     if(seq!==_extensionsSidecarMonitorSeq) return;
     _renderExtensionsPanel(data,seq);
   }catch(e){
+    if(seq!==_extensionsSidecarMonitorSeq) return;
+    if(preserveExisting&&target.innerHTML.trim()) return;
     _extensionsStatusData=null;
     if(copyBtn) copyBtn.disabled=true;
     target.innerHTML='<div class="extensions-error">Failed to load extension diagnostics: '+esc(e.message||String(e))+'</div>';
@@ -8285,7 +9277,163 @@ function switchExtensionsTab(tab){
   document.querySelectorAll('[data-extensions-pane]').forEach(pane=>{
     pane.hidden=pane.dataset.extensionsPane!==tab;
   });
+  if(tab==='diagnostics') loadExtensionsPanel({preserveExisting:true});
   if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();
+}
+
+function _extensionSafeHttpUrl(value){
+  if(!value) return '';
+  const raw=String(value).trim();
+  if(!/^https?:\/\//i.test(raw)) return '';
+  try{
+    const url=new URL(raw);
+    if(url.username||url.password) return '';
+    return (url.protocol==='http:'||url.protocol==='https:')?url.href:'';
+  }catch(_){
+    return '';
+  }
+}
+
+function _extensionRegistrySourceUrl(entryPath){
+  const raw=String(entryPath||'').trim();
+  if(!raw||raw.startsWith('/')||raw.includes('\\')||raw.includes('\0')) return '';
+  const parts=raw.split('/').filter(Boolean);
+  if(parts.length===0||parts.some(part=>part==='.'||part==='..')) return '';
+  const folder=parts.length>1?parts.slice(0,-1):parts;
+  return 'https://github.com/hermes-webui/hermes-webui-extensions/tree/main/'+folder.map(encodeURIComponent).join('/');
+}
+
+function _extensionSourceUrl(entry){
+  if(!entry||typeof entry!=='object') return '';
+  const candidates=[
+    entry.homepage,
+    entry.repository_url,
+    entry.repo_url,
+    entry.source_url,
+    entry.source,
+  ];
+  const repository=entry.repository;
+  if(typeof repository==='string'){
+    candidates.push(repository);
+  }else if(repository&&typeof repository==='object'){
+    candidates.push(repository.url,repository.html_url);
+  }
+  for(const candidate of candidates){
+    const safe=_extensionSafeHttpUrl(candidate);
+    if(safe) return safe;
+  }
+  return _extensionSafeHttpUrl(_extensionRegistrySourceUrl(entry.entry_path||entry.runtime_manifest_path));
+}
+
+function _extensionSourceLink(entry){
+  const url=_extensionSourceUrl(entry);
+  if(!url) return '';
+  return `<a class="extension-gallery-source-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Source</a>`;
+}
+
+function _extensionPermissionList(value){
+  if(!Array.isArray(value)) return '';
+  const items=value
+    .map(item=>String(item||'').trim())
+    .filter(Boolean);
+  return items.length?items.join(', '):'';
+}
+
+function _extensionPermissionRows(perms){
+  if(!perms||typeof perms!=='object') return [];
+  const rows=[];
+  const api=(perms.webui_api&&typeof perms.webui_api==='object')?perms.webui_api:{};
+  const apiRead=_extensionPermissionList(api.read);
+  const apiWrite=_extensionPermissionList(api.write);
+  if(apiRead) rows.push(['WebUI API reads',apiRead]);
+  if(apiWrite) rows.push(['WebUI API writes',apiWrite]);
+  if(perms.webui_navigation===true) rows.push(['Navigation','Can open or switch WebUI views']);
+
+  const sidecarCommands=(perms.sidecar_commands&&typeof perms.sidecar_commands==='object')?perms.sidecar_commands:{};
+  const commandLabels=[
+    ['from_loopback','accepts loopback commands'],
+    ['can_switch_sessions','switch sessions'],
+    ['can_write_drafts','write drafts'],
+    ['can_autosend','auto-send drafts'],
+    ['can_respond_approval','respond to approvals'],
+    ['can_respond_clarify','respond to clarifications'],
+  ];
+  const commands=commandLabels
+    .filter(([key])=>sidecarCommands[key]===true)
+    .map(([,label])=>label);
+  if(commands.length) rows.push(['Sidecar commands',commands.join(', ')]);
+
+  const dom=(perms.dom&&typeof perms.dom==='object')?perms.dom:{};
+  const domItems=[];
+  if(dom.owned===true) domItems.push('renders extension-owned UI');
+  if(dom.mutates_core_views===true) domItems.push('can alter core WebUI views');
+  if(domItems.length) rows.push(['DOM access',domItems.join(', ')]);
+
+  const storage=(perms.storage&&typeof perms.storage==='object')?perms.storage:{};
+  const ownedStorage=_extensionPermissionList(storage.owned||storage.owned_keys);
+  const sharedStorage=_extensionPermissionList(storage.shared_webui_keys);
+  if(ownedStorage) rows.push(['Owned storage keys',ownedStorage]);
+  if(sharedStorage) rows.push(['Shared WebUI storage',sharedStorage]);
+
+  if(perms.loopback_sidecar===true) rows.push(['Loopback sidecar','Can contact a declared local loopback helper']);
+  if(perms.native_host===true) rows.push(['Native host','Requires a local native host or desktop app']);
+
+  const filesystem=(perms.filesystem&&typeof perms.filesystem==='object')?perms.filesystem:{};
+  if(filesystem.arbitrary===true){
+    rows.push(['Filesystem','Can access arbitrary filesystem paths']);
+  }else if(filesystem.serves_bundled_assets===true){
+    rows.push(['Filesystem','Serves bundled extension assets only']);
+  }
+  if(perms.network_external===true||perms.external_network===true){
+    rows.push(['External network','Can contact external network origins']);
+  }
+  return rows;
+}
+
+function _extensionPermissionSummary(perms){
+  const rows=_extensionPermissionRows(perms);
+  const body=rows.length
+    ? '<div class="extension-gallery-permission-list">'+rows.map(([label,value])=>`
+      <div class="extension-gallery-permission-row">
+        <span class="extension-gallery-permission-label">${esc(label)}</span>
+        <span class="extension-gallery-permission-value">${esc(value)}</span>
+      </div>`).join('')+'</div>'
+    : `<div class="extension-gallery-permission-empty">${esc(t('ext_gallery_permissions_empty'))}</div>`;
+  return `<details class="extension-gallery-perms">
+    <summary>${esc(t('ext_gallery_permissions_show'))}</summary>
+    ${body}
+  </details>`;
+}
+
+function _extensionPostInstallNote(entry,isInstalled){
+  const lifecycle=(entry&&entry.lifecycle&&typeof entry.lifecycle==='object')?entry.lifecycle:{};
+  const post=(entry&&entry.post_install&&typeof entry.post_install==='object')?entry.post_install:null;
+  const needsSidecar=!!lifecycle.sidecar_start_required;
+  const needsNative=!!lifecycle.native_host_start_required;
+  const summary=post&&post.summary?String(post.summary):(
+    (needsSidecar||needsNative)
+      ? t('ext_gallery_local_component_required')
+      : ''
+  );
+  if(!summary) return '';
+  const docsUrl=_extensionSafeHttpUrl(post&&post.docs_url);
+  const localAppLabel=post&&post.local_app_label?String(post.local_app_label):t('ext_gallery_local_app_label');
+  const chips=[];
+  if(post&&post.requires_local_app===true) chips.push(t('ext_gallery_required_suffix',localAppLabel));
+  if(needsSidecar) chips.push(t('ext_gallery_sidecar_required'));
+  if(needsNative) chips.push(t('ext_gallery_native_host_required'));
+  const chipHtml=chips.length
+    ? '<div class="extension-gallery-next-chips">'+chips.map(item=>`<span>${esc(item)}</span>`).join('')+'</div>'
+    : '';
+  const docsHtml=docsUrl
+    ? `<a class="extension-gallery-next-link" href="${esc(docsUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('ext_gallery_open_setup_guide'))}</a>`
+    : '';
+  return `<div class="extension-gallery-next-step">
+    <div class="extension-gallery-next-label">${esc(t(isInstalled?'ext_gallery_next_step':'ext_gallery_after_install'))}</div>
+    <div class="extension-gallery-next-summary">${esc(summary)}</div>
+    ${chipHtml}
+    ${docsHtml}
+  </div>`;
 }
 
 async function loadExtensionsGallery(){
@@ -8312,6 +9460,7 @@ async function loadExtensionsGallery(){
 function _renderExtensionsGallery(entries,statusData){
   const galleryEl=$('extensionsGallery');
   const installedEl=$('extensionsInstalled');
+  _configureExtensionSettingsFromStatus(statusData);
   const installedIds=new Set();
   if(statusData&&statusData.gallery_installed){
     Object.keys(statusData.gallery_installed).forEach(id=>installedIds.add(id));
@@ -8321,11 +9470,14 @@ function _renderExtensionsGallery(entries,statusData){
   }
   if(!Array.isArray(entries)||entries.length===0){
     if(galleryEl) galleryEl.innerHTML='<div class="extensions-empty">No extensions found in the registry.</div>';
-    if(installedEl) installedEl.innerHTML='<div class="extensions-empty">No extensions installed from the gallery.</div>';
+    if(installedEl){
+      installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
+      _bindExtensionToggleButtons(installedEl);
+      _bindExtensionSettingsButtons(installedEl);
+    }
     return;
   }
   const galleryCards=[];
-  const installedCards=[];
   for(const entry of entries){
     const id=esc(String(entry.id||''));
     const name=esc(String(entry.name||entry.id||''));
@@ -8335,9 +9487,17 @@ function _renderExtensionsGallery(entries,statusData){
     const caps=Array.isArray(entry.capabilities)?entry.capabilities:[];
     const perms=entry.permissions||null;
     const isInstalled=installedIds.has(String(entry.id||''));
-    const restartRequired=!!(entry.lifecycle&&entry.lifecycle.restart_required);
+    const restartRequired=!!(entry.lifecycle&&(entry.lifecycle.restart_required||entry.lifecycle.webui_restart_required));
     const badgesHtml=caps.map(c=>`<span class="extension-gallery-badge">${esc(String(c))}</span>`).join('');
-    const permsHtml=perms?`<details class="extension-gallery-perms"><summary data-i18n="ext_gallery_permissions_show">Permissions</summary><pre>${esc(JSON.stringify(perms,null,2))}</pre></details>`:'';
+    const metaBits=[];
+    if(author) metaBits.push('by '+author);
+    if(version) metaBits.push('v'+version);
+    const sourceLinkHtml=_extensionSourceLink(entry);
+    const metaHtml=(metaBits.length||sourceLinkHtml)
+      ? `<div class="extension-gallery-meta">${metaBits.length?`<span>${metaBits.join(' · ')}</span>`:''}${sourceLinkHtml}</div>`
+      : '';
+    const permsHtml=perms?_extensionPermissionSummary(perms):'';
+    const postInstallHtml=_extensionPostInstallNote(entry,isInstalled);
     const actionBtn=isInstalled
       ?`<button class="extension-gallery-uninstall-btn" data-ext-uninstall-id="${id}" type="button" data-i18n="ext_gallery_uninstall">Uninstall</button>`
       :`<button class="extension-gallery-install-btn" data-ext-install-id="${id}" type="button" data-i18n="ext_gallery_install">Install</button>`;
@@ -8346,19 +9506,23 @@ function _renderExtensionsGallery(entries,statusData){
       <div class="extension-gallery-head">
         <div class="extension-gallery-info">
           <div class="extension-gallery-name">${name}${installedBadge}</div>
-          <div class="extension-gallery-meta">${author?'by '+author:''}${version?' · v'+version:''}</div>
+          ${metaHtml}
         </div>
       </div>
       <div class="extension-gallery-desc">${desc}</div>
       ${badgesHtml?'<div class="extension-gallery-badge-row">'+badgesHtml+'</div>':''}
+      ${postInstallHtml}
       ${permsHtml}
       <div class="extension-gallery-actions">${actionBtn}</div>
     </div>`;
     galleryCards.push(card);
-    if(isInstalled) installedCards.push(card);
   }
   if(galleryEl) galleryEl.innerHTML=galleryCards.length?galleryCards.join(''):'<div class="extensions-empty">No extensions found.</div>';
-  if(installedEl) installedEl.innerHTML=installedCards.length?installedCards.join(''):'<div class="extensions-empty">No extensions installed from the gallery.</div>';
+  if(installedEl){
+    installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
+    _bindExtensionToggleButtons(installedEl);
+    _bindExtensionSettingsButtons(installedEl);
+  }
   _bindExtensionGalleryButtons(entries);
 }
 
@@ -8378,15 +9542,18 @@ async function handleExtensionInstall(btn,entry){
   if(!btn||btn.disabled) return;
   const previousText=btn.textContent;
   btn.disabled=true;
-  btn.textContent='Installing…';
+  btn.textContent=t('ext_gallery_installing');
   try{
     const result=await api('/api/extensions/install',{method:'POST',body:JSON.stringify({
       id:entry.id,
       download_url:entry.download_url||entry.download,
       sha256:entry.sha256,
     })});
-    const restart=!!(entry.lifecycle&&entry.lifecycle.restart_required);
-    showToast(restart?'Extension installed. Restart required to apply.':'Extension installed successfully.');
+    const restart=!!(entry.lifecycle&&(entry.lifecycle.restart_required||entry.lifecycle.webui_restart_required));
+    const hasPostInstall=!!(entry.post_install||(entry.lifecycle&&(entry.lifecycle.sidecar_start_required||entry.lifecycle.native_host_start_required)));
+    showToast(restart
+      ? t('ext_gallery_install_restart_required')
+      : (hasPostInstall?t('ext_gallery_install_followup'):t('ext_gallery_install_ok')));
     _extensionsGalleryLoaded=false;
     await loadExtensionsGallery();
   }catch(e){
@@ -8934,7 +10101,13 @@ async function renderProviderCostChart(card){
   }
   const body=card.querySelector('.provider-quota-body');
   if(!body||body.querySelector('.provider-cost-chart-wrap')) return;
-  if(!history||history.ok===false) return;
+  if(!history||history.ok===false){
+    const wrap=document.createElement('div');
+    wrap.className='provider-cost-chart-wrap';
+    _attachBudgetControls(wrap,history||{},card,0);
+    body.appendChild(wrap);
+    return;
+  }
   const snaps=Array.isArray(history.snapshots)?history.snapshots:[];
   // need at least 2 snapshots to have one non-null delta
   const hasData=snaps.filter(s=>s.delta!=null).length>=1;
@@ -8943,12 +10116,14 @@ async function renderProviderCostChart(card){
     empty.className='provider-cost-chart-wrap';
     empty.innerHTML='<div class="provider-cost-chart-title">7-day spend</div><div class="provider-quota-message">Not enough data yet. Cost chart builds after 2 daily snapshots.</div>';
     body.appendChild(empty);
+    _attachBudgetControls(empty,history,card,0);
     return;
   }
   const maxDelta=Math.max(...snaps.map(s=>s.delta!=null?Number(s.delta):0),1e-9);
   const nonNull=snaps.filter(s=>s.delta!=null).map(s=>Number(s.delta));
   const avg=nonNull.length?nonNull.reduce((a,b)=>a+b,0)/nonNull.length:0;
-  const pace='$'+(avg*30).toFixed(2);
+  const paceNum=avg*30;
+  const pace='$'+paceNum.toFixed(2);
   const bars=snaps.map(s=>{
     const delta=s.delta!=null?Number(s.delta):null;
     const pct=delta!=null?Math.max((delta/maxDelta)*100,delta>0?2:0).toFixed(1):'0';
@@ -8959,7 +10134,103 @@ async function renderProviderCostChart(card){
   const wrap=document.createElement('div');
   wrap.className='provider-cost-chart-wrap';
   wrap.innerHTML=`<div class="provider-cost-chart-title">7-day spend <span class="provider-cost-chart-pace">Monthly pace: ${esc(pace)}</span></div><div class="provider-cost-chart-bars insights-daily-token-chart">${bars}</div>`;
+  const monthly_budget=history&&history.monthly_budget!=null?history.monthly_budget:null;
+  if(monthly_budget!=null&&paceNum>0){
+    const paceSpan=wrap.querySelector('.provider-cost-chart-pace');
+    if(paceSpan){
+      const pct=Math.round((paceNum/monthly_budget)*100);
+      const pctSpan=document.createElement('span');
+      pctSpan.className='provider-cost-chart-pct'+(pct>=100?' over':pct>=80?' warn':'');
+      pctSpan.textContent=`(${pct}%)`;
+      paceSpan.appendChild(pctSpan);
+    }
+  }
   body.appendChild(wrap);
+  _attachBudgetControls(wrap,history,card,paceNum);
+}
+
+function _attachBudgetControls(wrap,history,card,paceNum){
+  const budget=history&&history.monthly_budget!=null?Number(history.monthly_budget):null;
+  const row=document.createElement('div');
+  row.className='provider-cost-budget-row';
+
+  const titleDiv=document.createElement('div');
+  titleDiv.className='provider-cost-budget-title';
+  titleDiv.textContent=t('provider_cost_budget_label');
+  row.appendChild(titleDiv);
+
+  const inputGroup=document.createElement('div');
+  inputGroup.className='provider-cost-budget-input-group';
+
+  const prefix=document.createElement('span');
+  prefix.className='provider-cost-budget-prefix';
+  prefix.textContent='$';
+  inputGroup.appendChild(prefix);
+
+  const input=document.createElement('input');
+  input.type='number';
+  input.min='0.01';
+  input.step='0.01';
+  input.className='provider-cost-budget-input';
+  input.placeholder=t('provider_cost_budget_placeholder')||'e.g. 50.00';
+  if(budget!=null) input.value=budget.toFixed(2);
+  inputGroup.appendChild(input);
+
+  const setBtn=document.createElement('button');
+  setBtn.type='button';
+  setBtn.className='provider-cost-budget-set';
+  setBtn.textContent=t('provider_cost_budget_set');
+  inputGroup.appendChild(setBtn);
+
+  const clearBtn=document.createElement('button');
+  clearBtn.type='button';
+  clearBtn.className='provider-cost-budget-clear';
+  clearBtn.textContent=t('provider_cost_budget_clear');
+  if(budget==null) clearBtn.style.display='none';
+  inputGroup.appendChild(clearBtn);
+
+  row.appendChild(inputGroup);
+
+  if(budget!=null&&paceNum>0){
+    const pct=Math.round((paceNum/budget)*100);
+    const barWrap=document.createElement('div');
+    barWrap.className='provider-cost-budget-bar-wrap';
+    const bar=document.createElement('div');
+    bar.className='provider-cost-budget-bar';
+    const fill=document.createElement('div');
+    fill.className='provider-cost-budget-bar-fill'+(pct>=100?' over':pct>=80?' warn':'');
+    fill.style.width=Math.min(100,pct)+'%';
+    bar.appendChild(fill);
+    barWrap.appendChild(bar);
+    const pctLabel=document.createElement('span');
+    pctLabel.className='provider-cost-budget-pct-label';
+    pctLabel.textContent=t('provider_cost_budget_pct',pct,budget.toFixed(2));
+    barWrap.appendChild(pctLabel);
+    row.appendChild(barWrap);
+  }
+
+  wrap.appendChild(row);
+
+  async function _saveBudget(value){
+    try{
+      await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
+      const existing=card.querySelector('.provider-cost-chart-wrap');
+      if(existing) existing.remove();
+      renderProviderCostChart(card);
+    }catch(e){
+      if(typeof showToast==='function') showToast(t('provider_cost_budget_save_failed'));
+    }
+  }
+
+  setBtn.addEventListener('click',()=>{
+    const val=parseFloat(input.value);
+    if(!isFinite(val)||val<=0) return;
+    _saveBudget(val);
+  });
+
+  clearBtn.addEventListener('click',()=>{
+    _saveBudget(null);
+  });
 }
 
 function _buildProviderCard(p){
@@ -9411,13 +10682,14 @@ async function deletePasskey(id){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
+  const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showQuotaChip=showQuotaChip===true;
   window._showConversationOutline=showConversationOutline===true;
   document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
   if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
+  window._showBusyPlaceholderHint=showBusyPlaceholderHint===true;
   window._showTps=showTps;
   window._fadeTextEffect=!!fadeTextEffect;
   window._showCliSessions=showCliSessions;
@@ -9434,16 +10706,42 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
-  window._busyInputMode=body.busy_input_mode||'queue';
+  window._busyInputMode=(typeof _persistBusyInputMode==='function')
+    ? _persistBusyInputMode(body.busy_input_mode)
+    : (body.busy_input_mode||'queue');
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
   window._autoScrollFollow=body.auto_scroll_follow!==false;
+  window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;
+  window._projectQuickCreate=!!body.project_quick_create_buttons;
   if(Object.prototype.hasOwnProperty.call(body,'structured_code_default_view')){
     _applyStructuredCodeViewSettings(body.structured_code_default_view,body.structured_code_auto_tree_lines,false);
   }
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
+  else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  _ensureComposerControlVisibilityState(saved||body||{});
+  const composerOrderSource=(saved&&Array.isArray(saved.composer_control_order))
+    ? saved.composer_control_order
+    : (Array.isArray(body.composer_control_order)?body.composer_control_order:null);
+  if(composerOrderSource){
+    const composerOrder=_setComposerControlOrder(composerOrderSource);
+    if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(composerOrder);
+  }
+  _renderComposerControlChips();
+  _renderComposerSituationalControlChips();
+  if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
+  const maxTokensField=$('settingsMaxTokens');
+  if(maxTokensField){
+    const savedRawMaxTokens=saved&&saved.max_tokens;
+    const parsedSavedMaxTokens=parseInt(savedRawMaxTokens,10);
+    maxTokensField.value=(Number.isFinite(parsedSavedMaxTokens)&&parsedSavedMaxTokens>0)
+      ? String(parsedSavedMaxTokens)
+      : '';
+    _syncSettingsMaxTokensPlaceholder(maxTokensField,saved&&saved.max_tokens_fallback);
+    maxTokensField.dataset.initialValue=maxTokensField.value;
+  }
   if(typeof startGatewaySSE==='function'){
     if(showCliSessions) startGatewaySSE();
     else if(typeof stopGatewaySSE==='function') stopGatewaySSE();
@@ -9687,6 +10985,25 @@ function _auxAdvancedInputHtml(id,label,value,desc,type='text',extraAttrs='',ext
  return `<label style="display:grid;gap:4px;font-size:12px;color:var(--text)"><span style="font-weight:600">${esc(label)}</span><input ${inputAttrs} style="width:100%;box-sizing:border-box;padding:7px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px${extraStyle}"><span style="font-size:10px;color:var(--muted);line-height:1.35">${esc(desc)}</span></label>`;
 }
 
+function _mainModelSupportsServiceTier(cfg){
+ const selected=$('settingsModel');
+ const selectedOpt=selected&&selected.selectedIndex>=0?selected.options[selected.selectedIndex]:null;
+ const optgroup=selectedOpt&&selectedOpt.parentElement&&selectedOpt.parentElement.tagName==='OPTGROUP'?selectedOpt.parentElement:null;
+ const provider=((selectedOpt&&selectedOpt.dataset&&selectedOpt.dataset.provider)||(optgroup&&optgroup.dataset&&optgroup.dataset.provider)||(cfg&&cfg.provider)||'').trim().toLowerCase();
+ if(provider!=='openai'&&provider!=='openai-api'&&provider!=='openai-codex') return false;
+ if(provider==='openai-codex') return false;
+ const rawModel=String((selectedOpt&&selectedOpt.value)||(selected&&selected.value)||(cfg&&cfg.model)||'').trim().toLowerCase();
+ if(!rawModel) return true;
+ let bareModel=rawModel;
+ if(rawModel.includes('/')){
+  const slash=rawModel.indexOf('/');
+  if(rawModel.slice(0,slash)!=='openai') return false;
+  bareModel=rawModel.slice(slash+1);
+ }
+ if(bareModel.includes('codex')) return false;
+ return bareModel.startsWith('gpt-')||bareModel.startsWith('o1')||bareModel.startsWith('o3')||bareModel.startsWith('o4');
+}
+
 function _openAuxAdvancedOptions(taskKey,cfg){
  const isMain=taskKey==='__main__';
  const slot=isMain?{key:taskKey,nameKey:'settings_label_model',descKey:'settings_desc_model'}:(_AUX_TASK_SLOTS.find(s=>s.key===taskKey)||{key:taskKey,nameKey:'',descKey:''});
@@ -9699,12 +11016,17 @@ function _openAuxAdvancedOptions(taskKey,cfg){
  const extraBody=cfg&&cfg.extra_body&&typeof cfg.extra_body==='object'&&Object.keys(cfg.extra_body).length?JSON.stringify(cfg.extra_body,null,2):'';
  const apiKeyHint=cfg&&cfg.api_key_set?(t('settings_aux_advanced_api_key_set_hint')||'API key is set. Leave blank to keep it, or use clear to remove it.'):(t('settings_aux_advanced_api_key_empty_hint')||'Leave blank to use provider/default credentials.');
  if(body){
+  const selectedServiceTier=((cfg&&cfg.service_tier)||'').trim().toLowerCase()==='priority'?'priority':'';
+  const serviceTierField=isMain&&_mainModelSupportsServiceTier(cfg)
+   ? `<label style="display:grid;gap:4px;font-size:12px;color:var(--text)"><span style="font-weight:600">${esc(t('settings_main_advanced_service_tier')||'Service tier')}</span><select id="auxAdvancedServiceTier" style="width:100%;box-sizing:border-box;padding:7px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px"><option value=""${selectedServiceTier?'':' selected'}>${esc(t('settings_main_advanced_service_tier_default')||'Default / off')}</option><option value="priority"${selectedServiceTier==='priority'?' selected':''}>${esc(t('settings_main_advanced_service_tier_priority')||'Priority (fast)')}</option></select><span style="font-size:10px;color:var(--muted);line-height:1.35">${esc(t('settings_main_advanced_service_tier_desc')||'Optional request setting for OpenAI-family providers.')}</span></label>`
+   : '';
   const timingFields=isMain?'':(
    _auxAdvancedInputHtml('auxAdvancedTimeout',t('settings_aux_advanced_timeout')||'Timeout seconds',_auxAdvancedValue(cfg,'timeout'),t('settings_aux_advanced_timeout_desc')||'Request timeout for this auxiliary task. Blank uses Hermes default.','number','inputmode="numeric" min="1" step="1"')+
    _auxAdvancedInputHtml('auxAdvancedDownloadTimeout',t('settings_aux_advanced_download_timeout')||'Download timeout seconds',_auxAdvancedValue(cfg,'download_timeout'),t('settings_aux_advanced_download_timeout_desc')||'Only relevant for tasks that download media/content, e.g. vision. Blank uses default.','number','inputmode="numeric" min="1" step="1"')+
    _auxAdvancedInputHtml('auxAdvancedMaxConcurrency',t('settings_aux_advanced_max_concurrency')||'Max concurrency',_auxAdvancedValue(cfg,'max_concurrency'),t('settings_aux_advanced_max_concurrency_desc')||'Optional per-task concurrency limit. Blank uses default.','number','inputmode="numeric" min="1" step="1"'));
   body.innerHTML=
    _auxAdvancedInputHtml('auxAdvancedBaseUrl',t('settings_aux_advanced_base_url')||'Base URL',_auxAdvancedValue(cfg,'base_url'),t('settings_aux_advanced_base_url_desc')||'Optional provider endpoint override.','text','inputmode="url"')+
+   serviceTierField+
    timingFields+
    `<label style="display:grid;gap:4px;font-size:12px;color:var(--text)"><span style="font-weight:600">${esc(t('settings_aux_advanced_extra_body')||'Extra body JSON')}</span><textarea id="auxAdvancedExtraBody" rows="6" style="width:100%;box-sizing:border-box;padding:7px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:var(--mono,monospace)">${esc(extraBody)}</textarea><span style="font-size:10px;color:var(--muted);line-height:1.35">${esc(t('settings_aux_advanced_extra_body_desc')||'Optional JSON object merged into the model request body.')}</span></label>`+
    _auxAdvancedInputHtml('auxAdvancedApiKey',t('settings_aux_advanced_api_key')||'API key override','',apiKeyHint,'text','autocomplete="one-time-code" inputmode="text" readonly onfocus="this.removeAttribute(&quot;readonly&quot;)"',';-webkit-text-security:disc')+
@@ -9728,6 +11050,9 @@ function _openAuxAdvancedOptions(taskKey,cfg){
     api_key:$('auxAdvancedApiKey')?.value||'',
     api_key_clear:!!($('auxAdvancedApiKeyClear')&&$('auxAdvancedApiKeyClear').checked),
    };
+   if(isMain&&$('auxAdvancedServiceTier')){
+    advanced.service_tier=$('auxAdvancedServiceTier')?.value||'';
+   }
    if(!isMain){
     advanced.timeout=$('auxAdvancedTimeout')?.value||'';
     advanced.download_timeout=$('auxAdvancedDownloadTimeout')?.value||'';
@@ -9945,7 +11270,9 @@ async function saveSettings(andClose){
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
+  const showClaudeCodeSessions=!!($('settingsShowClaudeCodeSessions')||{}).checked;
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
+  const showWebhookSessions=!!($('settingsShowWebhookSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
@@ -9955,6 +11282,7 @@ async function saveSettings(andClose){
   const language=($('settingsLanguage')||{}).value||'en';
   const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
   const busyInputMode=($('settingsBusyInputMode')||{}).value||'queue';
+  const showBusyPlaceholderHint=!!($('settingsShowBusyPlaceholderHint')||{}).checked;
   const body={};
 
   if(sendKey) body.send_key=sendKey;
@@ -9966,20 +11294,36 @@ async function saveSettings(andClose){
   body.chat_activity_display_mode=(($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')?'transparent_stream':'compact_worklog';
   body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
+  body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
+  body.project_quick_create_buttons=!!($('settingsProjectQuickCreate')||{}).checked;
   Object.assign(body,_structuredCodeViewFromUi());
+  Object.assign(body,_composerControlVisibilityPayload());
+  body.composer_control_order=_getComposerControlOrder();
   body.language=language;
   body.show_token_usage=showTokenUsage;
+  const maxTokensField=$('settingsMaxTokens');
+  if(maxTokensField){
+    const maxTokensRaw=String(maxTokensField.value||'').trim();
+    const initialMaxTokens=String(maxTokensField.dataset.initialValue||'').trim();
+    if(maxTokensRaw!==initialMaxTokens){
+      body.max_tokens=maxTokensRaw===''?null:maxTokensRaw;
+    }
+  }
   body.show_quota_chip=showQuotaChip===true;
   body.show_conversation_outline=showConversationOutline===true;
+  body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
-  // Cron sessions are gated on CLI sessions (server short-circuits otherwise);
-  // mirror the autosave path so the explicit Save Settings button persists it too. (#3514)
+  // Persist the opt-out child independently; the read path applies the parent gate.
+  body.show_claude_code_sessions=showClaudeCodeSessions;
+  // Cron and webhook sessions are gated on CLI sessions (server short-circuits otherwise);
+  // mirror the autosave path so the explicit Save Settings button persists them too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;
+  body.show_webhook_sessions=showCliSessions&&showWebhookSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
@@ -10017,7 +11361,7 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
       const pwField=$('settingsPassword'); if(pwField) pwField.value='';
@@ -10047,7 +11391,7 @@ async function saveSettings(andClose){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
       }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();

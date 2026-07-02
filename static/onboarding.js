@@ -209,6 +209,9 @@ function _renderOnboardingModelField(){
   if(ONBOARDING.form.provider==='custom'){
     return `<label class="onboarding-field"><span>${t('onboarding_model_label')}</span><input id="onboardingModelInput" value="${esc(_getOnboardingSelectedModel())}" placeholder="${t('onboarding_custom_model_placeholder')}" oninput="ONBOARDING.form.model=this.value"></label><p class="onboarding-copy">${t('onboarding_custom_model_help')}</p>`;
   }
+  if(typeof _mountSearchableModelSelect==='function'){
+    return `<div class="onboarding-field onboarding-model-field"><span>${t('onboarding_model_label')}</span><div id="onboardingModelPickerRoot"></div></div><p class="onboarding-copy">${t('onboarding_workspace_help')}</p>`;
+  }
   const options=choices.map(m=>`<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
   return `<label class="onboarding-field"><span>${t('onboarding_model_label')}</span><select id="onboardingModelSelect" onchange="ONBOARDING.form.model=this.value">${options}</select></label><p class="onboarding-copy">${t('onboarding_workspace_help')}</p>`;
 }
@@ -356,8 +359,23 @@ function _renderOnboardingBody(){
       ${_renderOnboardingModelField()}`;
     const wsSel=$('onboardingWorkspaceSelect');
     if(wsSel && ONBOARDING.form.workspace) wsSel.value=ONBOARDING.form.workspace;
-    const modelSel=$('onboardingModelSelect');
-    if(modelSel && ONBOARDING.form.model) modelSel.value=ONBOARDING.form.model;
+    const modelPickerRoot=$('onboardingModelPickerRoot');
+    if(modelPickerRoot && typeof _mountSearchableModelSelect==='function'){
+      _mountSearchableModelSelect({
+        root:modelPickerRoot,
+        selectId:'onboardingModelSelect',
+        customInputId:'onboardingModelInput',
+        choices:_getOnboardingProviderModelChoices(),
+        selectedValue:ONBOARDING.form.model,
+        onModelChange:(value)=>{ ONBOARDING.form.model=(value||'').trim(); },
+      });
+    }else{
+      // Fallback path (searchable picker unavailable): rehydrate the plain
+      // <select> so a saved/default model that isn't the first option isn't
+      // silently replaced by option[0] on render.
+      const modelSel=$('onboardingModelSelect');
+      if(modelSel && ONBOARDING.form.model) modelSel.value=ONBOARDING.form.model;
+    }
     return;
   }
 

@@ -297,6 +297,50 @@ class TestCancelWithReasoningOnlyNoText:
         assert len(partial_msgs) > 0, \
             f"Expected at least one partial assistant msg for tools-only cancel. Got: {assistant_msgs}"
 
+    def test_cancel_event_payload_includes_partial_session_snapshot(self):
+        """#4076: the terminal cancel SSE must carry the persisted partial turn.
+
+        The browser should not need a second /api/session request before it can
+        render reasoning/tool-only partial work captured by cancel_stream().
+        """
+        sid = "test_4076_cancel_payload"
+        stream_id = "stream_4076_payload"
+        _make_session(session_id=sid)
+        _setup_cancel_state(sid, stream_id)
+        q = config.STREAMS[stream_id]
+
+        config.STREAM_PARTIAL_TEXT[stream_id] = ""
+        assert hasattr(config, "STREAM_REASONING_TEXT"), (
+            "cancel payload test requires reasoning capture"
+        )
+        assert hasattr(config, "STREAM_LIVE_TOOL_CALLS"), (
+            "cancel payload test requires live tool capture"
+        )
+        config.STREAM_REASONING_TEXT[stream_id] = "Important cancelled reasoning"
+        config.STREAM_LIVE_TOOL_CALLS[stream_id] = [
+            {"name": "terminal", "args": {"command": "pytest -q"}, "done": False},
+        ]
+
+        cancel_stream(stream_id)
+
+        event_type, payload = q.get_nowait()
+        assert event_type == "cancel"
+        assert payload["type"] == "cancelled"
+        assert payload["status"] == "cancelled"
+        assert payload["session_id"] == sid
+        session_payload = payload["session"]
+        partials = [
+            m for m in session_payload["messages"]
+            if isinstance(m, dict) and m.get("_partial")
+        ]
+        assert partials, f"Expected persisted partial in cancel SSE payload: {session_payload}"
+        assert partials[-1]["reasoning"] == "Important cancelled reasoning"
+        assert partials[-1]["_partial_tool_calls"][0]["name"] == "terminal"
+        assert any(
+            isinstance(m, dict) and m.get("_error") and "Task cancelled" in str(m.get("content") or "")
+            for m in session_payload["messages"]
+        )
+
     def test_no_reasoning_no_tools_no_partial(self):
         """Cancel with no reasoning and no tools and no text = only cancel marker (no change)."""
         sid = "test_1361_c3"

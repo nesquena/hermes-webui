@@ -9,7 +9,7 @@ import urllib.error
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
-from api.config import STREAMS, create_stream_channel
+from api.config import PENDING_GOAL_CONTINUATION, STREAMS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
     _gateway_http_error_event,
@@ -490,6 +490,160 @@ def test_gateway_chat_worker_reads_reasoning_content_deltas_from_chat_completion
     assert reasoning_events == ["Let me ", "think"]
 
 
+def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"goal "}}]}\n\n'
+            yield b'data: {"choices":[{"delta":{"content":"reply"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    from api import goals as webui_goals
+
+    monkeypatch.setattr(webui_goals, "has_active_goal", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        webui_goals,
+        "evaluate_goal_after_turn",
+        lambda *args, **kwargs: {
+            "should_continue": True,
+            "continuation_prompt": "continue the goal",
+            "message": "Continuing goal",
+            "message_key": "goal_continuing",
+            "message_args": ["one step remains"],
+        },
+    )
+
+    s = new_session()
+    stream_id = "stream-gateway-goal-continue"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "finish it"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+    PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "finish it",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        goal_related=True,
+    )
+
+    saved = models.get_session(s.session_id)
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    event_names = [item[0] for item in events]
+
+    assert event_names.count("goal") == 2
+    assert "goal_continue" in event_names
+    assert "done" in event_names
+    assert "stream_end" in event_names
+    assert event_names.index("goal_continue") < event_names.index("done")
+    assert event_names.index("done") < event_names.index("stream_end")
+    assert s.session_id in PENDING_GOAL_CONTINUATION
+
+    goal_continue_event = next(item for item in events if item[0] == "goal_continue")
+    assert goal_continue_event[1]["continuation_prompt"] == "continue the goal"
+    assert goal_continue_event[1]["message"] == "Continuing goal"
+    assert goal_continue_event[1]["message_key"] == "goal_continuing"
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "goal reply"
+
+
+def test_gateway_chat_worker_skips_goal_judge_for_non_goal_turn(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"plain reply"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    from api import goals as webui_goals
+
+    has_goal_calls = []
+    judge_calls = []
+
+    monkeypatch.setattr(
+        webui_goals,
+        "has_active_goal",
+        lambda *args, **kwargs: has_goal_calls.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        webui_goals,
+        "evaluate_goal_after_turn",
+        lambda *args, **kwargs: judge_calls.append((args, kwargs)),
+    )
+
+    s = new_session()
+    stream_id = "stream-gateway-no-goal"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "plain turn"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+    PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "plain turn",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        goal_related=False,
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    event_names = [item[0] for item in events]
+
+    assert "goal" not in event_names
+    assert "goal_continue" not in event_names
+    assert "done" in event_names
+    assert "stream_end" in event_names
+    assert has_goal_calls == []
+    assert judge_calls == []
+    assert s.session_id not in PENDING_GOAL_CONTINUATION
+
+
 def test_gateway_chat_worker_normalizes_prefill_slice_before_system_prefix(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -847,6 +1001,7 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
+
 def test_gateway_chat_worker_text_mode_auto_analyzes_image_before_request(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -913,6 +1068,121 @@ def test_gateway_chat_worker_text_mode_auto_analyzes_image_before_request(tmp_pa
     assert "session already has an active stream" in content
     assert content.index("session already has an active stream") < content.index("What is in this image?")
     assert f"vision_analyze with image_url: {image_path}" in content
+
+# ── #4113 (salvage): _resolve_image_input_mode delegates to the agent's
+# canonical decide_image_input_mode, but preserves the WebUI carve-out that
+# UNKNOWN/custom models still forward images NATIVELY. ──────────────────────
+#
+# The agent package is not importable in the WebUI standalone test environment
+# (``import agent`` raises ModuleNotFoundError), so we inject fake
+# ``agent.image_routing`` / ``agent.auxiliary_client`` modules to exercise the
+# real delegation branch. The fakes let us control exactly what the canonical
+# router returns and what capability lookup reports, so each behaviour is
+# pinned independently of models.dev data.
+
+def _install_fake_agent_routing(monkeypatch, *, decision, supports,
+                                provider="customcorp", model="mystery-9000"):
+    """Inject fake agent.image_routing + agent.auxiliary_client into sys.modules.
+
+    ``decision`` is what the canonical ``decide_image_input_mode`` returns;
+    ``supports`` is what ``_lookup_supports_vision`` returns (True / False /
+    None — None means "unknown / no capability data").
+    """
+    import sys
+    import types
+
+    img = types.ModuleType("agent.image_routing")
+    img.decide_image_input_mode = lambda p, m, cfg: decision
+    img._lookup_supports_vision = lambda p, m, cfg=None: supports
+    aux = types.ModuleType("agent.auxiliary_client")
+    aux._read_main_provider = lambda: provider
+    aux._read_main_model = lambda: model
+    pkg = types.ModuleType("agent")
+
+    monkeypatch.setitem(sys.modules, "agent", pkg)
+    monkeypatch.setitem(sys.modules, "agent.image_routing", img)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", aux)
+
+
+def test_resolve_image_input_mode_unknown_model_routes_text_fail_closed(monkeypatch):
+    """WebUI carve-out: an UNKNOWN/custom model (no capability data) forwards
+    images natively even though the canonical router conservatively returns
+    ``"text"`` for it.
+
+    This is the behaviour the gateway image-forwarding test relies on, and the
+    agent's strip-and-retry guard downgrades to text on a provider rejection.
+    """
+    _install_fake_agent_routing(monkeypatch, decision="text", supports=None)
+    cfg = {"agent": {"image_input_mode": "auto"},
+           "auxiliary": {"vision": {"provider": "auto"}}}
+    assert streaming._resolve_image_input_mode(cfg) == "text"
+
+
+def test_resolve_image_input_mode_known_text_only_routes_text(monkeypatch):
+    """NON-VACUOUS regression for #4113's real divergence.
+
+    The OLD local re-implementation never consulted model capability, so a
+    model KNOWN to lack vision (``supports_vision == False``) still got images
+    embedded as native ``image_url`` parts — silently sending pixels to a model
+    that cannot see them (#21160). Delegating to the canonical router fixes
+    this: a known text-only model now routes through the text (vision_analyze)
+    pipeline.
+
+    Against master this assertion FAILS — the old code returns ``"native"`` for
+    this exact config (auto mode, no explicit vision backend) because it ignored
+    capability entirely.
+    """
+    _install_fake_agent_routing(monkeypatch, decision="text", supports=False)
+    cfg = {"agent": {"image_input_mode": "auto"},
+           "auxiliary": {"vision": {"provider": "auto"}}}
+    assert streaming._resolve_image_input_mode(cfg) == "text"
+
+
+def test_resolve_image_input_mode_known_vision_model_forwards_native(monkeypatch):
+    """A model KNOWN to support vision forwards natively (canonical native)."""
+    _install_fake_agent_routing(monkeypatch, decision="native", supports=True)
+    cfg = {"agent": {"image_input_mode": "auto"}}
+    assert streaming._resolve_image_input_mode(cfg) == "native"
+
+
+def test_resolve_image_input_mode_explicit_text_signal_honored(monkeypatch):
+    """An explicit user choice for the text pipeline is honoured even for an
+    unknown model — the carve-out only fires when there is NO explicit signal.
+
+    Both an explicit ``agent.image_input_mode: text`` and a configured
+    ``auxiliary.vision`` backend count as explicit signals.
+    """
+    _install_fake_agent_routing(monkeypatch, decision="text", supports=None)
+    assert streaming._resolve_image_input_mode(
+        {"agent": {"image_input_mode": "text"}}) == "text"
+    assert streaming._resolve_image_input_mode(
+        {"agent": {"image_input_mode": "auto"},
+         "auxiliary": {"vision": {"provider": "openai", "model": "gpt-4o"}}}) == "text"
+
+
+def test_resolve_image_input_mode_fallback_when_agent_unavailable_routes_text(monkeypatch):
+    """When the agent package cannot be imported (standalone WebUI env), fall
+    back to historical WebUI behaviour: explicit text signal wins, else native.
+    """
+    import sys
+
+    # Ensure the delegation import fails: stub agent.image_routing as a module
+    # that raises on attribute access of the routing fn would still import, so
+    # instead force an ImportError by mapping the submodule to None.
+    monkeypatch.setitem(sys.modules, "agent", None)
+    monkeypatch.setitem(sys.modules, "agent.image_routing", None)
+
+    # No explicit signal -> text so image attachments fail closed into vision_analyze.
+    assert streaming._resolve_image_input_mode(
+        {"agent": {"image_input_mode": "auto"},
+         "auxiliary": {"vision": {"provider": "auto"}}}) == "text"
+    # Explicit text mode -> text.
+    assert streaming._resolve_image_input_mode(
+        {"agent": {"image_input_mode": "text"}}) == "text"
+    # Explicit auxiliary vision backend -> text.
+    assert streaming._resolve_image_input_mode(
+        {"auxiliary": {"vision": {"provider": "anthropic"}}}) == "text"
+
 
 
 def test_gateway_use_runs_api_is_default_off():

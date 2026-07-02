@@ -24,12 +24,15 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
 const OFFLINE_RECHECK_MS=2500;
+const OFFLINE_HEALTH_TIMEOUT_MS=10000;
+const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;
 let _offlineVisible=false;
 let _offlineReason='browser';
 let _offlineProbeTimer=null;
 let _offlineChecking=false;
 let _offlineProbePromise=null;
 let _offlineHealthProbePromise=null;
+let _offlineFetchProbeFailures=0;
 let _offlineRawFetch=null;
 let _offlineFetchPatched=false;
 function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLine!==false;}
@@ -82,7 +85,7 @@ async function _probeOfflineRecovery(){
     // the initial banner display on the offline-event/startup paths.
     let ctrl=null,timer=null;
     try{ctrl=(typeof AbortController!=='undefined')?new AbortController():null;}catch(_){ctrl=null;}
-    if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},3000);
+    if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},OFFLINE_HEALTH_TIMEOUT_MS);
     try{
       const opts={cache:'no-store',credentials:'include'};
       if(ctrl)opts.signal=ctrl.signal;
@@ -94,14 +97,21 @@ async function _probeOfflineRecovery(){
   try{return await _offlineHealthProbePromise;}
   finally{_offlineHealthProbePromise=null;}
 }
-async function _showOfflineBannerIfProbeFails(reason){
+async function _showOfflineBannerIfProbeFails(reason,opts){
+  opts=opts||{};
   const visibleAtStart=_offlineVisible;
+  const requireConsecutiveFailures=opts.requireConsecutiveFailures!==false;
   if(visibleAtStart)_setOfflineChecking(true);
   const ok=await _probeOfflineRecovery();
   if(visibleAtStart)_setOfflineChecking(false);
   if(ok){
+    _offlineFetchProbeFailures=0;
     if(_offlineVisible){_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();}
     return true;
+  }
+  if(!visibleAtStart&&requireConsecutiveFailures){
+    _offlineFetchProbeFailures+=1;
+    if(_offlineFetchProbeFailures<OFFLINE_FETCH_FAILURES_BEFORE_BANNER)return false;
   }
   showOfflineBanner(reason||(_browserReportsOnline()?'network':'browser'));
   return false;
@@ -113,7 +123,7 @@ async function checkOfflineRecoveryNow(){
     _setOfflineChecking(true);
     const ok=await _probeOfflineRecovery();
     _setOfflineChecking(false);
-    if(ok){if(!_offlineVisible)return true;_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
+    if(ok){_offlineFetchProbeFailures=0;if(!_offlineVisible)return true;_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
     showOfflineBanner(_browserReportsOnline()?'network':'browser');
     return false;
   })();
@@ -182,9 +192,9 @@ function _patchOfflineFetch(){
 }
 function initOfflineMonitor(){
   _patchOfflineFetch();
-  window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser');});
+  window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});});
   window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
-  if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser');
+  if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
 else initOfflineMonitor();
@@ -443,6 +453,9 @@ const _recycleResetAttrs=[
   'data-transparent-turn-toggle-bound',
   'data-anchor-scene-live-owner',
   'data-anchor-stream-id',
+  'data-latest-assistant-response',
+  'role',
+  'aria-label',
   // Defensive reset for legacy/restored shells that may still carry the fallback live-turn marker.
   'data-live-assistant-turn',
 ];
@@ -811,6 +824,46 @@ function _captureMessageViewportAnchor(){
   }
   return null;
 }
+// Temporarily suppress the browser's native overflow-anchor on a scroll
+// container so a JS scrollTop write is not double-compensated by the browser's
+// own scroll-anchoring in the same frame. Returns a release fn that restores the
+// prior inline value on the NEXT frame (after layout settles). No-op on desktop,
+// where the resting computed value is already `none` (CSS hover/fine-pointer
+// media query) — suppressing `none` changes nothing and the release restores the
+// same empty inline value. Only mobile (resting `auto`) is actually affected,
+// which is exactly where the double-compensation jump-back happens.
+//
+// Both this helper and _fixMobileScrollJank() gate on the SAME question — "is
+// the browser's native scroll-anchor layer currently active on this element?" —
+// routed through this one predicate so the two guards can't drift apart if the
+// CSS media query ever changes (maintainer review on #5338). The computed-value
+// test is more robust than a matchMedia('(hover:hover) and (pointer:fine)')
+// check because it reflects the real resting value, including any inline
+// override, not just the viewport media state.
+function _browserOverflowAnchorActive(el){
+  if(!el) return false;
+  try{ return getComputedStyle(el).overflowAnchor==='auto'; }catch(_){ return false; }
+}
+function _suppressBrowserOverflowAnchor(container){
+  if(!container||!container.style) return null;
+  // Only engage when the browser layer is actually active (auto). On desktop
+  // (none) there is nothing to suppress.
+  if(!_browserOverflowAnchorActive(container)) return null;
+  const prevInline=container.style.overflowAnchor||'';
+  container.style.overflowAnchor='none';
+  let released=false;
+  return function _release(){
+    if(released) return;
+    released=true;
+    const restore=()=>{
+      // Only restore if we still own the suppression (another render may have
+      // re-set it); compare against the value we wrote.
+      if(container.style.overflowAnchor==='none') container.style.overflowAnchor=prevInline;
+    };
+    if(typeof requestAnimationFrame==='function') requestAnimationFrame(restore);
+    else restore();
+  };
+}
 function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const container=$('messages');
   if(!container||!anchor) return false;
@@ -829,7 +882,19 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const rect=row.getBoundingClientRect();
   const targetTop=Number(anchor.topOffset)||0;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  // Mobile-only jump fix: the resting overflow-anchor on .messages is `auto` on
+  // touch devices (CSS media query keeps it `none` only for hover+fine-pointer
+  // desktops). When we write scrollTop here to realign the anchor row, a mobile
+  // browser's OWN overflow-anchor machinery ALSO shifts scrollTop in the same
+  // frame if content height above the viewport changed — the two compensations
+  // stack and yank the reader to an unrelated turn (the mobile jump-back). This is why the
+  // bug is mobile-only and never reproduces on a desktop (none) browser. Suppress
+  // the browser layer for this write; _releaseAnchorSuppression restores it next
+  // frame. Desktop is already `none`, so this is a no-op there.
+  const _releaseAnchorSuppression=(typeof _suppressBrowserOverflowAnchor==='function')
+    ? _suppressBrowserOverflowAnchor(container) : null;
   container.scrollTop+=(rect.top-containerRect.top)-targetTop;
+  if(_releaseAnchorSuppression) _releaseAnchorSuppression();
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
   else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
   return true;
@@ -1174,11 +1239,28 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
 const DASHBOARD_STATUS_TTL_MS=60000;
 let _dashboardStatusCache=null;
 let _dashboardStatusFetchedAt=0;
+let _dashboardLastNonNeverMode='auto'; // Server-scoped dashboard config keeps this restore target session-global on purpose.
+let _dashboardSettingsLoadSeq=0;
+let _dashboardSettingsWriteSeq=0;
 
 function _dashboardIsBrowserLoopback(){
   const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
   return host==='127.0.0.1'||host==='localhost'||host==='::1';
 }
+
+function _normalizeDashboardEnabledMode(mode){
+  return mode==='auto'||mode==='always'||mode==='never'?mode:'auto';
+}
+
+function _setDashboardModeForChip(mode){
+  mode=_normalizeDashboardEnabledMode(mode);
+  if(mode==='auto'||mode==='always') _dashboardLastNonNeverMode=mode;
+}
+
+function _getDashboardChipRestoreMode(){
+  return _dashboardLastNonNeverMode||'auto';
+}
+
 function _dashboardBrowserUrl(status){
   if(!status||!status.running) return '';
   if(status.browser_url||status.url){
@@ -1234,26 +1316,39 @@ async function loadDashboardSettings(){
   const modeEl=$('settingsDashboardMode');
   const urlEl=$('settingsDashboardUrl');
   if(!modeEl&&!urlEl) return;
+  const loadSeq=++_dashboardSettingsLoadSeq;
+  const writeSeq=_dashboardSettingsWriteSeq;
   try{
     const cfg=await api('/api/dashboard/config');
-    if(modeEl) modeEl.value=cfg.enabled||'auto';
+    if(loadSeq!==_dashboardSettingsLoadSeq||writeSeq!==_dashboardSettingsWriteSeq) return;
+    const mode=_normalizeDashboardEnabledMode(cfg&&cfg.enabled);
+    if(modeEl) modeEl.value=mode;
+    _setDashboardModeForChip(mode);
     if(urlEl) urlEl.value=cfg.url||'';
+    if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
   }catch(_){/* leave defaults visible */}
 }
-async function saveDashboardSettings(){
+async function saveDashboardSettings(opts){
+  opts=opts||{};
   const modeEl=$('settingsDashboardMode');
   const urlEl=$('settingsDashboardUrl');
   const statusEl=$('settingsDashboardStatus');
   const payload={enabled:(modeEl&&modeEl.value)||'auto',url:(urlEl&&urlEl.value||'').trim()};
+  _dashboardSettingsWriteSeq+=1;
   try{
     const saved=await api('/api/dashboard/config',{method:'POST',body:JSON.stringify(payload)});
-    if(modeEl) modeEl.value=saved.enabled||'auto';
+    const mode=_normalizeDashboardEnabledMode(saved&&saved.enabled);
+    if(modeEl) modeEl.value=mode;
+    _setDashboardModeForChip(mode);
     if(urlEl) urlEl.value=saved.url||'';
     if(statusEl) statusEl.textContent='Dashboard link settings saved.';
     await refreshDashboardStatus(true);
+    if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
   }catch(err){
     if(statusEl) statusEl.textContent='Dashboard link settings failed to save.';
     else if(typeof showToast==='function') showToast('Dashboard link settings failed to save.');
+    try{await loadDashboardSettings();}catch(_){}
+    if(opts.raiseOnError) throw err;
   }
 }
 function openHermesDashboard(event){
@@ -1300,6 +1395,274 @@ function _openImgLightbox(imgEl) {
   }
   _openImgLightboxWithNav(src, alt, allImages, startIndex);
 }
+
+const _MERMAID_VIEWER_MIN_SCALE = 0.25;
+const _MERMAID_VIEWER_MAX_SCALE = 8;
+const _MERMAID_VIEWER_ZOOM_STEP = 1.2;
+
+function _mermaidViewerIcon(kind) {
+  const icons = {
+    zoomIn: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"></circle><path d="M10 7v6M7 10h6"></path><path d="M15 15l4 4"></path></svg>',
+    zoomOut: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"></circle><path d="M7 10h6"></path><path d="M15 15l4 4"></path></svg>',
+    reset: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9V4H1"></path><path d="M1 4l4 4"></path><path d="M10 4a8 8 0 1 1-5.66 13.66"></path></svg>',
+    fit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"></path></svg>',
+    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"></path></svg>',
+  };
+  return icons[kind] || '';
+}
+
+function _createMermaidViewerButton(label, iconKind, onClick) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'mermaid-viewer-btn';
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('title', label);
+  btn.innerHTML = _mermaidViewerIcon(iconKind);
+  btn.onclick = e => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick(e);
+  };
+  return btn;
+}
+
+function _mermaidSvgBox(svgEl) {
+  const box = {x: 0, y: 0, width: 0, height: 0};
+  if(!svgEl) return box;
+  const viewBox = svgEl.viewBox && svgEl.viewBox.baseVal;
+  if(viewBox && viewBox.width && viewBox.height){
+    box.x = Number(viewBox.x) || 0;
+    box.y = Number(viewBox.y) || 0;
+    box.width = Number(viewBox.width) || 0;
+    box.height = Number(viewBox.height) || 0;
+    return box;
+  }
+  const rawViewBox = svgEl.getAttribute && svgEl.getAttribute('viewBox');
+  if(rawViewBox){
+    const parts = rawViewBox.trim().split(/[,\s]+/).map(Number);
+    if(parts.length >= 4 && parts.every(n => Number.isFinite(n))){
+      box.x = parts[0] || 0;
+      box.y = parts[1] || 0;
+      box.width = parts[2] || 0;
+      box.height = parts[3] || 0;
+      return box;
+    }
+  }
+  const width = Number.parseFloat(svgEl.getAttribute && svgEl.getAttribute('width')) || (svgEl.getBoundingClientRect ? svgEl.getBoundingClientRect().width : 0) || 0;
+  const height = Number.parseFloat(svgEl.getAttribute && svgEl.getAttribute('height')) || (svgEl.getBoundingClientRect ? svgEl.getBoundingClientRect().height : 0) || 0;
+  box.width = width || 800;
+  box.height = height || 450;
+  return box;
+}
+
+function _mountMermaidViewer(svgEl, options = {}) {
+  if(!svgEl) return null;
+  const mode = options.mode === 'lightbox' ? 'lightbox' : 'inline';
+  const openLightbox = typeof options.openLightbox === 'function' ? options.openLightbox : () => _openMermaidLightbox(svgEl);
+  const box = _mermaidSvgBox(svgEl);
+  const host = svgEl.parentNode;
+  const root = document.createElement('div');
+  root.className = 'mermaid-viewer mermaid-viewer--' + mode;
+  const toolbar = document.createElement('div');
+  toolbar.className = 'mermaid-viewer-toolbar';
+  const viewport = document.createElement('div');
+  viewport.className = 'mermaid-viewer-viewport';
+  const canvas = document.createElement('div');
+  canvas.className = 'mermaid-viewer-canvas';
+  canvas.style.width = Math.max(1, Math.round(box.width)) + 'px';
+  canvas.style.height = Math.max(1, Math.round(box.height)) + 'px';
+  svgEl.classList.add('mermaid-viewer-svg');
+  if(mode === 'lightbox') svgEl.classList.add('mermaid-lightbox-svg');
+  svgEl.style.width = '100%';
+  svgEl.style.height = '100%';
+  svgEl.style.display = 'block';
+  viewport.appendChild(canvas);
+  root.appendChild(toolbar);
+  root.appendChild(viewport);
+  if(host) host.replaceChild(root, svgEl);
+  canvas.appendChild(svgEl);
+
+  const state = {
+    box,
+    canvas,
+    dragging: false,
+    dragOriginX: 0,
+    dragOriginY: 0,
+    dragPointerId: null,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragged: false,
+    mode,
+    root,
+    toolbar,
+    scale: 1,
+    svg: svgEl,
+    viewport,
+    x: 0,
+    y: 0,
+  };
+  root._mermaidViewer = state;
+
+  function _viewportSize(){
+    const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+    const width = viewport.clientWidth || (rect && rect.width) || (mode === 'lightbox' ? Math.round((window.innerWidth || box.width) * 0.9) : Math.round(window.innerWidth || box.width));
+    const height = viewport.clientHeight || (rect && rect.height) || (mode === 'lightbox' ? Math.round((window.innerHeight || box.height) * 0.9) : Math.round((window.innerHeight || box.height) * 0.7));
+    return {
+      width: Math.max(1, Number(width) || box.width || 1),
+      height: Math.max(1, Number(height) || box.height || 1),
+    };
+  }
+
+  function _applyTransform(){
+    canvas.style.transform = `translate(${Math.round(state.x)}px, ${Math.round(state.y)}px) scale(${state.scale})`;
+    canvas.style.transformOrigin = '0 0';
+  }
+
+  function _centerForScale(nextScale){
+    const size = _viewportSize();
+    const scaledWidth = box.width * nextScale;
+    const scaledHeight = box.height * nextScale;
+    state.x = scaledWidth < size.width ? Math.round((size.width - scaledWidth) / 2) : 0;
+    state.y = scaledHeight < size.height ? Math.round((size.height - scaledHeight) / 2) : 0;
+  }
+
+  function _fitScale(){
+    const size = _viewportSize();
+    return Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, Math.min(size.width / box.width, size.height / box.height)));
+  }
+
+  function _setScale(nextScale, anchorX, anchorY){
+    const bounded = Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, nextScale));
+    if(!Number.isFinite(bounded) || !box.width || !box.height) return;
+    const focusX = Number.isFinite(anchorX) ? anchorX : _viewportSize().width / 2;
+    const focusY = Number.isFinite(anchorY) ? anchorY : _viewportSize().height / 2;
+    if(state.scale){
+      const ratio = bounded / state.scale;
+      state.x = focusX - (focusX - state.x) * ratio;
+      state.y = focusY - (focusY - state.y) * ratio;
+    }
+    state.scale = bounded;
+    _applyTransform();
+  }
+
+  function _fitViewer(){
+    const nextScale = _fitScale();
+    state.scale = nextScale;
+    _centerForScale(nextScale);
+    _applyTransform();
+  }
+
+  function _resetViewer(){
+    state.scale = 1;
+    _centerForScale(1);
+    _applyTransform();
+  }
+
+  function _zoomIn(){
+    const size = _viewportSize();
+    _setScale(state.scale * _MERMAID_VIEWER_ZOOM_STEP, size.width / 2, size.height / 2);
+  }
+
+  function _zoomOut(){
+    const size = _viewportSize();
+    _setScale(state.scale / _MERMAID_VIEWER_ZOOM_STEP, size.width / 2, size.height / 2);
+  }
+
+  function _zoomFromWheel(e){
+    if(e.preventDefault) e.preventDefault();
+    const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : {left: 0, top: 0};
+    const anchorX = Number.isFinite(e.clientX) ? e.clientX - rect.left : undefined;
+    const anchorY = Number.isFinite(e.clientY) ? e.clientY - rect.top : undefined;
+    const deltaMode = Number(e.deltaMode) || 0;
+    const lineScale = deltaMode === 1 ? 30 : deltaMode === 2 ? 600 : 1;
+    const factor = Math.exp((-(Number(e.deltaY) || 0)) * lineScale * 0.0015);
+    _setScale(state.scale * factor, anchorX, anchorY);
+  }
+
+  function _onPointerDown(e){
+    if(e.button != null && e.button !== 0) return;
+    state.dragging = true;
+    state.dragged = false;
+    state.dragOriginX = Number(e.clientX) || 0;
+    state.dragOriginY = Number(e.clientY) || 0;
+    state.dragPointerId = e.pointerId != null ? e.pointerId : null;
+    state.dragStartX = state.x;
+    state.dragStartY = state.y;
+    viewport.classList.add('is-panning');
+    if(state.dragPointerId != null && viewport.setPointerCapture) viewport.setPointerCapture(state.dragPointerId);
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _onPointerMove(e){
+    if(!state.dragging) return;
+    const dx = (Number(e.clientX) || 0) - state.dragOriginX;
+    const dy = (Number(e.clientY) || 0) - state.dragOriginY;
+    if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
+    state.x = state.dragStartX + dx;
+    state.y = state.dragStartY + dy;
+    _applyTransform();
+  }
+
+  function _endPointerDrag(){
+    if(!state.dragging) return;
+    state.dragging = false;
+    if(state.dragPointerId != null && viewport.releasePointerCapture){
+      try{ viewport.releasePointerCapture(state.dragPointerId); }catch(_){}
+    }
+    state.dragPointerId = null;
+    viewport.classList.remove('is-panning');
+  }
+
+  function _openViewerOnClick(e){
+    if(mode !== 'inline') return;
+    if(state.dragged){
+      state.dragged = false;
+      return;
+    }
+    if(e.preventDefault) e.preventDefault();
+    if(e.stopPropagation) e.stopPropagation();
+    openLightbox();
+  }
+
+  viewport.onpointerdown = _onPointerDown;
+  viewport.onpointermove = _onPointerMove;
+  viewport.onpointerup = _endPointerDrag;
+  viewport.onpointercancel = _endPointerDrag;
+  viewport.onpointerleave = _endPointerDrag;
+  viewport.onwheel = _zoomFromWheel;
+  viewport.onclick = _openViewerOnClick;
+  root.onclick = e => e.stopPropagation();
+  state.fit = _fitViewer;
+  state.reset = _resetViewer;
+  state.zoomIn = _zoomIn;
+  state.zoomOut = _zoomOut;
+  state.zoomAt = _setScale;
+  state.applyTransform = _applyTransform;
+  state.openLightbox = openLightbox;
+
+  toolbar.appendChild(_createMermaidViewerButton('Zoom in', 'zoomIn', _zoomIn));
+  toolbar.appendChild(_createMermaidViewerButton('Zoom out', 'zoomOut', _zoomOut));
+  toolbar.appendChild(_createMermaidViewerButton('Reset view', 'reset', _resetViewer));
+  toolbar.appendChild(_createMermaidViewerButton('Fit to screen', 'fit', _fitViewer));
+  if(mode === 'inline'){
+    toolbar.appendChild(_createMermaidViewerButton('Fullscreen', 'fullscreen', openLightbox));
+  }
+
+  const initialFit = _fitScale();
+  state.scale = initialFit;
+  _centerForScale(initialFit);
+  _applyTransform();
+  if(mode === 'lightbox'){
+    viewport.style.width = Math.max(1, Math.round(box.width * initialFit)) + 'px';
+    viewport.style.height = Math.max(1, Math.round(box.height * initialFit)) + 'px';
+  } else {
+    viewport.style.width = '100%';
+    viewport.style.height = Math.max(1, Math.round(box.height * initialFit)) + 'px';
+  }
+
+  return root;
+}
+
 function _openMermaidLightbox(svgEl) {
   if(!svgEl) return;
   const lb = document.createElement('div');
@@ -1341,16 +1704,15 @@ function _openMermaidLightbox(svgEl) {
       styleEl.textContent = styleText;
     });
   }
-  clone.classList.add('mermaid-lightbox-svg');
   clone.removeAttribute('width');
   clone.removeAttribute('height');
-  clone.onclick = e => e.stopPropagation();
+  const viewer = _mountMermaidViewer(clone, {mode:'lightbox'});
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
   cls.setAttribute('aria-label', 'Close');
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
-  lb.appendChild(clone);
+  lb.appendChild(viewer);
   lb.appendChild(cls);
   lb.onclick = () => _closeImgLightbox(lb);
   lb._keyHandler = e => {
@@ -1594,7 +1956,7 @@ function _providerQuotaIndicatorText(status){
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
     const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
     const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:provider+' '+remaining, title:(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
   }
   const quota=status.quota||null;
   if(quota){
@@ -1605,7 +1967,7 @@ function _providerQuotaIndicatorText(status){
       const parts=[];
       if(used) parts.push('used '+used);
       if(limit) parts.push('limit '+limit);
-      return {label:provider+' '+remaining, title:(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
+      return {label:remaining, title:provider+' — '+(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
     }
   }
   return null;
@@ -1613,14 +1975,17 @@ function _providerQuotaIndicatorText(status){
 function renderProviderQuotaIndicator(status){
   const chip=$('providerQuotaChip');
   const label=$('providerQuotaChipLabel');
+  const mobileAction=$('composerMobileQuotaAction');
+  const mobileLabel=$('composerMobileQuotaLabel');
   if(!chip||!label) return;
   // Hide entirely when the user has disabled the ambient quota chip in Settings.
-  // Default is off (window._showQuotaChip defaults to false in boot.js) so users
-  // never see the chip unless they opt in.
+  // Boot defaults this on; an explicit false preference suppresses it.
   if(window._showQuotaChip!==true){
     chip.hidden=true;
     label.textContent='';
     chip.removeAttribute('title');
+    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
+    if(mobileLabel) mobileLabel.textContent='';
     return;
   }
   const text=_providerQuotaIndicatorText(status);
@@ -1628,11 +1993,15 @@ function renderProviderQuotaIndicator(status){
     chip.hidden=true;
     label.textContent='';
     chip.removeAttribute('title');
+    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
+    if(mobileLabel) mobileLabel.textContent='';
     return;
   }
   label.textContent=text.label;
   chip.title=text.title;
   chip.hidden=false;
+  if(mobileAction){mobileAction.style.display='';mobileAction.title=text.title;}
+  if(mobileLabel) mobileLabel.textContent=text.label;
 }
 async function refreshProviderQuotaIndicator(){
   // Short-circuit before the fetch when the chip is disabled — no point asking
@@ -1640,6 +2009,10 @@ async function refreshProviderQuotaIndicator(){
   if(window._showQuotaChip!==true){
     const chip=$('providerQuotaChip');
     if(chip){chip.hidden=true;chip.removeAttribute('title');}
+    const mobileAction=$('composerMobileQuotaAction');
+    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
+    const mobileLabel=$('composerMobileQuotaLabel');
+    if(mobileLabel) mobileLabel.textContent='';
     return;
   }
   if(_providerQuotaRefreshInFlight) return;
@@ -2017,6 +2390,7 @@ function _persistSessionModelCorrection(model, provider, opts){
   return opts&&opts.propagateErrors ? request : request.catch(()=>{});
 }
 let _modelDropdownRequestSeq=0;
+let _modelCatalogFallbackRetried=false;
 
 function _applySessionModelFallback(sel){
   if(!sel) return null;
@@ -2040,25 +2414,28 @@ function _applySessionModelFallback(sel){
 async function populateModelDropdown(opts={}){
   const sel=$('modelSelect');
   if(!sel) return;
+  // `_activeProvider` is refreshed from the /api/models response below.
   if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
+  if(typeof _modelCatalogFallbackRetried!=='boolean') _modelCatalogFallbackRetried=false;
   const requestSeq=++_modelDropdownRequestSeq;
   try{
     const modelsUrl=new URL('api/models',document.baseURI||location.href);
+    const requestedFreshness=opts&&opts.freshness?String(opts.freshness):'';
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
     const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
     if(requestSeq!==_modelDropdownRequestSeq) return;
-    if(_redirectIfUnauth(_modelsRes)) return;
+    const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
+    if(customRedirectIfUnauth){
+      if(customRedirectIfUnauth(_modelsRes)) return;
+    }else if(_redirectIfUnauth(_modelsRes)) return;
+    // `_activeProvider` is populated from the /api/models payload below.
     const data=await _modelsRes.json();
     if(requestSeq!==_modelDropdownRequestSeq) return;
-    // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
-    // Store default model so newSession() can apply it (#872).
-    // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
-    // Keep the g.extra_models label hydration path below in this function; tests
-    // assert populateModelDropdown preserves that full-catalog label contract.
     window._modelEndpointErrors={};
+    // Keep g.extra_models label hydration in this function for /model and tail selections.
 
     const _synthGroupsFromConfigured=()=>{
       const badgeMap=window._configuredModelBadges||{};
@@ -2096,11 +2473,19 @@ async function populateModelDropdown(opts={}){
       return groups;
     };
 
-    const groups=(Array.isArray(data.groups)&&data.groups.length)
-      ? data.groups
-      : _synthGroupsFromConfigured();
+    const usedConfiguredFallback=!(Array.isArray(data.groups)&&data.groups.length);
+    const groups=usedConfiguredFallback
+      ? _synthGroupsFromConfigured()
+      : data.groups;
+    const willRetry=usedConfiguredFallback && requestedFreshness!=='session_visit' && !_modelCatalogFallbackRetried;
 
-    if(!groups.length) return; // no server groups and no configured fallback
+    if(!groups.length){
+      if(willRetry){
+        _modelCatalogFallbackRetried=true;
+        populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
+      }
+      return; // no server groups and no configured fallback
+    }
     const previousSelection=_captureModelDropdownSelection(sel);
     // Clear existing options
     sel.innerHTML='';
@@ -2144,7 +2529,11 @@ async function populateModelDropdown(opts={}){
     }
     // Kick off a background live-model fetch for the active provider.
     // This runs after the static list is already shown (no blocking flicker).
-    if(data.active_provider) _fetchLiveModels(data.active_provider, sel, requestSeq);
+    if(data.active_provider && !willRetry) _fetchLiveModels(data.active_provider, sel, requestSeq);
+    if(willRetry){
+      _modelCatalogFallbackRetried=true;
+      populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
+    }
   }catch(e){
     if(requestSeq!==_modelDropdownRequestSeq) return;
     // API unavailable -- keep the hardcoded HTML options as fallback
@@ -2355,6 +2744,37 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   return matches[0];
 }
 
+function _compactComposerModelChipLabel(modelId,labelText){
+  const id=String(modelId||'').trim();
+  const raw=String(labelText||'').trim();
+  if(!raw) return getModelLabel(id);
+  const idLower=id.toLowerCase();
+  const rawLower=raw.toLowerCase();
+  const slash=id.indexOf('/');
+  if(slash>0){
+    const provider=id.slice(0,slash).toLowerCase();
+    if(rawLower.startsWith(provider+'/')){
+      return raw.slice(provider.length+1).trim();
+    }
+  }
+  if(id&&rawLower===idLower&&raw.includes('/')){
+    return raw.slice(raw.indexOf('/')+1).trim();
+  }
+  if(raw.includes('/') && !/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)){
+    const parts=raw.split('/').map(s=>s.trim()).filter(Boolean);
+    if(parts.length>=2){
+      const tail=parts[parts.length-1];
+      const tailLower=tail.toLowerCase();
+      if(idLower && (tailLower===idLower || idLower.endsWith('/'+tailLower))) return tail;
+      if(parts.length===2){
+        const leadLower=parts[0].toLowerCase();
+        if(tailLower.startsWith(leadLower+'-')) return tail;
+      }
+    }
+  }
+  return raw;
+}
+
 function syncModelChip(){
   const sel=$('modelSelect');
   const chip=$('composerModelChip');
@@ -2372,8 +2792,9 @@ function syncModelChip(){
   }
   const opt=_selectedModelOption();
   const text=opt?opt.textContent:getModelLabel(sel.value||'');
+  const compactText=_compactComposerModelChipLabel(sel.value||'', text);
   const gatewayRouting=_latestGatewayRoutingForSession(S.session);
-  const displayText=_formatGatewayModelLabel(sel.value||'',text,gatewayRouting)||text;
+  const displayText=_formatGatewayModelLabel(sel.value||'',compactText,gatewayRouting)||compactText;
   label.textContent=displayText;
   if(mobileLabel) mobileLabel.textContent=displayText;
   chip.title=gatewayRouting?`${sel.value||'Conversation model'} ${_gatewayRoutingLabel(gatewayRouting)}`:(sel.value||'Conversation model');
@@ -2441,6 +2862,119 @@ function _appendOverflowOptionsToGroup(group, extraModels){
     group.dataset.overflowExpanded='1';
   }
   return appended;
+}
+
+function _mountSearchableModelSelect(opts={}){
+  const root=opts.root;
+  if(!root) return null;
+  const choices=Array.isArray(opts.choices)
+    ? opts.choices
+      .map(choice=>choice&&choice.id?{id:String(choice.id),label:String(choice.label||choice.id)}:null)
+      .filter(Boolean)
+    : [];
+  const selectedValue=String(opts.selectedValue||'');
+  const onModelChange=typeof opts.onModelChange==='function' ? opts.onModelChange : ()=>{};
+  const selectId=opts.selectId||'';
+  const customInputId=opts.customInputId||'';
+  const listedChoiceIds=new Set(choices.map(choice=>choice.id));
+  const listedSelection=listedChoiceIds.has(selectedValue) ? selectedValue : '';
+  const customSelection=listedSelection ? '' : selectedValue;
+  let lastListedValue=listedSelection||(choices[0]?choices[0].id:'');
+  root.innerHTML=
+    `<div class="model-search-row">`+
+      `<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off">`+
+      `<button class="model-search-clear" title="Clear search">${li('x',10)}</button>`+
+    `</div>`+
+    `<select ${selectId?`id="${esc(selectId)}"`:''}></select>`+
+    `<div class="model-group model-custom-sep">${esc(t('model_custom_label')||'Custom model ID')}</div>`+
+    `<div class="model-custom-row">`+
+      `<input ${customInputId?`id="${esc(customInputId)}"`:''} class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off">`+
+      `<button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`+
+    `</div>`;
+  const searchInput=root.querySelector('.model-search-input');
+  const clearButton=root.querySelector('.model-search-clear');
+  const selectEl=selectId ? root.querySelector(`#${selectId}`) : root.querySelector('select');
+  const customInput=customInputId ? root.querySelector(`#${customInputId}`) : root.querySelector('.model-custom-input');
+  const customButton=root.querySelector('.model-custom-btn');
+  if(!searchInput||!clearButton||!selectEl||!customInput||!customButton) return null;
+
+  const noMatchesOption=document.createElement('option');
+  noMatchesOption.value='';
+  noMatchesOption.textContent='No matching models';
+  noMatchesOption.disabled=true;
+  noMatchesOption.hidden=true;
+  selectEl.appendChild(noMatchesOption);
+
+  for(const choice of choices){
+    const option=document.createElement('option');
+    option.value=choice.id;
+    option.textContent=choice.label;
+    selectEl.appendChild(option);
+  }
+  if(listedSelection){
+    selectEl.value=listedSelection;
+  }else if(customSelection){
+    selectEl.selectedIndex=-1;
+  }else if(choices.length){
+    selectEl.value=choices[0].id;
+    onModelChange(lastListedValue);
+  }
+  customInput.value=customSelection;
+
+  const applyFilter=()=>{
+    const needle=(searchInput.value||'').trim().toLowerCase();
+    let visibleCount=0;
+    for(const option of Array.from(selectEl.options)){
+      if(option===noMatchesOption) continue;
+      const haystack=`${option.textContent||''} ${option.value||''}`.toLowerCase();
+      const visible=!needle||haystack.includes(needle);
+      option.hidden=!visible;
+      if(visible) visibleCount++;
+    }
+    noMatchesOption.hidden=visibleCount!==0;
+  };
+
+  const applyCustomSelection=()=>{
+    onModelChange((customInput.value||'').trim());
+  };
+
+  searchInput.addEventListener('input', applyFilter);
+  clearButton.addEventListener('click', ()=>{
+    searchInput.value='';
+    applyFilter();
+    searchInput.focus();
+  });
+  selectEl.addEventListener('change', ()=>{
+    customInput.value='';
+    lastListedValue=selectEl.value||lastListedValue;
+    onModelChange(lastListedValue);
+  });
+  customInput.addEventListener('input', ()=>{
+    const value=(customInput.value||'').trim();
+    if(value){
+      selectEl.selectedIndex=-1;
+      onModelChange(value);
+      return;
+    }
+    customInput.value='';
+    if(lastListedValue){
+      selectEl.value=lastListedValue;
+      onModelChange(lastListedValue);
+      return;
+    }
+    onModelChange('');
+  });
+  customInput.addEventListener('keydown', (event)=>{
+    if(event.key!=='Enter') return;
+    event.preventDefault();
+    applyCustomSelection();
+  });
+  customButton.addEventListener('click', (event)=>{
+    event.preventDefault();
+    applyCustomSelection();
+  });
+  applyFilter();
+  return {searchInput,selectEl,customInput,customButton};
 }
 
 function renderModelDropdown(){
@@ -3077,6 +3611,84 @@ window.addEventListener('resize',()=>{
   }
 });
 
+// ── Fit-based composer footer collapse ──────────────────────────────────────
+// Stage classes on .composer-footer:
+//   (none) full labels · .cf-icons icon chips · .cf-icons.cf-burger hamburger.
+let _composerFitScheduled=false;
+let _composerFitResizeObserver=null;
+let _composerFitMutationObserver=null;
+let _composerFitObservedFooter=null;
+let _composerFitResizeListenerBound=false;
+
+function _fitComposerFooter(){
+  const footer=document.querySelector('.composer-footer');
+  if(!footer) return;
+  const left=footer.querySelector('.composer-left');
+  if(!left) return;
+  if(!left.clientWidth) return;
+  const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  footer.classList.remove('cf-icons','cf-burger');
+  if(!overflows()) return;
+  footer.classList.add('cf-icons');
+  if(!overflows()) return;
+  footer.classList.add('cf-burger');
+}
+window._fitComposerFooter=_fitComposerFooter;
+
+function _scheduleComposerFit(){
+  if(_composerFitScheduled) return;
+  _composerFitScheduled=true;
+  requestAnimationFrame(function(){
+    _composerFitScheduled=false;
+    try{_fitComposerFooter();}catch(_){ }
+  });
+}
+window._scheduleComposerFit=_scheduleComposerFit;
+
+function _initComposerFooterFit(){
+  const footer=document.querySelector('.composer-footer');
+  const left=footer&&footer.querySelector('.composer-left');
+  if(!footer||!left) return;
+  _scheduleComposerFit();
+  if(_composerFitObservedFooter===footer) return;
+  if(_composerFitResizeObserver){try{_composerFitResizeObserver.disconnect();}catch(_){ }}
+  if(_composerFitMutationObserver){try{_composerFitMutationObserver.disconnect();}catch(_){ }}
+  _composerFitResizeObserver=null;
+  _composerFitMutationObserver=null;
+  _composerFitObservedFooter=footer;
+  if(window.ResizeObserver){
+    try{
+      _composerFitResizeObserver=new ResizeObserver(_scheduleComposerFit);
+      _composerFitResizeObserver.observe(footer);
+      // Also observe the left control group directly: the footer's outer width
+      // may not change when right-side controls (status/context chips) appear or
+      // resize, but that shrinks .composer-left's available room and must
+      // retrigger a refit. (Codex gate #4657.)
+      if(left && left!==footer){try{_composerFitResizeObserver.observe(left);}catch(_){ }}
+    }catch(_){ }
+  }
+  if(window.MutationObserver){
+    try{
+      _composerFitMutationObserver=new MutationObserver(_scheduleComposerFit);
+      _composerFitMutationObserver.observe(left,{
+        childList:true,subtree:true,characterData:true,
+        attributes:true,attributeFilter:['class','style','hidden']
+      });
+    }catch(_){ }
+  }
+  if(!_composerFitResizeListenerBound){
+    window.addEventListener('resize',_scheduleComposerFit);
+    _composerFitResizeListenerBound=true;
+  }
+}
+window._initComposerFooterFit=_initComposerFooterFit;
+
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',_initComposerFooterFit);
+}else{
+  _initComposerFooterFit();
+}
+
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
 let _currentReasoningEffortsSupported=null;
@@ -3088,7 +3700,12 @@ function _normalizeReasoningEffort(eff){
 function _formatReasoningEffortLabel(effort){
   if(effort==='none') return 'None';
   if(!effort) return 'Default';
-  return effort;
+  if(effort==='minimal') return 'Minimal';
+  if(effort==='low') return 'Low';
+  if(effort==='medium') return 'Medium';
+  if(effort==='high') return 'High';
+  if(effort==='xhigh') return 'XHigh';
+  return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
 function _reasoningEffortContext(){
@@ -3161,7 +3778,9 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    chip.title='Reasoning effort: '+text;
+    const labelText='Reasoning effort: '+text;
+    chip.title=labelText;
+    chip.setAttribute('aria-label',labelText);
   }
   if(mobileAction) mobileAction.classList.toggle('inactive',!effort||effort==='none');
   _highlightReasoningOption(effort);
@@ -3647,6 +4266,18 @@ function closeMobileComposerConfig(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
 }
 
+function openMobileComposerConfig(){
+  const panel=$('composerMobileConfigPanel');
+  if(!panel) return;
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  closeModelDropdown();
+  closeReasoningDropdown();
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  panel.classList.add('open');
+  _syncMobileComposerConfigButton(true);
+}
+
 function toggleMobileComposerConfig(){
   const panel=$('composerMobileConfigPanel');
   if(!panel) return;
@@ -3658,14 +4289,22 @@ function toggleMobileComposerConfig(){
     if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
     return;
   }
-  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
-  if(typeof closeWsDropdown==='function') closeWsDropdown();
-  closeModelDropdown();
-  closeReasoningDropdown();
-  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
-  panel.classList.add('open');
-  _syncMobileComposerConfigButton(true);
+  openMobileComposerConfig();
 }
+
+function openComposerContextMenu(e){
+  if(e){
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  const tooltip=$('ctxTooltip');
+  if(tooltip){
+    tooltip.classList.remove('ctx-tooltip-active');
+    tooltip.setAttribute('aria-hidden','true');
+  }
+  openMobileComposerConfig();
+}
+window.openComposerContextMenu=openComposerContextMenu;
 
 document.addEventListener('click',function(e){
   if(
@@ -3731,7 +4370,25 @@ let _messageTouchScrollActive=false;
 let _lastMessageTouchScrollIntentMs=-Infinity;
 let _deferredOlderMessagesTimer=0;
 const MESSAGE_TOUCH_SCROLL_SUPPRESS_MS=1200;
+// #4970 review: track recent LOW-DELTA upward message-pane wheel intent separately from
+// the decisive deltaY<-30 sticky-unpin threshold. A gentle trackpad wheel
+// (deltaY:-5) is real user intent but never crosses -30, so without this the
+// post-render artifact suppression would swallow it for the whole window.
+const MESSAGE_WHEEL_INTENT_SUPPRESS_MS=1200;
+let _lastMessageWheelIntentMs=-Infinity;
+let _lastMessageScrollIntentMs=-Infinity;
+// #4970 review (greptile P1): keyboard scrolling of the message pane (PageUp/Down,
+// arrows, Space, Home/End) fires a native `scroll` event with NO wheel/touch/
+// scrollbar/non-message intent. Without recording it, a keyboard scroll-up inside
+// the post-render artifact window is swallowed and live-follow snaps the reader
+// back to the bottom. Stamp a generic scroll-key intent so the suppression skips it.
+const MESSAGE_KEY_SCROLL_INTENT_SUPPRESS_MS=1200;
+let _lastMessageKeyScrollIntentMs=-Infinity;
 let _newMessageCueVisible=false;
+let _lastMessageRenderAt=-Infinity;
+function _recentMessageRenderArtifactWindow(ms){
+  return performance.now()-_lastMessageRenderAt<(ms||1400);
+}
 function _cancelBottomSettle(){ _bottomSettleToken++; if(_settleRO){ _settleRO.disconnect(); _settleRO=null; } clearTimeout(_settleTimer); clearTimeout(_settleFinalTimer); cancelAnimationFrame(_settleRAF); }
 function _markMessageTouchScrollIntent(active=true){
   _messageTouchScrollActive=!!active;
@@ -3739,6 +4396,26 @@ function _markMessageTouchScrollIntent(active=true){
 }
 function _recentMessageTouchScrollIntent(){
   return _messageTouchScrollActive || performance.now()-_lastMessageTouchScrollIntentMs<MESSAGE_TOUCH_SCROLL_SUPPRESS_MS;
+}
+// #4970: true when the reader recently made ANY upward message-pane wheel
+// motion, including gentle low-delta trackpad wheels below the -30 sticky-unpin
+// threshold. The post-render artifact suppression must NOT fire when this is
+// true, otherwise a real gentle scroll-up right after a render gets swallowed.
+function _recentMessageWheelIntent(){
+  return performance.now()-_lastMessageWheelIntentMs<MESSAGE_WHEEL_INTENT_SUPPRESS_MS;
+}
+function _recentMessageScrollIntent(){
+  // This manual-reader snapshot signal intentionally excludes the raw
+  // touch/key recency helpers: those also record near-tail events for render
+  // artifact suppression. Only this timestamp is guarded by bottom distance.
+  return performance.now()-_lastMessageScrollIntentMs<MESSAGE_WHEEL_INTENT_SUPPRESS_MS
+    || (typeof _scrollbarDragActive!=='undefined'&&!!_scrollbarDragActive);
+}
+// #4970 review (greptile P1): true when the reader recently used the keyboard to
+// scroll the message pane. Keyboard scrolls fire a native scroll event with no
+// wheel/touch intent, so the post-render artifact suppression must skip them.
+function _recentMessageKeyScrollIntent(){
+  return performance.now()-_lastMessageKeyScrollIntentMs<MESSAGE_KEY_SCROLL_INTENT_SUPPRESS_MS;
 }
 function _isMessageReaderUnpinned(){
   return !!_messageUserUnpinned;
@@ -3764,8 +4441,19 @@ function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
   if(!el||!target) return;
-  if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
-  else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)){
+  if(!el.contains(target)){ _lastNonMessageScrollIntentMs=performance.now(); return; }
+  // #4970: record ANY upward message-pane wheel motion as recent wheel intent,
+  // including gentle low-delta trackpad wheels (e.g. deltaY:-5) that never reach
+  // the decisive -30 sticky-unpin threshold below. The post-render artifact
+  // suppression consults _recentMessageWheelIntent() so it cannot swallow a real
+  // gentle scroll-up. This does NOT unpin on its own — only the <-30 branch and
+  // the scroll listener's movedUp branch flip _messageUserUnpinned.
+  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
+    const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+    if(bottomDistance>120) _lastMessageScrollIntentMs=performance.now();
+  }
+  if(typeof e.deltaY==='number'&&e.deltaY<0) _lastMessageWheelIntentMs=performance.now();
+  if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)){
     _cancelBottomSettle();
     if(e.type==='touchmove') _markMessageTouchScrollIntent(true);
     if(typeof e.deltaY==='number'&&e.deltaY< -30){
@@ -3854,6 +4542,14 @@ function _resetScrollDirectionTracker(){
   _touchStartY=null;
   _messageTouchScrollActive=false;
   _lastMessageTouchScrollIntentMs=-Infinity;
+  // #4970 review: also clear low-delta wheel intent on session switch, else a
+  // gentle wheel in the previous chat leaves _recentMessageWheelIntent() true
+  // into the new chat's first post-render window — the artifact then isn't
+  // suppressed, falls into movedUp, and falsely unpins live-follow.
+  _lastMessageWheelIntentMs=-Infinity;
+  _lastMessageScrollIntentMs=-Infinity;
+  // #4970 review (greptile P1): same hygiene for keyboard scroll intent.
+  _lastMessageKeyScrollIntentMs=-Infinity;
   clearTimeout(_deferredOlderMessagesTimer);
   _deferredOlderMessagesTimer=0;
 }
@@ -3863,6 +4559,13 @@ function _resetStreamScrollFollow(){
   _scrollPinned=true;
   _nearBottomCount=0;
   _lastScrollTop=null;
+  // #4970 review: clear low-delta wheel intent on fresh stream start too, else a
+  // gentle upward wheel within the prior 1200ms can under-suppress a genuine
+  // no-intent render artifact and silently disable live follow for the new stream.
+  _lastMessageWheelIntentMs=-Infinity;
+  _lastMessageScrollIntentMs=-Infinity;
+  // #4970 review (greptile P1): same hygiene for keyboard scroll intent.
+  _lastMessageKeyScrollIntentMs=-Infinity;
   _cancelBottomSettle();
 }
 if(typeof window!=='undefined'){
@@ -3958,6 +4661,41 @@ if(typeof window!=='undefined'){
   document.addEventListener('visibilitychange',()=>{
     if(document.visibilityState==='hidden') _scrollbarDragActive=false;
   },{passive:true});
+  // #4970 review (greptile P1): record keyboard-driven message-pane scrolling as
+  // user intent. PageUp/PageDown, Arrow keys, Space/Shift+Space, Home/End scroll
+  // the pane and fire a native scroll event with no wheel/touch intent — without
+  // this stamp a keyboard scroll-up inside the post-render artifact window is
+  // swallowed and live-follow snaps the reader back to the bottom. Only count it
+  // when the scroll container (or a descendant) is the active/scrolling target,
+  // not when typing in the composer or activating an in-transcript control.
+  const _MESSAGE_SCROLL_KEYS=new Set([
+    'PageUp','PageDown','ArrowUp','ArrowDown','Home','End','Spacebar',' ',
+  ]);
+  const _isMessageInteractiveKeyTarget=(node)=>{
+    if(!node||!el.contains(node)) return false;
+    if(node.tagName==='INPUT'||node.tagName==='TEXTAREA'||node.isContentEditable) return true;
+    return !!(node.closest&&node.closest('button,a[href],select,summary,[role="button"],[role="tab"],[role="menuitem"],[contenteditable="true"]'));
+  };
+  document.addEventListener('keydown',(e)=>{
+    if(!e||!_MESSAGE_SCROLL_KEYS.has(e.key)) return;
+    const a=document.activeElement;
+    const t=e.target;
+    // Ignore keys aimed at editable fields (composer, inputs, contenteditable).
+    if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'||a.isContentEditable)) return;
+    // Space/Spacebar activates focused transcript controls (buttons, role=button,
+    // links, tabs) rather than scrolling. The listener is capture-phase, so target
+    // handlers have not yet preventDefault()/stopPropagation()'d; inspect the
+    // active/target control path directly.
+    if((e.key===' '||e.key==='Spacebar')&&(_isMessageInteractiveKeyTarget(t)||_isMessageInteractiveKeyTarget(a))) return;
+    // Count only when the message pane itself is the scroll target: it is focused,
+    // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
+    if(a===el||el.contains(a)||el.matches(':hover')){
+      const now=performance.now();
+      _lastMessageKeyScrollIntentMs=now;
+      const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+      if(bottomDistance>120) _lastMessageScrollIntentMs=now;
+    }
+  },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     _scheduleMessageVirtualizedRender();
@@ -3981,6 +4719,36 @@ if(typeof window!=='undefined'){
       _lastMessageClientHeight=el.clientHeight;
       const movedUp=!grew&&_lastScrollTop!==null&&top<_lastScrollTop-2;
       const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
+      // Suppress the post-render scroll artifact: right after renderMessages()
+      // rebuilds #msgInner, the browser can emit a non-user upward scroll event.
+      // The typeof guards keep this branch inert in unit harnesses that inject
+      // the listener body without these helpers (and short-circuit before any
+      // call), while production evaluates the real intent/recency helpers.
+      // #4970: also require no recent low-delta message-pane wheel intent, so a
+      // gentle trackpad scroll-up (deltaY>-30) right after a render still unpins
+      // instead of being swallowed for the artifact window.
+      // #4970 review: and never suppress while a scrollbar drag is active — a
+      // manual scrollbar-drag upward scroll inside the window is real intent.
+      // typeof guard keeps the #4295 node harness (no _scrollbarDragActive
+      // injected) inert via short-circuit.
+      // #4970 review (greptile P1): likewise skip suppression when the reader
+      // recently scrolled the pane with the keyboard — a keyboard scroll-up is
+      // real intent that produces a native scroll event with no wheel/touch.
+      if(movedUp
+        && typeof _recentMessageRenderArtifactWindow==='function'
+        && typeof _recentMessageTouchScrollIntent==='function'
+        && typeof _recentNonMessageScrollIntent==='function'
+        && typeof _recentMessageWheelIntent==='function'
+        && typeof _recentMessageKeyScrollIntent==='function'
+        && (typeof _scrollbarDragActive==='undefined' || !_scrollbarDragActive)
+        && _recentMessageRenderArtifactWindow(1400)
+        && !_recentMessageTouchScrollIntent()
+        && !_recentNonMessageScrollIntent()
+        && !_recentMessageWheelIntent()
+        && !_recentMessageKeyScrollIntent()){
+        _lastScrollTop=top;
+        return;
+      }
       _lastScrollTop=top;
       if(movedUp){
         _cancelBottomSettle();
@@ -4000,6 +4768,19 @@ if(typeof window!=='undefined'){
         if(nearBottom){
           _nearBottomCount=_nearBottomCount+1;
           if(_nearBottomCount>=2){_scrollPinned=true;_nearBottomCount=0;}
+        }else if(!movedUp && _autoScrollFollow && _scrollPinned){
+          // Content-grew-beneath-a-pinned-viewport case (NOT a user scroll-away).
+          // During streaming on a tall transcript (esp. mobile, where chunks land
+          // fast), new content increases scrollHeight under a stationary viewport,
+          // so bottomDistance crosses the nearBottom threshold even though the
+          // reader never scrolled (top did NOT move up, _messageUserUnpinned is
+          // false). Previously this fell through to `_scrollPinned=false`, killing
+          // auto-follow mid-stream: the follow writer and this listener then fought
+          // frame-by-frame, the viewport stalled while content kept growing, and it
+          // was progressively stranded mid-transcript (the "jump back" report).
+          // Keep the pin and re-snap to the true bottom instead of unpinning.
+          _nearBottomCount=0;
+          if(typeof _setMessageScrollToBottom==='function') _setMessageScrollToBottom();
         }else{
           _nearBottomCount=0;
           _scrollPinned=false;
@@ -4214,7 +4995,7 @@ function _clearActivityElapsedTimer(){
   _activityElapsedTimerGroup=null;
 }
 
-const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, reasoning, and context settings';
+const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, quota, reasoning, and context settings';
 
 function _setCtxCompressButton(btn,text){
   if(!btn)return;
@@ -4444,20 +5225,16 @@ function _syncCtxIndicator(usage){
 }
 
 // ── Touch support: toggle context tooltip on tap (#524) ──
-// On mobile, hover doesn't work — allow tap on the context ring button
-// to toggle the tooltip visibility so the compress affordance is reachable.
+// Hover/focus still exposes the compact tooltip, but a click/tap now opens the
+// shared composer config menu used by the phone footer so the richer context
+// details and compress action have one interaction path.
 document.addEventListener('DOMContentLoaded',function(){
   const wrap=document.getElementById('ctxIndicatorWrap');
   const tooltip=document.getElementById('ctxTooltip');
   if(!wrap||!tooltip)return;
   const btn=document.getElementById('ctxIndicator');
   if(!btn)return;
-  btn.addEventListener('click',function(e){
-    e.stopPropagation();
-    const isOpen=tooltip.classList.contains('ctx-tooltip-active');
-    tooltip.classList.toggle('ctx-tooltip-active',!isOpen);
-    tooltip.setAttribute('aria-hidden',String(isOpen));
-  });
+  btn.addEventListener('click',openComposerContextMenu);
   // Close on outside tap
   document.addEventListener('click',function(){
     tooltip.classList.remove('ctx-tooltip-active');
@@ -4747,7 +5524,9 @@ function _gatewayRoutingLabel(routing){
 function _formatGatewayModelLabel(modelId,labelText,routing){
   if(!routing)return'';
   const usedModel=String(routing.used_model||'').trim();
-  const base=usedModel?getModelLabel(usedModel):(labelText||getModelLabel(modelId));
+  const base=usedModel
+    ?_compactComposerModelChipLabel(usedModel,getModelLabel(usedModel))
+    :_compactComposerModelChipLabel(modelId,labelText||getModelLabel(modelId));
   const via=_gatewayRoutingLabel(routing);
   return via?`${base} ${via}`:base;
 }
@@ -5635,6 +6414,33 @@ function getComposerPrimaryAction(){
   return 'queue';
 }
 
+function _applyBusyComposerPlaceholder(){
+  const input=$('msg');
+  if(!input) return;
+  if(_compressionPlaceholderSaved!==null) return;
+  if(input.disabled) return;
+  if(_composerHasContent()) return;
+  const idlePlaceholder='Message '+assistantDisplayName()+'\u2026';
+  if(!window._showBusyPlaceholderHint||!S.busy){
+    input.placeholder=idlePlaceholder;
+    return;
+  }
+  const busyMode=window._busyInputMode||'queue';
+  const busyPlaceholderKey=busyMode==='interrupt'
+    ? 'composer_placeholder_busy_interrupt'
+    : busyMode==='steer'
+      ? 'composer_placeholder_busy_steer'
+      : 'composer_placeholder_busy_queue';
+  const busyPlaceholderFallback=busyMode==='interrupt'
+    ? 'Enter = interrupt | /queue | /background | /steer'
+    : busyMode==='steer'
+      ? 'Enter = steer | /queue | /background | /interrupt'
+      : 'Enter = queue | /interrupt | /background | /steer';
+  input.placeholder=typeof t==='function'
+    ? (t(busyPlaceholderKey)||busyPlaceholderFallback)
+    : busyPlaceholderFallback;
+}
+
 function _setComposerPrimaryButtonIcon(btn,action){
   // Queue/interrupt/steer icons are inline Lucide SVGs (ISC):
   // https://lucide.dev/icons/
@@ -5652,7 +6458,10 @@ function _setComposerPrimaryButtonIcon(btn,action){
 
 function updateSendBtn(){
   const btn=$('btnSend');
-  if(!btn) return;
+  if(!btn){
+    if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    return;
+  }
   const action=getComposerPrimaryAction();
   btn.dataset.action=action;
   btn.classList.toggle('stop',action==='stop');
@@ -5675,6 +6484,7 @@ function updateSendBtn(){
   btn.setAttribute('aria-label',_btnTitle);
   btn.setAttribute('aria-expanded',$('sendActionMenu')?.classList.contains('open')?'true':'false');
   _setComposerPrimaryButtonIcon(btn,action);
+  if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   // Single primary action button: while busy/no-draft it becomes the red Stop
   // action; while busy with a draft it reflects queue/interrupt/steer.
   btn.style.display='';
@@ -5820,7 +6630,7 @@ document.addEventListener('click',e=>{
 async function executeComposerAction(action){
   if(action==='disabled') return;
   if(action==='stop'){
-    if(typeof cancelStream==='function') await cancelStream();
+    if(typeof cancelStream==='function') await cancelStream('composer-stop');
     return;
   }
   return send({forceAction:action});
@@ -6599,12 +7409,36 @@ function speakMessage(btn){
   if(!clean) return;
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='openai'){
+    _playOpenaiTts(clean, btn);
+    return;
+  }
   if(engine==='elevenlabs'){
     _playElevenLabsTts(clean, btn);
     return;
   }
   if(engine==='edge'){
     _playEdgeTtsChunked(clean, btn);
+    return;
+  }
+  // Extension-registered TTS engine (window.registerHermesTtsEngine). Synthesize
+  // via the extension, then play through the shared audio-buffer path.
+  if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+    if(btn) btn.dataset.speaking='1';
+    _ttsSpeaking=true;
+    const _failReg=function(msg){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn)btn.dataset.speaking='0';
+      if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+    };
+    const _opts={
+      voice: localStorage.getItem('hermes-tts-voice')||'',
+      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
+      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
+    };
+    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
+      .then(function(buf){ return _playAudioBuf(buf, btn, 'TTS'); })
+      .catch(function(e){ _failReg((e&&e.message)||'TTS engine failed'); });
     return;
   }
 
@@ -6649,6 +7483,33 @@ function _playElevenLabsTts(text, btn){
     return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
+}
+
+function _playOpenaiTts(text, btn){
+  if(btn) btn.dataset.speaking='1';
+  _ttsSpeaking=true;
+  const _fail=function(msg){
+    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(btn)btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
+  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text, engine:'openai'})
+  })
+  .then(function(r){
+    if(!r.ok){
+      return r.json().catch(function(){return {};}).then(function(j){
+        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+      });
+    }
+    return r.arrayBuffer();
+  })
+  .then(function(buf){
+    return _playAudioBuf(buf, btn, 'OpenAI TTS');
+  })
+  .catch(function(e){ _fail((e&&e.message)||'OpenAI TTS failed'); });
 }
 
 // ── Shared AudioContext for TTS playback (no blob URLs needed) ──
@@ -6730,6 +7591,10 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
+  if(engine==='openai'){
+    _playOpenaiTts(clean, null);
+    return;
+  }
   if(engine==='elevenlabs'){
     _playElevenLabsTts(clean, null);
     return;
@@ -6738,6 +7603,24 @@ function autoReadLastAssistant(){
     _playEdgeTtsChunked(clean, null);
     return;
   }
+  // Extension-registered TTS engine (window.registerHermesTtsEngine): synth via
+  // the extension, then play through the shared audio-buffer path. Mirrors the
+  // registered-engine branch in speakMessage() so auto-read honors the selection.
+  if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+    _ttsSpeaking=true;
+    const _opts={
+      voice: localStorage.getItem('hermes-tts-voice')||'',
+      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
+      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
+    };
+    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
+      .then(function(buf){ return _playAudioBuf(buf, null, 'TTS'); })
+      .catch(function(){ _ttsSpeaking=false; _playingEdgeAudio=null; });
+    return;
+  }
+  // Unknown/unregistered engine (e.g. an extension engine that's no longer
+  // registered) — fall back to browser TTS only if it's available.
+  if(!('speechSynthesis' in window)) return;
   // Use chunked playback for browser TTS
   _ttsChunkQueue=_splitForTTS(clean);
   _ttsChunkIndex=0;
@@ -6901,8 +7784,9 @@ function clearInflightState(sid){
 //      and as the hash that compares "rendered vs current" snapshots.
 //
 //   2. scheduleTodosRefresh() — coalesces multiple `todo_state` events that
-//      land in the same animation frame into a single loadTodos() call.
-//      Skips work entirely when the panel is not active.
+//      land in the same animation frame into a single refresh pass. It keeps
+//      the left sidebar Todos behavior unchanged, and also lets the workspace
+//      Todos tab repaint when that tab is enabled and currently visible.
 //
 //   3. _hydrateTodosFromSession(session) — applies cold-load todo_state
 //      from the session GET payload, or clears the panel when neither a
@@ -6910,7 +7794,7 @@ function clearInflightState(sid){
 //      `S.session = ...` settle point so cross-session navigation never
 //      leaves a stale list visible.
 //
-// The hash is keyed on (id, content, status); the render itself uses
+// The hash is keyed on (id, content/text, status); the render itself uses
 // `esc()` for any user-controlled string, so XSS surface is the same as
 // any other innerHTML path in this file.
 let _todosLastRenderedHash=null;
@@ -6927,9 +7811,72 @@ function _todosHash(items){
   let h=items.length+'|';
   for(let i=0;i<items.length;i++){
     const t=items[i]||{};
-    h+=String(t.id==null?'':t.id)+'\x1f'+String(t.content==null?'':t.content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
+    const content=t.content==null?(t.text==null?'':t.text):t.content;
+    h+=String(t.id==null?'':t.id)+'\x1f'+String(content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
   }
   return h;
+}
+
+const TODO_STATUS_RENDERING=Object.freeze({
+  pending:Object.freeze({icon:'square',color:'var(--muted)'}),
+  in_progress:Object.freeze({icon:'loader',color:'var(--blue)'}),
+  completed:Object.freeze({icon:'check',color:'rgba(100,200,100,.8)'}),
+  cancelled:Object.freeze({icon:'x',color:'rgba(200,100,100,.5)'}),
+});
+
+function todoStatusKey(status){
+  const key=String(status||'pending');
+  return Object.prototype.hasOwnProperty.call(TODO_STATUS_RENDERING,key)?key:'pending';
+}
+
+function todoStatusVisual(status){
+  const key=todoStatusKey(status);
+  return TODO_STATUS_RENDERING[key];
+}
+
+function renderTodoStatusIcon(status,size=14){
+  const visual=todoStatusVisual(status);
+  return typeof li==='function'?li(visual.icon,size):'';
+}
+
+function todoContent(todo){
+  if(!todo) return '';
+  return todo.content==null?(todo.text==null?'':todo.text):todo.content;
+}
+
+function renderTodoEmptyState(options={}){
+  const centered=!!(options&&options.centered);
+  const style=centered
+    ? 'padding:24px 12px;text-align:center;color:var(--muted);font-size:12px'
+    : 'color:var(--muted);font-size:12px;padding:4px 0';
+  return `<div style="${style}">${esc(t('todos_no_active'))}</div>`;
+}
+
+function renderTodoRow(todo,options={}){
+  const td=todo||{};
+  const status=todoStatusKey(td.status);
+  const visual=todoStatusVisual(status);
+  const showMetadata=!(options&&options.metadata===false);
+  const isCompleted=status==='completed';
+  const isCancelled=status==='cancelled';
+  const contentColor=(isCompleted||isCancelled)?'var(--muted)':'var(--text)';
+  const completedStyle=(isCompleted||isCancelled)?'text-decoration:line-through;opacity:.5':'';
+  const metadata=showMetadata
+    ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(status)}</div>`
+    : '';
+  return `
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${visual.color}">${renderTodoStatusIcon(status,14)}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;color:${contentColor};${completedStyle};line-height:1.4">${esc(todoContent(td))}</div>
+        ${metadata}
+      </div>
+    </div>`;
+}
+
+function renderTodoRows(todos,options={}){
+  const items=Array.isArray(todos)?todos:[];
+  return items.map(td=>renderTodoRow(td,options)).join('');
 }
 
 function _todosPanelIsActive(){
@@ -6945,12 +7892,14 @@ function scheduleTodosRefresh(){
   if(_todosRenderRafId) return;
   if(typeof requestAnimationFrame!=='function'){
     if(typeof loadTodos==='function') loadTodos();
+    if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
     return;
   }
   _todosRenderRafId=requestAnimationFrame(()=>{
     _todosRenderRafId=0;
-    if(!_todosPanelIsActive()) return;
-    if(typeof loadTodos==='function') loadTodos();
+    const sidebarActive=_todosPanelIsActive();
+    if(sidebarActive&&typeof loadTodos==='function') loadTodos();
+    if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
   });
 }
 
@@ -6958,6 +7907,7 @@ function _resetTodosRenderCache(){
   // Clear after every cross-session navigation so the next render is
   // never short-circuited against a hash from a different session.
   _todosLastRenderedHash=null;
+  if(typeof _resetWorkspaceTodosRenderCache==='function') _resetWorkspaceTodosRenderCache();
 }
 
 function _hydrateTodosFromSession(session){
@@ -7038,6 +7988,7 @@ function _hydrateTodosFromSession(session){
     S.todoStateMeta=null;
   }
   _resetTodosRenderCache();
+  if(typeof scheduleTodosRefresh==='function') scheduleTodosRefresh();
 }
 
 function snapshotLiveTurnHtmlForSession(sid){
@@ -7107,7 +8058,7 @@ function restoreLiveTurnHtmlForSession(sid){
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
-  requestAnimationFrame(()=>postProcessRenderedMessages(restored));
+  requestAnimationFrame(()=>_postProcessWithAnchorSuppression(restored));
   return true;
 }
 
@@ -7650,8 +8601,8 @@ async function applyUpdates(){
   const forceBtnReset=$('btnForceUpdate');
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
   const targets=[];
-  if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(window._updateData?.agent?.behind>0) targets.push('agent');
+  if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(!targets.length){
     const msg='No update target selected. Refresh update status and retry.';
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -7889,17 +8840,32 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
+function _pendingCurrentTailUserMessage(messages){
+  const list=Array.isArray(messages)?messages:[];
+  for(let i=list.length-1;i>=0;i--){
+    const msg=list[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user') return msg;
+    if(msg._live||String(msg.role||'')==='tool') continue;
+    return null;
+  }
+  return null;
+}
+
 function getPendingSessionMessage(session, messagesOverride=null){
   const text=String(session?.pending_user_message||'').trim();
   if(!text) return null;
   const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
   const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
   const messages=Array.isArray(sourceMessages)?sourceMessages:[];
-  const lastUser=[...messages].reverse().find(m=>m&&m.role==='user');
-  if(lastUser){
-    const lastText=String(msgContent(lastUser)||'').trim();
-    if(lastText===text){
-      if(attachments.length&&!lastUser.attachments?.length) lastUser.attachments=attachments;
+  const currentTailUser=_pendingCurrentTailUserMessage(messages);
+  if(currentTailUser){
+    const pendingCandidate={role:'user',content:text};
+    const sameCurrentTurn=typeof _sameTranscriptMessage==='function'
+      ? _sameTranscriptMessage(currentTailUser,pendingCandidate)
+      : String(msgContent(currentTailUser)||'').trim()===text;
+    if(sameCurrentTurn){
+      if(attachments.length&&!currentTailUser.attachments?.length) currentTailUser.attachments=attachments;
       return null;
     }
   }
@@ -8219,6 +9185,24 @@ function _createAssistantTurn(tsTitle='', tpsText=''){
   if(S.session) row.dataset.sessionId=S.session.session_id;
   row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText)}<div class="assistant-turn-blocks"></div>`;
   return row;
+}
+function _setLatestAssistantTurnLandmark(turn, isLatest){
+  if(!turn) return;
+  const label='Latest Hermes response';
+  if(isLatest){
+    if(typeof document!=='undefined'){
+      document.querySelectorAll('.assistant-turn[data-latest-assistant-response="true"]').forEach(el=>{
+        if(el!==turn) _setLatestAssistantTurnLandmark(el, false);
+      });
+    }
+    turn.setAttribute('role','region');
+    turn.setAttribute('aria-label',label);
+    turn.dataset.latestAssistantResponse='true';
+    return;
+  }
+  if(turn.getAttribute('role')==='region') turn.removeAttribute('role');
+  if(turn.getAttribute('aria-label')===label) turn.removeAttribute('aria-label');
+  delete turn.dataset.latestAssistantResponse;
 }
 function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
@@ -9631,6 +10615,7 @@ function _anchorSceneNodeForRow(row, opts){
 }
 function _anchorSceneTransparentNodeForRow(row, opts){
   const settled=!!(opts&&opts.settled);
+  const live=!!(opts&&opts.live);
   if(!row) return null;
   let node=null;
   const meta={
@@ -9682,10 +10667,14 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   }
   if(!node) return null;
   node.setAttribute('data-anchor-scene-row','1');
-  node.setAttribute('data-anchor-settled-scene-row','1');
+  if(settled) node.setAttribute('data-anchor-settled-scene-row','1');
+  if(live) node.setAttribute('data-anchor-live-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
+  if(opts&&opts.streamId) node.setAttribute('data-anchor-stream-id',String(opts.streamId));
+  if(opts&&opts.sessionId) node.setAttribute('data-session-id',String(opts.sessionId));
+  if(live) node.setAttribute('data-live-stream-owned','1');
   return node;
 }
 // Whitespace-insensitive compare so a scene prose row that IS the final answer
@@ -9713,7 +10702,10 @@ function _anchorSceneWorklogGroup(blocks, opts){
   let group=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
   if(!group){
     group=ensureActivityGroup(blocks,{
-      collapsed:!live,
+      // Respect callers that need the settled activity group open. Round 6:
+      // pinned followers keep the just-settled worklog open so STREAM_DONE does
+      // not collapse hundreds of px of live worklog and visibly clamp the pane.
+      collapsed:(opts&&opts.collapsed!==undefined)?opts.collapsed:!live,
       live,
       activityKey,
       beforeAnchor:!!(opts&&opts.beforeAnchor),
@@ -9859,6 +10851,9 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
 }
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
+  if(typeof isTransparentStream==='function'&&isTransparentStream()){
+    return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
+  }
   if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
@@ -9869,11 +10864,11 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!turn){
     turn=_createAssistantTurn();
     turn.id='liveAssistantTurn';
-    if(S.session) turn.dataset.sessionId=S.session.session_id;
     $('msgInner').appendChild(turn);
   }
   turn.setAttribute('data-anchor-scene-live-owner','1');
   turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  // Re-stamp when reusing a turn restored or previously rendered in another mode.
   if(S.session) turn.dataset.sessionId=S.session.session_id;
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return false;
@@ -9919,8 +10914,79 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
+function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
+  opts=opts||{};
+  if(!S.session||!S.activeStreamId) return false;
+  if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
+  if(streamId&&S.activeStreamId!==streamId) return false;
+  const rows=_anchorSceneRowsForRendering(scene,{settled:false});
+  if(!rows.length) return false;
+  $('emptyState').style.display='none';
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    $('msgInner').appendChild(turn);
+  }
+  turn.setAttribute('data-anchor-scene-live-owner','1');
+  turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  turn.setAttribute('data-live-assistant-turn','1');
+  if(S.session) turn.dataset.sessionId=S.session.session_id;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return false;
+  const scrollSnapshot=_captureMessageScrollSnapshot();
+  const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  // Clear every legacy live activity surface this renderer can replace. The
+  // anchor-scene rows are now the source of truth for visible live activity.
+  blocks.querySelectorAll(
+    '.live-worklog[data-live-worklog-shell="1"],'+
+    '.tool-worklog-group[data-live-tool-call-group="1"],'+
+    '.tool-call-group[data-live-tool-call-group="1"],'+
+    '.tool-card-row[data-live-tid],'+
+    '.agent-activity-thinking[data-live-thinking="1"],'+
+    '.transparent-event-row[data-live-tid],'+
+    '[data-live-stream-owned="1"],'+
+    '.interim-collapse-toggle'
+  ).forEach(el=>el.remove());
+  // Match the compact path: keep legacy live segments as hidden anchors so
+  // stream-owned metadata survives while the anchor scene owns visible activity.
+  blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
+    el.classList.add('assistant-segment-worklog-source');
+    el.setAttribute('aria-hidden','true');
+    el.hidden=true;
+  });
+  const liveFooter=blocks.querySelector('#liveRunStatus');
+  let wrote=false;
+  for(const row of rows){
+    const node=_anchorSceneTransparentNodeForRow(row,{
+      live:true,
+      settled:false,
+      streamId:streamId||S.activeStreamId||'',
+      sessionId:S.session&&S.session.session_id,
+    });
+    if(!node) continue;
+    if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(node,liveFooter);
+    else blocks.appendChild(node);
+    wrote=true;
+  }
+  if(wrote) _syncTransparentEventControls(turn);
+  if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
+  _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+  if(scrollRebuildGuard&&scrollRebuildGuard.release){
+    requestAnimationFrame(()=>{
+      scrollRebuildGuard.release();
+      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+    });
+  }
+  if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
+  return wrote;
+}
 function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
-  const scene=_projectLiveAnchorActivitySceneForStream(streamId,(opts&&opts.mode)||'compact_worklog');
+  const mode=(typeof isTransparentStream==='function'&&isTransparentStream())
+    ? 'transparent_stream'
+    : ((opts&&opts.mode)||'compact_worklog');
+  const scene=_projectLiveAnchorActivitySceneForStream(streamId,mode);
   if(!scene) return false;
   return renderLiveAnchorActivityScene(streamId,scene,{...(opts||{}),sessionId});
 }
@@ -9940,8 +11006,28 @@ if(typeof window!=='undefined'){
   window._projectLiveAnchorActivitySceneForStream=_projectLiveAnchorActivitySceneForStream;
   window.isLiveAnchorActivitySceneOwner=isLiveAnchorActivitySceneOwner;
 }
+function _anchorSceneSceneHasWorklogWorthyRows(scene){
+  // Mirror of messages.js _anchorSceneHasWorklogWorthyRows for the RENDER side:
+  // a settled scene that was persisted (or hydrated from the backend) before the
+  // generation-side guard existed can still be all-prose. Such a scene must NOT be
+  // promoted to a collapsed worklog at render time (it would hide the whole answer
+  // and shrink the transcript at settle → bottom-pinned jump-back). Require at least
+  // one tool/thinking/compression row. (defense-in-depth for already-persisted scenes)
+  const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+  for(const row of rows){
+    if(!row||typeof row!=='object') continue;
+    const role=String(row.role||'');
+    if(role==='tool'||role==='thinking') return true;
+    if(role==='lifecycle'){
+      const source=String(row.source_event_type||'');
+      if(source==='compressing'||source==='compressed') return true;
+    }
+  }
+  return false;
+}
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
@@ -9978,8 +11064,66 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   }
   return wrote;
 }
+// One-shot token: the stream id of the turn that JUST settled at STREAM_DONE.
+// The keep-open exception applies to ONLY this one turn's settled render, then
+// is cleared so every other (historical) settled worklog renders compact even
+// while the reader is pinned. Set right before the STREAM_DONE
+// renderMessages({preserveScroll:true}) call and cleared after the settled-scene
+// render pass; null at all other times.
+let _keepSettledWorklogOpenForStreamId=null;
+function _shouldKeepSettledWorklogOpenForStreamSettle(streamId){
+  // Round 6 scroll-jump guard: collapsing the JUST-settled live worklog into a
+  // compact summary at STREAM_DONE shrinks the transcript by hundreds of px. The
+  // resulting backward jump hits readers in TWO positions, so keep that one
+  // worklog open for BOTH on the settle render — the live->settled DOM swap is
+  // then height-stable and there is no shrink for any scroll path to mishandle:
+  //
+  //  1. PINNED follower at the live tail: the shrink lowers scrollHeight, the
+  //     browser clamps scrollTop to the new max, and the viewport snaps upward
+  //     even though pin state is correct.
+  //  2. UNPINNED reader who scrolled UP to read inside the just-settled turn
+  //     (the mobile "往回大跳" report, #MOBILESCROLL follow-up): the worklog sits
+  //     ABOVE their viewport, so collapsing it pulls their content up to the top
+  //     of the turn. On desktop overflow-anchor:none + the JS snapshot restore
+  //     keep them put, but on mobile the CSS resting value is overflow-anchor:
+  //     auto AND _fixMobileScrollJank() flips an inline overflow-anchor:none over
+  //     the settle render — which is exactly the wrong state: native anchoring is
+  //     suppressed during the one frame the unpinned reader needs it to absorb
+  //     the above-viewport shrink, so the content leaps to the turn's top. Keeping
+  //     the worklog open removes the shrink entirely, which fixes it for every
+  //     device/anchor-mode combination instead of fighting the anchor engine.
+  //
+  // SCOPING: the exception is gated on the one-shot token matching this turn's
+  // stream id, so it applies ONLY to the turn that just settled — not to every
+  // historical settled worklog on every re-render (which would defeat the
+  // compact-worklog default for past turns).
+  return !!(streamId&&_keepSettledWorklogOpenForStreamId===streamId);
+}
+// One-shot token set/clear API used by the STREAM_DONE handler (messages.js):
+// arm the keep-open exception for exactly the turn that just settled, render,
+// then disarm so subsequent re-renders collapse historical worklogs as normal.
+function _armKeepSettledWorklogOpen(streamId){
+  _keepSettledWorklogOpenForStreamId=streamId?String(streamId):null;
+}
+function _disarmKeepSettledWorklogOpen(){
+  _keepSettledWorklogOpenForStreamId=null;
+}
+// True while a just-settled worklog is being force-rendered open (between
+// _armKeepSettledWorklogOpen and _disarmKeepSettledWorklogOpen). renderMessages()
+// consults this so it does NOT write the forced-open DOM into _sessionHtmlCache:
+// the keep-open is a transient settle-frame device, and caching it would persist
+// the forced-open worklog across session switches / restores, silently overriding
+// a user-collapsed worklog. (#5260 gate-cert: keep-open must not leak into cache.)
+function _isKeepSettledWorklogOpenArmed(){
+  return _keepSettledWorklogOpenForStreamId!==null;
+}
+if(typeof window!=='undefined'){
+  window._armKeepSettledWorklogOpen=_armKeepSettledWorklogOpen;
+  window._disarmKeepSettledWorklogOpen=_disarmKeepSettledWorklogOpen;
+}
 function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
+  if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
     return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
   }
@@ -9999,13 +11143,23 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   });
   blocks.querySelectorAll('.tool-worklog-group:not([data-anchor-scene-owner="1"]),.tool-call-group:not([data-anchor-scene-owner="1"]),.agent-activity-thinking:not([data-anchor-scene-row="1"]),.wl-reason').forEach(el=>el.remove());
   const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');
+  const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForStreamSettle(streamId);
   const activityKey=`anchor-scene:${rawIdx}`;
   if(streamId&&!_readActivityDisclosureState(activityKey)){
     _copyActivityDisclosureState(`live:${streamId}`, activityKey);
   }
+  // keepSettledWorklogOpen forces collapsed:false for the ONE height-stable settle
+  // render of the just-settled turn (no STREAM_DONE shrink jump) for both pinned
+  // followers AND unpinned mid-turn readers. The keep-open is made genuinely
+  // transient by the STREAM_DONE handler (messages.js): right after this render it
+  // disarms the token and runs a scroll-PRESERVING collapse pass, so a worklog the
+  // reader had manually collapsed returns to its copied disclosure state
+  // (_copyActivityDisclosureState above) without the jump. While the token is
+  // armed this forced-open DOM is also kept OUT of _sessionHtmlCache
+  // (_isKeepSettledWorklogOpenArmed), so it never persists across restores.
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
-    collapsed:true,
+    collapsed:!keepSettledWorklogOpen,
     beforeAnchor:true,
     anchor:segment,
     activityKey,
@@ -11145,19 +12299,47 @@ function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
   const bottom=Math.max(0,el.scrollHeight-el.scrollTop-el.clientHeight);
+  const readerAwayFromBottom=bottom>250&&(
+    _messageUserUnpinned ||
+    _scrollPinned===false ||
+    (typeof _recentMessageScrollIntent==='function'&&_recentMessageScrollIntent())
+  );
   return {
     anchor:(typeof _captureMessageViewportAnchor==='function')?_captureMessageViewportAnchor():null,
     top:el.scrollTop,
     bottom,
     scrollHeight:el.scrollHeight,
-    pinned:_shouldFollowMessagesOnDomReplace(),
-    userUnpinned:_messageUserUnpinned,
+    pinned:readerAwayFromBottom?false:_shouldFollowMessagesOnDomReplace(),
+    userUnpinned:readerAwayFromBottom?true:_messageUserUnpinned,
   };
+}
+function _restorePinnedMessageScrollSnapshot(snapshot){
+  const el=$('messages');
+  if(!el||!snapshot||snapshot.pinned!==true||snapshot.userUnpinned===true) return false;
+  const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  const bottom=Number(snapshot.bottom);
+  const target=Number.isFinite(bottom)?maxTop-Math.max(0,bottom):maxTop;
+  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  el.scrollTop=Math.max(0,Math.min(target,maxTop));
+  // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
+  _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+  _messageUserUnpinned=false;
+  _scrollPinned=true;
+  _nearBottomCount=2;
+  if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+  else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
+  return true;
 }
 function _restoreMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  // If the reader was following the live tail, preserve the tail-relative bottom
+  // distance. Do not semantic-anchor to the first visible row: live Worklog/
+  // activity rebuilds can remount an older top-of-viewport anchor and yank a
+  // pinned streaming transcript upward. Semantic anchors remain for manual
+  // unpinned reading positions below.
+  if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;
@@ -11205,9 +12387,12 @@ function _restoreMessageScrollSnapshot(snapshot){
 window._fixMobileScrollJank=function _fixMobileScrollJank(){
   const el=document.getElementById('messages');
   if(!el) return;
-  // Desktop with a mouse: keep overflow-anchor:none (explicitly set by CSS).
-  // Mobile touch devices only: temporarily suppress anchor re-selection.
-  if(window.matchMedia('(hover:hover) and (pointer:fine)').matches) return;
+  // Route through the same "is the browser scroll-anchor layer active?" predicate
+  // as _suppressBrowserOverflowAnchor so the two guards can't drift (#5338 review).
+  // Desktop rests at overflow-anchor:none (predicate false) → nothing to suppress.
+  // Mobile touch devices rest at auto (predicate true) → temporarily suppress
+  // anchor re-selection during the wipe-and-rebuild gap.
+  if(!_browserOverflowAnchorActive(el)) return;
   el.style.overflowAnchor='none';
   requestAnimationFrame(()=>{
     if(el.style.overflowAnchor==='none') el.style.overflowAnchor='';
@@ -11217,6 +12402,10 @@ window._fixMobileScrollJank=function _fixMobileScrollJank(){
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
+  // Same-frame live DOM updates (tool/worklog/activity rows) are the hot path for
+  // streaming. Pinned followers must stay tail-relative here too; restoring the
+  // semantic viewport anchor is only safe for explicitly unpinned readers.
+  if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;
@@ -11284,6 +12473,14 @@ function _transparentStreamOrderedParts(message){
     }
   }
   return hasText&&hasTool?ordered:null;
+}
+function _legacySettledFallbackHasToolMetadata(message){
+  if(!message||message.role!=='assistant'||message._anchor_activity_scene) return false;
+  return !!(
+    (Array.isArray(message.tool_calls)&&message.tool_calls.length>0)||
+    (Array.isArray(message._partial_tool_calls)&&message._partial_tool_calls.length>0)||
+    (Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use'))
+  );
 }
 function _transparentOrderedDisplayText(text){
   return _stripWorkspaceDisplayPrefix(
@@ -11460,6 +12657,7 @@ function _stripConversationLoadingPlaceholderHtml(html){
 }
 
 function renderMessages(options){
+  _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when the reader has
@@ -11526,7 +12724,7 @@ function renderMessages(options){
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
-      requestAnimationFrame(()=>postProcessRenderedMessages(inner));
+      requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -11546,7 +12744,24 @@ function renderMessages(options){
   if(sid&&INFLIGHT[sid]){
     const _lt=document.getElementById('liveAssistantTurn');
     if(_lt&&(!_lt.dataset||!_lt.dataset.sessionId||_lt.dataset.sessionId===sid)){
-      _preservedLiveTurn=_lt;
+      // Blank-turn fix (对话消失): only preserve the live turn across the DOM
+      // wipe if it is GENUINELY live — either an active stream is still running
+      // (S.activeStreamId set: the #3877 mid-stream flicker case this preserve
+      // was written for), or the turn already holds real rendered content (a
+      // visible answer body, a tool card, or a reasoning row). A DEAD shell —
+      // an interrupted turn whose stream dropped (S.activeStreamId cleared to
+      // null) but whose INFLIGHT[sid] entry was not cleaned, leaving only an
+      // empty worklog group ("Processed Ns" with no body/tool rows) — must NOT
+      // be preserved: re-attaching it on a session-updated swap re-render pins
+      // an avatar-only empty turn OVER the settled transcript, hiding the real
+      // (already-persisted) answer. That is the reported blank. Reproduced +
+      // fix verified on an isolated debug instance (8710): stale INFLIGHT +
+      // empty live-turn survived the swap → blank; gating on real-content /
+      // active-stream clears it while a genuine live turn still renders.
+      const _hasRealLiveContent=!!_lt.querySelector('.msg-body, .tool-card-row, .wl-reason');
+      if(_hasRealLiveContent || S.activeStreamId){
+        _preservedLiveTurn=_lt;
+      }
     }
   }
   const compressionState=(()=>{
@@ -11760,6 +12975,13 @@ function renderMessages(options){
     }catch(e){}
   }
   const transparentToolResultsByTid=_transparentModeActive?_collectToolResultSnippetsByTid(S.messages):{};
+  const latestRenderedAssistantRawIdx=(()=>{
+    for(let i=renderVisWithIdx.length-1;i>=0;i--){
+      const entry=renderVisWithIdx[i];
+      if(entry&&entry.m&&entry.m.role==='assistant'&&!entry.m._live) return entry.rawIdx;
+    }
+    return -1;
+  })();
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
@@ -11947,6 +13169,7 @@ function renderMessages(options){
       currentAssistantTurn.dataset.recycleKey=rawIdx;
       inner.appendChild(currentAssistantTurn);
     }
+    _setLatestAssistantTurnLandmark(currentAssistantTurn, !m._live&&rawIdx===latestRenderedAssistantRawIdx);
     const seg=document.createElement('div');
     if(Array.isArray(orderedTransparentParts)&&orderedTransparentParts.length){
       const blocks=_assistantTurnBlocks(currentAssistantTurn);
@@ -12168,12 +13391,8 @@ function renderMessages(options){
   // tracking, or runs that didn't go through the normal streaming path), build
   // a display list from per-message tool_calls (OpenAI format) stored in each
   // assistant message. This covers the reload case described in issue #140.
-  const hasMessageToolMetadata=!S.busy&&Array.isArray(S.messages)&&S.messages.some(m=>
-    m&&m.role==='assistant'&&!anchorOwnedAssistantRawIdxs.has(S.messages.indexOf(m))&&(
-      (Array.isArray(m.tool_calls)&&m.tool_calls.length>0)||
-      (Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0)||
-      (Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use'))
-    )
+  const hasMessageToolMetadata=!S.busy&&Array.isArray(S.messages)&&S.messages.some((m,rawIdx)=>
+    !anchorOwnedAssistantRawIdxs.has(rawIdx)&&_legacySettledFallbackHasToolMetadata(m)
   );
   if(!S.busy && (hasMessageToolMetadata||!S.toolCalls||!S.toolCalls.length)){
     // Index tool outputs by tool_call_id / tool_use_id so the
@@ -12218,10 +13437,7 @@ function renderMessages(options){
       }
       if(m.role==='assistant'){
         if(anchorOwnedAssistantRawIdxs.has(rawIdx)) return;
-        const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-        const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
-        if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});
+        if(_legacySettledFallbackHasToolMetadata(m)) fallbackToolSources.push({m,rawIdx});
       }
     });
     const derived=[];
@@ -12879,7 +14095,7 @@ function renderMessages(options){
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>postProcessRenderedMessages(inner));
+  requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -12888,8 +14104,12 @@ function renderMessages(options){
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
-  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
-    const _html=_stripConversationLoadingPlaceholderHtml(inner.innerHTML);
+  // Skip caching while the just-settled keep-open token is armed: that render
+  // force-opens the settled worklog for height-stability, and caching it would
+  // persist the forced-open DOM across session switches / restores.
+  const _keepOpenArmed=(typeof _isKeepSettledWorklogOpenArmed==='function')&&_isKeepSettledWorklogOpenArmed();
+  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi&&!_keepOpenArmed){
+    const _html=(typeof _stripConversationLoadingPlaceholderHtml==='function')?_stripConversationLoadingPlaceholderHtml(inner.innerHTML):inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
       const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
@@ -13950,16 +15170,19 @@ function autoResizeTextarea(ta) {
 
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
-  // Truncate session at msgIdx (keep messages before the edited one)
-  // then re-send the edited text
+  const initialSid = S.session.session_id;
+  const absoluteKeepCount = _oldestIdx + msgIdx;
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: msgIdx  // keep messages[0..msgIdx-1], discard from msgIdx onward
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
     })});
-    S.messages = S.messages.slice(0, msgIdx);
+    S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
-    // Now send the edited message as a new chat
     $('msg').value = newText;
     await send();
   } catch(e) { setStatus(t('edit_failed') + e.message); }
@@ -13967,30 +15190,63 @@ async function submitEdit(msgIdx, newText) {
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
-  // Find the last user message and re-run it
-  // Remove the last assistant message first (truncate to before it)
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
-  // Find the last user message text (one before this assistant message)
+  const absoluteKeepCount = _oldestIdx + assistantIdx;
+  const initialSid = S.session.session_id;
   let lastUserText = '';
   for(let i = assistantIdx - 1; i >= 0; i--) {
     const m = S.messages[i];
     if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
   }
   if(!lastUserText) return;
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
+  if(!S.session || S.session.session_id !== initialSid) return;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: S.session.session_id,
-      keep_count: assistantIdx  // remove the assistant message
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
     })});
-    S.messages = S.messages.slice(0, assistantIdx);
+    S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = lastUserText;
     await send();
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
 
+// postProcessRenderedMessages() runs one frame AFTER the render + JS scroll
+// restore (it is scheduled via requestAnimationFrame). It performs syntax
+// highlighting, inline diff/csv/pdf/html/excalidraw hydration, mermaid/katex
+// rendering — all of which can CHANGE the height of rows above the viewport.
+//
+// On mobile the scroller rests at overflow-anchor:auto, so any above-viewport
+// height change in this post-render frame makes the browser's native anchor
+// engine compensate scrollTop a SECOND time — after the JS restore already
+// settled the reader's position — yanking them to an unrelated turn ("往回大跳").
+// The synchronous _fixMobileScrollJank / _suppressBrowserOverflowAnchor guards
+// only cover the render frame itself; they have already released by the time
+// this rAF fires. Wrap the post-process (and the media-reflow frame right after
+// it) in the same suppression so the browser layer cannot re-anchor during the
+// async settle window. Desktop rests at `none`, so this is a no-op there.
+function _postProcessWithAnchorSuppression(container){
+  const scroller=$('messages');
+  const release=(scroller&&typeof _suppressBrowserOverflowAnchor==='function')
+    ? _suppressBrowserOverflowAnchor(scroller) : null;
+  try{
+    postProcessRenderedMessages(container);
+  }finally{
+    // Hold suppression across ONE more frame so late media/layout reflow
+    // (image decode, katex/mermaid measure) cannot re-anchor either, then let
+    // _suppressBrowserOverflowAnchor's own rAF-deferred restore run.
+    if(release){
+      if(typeof requestAnimationFrame==='function') requestAnimationFrame(release);
+      else release();
+    }
+  }
+}
 function postProcessRenderedMessages(container) {
   highlightCode(container);
   addCopyButtons(container);
@@ -14430,19 +15686,23 @@ function loadPdfInline(container){
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
+    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
     const loadPdf=(pdfjsLib)=>{
-      fetch('api/media?path='+encodeURIComponent(path))
+      fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            const dlUrl=publicMediaUrl+'&download=1';
+            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
           return pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise;
         })
         .then(pdf=>{
           if(!pdf) return;
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1';
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
           const wrap=document.createElement('div');
@@ -14481,7 +15741,7 @@ function loadPdfInline(container){
           renderPage(1);
         })
         .catch(()=>{
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1';
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
         });
     };
@@ -14501,7 +15761,7 @@ function loadPdfInline(container){
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
         if(!_pdfjsReady){
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1';
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }
@@ -14521,20 +15781,23 @@ function loadHtmlInline(container){
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+          const openUrl=publicMediaUrl+'&inline=1';
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+        const openUrl=publicMediaUrl+'&inline=1';
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const dlUrl=publicMediaUrl+'&download=1';
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });
@@ -14575,6 +15838,8 @@ function renderMermaidBlocks(container){
       const tmp=document.getElementById('d'+id);
       if(tmp) tmp.remove();
       block.innerHTML=svg;
+      const renderedSvg = block.querySelector('svg');
+      if(renderedSvg) _mountMermaidViewer(renderedSvg, {mode:'inline'});
       block.classList.add('mermaid-rendered');
     }catch(e){
       const tmp=document.getElementById('d'+id);

@@ -37,9 +37,23 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "_sessionUrlForSid(sid)" in MESSAGES_JS
     assert "data:{url}" in MESSAGES_JS
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
-    assert "sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
+    assert "function _completionNotificationPreviewText" in MESSAGES_JS
+    assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
+    assert "sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
+    assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
     assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
     assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
+
+
+def test_completion_notification_preview_uses_settled_message_not_live_prefix():
+    """Background completion preview must not slice the live-stream accumulator."""
+    assert "function _completionNotificationPreviewText" in MESSAGES_JS
+    assert "String(msgContent(lastAssistantMessage)||'').trim()" in MESSAGES_JS
+    assert "_assistantTurnAnchorSettledFinalAnswer" in MESSAGES_JS
+    done_block = _source_between("source.addEventListener('done'", "source.addEventListener('stream_end'")
+    assert "let lastAsst=null;" in done_block
+    assert "d.session.messages" in done_block
+    assert "liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText" in done_block
 
 
 def test_completion_notification_fires_when_tab_was_hidden_during_stream():

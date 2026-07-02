@@ -116,7 +116,7 @@ def test_576_panel_restore_gated_on_workspace():
 
 def test_576_restore_happens_after_load_session():
     """boot.js: loadSession() must come before the panel restore guard."""
-    load_pos    = BOOT_JS.find("await loadSession(saved)")
+    load_pos    = BOOT_JS.find("await loadSession(saved, {preserveActiveInput:true})")
     restore_pos = BOOT_JS.find("panelPref")
     assert load_pos != -1, "loadSession call not found in boot.js"
     assert restore_pos != -1, "workspace panel restore guard not found"
@@ -177,13 +177,15 @@ def test_590_transcribing_status_shown_before_fetch():
 
 
 def test_590_recording_stops_before_transcribe():
-    """boot.js: _setRecording(false) must fire in onstop before _transcribeBlob."""
-    onstop_start = BOOT_JS.find("mediaRecorder.onstop")
-    assert onstop_start != -1, "mediaRecorder.onstop not found"
-    onstop_body = BOOT_JS[onstop_start:onstop_start + 400]
+    """boot.js: _setRecording(false) must fire in onstop before the pinned send path."""
+    onstop_start = BOOT_JS.find("recorder.onstop")
+    assert onstop_start != -1, "recorder.onstop not found"
+    onstop_body = BOOT_JS[onstop_start:onstop_start + 700]
     rec_pos = onstop_body.find("_setRecording(false)")
     blob_pos = onstop_body.find("_transcribeBlob(")
-    assert rec_pos != -1 and blob_pos != -1
-    assert rec_pos < blob_pos, (
-        "_setRecording(false) must come before _transcribeBlob so mic icon clears immediately"
+    raw_pos = onstop_body.find("_sendRawAudio(")
+    send_pos = raw_pos if raw_pos != -1 and (blob_pos == -1 or raw_pos < blob_pos) else blob_pos
+    assert rec_pos != -1 and send_pos != -1
+    assert rec_pos < send_pos, (
+        "_setRecording(false) must come before the pinned send path so the mic icon clears immediately"
     )

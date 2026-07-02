@@ -46,6 +46,19 @@ def test_archive_action_repaints_sidebar_before_full_refresh():
     assert helper_body.index(api_call) < helper_body.index(optimistic) < helper_body.index(cached_render) < helper_body.index(full_refresh)
 
 
+def test_archive_action_clears_saved_session_pointer_for_archived_current_session():
+    """Archiving the saved active session should not leave boot localStorage stale."""
+    helper_body = _function_block(SESSIONS_JS, "_archiveSession")
+    stale_saved_pointer_guard = (
+        "try{ if(archived&&session.session_id&&localStorage.getItem('hermes-webui-session')===session.session_id) "
+        "localStorage.removeItem('hermes-webui-session'); }catch(_){ }"
+    )
+
+    assert stale_saved_pointer_guard in helper_body
+    assert helper_body.index("if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;") < helper_body.index(stale_saved_pointer_guard)
+    assert helper_body.index(stale_saved_pointer_guard) < helper_body.index("showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));")
+
+
 def test_delete_action_repaints_sidebar_before_loading_remaining_sessions():
     """Delete should remove the row locally before loading replacement session data."""
     body = _function_block(SESSIONS_JS, "deleteSession")

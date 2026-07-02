@@ -164,6 +164,8 @@ def test_extension_status_reports_loaded_manifest_counts_and_urls(tmp_path, monk
             "effective_enabled": True,
             "can_toggle": True,
             "reload_required": True,
+            "storage_owned": False,
+            "settings_schema": [],
             "status": "enabled",
         },
         {
@@ -175,6 +177,8 @@ def test_extension_status_reports_loaded_manifest_counts_and_urls(tmp_path, monk
             "effective_enabled": False,
             "can_toggle": False,
             "reload_required": True,
+            "storage_owned": False,
+            "settings_schema": [],
             "status": "manifest_disabled",
         },
     ]
@@ -188,6 +192,72 @@ def test_extension_status_reports_loaded_manifest_counts_and_urls(tmp_path, monk
         "sidecar_count": 0,
     }
     assert status["warnings"] == []
+
+
+def test_extension_status_sanitizes_settings_schema_only_for_owned_storage(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "extensions.json").write_text(
+        json.dumps(
+            {
+                "extensions": [
+                    {
+                        "id": "settings-ok",
+                        "permissions": {"storage": {"owned": True}},
+                        "settings_schema": [
+                            {"key": "flag", "type": "boolean", "label": "Flag", "default": True},
+                            {"key": "name", "type": "string", "default": "Ada"},
+                            {"key": "ratio", "type": "number", "default": 1.5},
+                            {"key": "count", "type": "integer", "default": 2},
+                            {
+                                "key": "mode",
+                                "type": "enum",
+                                "options": [
+                                    {"value": "compact", "label": "Compact"},
+                                    "full",
+                                ],
+                                "default": "compact",
+                            },
+                            {"key": "secret", "type": "string", "sensitive": True, "default": "x"},
+                            {"key": "badtype", "type": "object", "default": {}},
+                            {"key": "bad_enum", "type": "enum", "options": [{"label": "No value"}]},
+                            {"key": "flag", "type": "boolean", "default": False},
+                            {"key": "bad_default", "type": "integer", "default": 1.2},
+                            {"key": "null_flag", "type": "boolean", "default": None},
+                            {"key": "null_name", "type": "string", "default": None},
+                        ],
+                    },
+                    {
+                        "id": "settings-denied",
+                        "permissions": {"storage": {"owned": False}},
+                        "settings_schema": [{"key": "flag", "type": "boolean", "default": True}],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import get_extension_config, get_extension_status
+
+    status = get_extension_status()
+    by_id = {entry["id"]: entry for entry in status["extensions"]}
+    assert by_id["settings-ok"]["storage_owned"] is True
+    assert [field["key"] for field in by_id["settings-ok"]["settings_schema"]] == ["flag", "name", "ratio", "count", "mode"]
+    assert by_id["settings-ok"]["settings_schema"][0]["default"] is True
+    assert by_id["settings-ok"]["settings_schema"][4]["options"] == [
+        {"value": "compact", "label": "Compact"},
+        {"value": "full", "label": "full"},
+    ]
+    assert by_id["settings-denied"]["storage_owned"] is False
+    assert by_id["settings-denied"]["settings_schema"] == []
+
+    config = get_extension_config()
+    config_by_id = {entry["id"]: entry for entry in config["extensions"]}
+    assert config_by_id["settings-ok"]["settings_schema"] == by_id["settings-ok"]["settings_schema"]
+    assert config_by_id["settings-denied"]["settings_schema"] == []
 
 
 def test_extension_status_ignores_non_dict_manifest_extensions_in_entry_count(
@@ -445,6 +515,13 @@ def test_extension_status_reports_sanitized_loopback_sidecars(tmp_path, monkeypa
             "origin": "http://127.0.0.1:17787",
             "health_path": "/health",
             "health_url": "http://127.0.0.1:17787/health",
+            "proxy": {
+                "available": True,
+                "consented": False,
+                "consent_required": True,
+                "path": "/api/extensions/desktop-companion/sidecar/",
+                "origin_changed": False,
+            },
         },
         {
             "id": "implicit-health",
@@ -453,6 +530,13 @@ def test_extension_status_reports_sanitized_loopback_sidecars(tmp_path, monkeypa
             "origin": "http://localhost:17788",
             "health_path": "/health",
             "health_url": "http://localhost:17788/health",
+            "proxy": {
+                "available": True,
+                "consented": False,
+                "consent_required": True,
+                "path": "/api/extensions/implicit-health/sidecar/",
+                "origin_changed": False,
+            },
         },
         {
             "id": "ipv6-loopback",
@@ -461,11 +545,91 @@ def test_extension_status_reports_sanitized_loopback_sidecars(tmp_path, monkeypa
             "origin": "http://[::1]:17789",
             "health_path": "/ready",
             "health_url": "http://[::1]:17789/ready",
+            "proxy": {
+                "available": True,
+                "consented": False,
+                "consent_required": True,
+                "path": "/api/extensions/ipv6-loopback/sidecar/",
+                "origin_changed": False,
+            },
         },
     ]
     assert status["counts"]["sidecars"] == 3
     assert status["manifest"]["sidecar_count"] == 3
     assert status["warnings"] == []
+
+
+def test_extension_status_reports_sidecar_proxy_consent_and_origin_change(tmp_path, monkeypatch):
+    state_dir = _use_extension_state_dir(monkeypatch, tmp_path)
+    root = tmp_path / "extensions"
+    root.mkdir()
+    manifest_file = root / "extensions.json"
+    manifest_file.write_text(
+        json.dumps(
+            {
+                "extensions": [
+                    {
+                        "id": "desktop-companion",
+                        "sidecar": {
+                            "type": "loopback",
+                            "origin": "http://127.0.0.1:17787",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "extension-overrides.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "disabled_extensions": [],
+                "sidecar_proxy_consents": {
+                    "desktop-companion": "http://127.0.0.1:17787",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import get_extension_status
+
+    current = get_extension_status()
+    assert current["sidecars"][0]["proxy"] == {
+        "available": True,
+        "consented": True,
+        "consent_required": False,
+        "path": "/api/extensions/desktop-companion/sidecar/",
+        "origin_changed": False,
+    }
+
+    manifest_file.write_text(
+        json.dumps(
+            {
+                "extensions": [
+                    {
+                        "id": "desktop-companion",
+                        "sidecar": {
+                            "type": "loopback",
+                            "origin": "http://127.0.0.1:17788",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    changed = get_extension_status()
+    assert changed["sidecars"][0]["proxy"] == {
+        "available": True,
+        "consented": False,
+        "consent_required": True,
+        "path": "/api/extensions/desktop-companion/sidecar/",
+        "origin_changed": True,
+    }
 
 
 def test_extension_status_skips_disabled_sidecar_entries(tmp_path, monkeypatch):
@@ -804,6 +968,7 @@ def test_set_extension_user_enabled_persists_override_and_reenables(tmp_path, mo
     assert json.loads((state_dir / "extension-overrides.json").read_text(encoding="utf-8")) == {
         "version": 1,
         "disabled_extensions": ["templates"],
+        "sidecar_proxy_consents": {},
     }
 
     enabled = set_extension_user_enabled("templates", True)
@@ -812,6 +977,66 @@ def test_set_extension_user_enabled_persists_override_and_reenables(tmp_path, mo
     assert json.loads((state_dir / "extension-overrides.json").read_text(encoding="utf-8")) == {
         "version": 1,
         "disabled_extensions": [],
+        "sidecar_proxy_consents": {},
+    }
+
+
+def test_set_extension_user_enabled_preserves_sidecar_proxy_consent(tmp_path, monkeypatch):
+    state_dir = _use_extension_state_dir(monkeypatch, tmp_path)
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "extensions.json").write_text(
+        json.dumps(
+            {
+                "extensions": [
+                    {
+                        "id": "templates",
+                        "scripts": ["templates.js"],
+                        "sidecar": {
+                            "type": "loopback",
+                            "origin": "http://127.0.0.1:17787",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "extension-overrides.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "disabled_extensions": [],
+                "sidecar_proxy_consents": {
+                    "templates": "http://127.0.0.1:17787",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "extensions.json")
+
+    from api.extensions import set_extension_user_enabled
+
+    disabled = set_extension_user_enabled("templates", False)
+    assert disabled["sidecars"] == []
+    assert json.loads((state_dir / "extension-overrides.json").read_text(encoding="utf-8")) == {
+        "version": 1,
+        "disabled_extensions": ["templates"],
+        "sidecar_proxy_consents": {
+            "templates": "http://127.0.0.1:17787",
+        },
+    }
+
+    enabled = set_extension_user_enabled("templates", True)
+    assert enabled["sidecars"][0]["proxy"]["consented"] is True
+    assert json.loads((state_dir / "extension-overrides.json").read_text(encoding="utf-8")) == {
+        "version": 1,
+        "disabled_extensions": [],
+        "sidecar_proxy_consents": {
+            "templates": "http://127.0.0.1:17787",
+        },
     }
 
 
@@ -933,7 +1158,7 @@ def test_extension_state_recursion_error_fails_safe(tmp_path, monkeypatch):
 
     monkeypatch.setattr(extensions.json, "loads", raise_recursion_error)
     state = extensions._load_extension_state({"warnings": []})
-    assert state == {"version": 1, "disabled_extensions": []}
+    assert state == {"version": 1, "disabled_extensions": [], "sidecar_proxy_consents": {}}
 
     diagnostics = {"warnings": []}
     extensions._load_extension_state(diagnostics)
@@ -993,6 +1218,7 @@ def test_set_extension_user_enabled_is_idempotent_and_preserves_stale_ids(tmp_pa
     assert json.loads((state_dir / "extension-overrides.json").read_text(encoding="utf-8")) == {
         "version": 1,
         "disabled_extensions": ["stale", "templates"],
+        "sidecar_proxy_consents": {},
     }
 
     status = set_extension_user_enabled("templates", True)
@@ -1000,6 +1226,7 @@ def test_set_extension_user_enabled_is_idempotent_and_preserves_stale_ids(tmp_pa
     assert json.loads((state_dir / "extension-overrides.json").read_text(encoding="utf-8")) == {
         "version": 1,
         "disabled_extensions": ["stale"],
+        "sidecar_proxy_consents": {},
     }
     assert status["warnings"] == [
         {"code": "extension_state_unknown_ids", "source": "extension_state"}

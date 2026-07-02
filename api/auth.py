@@ -1,7 +1,7 @@
 """
 Hermes Web UI -- optional authentication.
 Off by default. Enable by setting HERMES_WEBUI_PASSWORD, configuring a
-password in Settings, or registering passkeys and then going passwordless.
+password in Settings, registering passkeys, or configuring native OIDC SSO.
 """
 import hashlib
 import hmac
@@ -14,8 +14,9 @@ import secrets
 import tempfile
 import threading
 import time
+from pathlib import Path
 
-from api.config import STATE_DIR, load_settings
+from api.config import STATE_DIR, get_config, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ def _resolve_session_ttl() -> int:
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
+    '/api/auth/oidc/start', '/api/auth/oidc/callback',
     '/api/auth/passkey/options', '/api/auth/passkey/login',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
@@ -85,6 +87,18 @@ def _resolve_cookie_name() -> str:
     return COOKIE_NAME
 
 
+def _warn_auth_persistence_failure(prefix: str, artifact: Path, exc: Exception, consequence: str) -> None:
+    logger.warning(
+        '%s at %s (STATE_DIR=%s): %s: %s; %s',
+        prefix,
+        artifact,
+        STATE_DIR,
+        exc.__class__.__name__,
+        exc,
+        consequence,
+    )
+
+
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
 
@@ -95,29 +109,52 @@ def _load_sessions() -> dict[str, object]:
     blocked by a corrupt or missing sessions file.
     """
     try:
-        if _SESSIONS_FILE.exists():
-            data = json.loads(_SESSIONS_FILE.read_text(encoding='utf-8'))
-            if not isinstance(data, dict):
-                raise ValueError('malformed sessions file — expected dict')
-            now = time.time()
-            sessions: dict[str, object] = {}
-            for token, entry in data.items():
-                if not isinstance(token, str):
-                    continue
-                raw_expiry = entry.get('expiry') if isinstance(entry, dict) else entry
-                if raw_expiry is None:
-                    continue
-                try:
-                    expiry = float(raw_expiry)
-                except (TypeError, ValueError):
-                    continue
-                if expiry > now:
-                    sessions[token] = entry
-            return sessions
+        if not _SESSIONS_FILE.exists():
+            return {}
+        raw = _SESSIONS_FILE.read_text(encoding='utf-8')
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError('malformed sessions file: expected dict')
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth session store read failed',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        _warn_auth_persistence_failure(
+            'Ignoring malformed auth session store',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
     except Exception as e:
-        logger.debug("Failed to load sessions file, starting fresh: %s", e)
-    return {}
+        _warn_auth_persistence_failure(
+            'Ignoring malformed auth session store',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
 
+    now = time.time()
+    sessions: dict[str, object] = {}
+    for token, entry in data.items():
+        if not isinstance(token, str):
+            continue
+        raw_expiry = entry.get('expiry') if isinstance(entry, dict) else entry
+        if raw_expiry is None:
+            continue
+        try:
+            expiry = float(raw_expiry)
+        except (TypeError, ValueError):
+            continue
+        if expiry > now:
+            sessions[token] = entry
+    return sessions
 
 def _save_sessions(sessions: dict[str, object]) -> None:
     """Atomically persist sessions to STATE_DIR/.sessions.json (0600).
@@ -140,7 +177,12 @@ def _save_sessions(sessions: dict[str, object]) -> None:
                 pass
             raise
     except Exception as e:
-        logger.debug("Failed to persist sessions: %s", e)
+        _warn_auth_persistence_failure(
+            'Auth session persistence failed',
+            _SESSIONS_FILE,
+            e,
+            'keeping the in-process session table available',
+        )
 
 
 # Active sessions: token -> expiry timestamp or metadata dict (persisted across restarts via STATE_DIR)
@@ -341,15 +383,39 @@ def _load_key(filename: str) -> bytes:
             raw = key_file.read_bytes()
             if len(raw) >= 32:
                 return raw[:32]
-    except OSError:
-        logger.debug("Failed to read key %s", filename)
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth key read failed',
+            key_file,
+            e,
+            'generating a new key and continuing',
+        )
+    except Exception as e:
+        _warn_auth_persistence_failure(
+            'Auth key read failed',
+            key_file,
+            e,
+            'generating a new key and continuing',
+        )
     key = secrets.token_bytes(32)
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         key_file.write_bytes(key)
         key_file.chmod(0o600)
-    except OSError:
-        logger.debug("Failed to persist key %s", filename)
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth key persistence failed',
+            key_file,
+            e,
+            'returning the generated key so startup can continue',
+        )
+    except Exception as e:
+        _warn_auth_persistence_failure(
+            'Auth key persistence failed',
+            key_file,
+            e,
+            'returning the generated key so startup can continue',
+        )
     return key
 
 
@@ -488,9 +554,68 @@ def are_passkeys_enabled() -> bool:
         return False
 
 
+def is_oidc_auth_enabled() -> bool:
+    """True if native OIDC login is configured for WebUI sessions."""
+    try:
+        from api.auth_oidc import is_oidc_enabled
+
+        return is_oidc_enabled()
+    except Exception as exc:
+        logger.debug("Failed to inspect OIDC availability: %s", exc)
+        return False
+
+
+def get_oidc_startup_warning() -> str | None:
+    """Return a startup warning when OIDC auth is only partially configured."""
+    try:
+        cfg = get_config()
+        raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+    except Exception:
+        logger.debug("Failed to read webui_oidc config", exc_info=True)
+        raw = {}
+
+    def pick(name: str, env_name: str) -> str:
+        env_value = os.getenv(env_name)
+        value = env_value if env_value is not None else raw.get(name)
+        return str(value or "").strip()
+
+    issuer = bool(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER"))
+    client_id = bool(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID"))
+    allow_claim = bool(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM"))
+    allow_values = bool(pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES"))
+
+    if not any((issuer, client_id, allow_claim, allow_values)):
+        return None
+    if issuer and client_id and allow_claim and allow_values:
+        return None
+
+    missing = []
+    if not issuer:
+        missing.append("issuer")
+    if not client_id:
+        missing.append("client_id")
+    if not allow_claim:
+        missing.append("allow_claim")
+    if not allow_values:
+        missing.append("allow_values")
+
+    joined = ", ".join(missing)
+    return (
+        "Native OIDC login is only partially configured; missing "
+        f"{joined}. The WebUI will not enable OIDC auth until all four fields are set."
+    )
+
+
 def is_auth_enabled() -> bool:
-    """True if password auth, multi-account password auth, or passkey-only auth is configured."""
-    return is_password_auth_enabled() or accounts_configured() or are_passkeys_enabled()
+    """True if password auth, multi-account password auth, passkeys, or OIDC login is configured."""
+    return (
+        is_password_auth_enabled()
+        or accounts_configured()
+        or are_passkeys_enabled()
+        or is_oidc_auth_enabled()
+    )
 
 
 def verify_password(plain: str) -> bool:

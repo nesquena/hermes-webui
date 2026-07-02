@@ -226,8 +226,9 @@ def test_webhook_state_projection_preserves_archived_sidecar(monkeypatch, tmp_pa
     assert row["title"] == "Webhook Session"
     assert row["source_tag"] == "webhook"
     assert row["raw_source"] == "webhook"
-    assert row["session_source"] == "other"
+    assert row["session_source"] == "webhook"
     assert row["source_label"] == "Webhook"
+    assert row["project_id"]
     assert row["is_cli_session"] is False
     assert row["archived"] is True
 
@@ -248,8 +249,9 @@ def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
         "archived": True,
         "source_tag": "webhook",
         "raw_source": "webhook",
-        "session_source": "other",
+        "session_source": "webhook",
         "source_label": "Webhook",
+        "project_id": "webhook-project",
         "is_cli_session": False,
     }
 
@@ -282,6 +284,7 @@ def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
     assert len(matching) == 1
     assert matching[0]["archived"] is True
     assert matching[0]["source_tag"] == "webhook"
+    assert matching[0]["default_hidden"] is True
     assert matching[0]["is_cli_session"] is False
 
 

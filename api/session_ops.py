@@ -6,6 +6,7 @@ Behavior parity reference: gateway/run.py:_handle_*_command in
 the hermes-agent repo.
 """
 from __future__ import annotations
+import json
 import logging
 from typing import Any
 
@@ -15,6 +16,36 @@ from api.models import get_session, SESSIONS
 logger = logging.getLogger(__name__)
 
 AUTO_TITLE_LABELS = {'untitled', 'new chat'}
+
+
+def _live_active_stream_id(session) -> str | None:
+    """Return session.active_stream_id ONLY if that stream is live in THIS
+    process; else None.
+
+    After a restart/crash the persisted active_stream_id survives in the
+    session JSON but the in-memory STREAMS / ACTIVE_RUNS that actually drive a
+    live turn were wiped. Exposing that dead id (e.g. via /api/session/status to
+    the hidden-tab poller) would make a client attach its renderer to a stream
+    that never emits — a permanent fake "thinking" state. Liveness test mirrors
+    routes._clear_stale_stream_state: live iff present in STREAMS (open SSE
+    channel) or ACTIVE_RUNS (worker bookkeeping).
+    """
+    stream_id = getattr(session, 'active_stream_id', None)
+    if not stream_id:
+        return None
+    try:
+        from api import config as _cfg
+        with _cfg.STREAMS_LOCK:
+            if stream_id in _cfg.STREAMS:
+                return stream_id
+        with _cfg.ACTIVE_RUNS_LOCK:
+            if stream_id in (_cfg.ACTIVE_RUNS or {}):
+                return stream_id
+    except Exception:
+        # On any introspection failure, fail SAFE (report no live stream) rather
+        # than surfacing a possibly-stale id.
+        return None
+    return None
 
 
 def session_has_manual_title(session) -> bool:
@@ -65,6 +96,129 @@ def _truncation_watermark_for(messages):
         return float(history[-1].get('timestamp') or 0)
     except (AttributeError, TypeError, ValueError):
         return 0.0
+
+
+def truncate_context_for_display_keep(
+    context_messages: list | None,
+    full_messages: list | None,
+    keep: int,
+) -> list:
+    """Align model context with display prefix ``full_messages[:keep]``."""
+    if keep <= 0:
+        return []
+    ctx = context_messages if isinstance(context_messages, list) else []
+    msgs = full_messages if isinstance(full_messages, list) else []
+    if not ctx:
+        return []
+    if len(ctx) <= len(msgs):
+        return ctx[:keep]
+    if len(msgs) == 0:
+        return []
+
+    def _row_signature(row: Any) -> tuple[str, ...] | None:
+        if not isinstance(row, dict):
+            return None
+        tool_calls = row.get('tool_calls')
+        tool_calls_sig = json.dumps(tool_calls, sort_keys=True, default=str) if tool_calls else ''
+        return (
+            str(row.get('role') or ''),
+            str(row.get('content') or ''),
+            str(row.get('tool_call_id') or ''),
+            str(row.get('tool_use_id') or ''),
+            str(row.get('tool_name') or row.get('name') or ''),
+            tool_calls_sig,
+        )
+
+    def _first_match_from(message: Any, start_idx: int) -> tuple[int | None, int | None]:
+        msg_sig = _row_signature(message)
+        if msg_sig is None:
+            return None, None
+        msg_id = message.get('id')
+        msg_ts = message.get('timestamp')
+        weak_matches: list[int] = []
+        for idx in range(start_idx, len(ctx)):
+            context_row = ctx[idx]
+            context_sig = _row_signature(context_row)
+            if context_sig is None:
+                continue
+
+            context_id = context_row.get('id')
+            if context_id is not None and msg_id is not None:
+                if context_id == msg_id:
+                    return idx, None
+                continue
+
+            if context_sig != msg_sig:
+                continue
+
+            context_ts = context_row.get('timestamp')
+            if context_ts is not None and msg_ts is not None:
+                if context_ts == msg_ts:
+                    return idx, None
+                continue
+
+            weak_matches.append(idx)
+            if len(weak_matches) > 1:
+                return None, weak_matches[0]
+        return (weak_matches[0], None) if len(weak_matches) == 1 else (None, None)
+
+    matches = [None] * len(msgs)
+    ambiguous_matches = [None] * len(msgs)
+    next_ctx_idx = 0
+    for msg_idx, message in enumerate(msgs):
+        match_idx, ambiguous_idx = _first_match_from(message, next_ctx_idx)
+        matches[msg_idx] = match_idx
+        ambiguous_matches[msg_idx] = ambiguous_idx
+        if match_idx is not None:
+            next_ctx_idx = match_idx + 1
+
+    # Cut at the first unkept display turn, or fallback to the last kept turn
+    # if the boundary is not directly alignable.
+    if keep < len(msgs):
+        last_kept = None
+        if keep > 0:
+            last_kept = matches[keep - 1]
+        first_unkept = matches[keep]
+        if first_unkept is not None:
+            if (
+                last_kept is not None
+                and isinstance(msgs[keep - 1], dict)
+                and msgs[keep - 1].get('role') == 'user'
+            ):
+                return ctx[:last_kept + 1]
+            return ctx[:first_unkept]
+        if last_kept is not None:
+            ambiguous_first_unkept = ambiguous_matches[keep]
+            if (
+                ambiguous_first_unkept is not None
+                and isinstance(msgs[keep - 1], dict)
+                and msgs[keep - 1].get('role') != 'user'
+            ):
+                return ctx[:ambiguous_first_unkept]
+            return ctx[:last_kept + 1]
+
+    # Final fallback preserves #5096 behavior when alignment is unreliable.
+    prefix_len = max(0, len(ctx) - len(msgs))
+    prefix = ctx[:prefix_len]
+    suffix = ctx[prefix_len:]
+    return prefix + suffix[:keep]
+
+
+def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
+    """Truncate display + context; set watermark/boundary. Returns old counts."""
+    full_messages = list(session.messages or [])
+    old_msg_count = len(full_messages)
+    old_ctx_count = len(getattr(session, 'context_messages', None) or [])
+    session.messages = full_messages[:keep]
+    if isinstance(getattr(session, 'context_messages', None), list):
+        session.context_messages = truncate_context_for_display_keep(
+            session.context_messages,
+            full_messages,
+            keep,
+        )
+    session.truncation_watermark = _truncation_watermark_for(session.messages)
+    session.truncation_boundary = session.truncation_watermark
+    return old_msg_count, old_ctx_count
 
 
 def retry_last(session_id: str) -> dict[str, Any]:
@@ -202,6 +356,22 @@ def session_status(session_id: str) -> dict[str, Any]:
         'created_at': s.created_at,
         'updated_at': s.updated_at,
         'agent_running': bool(getattr(s, 'active_stream_id', None)),
+        # Expose the stream id itself (not just the agent_running bool) so a
+        # hidden-tab poller can attach the live renderer to a server-initiated
+        # turn (self-wake / cron / restart hook) without opening the persistent
+        # per-session SSE while the tab is hidden. See messages.js hidden-tab
+        # active-stream poll. Additive field — existing consumers ignore it.
+        #
+        # CRITICAL: only expose a stream id that is actually LIVE in this
+        # process. After a restart/crash the persisted active_stream_id is stale
+        # (the in-memory STREAMS/ACTIVE_RUNS were wiped) — handing that dead id
+        # to the poller would make it attach a renderer to a stream that never
+        # produces tokens (a permanent fake "thinking" state). Mirror
+        # _clear_stale_stream_state's liveness test: a stream counts as live
+        # only if it's in STREAMS (SSE channel open) or ACTIVE_RUNS (worker
+        # bookkeeping). Otherwise report None so the poller waits for a REAL
+        # server_turn_started instead of latching a ghost.
+        'active_stream_id': _live_active_stream_id(s),
         'input_tokens': inp,
         'output_tokens': out,
         'total_tokens': inp + out,

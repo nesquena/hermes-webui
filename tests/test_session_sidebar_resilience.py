@@ -41,21 +41,37 @@ def test_sessions_and_projects_load_independently_so_projects_failure_cannot_bla
     block_end = src.find("async function _drainRenderSessionListQueue", block_start)
     assert block_end > block_start
     block = src[block_start:block_end]
+    helper_start = src.find("async function _loadSidebarSessionListPayload")
+    assert helper_start > 0
+    helper_end = src.find("async function _drainRenderSessionListQueue", helper_start)
+    assert helper_end > helper_start
+    helper = src[helper_start:helper_end]
 
     assert "Promise.all" not in block
-    assert "api('/api/sessions' + sessionListQS" in block
-    assert "try{\n      const projectQS = _showAllProfiles ? '?all_profiles=1' : '';\n      projData = await api('/api/projects' + projectQS" in block
-    assert "console.warn('renderProjectsList'," in block
+    assert "_loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)" in block
+    assert "const projectPromise = (async() => {" in helper
+    assert "return await api('/api/projects' + projectQS,{timeoutToast:false});" in helper
+    assert "console.warn('renderProjectsList',projectError);" in helper
+    assert "const projData = await projectPromise;" in helper
     assert "_applySessionListPayload(sessData,projData)" in block
 
 
-def test_sessions_api_uses_longer_timeout_and_timeout_retry_for_boot_refresh():
+def test_sessions_api_uses_longer_timeout_and_timeout_retry_for_boot_refresh_only():
     sessions_src = _sessions_js()
     workspace_src = _workspace_js()
+    helper_start = sessions_src.find("async function _loadSidebarSessionListPayload")
+    assert helper_start > 0
+    helper_end = sessions_src.find("async function _drainRenderSessionListQueue", helper_start)
+    assert helper_end > helper_start
+    helper = sessions_src[helper_start:helper_end]
 
-    assert "timeoutMs:_sessionListHasLoadedOnce?30000:_SESSION_LIST_BOOT_TIMEOUT_MS" in sessions_src
-    assert "retryTimeouts:true" in sessions_src
-    assert "retryStatuses:[502,503,504]" in sessions_src
+    assert "const sessionRequestOpts={timeoutToast:false};" in sessions_src
+    assert "if(!_sessionListHasLoadedOnce){" in sessions_src
+    assert "sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;" in sessions_src
+    assert "const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);" in helper
+    assert "api('/api/sessions' + sessionListQS,{timeoutToast:false})" not in helper
+    assert "sessionRequestOpts.retryTimeouts=true" in sessions_src
+    assert "sessionRequestOpts.retryStatuses=[502,503,504]" in sessions_src
     assert "retryTimeouts" in workspace_src
     assert "retryStatuses" in workspace_src
 

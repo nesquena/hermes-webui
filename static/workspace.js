@@ -4,6 +4,7 @@ async function api(path,opts={}){
   const url=new URL(rel,document.baseURI||location.href);
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
+  const redirect401=opts.redirect401!==false;
   const maxAttempts=Object.prototype.hasOwnProperty.call(opts,'retries')?Math.max(0,Number(opts.retries)||0)+1:3;
   const retryTimeouts=opts.retryTimeouts===true;
   const retryStatuses=Array.isArray(opts.retryStatuses)?opts.retryStatuses.map(Number).filter(Number.isFinite):[];
@@ -21,6 +22,7 @@ async function api(path,opts={}){
       const fetchOpts={...opts};
       delete fetchOpts.timeoutMs;
       delete fetchOpts.timeoutToast;
+      delete fetchOpts.redirect401;
       delete fetchOpts.retries;
       delete fetchOpts.retryTimeouts;
       delete fetchOpts.retryStatuses;
@@ -43,7 +45,11 @@ async function api(path,opts={}){
           // 401 means the auth session expired. Redirect to login so the user can
           // re-authenticate. This is especially important for iOS PWA (standalone mode)
           // and for subpath mounts like /hermes/, where /login escapes to the site root.
-          if(res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
+          if(res.status===401){
+            if(redirect401) window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);
+            // Callers can opt out of navigation and handle the unauthenticated state themselves.
+            return;
+          }
           const text=await res.text();
           // Parse JSON error body and surface the human-readable message,
           // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
@@ -283,6 +289,7 @@ async function authorizeWorkspaceEscapeNavigation(item){
 
 let _workspacePanelActiveTab = 'files';
 let _renderSessionArtifactsTimer = null;
+let _workspaceTodosLastRenderedHash = null;
 
 function _setWorkspacePanelTabDataset(){
   const panel = document.querySelector('.rightpanel');
@@ -295,6 +302,35 @@ function scheduleRenderSessionArtifacts(){
     _renderSessionArtifactsTimer = null;
     renderSessionArtifacts();
   }, 100);
+}
+
+function _workspaceTodosHash(items){
+  if(!Array.isArray(items)) return '';
+  let h=items.length+'|';
+  for(let i=0;i<items.length;i++){
+    const t=items[i]||{};
+    h+=String(t.id==null?'':t.id)+'\x1f'+String(t.content==null?(t.text==null?'':t.text):t.content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
+  }
+  return h;
+}
+
+function _workspaceTodosTabIsActive(){
+  if(typeof window==='undefined'||window._workspaceTodosTab!==true) return false;
+  if(typeof document==='undefined') return false;
+  const rightPanel=document.querySelector('.rightpanel');
+  if(!rightPanel||!rightPanel.dataset||rightPanel.dataset.activeTab!=='todos') return false;
+  const tab=document.getElementById('workspaceTodosTab');
+  const panel=document.getElementById('workspaceTodosPanel');
+  return !!(tab&&panel&&!tab.hidden&&!panel.hidden);
+}
+
+function _resetWorkspaceTodosRenderCache(){
+  _workspaceTodosLastRenderedHash=null;
+}
+
+function _refreshWorkspacePanelTodos(){
+  if(!_workspaceTodosTabIsActive()) return;
+  _loadWorkspacePanelTodos();
 }
 
 if(typeof document !== 'undefined'){
@@ -342,25 +378,10 @@ function _loadWorkspacePanelTodos(){
     }
   }catch(e){ todos = []; }
   if(!todos.length){
-    panel.innerHTML = '<div style="padding:24px 12px;text-align:center;color:var(--muted);font-size:12px">No active tasks</div>';
+    panel.innerHTML = renderTodoEmptyState({centered:true});
     return;
   }
-  const statusIcon = (s) => {
-    if(s === 'completed') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
-    if(s === 'in_progress') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
-    if(s === 'cancelled') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-    // pending
-    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg>';
-  };
-  const items = todos.map(t => {
-    const s = t.status || 'pending';
-    const isDone = s === 'completed' || s === 'cancelled';
-    return `<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">`+
-      `<span style="flex-shrink:0;margin-top:2px">${statusIcon(s)}</span>`+
-      `<span style="font-size:12px;color:${isDone?'var(--muted)':'var(--text)'};text-decoration:${s==='cancelled'?'line-through':'none'}">${_escHtml(t.content||t.text||'')}</span>`+
-      `</div>`;
-  }).join('');
-  panel.innerHTML = `<div style="padding:4px 0">${items}</div>`;
+  panel.innerHTML = renderTodoRows(todos, {metadata:true});
 }
 
 function _escHtml(s){
@@ -757,7 +778,7 @@ const MD_PREVIEW_RICH_RENDER_MAX_BYTES = 256 * 1024;
 const MD_PREVIEW_RICH_RENDER_MAX_LINES = 5000;
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
-  '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
+  '.doc','.xls','.ppt','.odt','.ods','.odp',
   '.zip','.tar','.gz','.bz2','.7z','.rar',
   '.exe','.dmg','.pkg','.deb','.rpm',
   '.woff','.woff2','.ttf','.otf','.eot',
@@ -861,6 +882,10 @@ function forceRenderMarkdownPreview(){
 let _previewCurrentPath = '';  // relative path of currently previewed file
 let _previewCurrentMode = '';  // 'code' | 'csv' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
+let _previewServerEditable = null;  // backend editability metadata when available
+let _previewSaveRoute = '/api/file/save';  // current save adapter for the open preview
+let _previewOfficeFormat = '';  // current claimed Office format, if any
+let _previewPreviewKind = '';  // preview family returned by the backend
 
 function showPreview(mode){
   // mode: 'code' | 'csv' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
@@ -887,7 +912,9 @@ function updateEditBtn(){
   const btn=$('btnEditFile');
   if(!btn)return;
   const editable = !_workspacePathIsReadOnly(_previewCurrentPath)
-    && (_previewCurrentMode==='code'||_previewCurrentMode==='md'||_previewCurrentMode==='csv');
+    && (_previewServerEditable===null
+      ? (_previewCurrentMode==='code'||_previewCurrentMode==='md'||_previewCurrentMode==='csv')
+      : !!_previewServerEditable);
   btn.style.display = editable?'':'none';
   const editing = $('previewEditArea').style.display!=='none';
   btn.innerHTML = editing ? `&#128190; ${t('save')}` : `&#9998; ${t('edit')}`;
@@ -902,23 +929,34 @@ async function toggleEditMode(){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
+  if(!editing && _previewServerEditable===false){
+    showToast('This Office document is preview-only.', 3000, 'error');
+    return;
+  }
   if(editing){
     // Save
     if(!S.session||!_previewCurrentPath)return;
     const content=$('previewEditArea').value;
     try{
-      await api('/api/file/save',{method:'POST',body:JSON.stringify({
+      const saved=await api(_previewSaveRoute||'/api/file/save',{method:'POST',body:JSON.stringify({
         session_id:S.session.session_id, path:_previewCurrentPath, content
       })});
+      const savedContent=saved&&typeof saved.content==='string'?saved.content:content;
+      if(saved && typeof saved.editable==='boolean') _previewServerEditable = saved.editable;
+      if(saved && saved.preview_kind) _previewPreviewKind = saved.preview_kind;
+      if(saved && saved.office_format) _previewOfficeFormat = saved.office_format;
+      if(saved && saved.preview_kind==='office' && saved.office_format==='docx'){
+        _previewSaveRoute = '/api/file/office-save';
+      }
       _previewDirty=false;
       // Update read-only views AND the cached raw content so a later
       // "Render as markdown anyway" force-render reflects the just-saved text
       // (not the stale pre-edit fetch). #3378 review (Codex).
-      _previewRawContent = content;
+      _previewRawContent = savedContent;
       _previewRawContentPath = _previewCurrentPath;
-      if(_previewCurrentMode==='code') $('previewCode').textContent=content;
-      else if(_previewCurrentMode==='csv') renderCsvPreviewContent(_previewCurrentPath, content);
-      else renderMarkdownPreviewContent({content});
+      if(_previewCurrentMode==='code') $('previewCode').textContent=savedContent;
+      else if(_previewCurrentMode==='csv') renderCsvPreviewContent(_previewCurrentPath, savedContent);
+      else renderMarkdownPreviewContent({content:savedContent});
       $('previewEditArea').style.display='none';
       if(_previewCurrentMode==='code') $('previewCode').style.display='';
       else $('previewMd').style.display='';
@@ -1000,6 +1038,11 @@ async function openFile(path, opts={}){
     downloadFile(path);
     return;
   }
+
+  _previewServerEditable = null;
+  _previewSaveRoute = '/api/file/save';
+  _previewOfficeFormat = '';
+  _previewPreviewKind = '';
 
   $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
@@ -1092,6 +1135,14 @@ async function openFile(path, opts={}){
         // Server flagged this as binary content
         downloadFile(path);
         return;
+      }
+      if(data.preview_kind==='office'){
+        _previewRawContent = data.content || '';
+        _previewRawContentPath = path;
+        _previewServerEditable = typeof data.editable === 'boolean' ? data.editable : null;
+        _previewPreviewKind = data.preview_kind || '';
+        _previewOfficeFormat = data.office_format || '';
+        _previewSaveRoute = data.preview_kind==='office' ? '/api/file/office-save' : '/api/file/save';
       }
       renderCodePreviewContent(path, data.content);
   }catch(e){

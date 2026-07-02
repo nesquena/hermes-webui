@@ -70,7 +70,7 @@ from shutil import which
 BROWSER_GLOBALS = [
     "window", "document", "console", "localStorage", "sessionStorage", "setTimeout",
     "clearTimeout", "setInterval", "clearInterval", "requestAnimationFrame",
-    "cancelAnimationFrame", "queueMicrotask", "reportError", "fetch", "URL",
+    "cancelAnimationFrame", "requestIdleCallback", "cancelIdleCallback", "queueMicrotask", "reportError", "fetch", "URL",
     "URLSearchParams", "Blob", "File", "FileList", "FileReader", "FormData", "navigator",
     "location", "history", "alert", "prompt", "confirm", "EventSource", "WebSocket",
     "BroadcastChannel", "Image", "Audio", "MediaRecorder", "speechSynthesis",

@@ -46,22 +46,29 @@ function extractFunc(src, name) {
 }
 
 const funcNames = [
-  '_anchorSceneMessageText',
-  '_anchorSceneCleanText',
-  '_anchorSceneTextKey',
-  '_anchorSceneSafePayload',
-  '_anchorSceneToolId',
-  '_anchorSceneToolName',
-  '_anchorSceneToolArgs',
-  '_anchorSceneStringPayload',
-  '_anchorSceneRowBase',
-  '_anchorSceneProseRow',
-  '_anchorSceneThinkingRow',
-  '_anchorSceneToolRowFromCall',
-  '_anchorSceneMessageReasoningText',
-  '_enrichSettledToolRowBodyFromLive',
-  '_anchorSceneRowsByMessageIndex',
-];
+	  '_anchorSceneMessageText',
+	  '_anchorSceneCleanText',
+	  '_anchorSceneTextKey',
+	  '_anchorSceneContentText',
+	  '_anchorSceneMessageHasContentToolUse',
+	  '_anchorSceneSafePayload',
+	  '_anchorSceneToolId',
+	  '_anchorSceneToolName',
+	  '_anchorSceneToolArgs',
+	  '_anchorSceneContentTool',
+	  '_anchorSceneStringPayload',
+	  '_anchorSceneRowBase',
+	  '_anchorSceneProseRow',
+	  '_anchorSceneThinkingRow',
+	  '_anchorSceneToolRowFromCall',
+	  '_anchorSceneToolRowName',
+	  '_anchorSceneToolRowsHaveCompatibleNames',
+	  '_anchorSceneMatchingContentToolRow',
+	  '_anchorSceneMessageReasoningText',
+	  '_anchorSceneRowsFromContentParts',
+	  '_enrichSettledToolRowBodyFromLive',
+	  '_anchorSceneRowsByMessageIndex',
+	];
 
 // Build a self-contained module: closure variables + all functions + runner
 let code = '(function() {\n';
@@ -331,4 +338,3 @@ def test_anonymous_tool_rows_get_distinct_row_ids(driver_path):
     assert len(set(row_ids)) == 2, f"anonymous tool rows collided on row_id: {row_ids}"
     seqs = [r.get("seq") for r in tool_rows]
     assert len(set(seqs)) == 2, f"anonymous tool rows collided on seq: {seqs}"
-

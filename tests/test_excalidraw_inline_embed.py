@@ -123,7 +123,13 @@ def test_excalidraw_called_after_render():
     """Verify loadExcalidrawInline is called by the consolidated post-render pass."""
     with open('static/ui.js') as f:
         src = f.read()
-    assert 'requestAnimationFrame(()=>postProcessRenderedMessages(inner))' in src
+    # Behavior assertion (#5338): post-render is now scheduled through
+    # _postProcessWithAnchorSuppression (which still calls postProcessRenderedMessages).
+    assert 'requestAnimationFrame(()=>_postProcessWithAnchorSuppression(' in src
+    _wrap = src.find('function _postProcessWithAnchorSuppression')
+    assert _wrap != -1, "post-render should be wrapped by _postProcessWithAnchorSuppression"
+    assert 'postProcessRenderedMessages(container)' in src[_wrap:_wrap + 500], \
+        "the wrapper must still invoke postProcessRenderedMessages"
     idx = src.find('function postProcessRenderedMessages')
     body = src[idx:idx + 500]
     assert 'loadExcalidrawInline(container)' in body, (

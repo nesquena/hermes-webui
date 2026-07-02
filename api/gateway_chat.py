@@ -12,6 +12,8 @@ from typing import Any
 
 from api.config import (
     CANCEL_FLAGS,
+    PENDING_GOAL_CONTINUATION,
+    STREAM_GOAL_RELATED,
     STREAMS,
     STREAMS_LOCK,
     STREAM_LAST_EVENT_ID,
@@ -20,9 +22,11 @@ from api.config import (
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
     coerce_reasoning_effort_for_model,
+    gateway_approval_unavailable_reason,
     gateway_supports_approval,
     register_active_run,
     unregister_active_run,
+    unregister_stream_owner,
     update_active_run,
 )
 from api.helpers import _redact_text, redact_session_data
@@ -297,6 +301,7 @@ def _run_gateway_runs_api_streaming(
             _effective_stream_attachments,
             _force_image_attachment_notice_on_agent_message,
             _run_image_attachment_notice_hook,
+            _strip_oob_blocks,
         )
 
         _agent_attachments = _effective_stream_attachments(attachments, session, session_id=session_id, stream_id=stream_id)
@@ -323,6 +328,8 @@ def _run_gateway_runs_api_streaming(
     except Exception:
         logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
         message_content = str(msg_text or "")
+        from api.streaming import _strip_oob_blocks
+
     instructions_parts = []
     conversation_history = []
     for entry in getattr(session, "context_messages", None) or []:
@@ -333,6 +340,7 @@ def _run_gateway_runs_api_streaming(
             continue
         content = entry.get("content")
         if content is not None:
+            content = _strip_oob_blocks(content)
             conversation_history.append({"role": role, "content": content})
     for entry in prefill_messages or []:
         if not isinstance(entry, dict):
@@ -347,6 +355,8 @@ def _run_gateway_runs_api_streaming(
             continue
         if role not in {"user", "assistant"}:
             continue
+        if content is not None:
+            content = _strip_oob_blocks(content)
         conversation_history.append({"role": role, "content": content})
     run_input = message_content
     if isinstance(run_input, list):
@@ -496,6 +506,21 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.save()
 
 
+def _cleanup_gateway_pending_mirror(session_id: str) -> None:
+    try:
+        from api.route_approvals import (
+            _approval_sse_notify_locked,
+            _lock as _approval_lock,
+            reconcile_gateway_pending_mirror_locked,
+        )
+
+        with _approval_lock:
+            head, total, _ = reconcile_gateway_pending_mirror_locked(session_id)
+            _approval_sse_notify_locked(session_id, head, total)
+    except Exception:
+        logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -505,6 +530,7 @@ def _run_gateway_chat_streaming(
     attachments=None,
     *,
     model_provider=None,
+    goal_related=False,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -516,6 +542,9 @@ def _run_gateway_chat_streaming(
     """
     q = STREAMS.get(stream_id)
     if q is None:
+        # Cancelled before the worker started; release the owner entry the route
+        # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
+        unregister_stream_owner(stream_id)
         return
     register_active_run(
         stream_id,
@@ -615,6 +644,15 @@ def _run_gateway_chat_streaming(
             prefill_messages = []
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
+        try:
+            from api.config import _main_model_request_overrides
+            _gw_overrides = _main_model_request_overrides(
+                cfg,
+                effective_model=model,
+                effective_provider=model_provider,
+            )
+        except Exception:
+            _gw_overrides = {}
         # Capability gate: use runs API when gateway advertises approval support.
         _use_runs_api = _gateway_use_runs_api_enabled(cfg) and gateway_supports_approval(base_url, api_key)
         if _use_runs_api:
@@ -623,6 +661,8 @@ def _run_gateway_chat_streaming(
                 body_extras["provider"] = model_provider
             if reasoning_effort is not None:
                 body_extras["reasoning_effort"] = reasoning_effort
+            if _gw_overrides.get("service_tier"):
+                body_extras["service_tier"] = _gw_overrides["service_tier"]
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
@@ -646,13 +686,19 @@ def _run_gateway_chat_streaming(
         else:
             # Legacy gateway path: emit unsupported approval notice once per session,
             # but only when the gateway genuinely lacks approval capability.
-            if not gateway_supports_approval(base_url, api_key):
+            approval_reason = gateway_approval_unavailable_reason(base_url, api_key)
+            if approval_reason is not None:
                 if not hasattr(s, "_approval_notice_emitted"):
                     s._approval_notice_emitted = False
                 if not s._approval_notice_emitted:
+                    approval_message = "Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this."
+                    approval_type = "approval_gateway_unsupported"
+                    if approval_reason == "unreachable":
+                        approval_type = "approval_gateway_offline"
+                        approval_message = "Gateway connection failed. Check that the connected Hermes gateway is running and reachable."
                     put_gateway_event("warning", {
-                        "type": "approval_gateway_unsupported",
-                        "message": "Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.",
+                        "type": approval_type,
+                        "message": approval_message,
                     })
                     s._approval_notice_emitted = True
 
@@ -709,6 +755,8 @@ def _run_gateway_chat_streaming(
                 body["provider"] = model_provider
             if reasoning_effort is not None:
                 body["reasoning_effort"] = reasoning_effort
+            if _gw_overrides.get("service_tier"):
+                body["service_tier"] = _gw_overrides["service_tier"]
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),
@@ -890,6 +938,55 @@ def _run_gateway_chat_streaming(
             s.model = model
             s.model_provider = model_provider
             s.save()
+        try:
+            from api.goals import evaluate_goal_after_turn, has_active_goal
+            from api.profiles import get_hermes_home_for_profile
+
+            profile_home = get_hermes_home_for_profile(getattr(s, "profile", None))
+            if goal_related and has_active_goal(session_id, profile_home=profile_home):
+                put_gateway_event("goal", {
+                    "session_id": session_id,
+                    "state": "evaluating",
+                    "message": "Evaluating goal progress…",
+                    "message_key": "goal_evaluating_progress",
+                })
+                decision = evaluate_goal_after_turn(
+                    session_id,
+                    assistant_text,
+                    user_initiated=True,
+                    profile_home=profile_home,
+                ) or {}
+                goal_message = str(decision.get("message") or "").strip()
+                if goal_message:
+                    put_gateway_event("goal", {
+                        "session_id": session_id,
+                        "state": "continuing" if decision.get("should_continue") else "idle",
+                        "message": goal_message,
+                        "message_key": decision.get("message_key") or (
+                            "goal_continuing" if goal_message else ""
+                        ),
+                        "message_args": decision.get("message_args") or [],
+                        "decision": decision,
+                    })
+                if decision.get("should_continue"):
+                    continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
+                    if continuation_prompt:
+                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        put_gateway_event("goal_continue", {
+                            "session_id": session_id,
+                            "continuation_prompt": continuation_prompt,
+                            "text": continuation_prompt,
+                            "message": goal_message,
+                            "message_key": decision.get("message_key") or "goal_continuing",
+                            "message_args": decision.get("message_args") or [],
+                            "decision": decision,
+                        })
+        except Exception as goal_exc:
+            logger.debug(
+                "Gateway goal continuation hook failed for session %s: %s",
+                session_id,
+                goal_exc,
+            )
         from api.streaming import _session_payload_with_full_messages
         gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
@@ -918,8 +1015,10 @@ def _run_gateway_chat_streaming(
                     _clear_gateway_pending_state(get_session(session_id), stream_id)
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
+            _cleanup_gateway_pending_mirror(session_id)
         with STREAMS_LOCK:
             CANCEL_FLAGS.pop(stream_id, None)
+            STREAM_GOAL_RELATED.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
             STREAM_REASONING_TEXT.pop(stream_id, None)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)

@@ -18,7 +18,7 @@ def _ensure_messages_loaded_body() -> str:
     # Window widened (#3326 added reload-width-hint handling inside this function,
     # pushing the carry-forward reassignment further down; #3790 added the
     # cold-load expand_renderable param + comment, pushing it further still).
-    return SESSIONS_JS[start: start + 3000]
+    return SESSIONS_JS[start: start + 4500]
 
 
 def test_ensure_messages_loaded_declares_msgs_with_let():

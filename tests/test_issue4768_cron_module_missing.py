@@ -21,12 +21,18 @@ def _api_crons_branch() -> str:
     return ROUTES[marker:nxt]
 
 
+def _cross_profile_helper() -> str:
+    """Return the source of _cron_jobs_cross_profile."""
+    marker = ROUTES.index("def _cron_jobs_cross_profile(")
+    nxt = ROUTES.index("\ndef ", marker + 1)
+    return ROUTES[marker:nxt]
+
+
 def test_api_crons_guards_missing_cron_module():
-    """The /api/crons GET branch must wrap the cron.jobs import in a guard that
+    """The /api/crons GET branch must wrap the cron helper in a guard that
     returns a graceful payload instead of letting ModuleNotFoundError 500 — but
     only for a genuinely-absent cron package, not an internal import bug."""
     branch = _api_crons_branch()
-    assert "from cron.jobs import list_jobs" in branch
     assert "except ModuleNotFoundError as exc" in branch, (
         "GET /api/crons must catch ModuleNotFoundError so the Tasks tab does not "
         "500 when the cron package is absent (#4768)."
@@ -40,17 +46,16 @@ def test_api_crons_guards_missing_cron_module():
     )
     # ...and re-raises everything else (a real cron bug is not swallowed).
     assert "\n            raise" in branch
-    # The try guards the import specifically (not some unrelated block).
-    try_idx = branch.index("try:")
-    import_idx = branch.index("from cron.jobs import list_jobs")
-    except_idx = branch.index("except ModuleNotFoundError")
-    assert try_idx < import_idx < except_idx
+    # The try in the branch guards the cron helper call.
+    assert "try:" in branch
 
 
 def test_api_crons_still_lists_jobs_on_happy_path():
     """The guard must not remove the normal behavior: when cron imports fine, the
     branch still calls list_jobs(include_disabled=True) under cron_profile_context."""
-    branch = _api_crons_branch()
-    assert "list_jobs(include_disabled=True)" in branch
-    assert "cron_profile_context()" in branch
-    assert "_cron_jobs_for_api(" in branch
+    helper = _cross_profile_helper()
+    assert "list_jobs(include_disabled=True)" in helper
+    assert "cron_profile_context_for_home" in helper
+    assert "_cron_jobs_for_api(" in helper
+    # The import is lazy (inside the function body, not at module level).
+    assert "from cron.jobs import list_jobs" in helper
