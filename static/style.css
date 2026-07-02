@@ -1472,7 +1472,15 @@
   .agent-activity-thinking[data-live-thinking="1"],
   .agent-activity-thinking[data-live-thinking="1"] *,
   .live-worklog[data-live-worklog-shell="1"],
-  .live-worklog[data-live-worklog-shell="1"] *{transition-property:none!important;transition-duration:0s!important;transition-delay:0s!important;}
+  .live-worklog[data-live-worklog-shell="1"] *,
+  #liveAssistantTurn .transparent-event-row,
+  #liveAssistantTurn .transparent-event-row *,
+  #liveAssistantTurn .transparent-event-controls,
+  #liveAssistantTurn .transparent-event-controls *,
+  #liveAssistantTurn .transparent-turn-footer,
+  #liveAssistantTurn .transparent-turn-footer *,
+  #liveAssistantTurn .transparent-detail-modes,
+  #liveAssistantTurn .transparent-detail-modes *{transition-property:none!important;transition-duration:0s!important;transition-delay:0s!important;}
   :root{--app-titlebar-safe-top:0px;}
   .pwa-standalone{overscroll-behavior:none;}
   .pwa-standalone body{-webkit-tap-highlight-color:transparent;}
@@ -3977,7 +3985,9 @@ body.resizing .sidebar{transition:none!important;}
 /* Only animate entrance for rows in the LIVE turn — putting the animation on the
    base row class replayed the whole transcript's shimmer on every renderMessages
    rebuild. (Trifecta finding V9.) */
-#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter .18s ease-out both;}
+/* Enter animation disabled to prevent flickering during token-by-token streaming.
+   New event rows appear instantly; recency-fade (data-transparent-fade) is unaffected. */
+#liveAssistantTurn .transparent-event-row{animation:none!important;}
 .transparent-event-row[data-event-type="thinking"]{
   background:transparent;
   border-color:transparent;
