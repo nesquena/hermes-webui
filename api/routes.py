@@ -8565,6 +8565,7 @@ from api.models import (
     _record_webui_zero_message_orphan_tombstone,
     _clear_webui_zero_message_orphan_tombstone,
     ensure_cron_project,
+    _profile_has_user_projects,
     is_cron_session,
     is_safe_session_id,
 )
@@ -23255,10 +23256,11 @@ def _handle_session_import_cli(handler, body):
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")
 
-    # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079)
+    # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079),
+    # gated on whether this profile has opted into project organization (#5379)
     cron_project_id = None
     if is_cron_session(sid, cli_source_tag):
-        cron_project_id = ensure_cron_project()
+        cron_project_id = ensure_cron_project(create=_profile_has_user_projects())
 
     if _read_only_view:
         session_payload = {

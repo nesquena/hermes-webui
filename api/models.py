@@ -4573,7 +4573,7 @@ CRON_PROJECT_NAME = 'Cron Jobs'
 _CRON_PROJECT_LOCK = threading.Lock()
 
 
-def ensure_cron_project() -> str:
+def ensure_cron_project(create: bool = True) -> str | None:
     """Return the project_id of the system "Cron Jobs" project for the active profile.
 
     Each profile gets its own "Cron Jobs" project so cron-spawned sessions in
@@ -4582,7 +4582,16 @@ def ensure_cron_project() -> str:
     `profile` field) is treated as belonging to whichever profile first calls
     this in a given install, then re-tagged.
 
-    Thread-safe and idempotent.  Returns a 12-char hex project_id string.
+    When `create` is False, only an EXISTING per-profile cron project is
+    resolved (exact tag, renamed-root alias, or legacy-untagged back-tag);
+    no new project is minted and None is returned instead. Callers gate
+    `create` on `_profile_has_user_projects()` so cron sessions don't force
+    a "Cron Jobs" chip onto installs that never opted into project
+    organization (#5379). Direct callers that omit `create` keep today's
+    unconditional-create behavior.
+
+    Thread-safe and idempotent.  Returns a 12-char hex project_id string, or
+    None if `create` is False and no existing cron project resolves.
     """
     from api.profiles import get_active_profile_name, _is_root_profile
 
@@ -4607,6 +4616,8 @@ def ensure_cron_project() -> str:
                 p['profile'] = active
                 save_projects(projects)
                 return p['project_id']
+        if not create:
+            return None
         # Otherwise create a new one tagged with the active profile.
         project_id = uuid.uuid4().hex[:12]
         projects.append({
@@ -4654,6 +4665,32 @@ def ensure_webhook_project() -> str:
         })
         save_projects(projects)
         return project_id
+
+
+def _profile_has_user_projects() -> bool:
+    """True if the active profile already has at least one real (non-system) project.
+
+    "Opted into project organization" means `load_projects()` contains a
+    project whose name is not a reserved system name (`CRON_PROJECT_NAME`,
+    `WEBHOOK_PROJECT_NAME`), tagged to the active profile or its renamed-root
+    alias. Profile/alias matching mirrors `ensure_cron_project`'s own lookup
+    so the two never disagree about which profile a project belongs to.
+
+    Read-only: never mutates projects.json, safe to call as often as needed.
+    """
+    from api.profiles import get_active_profile_name, _is_root_profile
+
+    active = get_active_profile_name() or 'default'
+    reserved = {CRON_PROJECT_NAME, WEBHOOK_PROJECT_NAME}
+    for p in load_projects():
+        if p.get('name') in reserved:
+            continue
+        row_profile = p.get('profile')
+        if row_profile == active:
+            return True
+        if _is_root_profile(row_profile or 'default') and _is_root_profile(active):
+            return True
+    return False
 
 
 def is_cron_session(session_id: str, source_tag: str | None = None) -> bool:
@@ -5553,11 +5590,17 @@ def _load_cli_sessions_uncached(
     # Memoize the cron project ID for this scan so we don't pay a lock-acquire +
     # disk-read of projects.json per cron session in the loop below.
     # Resolved lazily on the first cron session we encounter.
-    _cron_pid_cache = [None]  # list-as-cell so the closure can mutate
+    # [resolved, project_id_or_None] — a plain `[None]` sentinel can't tell
+    # "not yet resolved" apart from "resolved to None" (the gated-closed
+    # case), which would re-pay the load_projects() read on every cron row
+    # in a cron-heavy zero-user-project scan — the exact I/O blowup #4842
+    # fixed, reintroduced by this gate if left as a bare None check.
+    _cron_pid_cache: list = [False, None]
     def _cron_pid():
-        if _cron_pid_cache[0] is None:
-            _cron_pid_cache[0] = ensure_cron_project()
-        return _cron_pid_cache[0]
+        if not _cron_pid_cache[0]:
+            _cron_pid_cache[0] = True
+            _cron_pid_cache[1] = ensure_cron_project(create=_profile_has_user_projects())
+        return _cron_pid_cache[1]
 
     # Memoize the cron jobs.json job_id -> name map for this scan. The two row
     # loops below each looked up a cron job's friendly name by re-reading and
