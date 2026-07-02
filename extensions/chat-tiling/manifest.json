@@ -1,0 +1,76 @@
+{
+  "extensions": [
+    {
+      "id": "chat-tiling",
+      "name": "Chat Tiling",
+      "description": "Multi-session tiling layouts: split in 2, 4 corners, or 3×2 grid. Click sessions from the sidebar to open them in tiles.",
+      "version": "0.1.0",
+      "author": "ChonSong",
+      "scripts": [
+        "assets/tiling.js"
+      ],
+      "stylesheets": [
+        "assets/tiling.css"
+      ],
+      "capabilities": [
+        "manifest-bundle"
+      ],
+      "permissions": {
+        "dom": {
+          "owned": true,
+          "mutates_core_views": true
+        },
+        "storage": {
+          "owned": [
+            "hermes-ext-chat-tiling"
+          ]
+        },
+        "webui_api": {
+          "read": [
+            "session",
+            "sessions"
+          ],
+          "write": []
+        },
+        "network_external": false,
+        "filesystem": {
+          "arbitrary": false,
+          "serves_bundled_assets": true
+        },
+        "loopback_sidecar": false,
+        "native_host": false
+      },
+      "lifecycle": {
+        "webui_restart_required": false,
+        "sidecar_start_required": false,
+        "native_host_start_required": false,
+        "native_host_autostart": "none"
+      },
+      "settings_schema": [
+        {
+          "key": "default_layout",
+          "type": "enum",
+          "label": "Default layout",
+          "options": [
+            {"value": "2", "label": "2-column (horizontal split)"},
+            {"value": "4", "label": "4 corners (2×2 grid)"},
+            {"value": "6", "label": "6 tiles (3×2 grid)"}
+          ],
+          "default": "4"
+        },
+        {
+          "key": "auto_tile",
+          "type": "boolean",
+          "label": "Auto-tile on session click",
+          "default": true
+        },
+        {
+          "key": "show_sidebar_badges",
+          "type": "boolean",
+          "label": "Show tile count badges in sidebar",
+          "default": true
+        }
+      ]
+    }
+  ]
+}
