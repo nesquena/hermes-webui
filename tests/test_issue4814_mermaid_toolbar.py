@@ -361,6 +361,21 @@ def test_inline_wide_diagram_reads_readable_height_on_mobile(_driver_path):
     assert result["scale"] < 1.0
 
 
+def test_inline_tall_diagram_respects_viewport_cap_without_overflow_mismatch(_driver_path):
+    result = _run_node(_driver_path, {
+        "scenario": "wide-inline",
+        "width": 400,
+        "height": 2400,
+        "viewportWidth": 360,
+        "viewportHeight": 640,
+        "options": {"mode": "inline"},
+    })
+
+    assert _px(result["viewportHeight"]) == 448
+    assert result["scale"] < 0.25
+    assert _px(result["viewportHeight"]) == round(2400 * result["scale"])
+
+
 def test_zoom_fit_reset_and_wheel_update_state(_driver_path):
     result = _run_node(_driver_path, {"scenario": "zoom", "options": {"mode": "inline"}})
 
@@ -405,7 +420,8 @@ def test_lightbox_wide_diagram_fits_modal_envelope(_driver_path):
     })
 
     assert result["mode"] == "lightbox"
-    assert _px(result["viewportWidth"]) <= 324
+    expected_max_width = int(360 * 0.9)
+    assert _px(result["viewportWidth"]) <= expected_max_width
     assert _px(result["viewportWidth"]) > 0
     assert _px(result["viewportHeight"]) > 0
     assert result["scale"] < 0.1

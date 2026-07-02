@@ -1529,8 +1529,8 @@ function _mountMermaidViewer(svgEl, options = {}) {
   }
 
   function _minScale(){
-    if(mode !== 'lightbox') return _MERMAID_VIEWER_MIN_SCALE;
-    return Math.min(_MERMAID_VIEWER_MIN_SCALE, _rawFitScale(_viewportSize()));
+    if(mode === 'lightbox') return Math.min(_MERMAID_VIEWER_MIN_SCALE, _rawFitScale(_viewportSize()));
+    return Math.min(_MERMAID_VIEWER_MIN_SCALE, _inlineViewportHeight() / Math.max(1, box.height));
   }
 
   function _inlineViewportHeight(){
@@ -1684,7 +1684,7 @@ function _mountMermaidViewer(svgEl, options = {}) {
   } else {
     const initialHeight = _inlineViewportHeight();
     const readableScale = initialHeight / Math.max(1, box.height);
-    state.scale = Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, readableScale));
+    state.scale = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, readableScale));
     viewport.style.width = '100%';
     viewport.style.height = Math.max(1, Math.round(initialHeight)) + 'px';
   }
