@@ -211,9 +211,37 @@ def _deliver(deliveries: list[dict]) -> None:
                 )
         except Exception:
             logger.warning(
-                "kanban webui notifier: wakeup failed for session %s (task %s)",
+                "kanban webui notifier: wakeup failed for session %s (task %s) "
+                "— rewinding cursor so the event is retried next tick",
                 session_id, task_id, exc_info=True,
             )
+            # Rewind the DB cursor so the event is re-delivered on the next
+            # tick instead of being permanently lost. The in-memory dedup set
+            # is also cleared for this sub so the retry is not skipped.
+            try:
+                kb = _kb()
+                conn = kb.connect(board=board_slug)
+                try:
+                    kb.rewind_notify_cursor(
+                        conn,
+                        task_id=task_id,
+                        platform=sub["platform"],
+                        chat_id=sub["chat_id"],
+                        thread_id=sub.get("thread_id") or None,
+                        claimed_cursor=d["new_cursor"],
+                        old_cursor=d["old_cursor"],
+                    )
+                finally:
+                    conn.close()
+                task_key = f"{board_slug}:{task_id}:{sub['chat_id']}"
+                with _DELIVERED_LOCK:
+                    _DELIVERED_EVENTS.pop(task_key, None)
+            except Exception:
+                logger.warning(
+                    "kanban webui notifier: cursor rewind also failed for %s — "
+                    "event will be lost",
+                    task_id, exc_info=True,
+                )
 
         # If the task reached a truly terminal status, clean up the subscription
         task_terminal = task and task.status in _TERMINAL_STATUSES

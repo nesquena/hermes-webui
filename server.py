@@ -716,6 +716,11 @@ def main() -> None:
         except Exception:
             logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
         try:
+            from api.kanban_notifier import stop_notifier_thread
+            stop_notifier_thread()
+        except Exception:
+            logger.debug("Failed to stop kanban notifier thread during shutdown", exc_info=True)
+        try:
             from api.background_process import stop_session_channel_reaper
             stop_session_channel_reaper()
         except Exception:

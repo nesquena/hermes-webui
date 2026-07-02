@@ -195,6 +195,16 @@ class FakeKanbanDB:
         ]
         return before != len(conn.subs)
 
+    def rewind_notify_cursor(self, conn, *, task_id, platform, chat_id,
+                             thread_id=None, claimed_cursor=None, old_cursor=None):
+        for s in conn.subs:
+            if (s["task_id"] == task_id and s["platform"] == platform
+                    and s["chat_id"] == chat_id):
+                if s["last_event_id"] == claimed_cursor:
+                    s["last_event_id"] = old_cursor
+                    return True
+        return False
+
     @staticmethod
     def _normalize_board_slug(slug):
         if slug is None:
@@ -433,6 +443,71 @@ class TestDeliver:
             with patch("api.background_process._start_server_side_wakeup_turn") as mock_wakeup:
                 clean_notifier._deliver(deliveries)
                 mock_wakeup.assert_not_called()
+
+    def test_rewinds_cursor_on_delivery_failure(self, fake_kanban, clean_notifier):
+        """When _start_server_side_wakeup_turn raises, the DB cursor is
+        rewound so the event is retried on the next tick instead of
+        being permanently lost."""
+        fake_kanban.tasks = [FakeTask("t_1", "Test", "blocked", "w")]
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "blocked", {"reason": "x"}, 100),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        deliveries = clean_notifier._poll_once()
+        assert len(deliveries) == 1
+        old_cursor = deliveries[0]["old_cursor"]
+        new_cursor = deliveries[0]["new_cursor"]
+        assert old_cursor == 0
+        assert new_cursor == 1
+
+        # Verify cursor was advanced
+        assert fake_kanban.subs[0]["last_event_id"] == 1
+
+        with patch("api.background_process._session_has_active_turn", return_value=False), \
+             patch("api.background_process._start_server_side_wakeup_turn",
+                   side_effect=Exception("RPC failed")), \
+             patch("api.background_process.record_deferred_wakeup"):
+            clean_notifier._deliver(deliveries)
+
+        # Cursor should be rewound back to old_cursor (0)
+        assert fake_kanban.subs[0]["last_event_id"] == 0
+
+        # In-memory dedup should be cleared so retry is not skipped
+        task_key = f"default:t_1:sess-1"
+        assert task_key not in clean_notifier._DELIVERED_EVENTS or \
+               len(clean_notifier._DELIVERED_EVENTS.get(task_key, set())) == 0
+
+    def test_retry_succeeds_after_rewind(self, fake_kanban, clean_notifier):
+        """After a cursor rewind, the next _poll_once should re-claim the
+        same events and successfully deliver them."""
+        fake_kanban.tasks = [FakeTask("t_1", "Test", "blocked", "w")]
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "blocked", {"reason": "x"}, 100),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        # First poll: claim events
+        deliveries = clean_notifier._poll_once()
+        assert len(deliveries) == 1
+
+        # Simulate delivery failure → rewind
+        with patch("api.background_process._session_has_active_turn", return_value=False), \
+             patch("api.background_process._start_server_side_wakeup_turn",
+                   side_effect=Exception("transient")), \
+             patch("api.background_process.record_deferred_wakeup"):
+            clean_notifier._deliver(deliveries)
+
+        # Second poll: should re-claim the same events
+        deliveries2 = clean_notifier._poll_once()
+        assert len(deliveries2) == 1
+        assert len(deliveries2[0]["events"]) == 1
+
+        # This time delivery succeeds
+        with patch("api.background_process._session_has_active_turn", return_value=False), \
+             patch("api.background_process._start_server_side_wakeup_turn") as mock_wakeup:
+            clean_notifier._deliver(deliveries2)
+            mock_wakeup.assert_called_once()
 
 
 class TestThreadLifecycle:
