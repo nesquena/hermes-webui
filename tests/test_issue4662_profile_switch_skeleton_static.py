@@ -10,6 +10,7 @@ silently regress:
   * style.css defines the skeleton classes, the sheen + fade keyframes, the
     reduced-motion fallback, and dark-mode tokens.
 """
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
@@ -26,12 +27,21 @@ def _switch_body() -> str:
     return PANELS[start:end]
 
 
+def _show_session_skeleton_call_idx(body: str) -> int:
+    match = re.search(
+        r"(?:^|\n)\s*(?:if\s*\([^\n;]*showSessionListSkeleton[^\n;]*\)\s*)?showSessionListSkeleton\s*\(",
+        body,
+    )
+    assert match, "switchToProfile() must call showSessionListSkeleton(...)"
+    return match.start()
+
+
 class TestSwitchWiring:
     def test_shows_session_skeleton_up_front(self):
         body = _switch_body()
-        assert "showSessionListSkeleton()" in body
+        skeleton_idx = _show_session_skeleton_call_idx(body)
         # ...and before the awaited /api/profile/switch POST, so stale rows clear immediately
-        assert body.index("showSessionListSkeleton()") < body.index("/api/profile/switch")
+        assert skeleton_idx < body.index("await api('/api/profile/switch'")
 
     def test_shows_workspace_skeleton_when_panel_open(self):
         body = _switch_body()
@@ -76,7 +86,7 @@ class TestSwitchWiring:
         # showing a skeleton (activateCurrentProfile() doesn't pre-check), else it
         # flashes skeleton→restore.
         body = _switch_body()
-        head = body[: body.index("showSessionListSkeleton()")]
+        head = body[: _show_session_skeleton_call_idx(body)]
         assert "name === S.activeProfile" in head, "missing no-op self-switch early-return"
         assert "return;" in head
 
@@ -85,7 +95,7 @@ class TestSwitchWiring:
         # _renamingSid / _sessionActionMenu is set — which would strand the
         # skeleton. switchToProfile must dismiss both before showing it.
         body = _switch_body()
-        pre = body[: body.index("showSessionListSkeleton()")]
+        pre = body[: _show_session_skeleton_call_idx(body)]
         assert "_renamingSid = null" in pre, "must clear inline-rename state before skeleton"
         assert "closeSessionActionMenu()" in pre, "must close row action menu before skeleton"
 
@@ -104,10 +114,10 @@ class TestSwitchWiring:
         # transient-but-eventually-successful switch. Failures surface only through
         # the generation-guarded catch handler, which is the single source of truth.
         body = _switch_body()
-        post_idx = body.index("/api/profile/switch")
+        post_idx = body.index("await api('/api/profile/switch'")
         # The same api(...) call expression that targets /api/profile/switch must
         # carry timeoutToast: false. Scope to a small window around the call.
-        window = body[post_idx - 200: post_idx + 200]
+        window = body[post_idx: post_idx + 300]
         assert "timeoutToast: false" in window or "timeoutToast:false" in window.replace(" ", ""), (
             "the /api/profile/switch POST must suppress the generic timeout toast"
         )

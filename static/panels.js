@@ -6383,6 +6383,21 @@ window.addEventListener('resize',()=>{
   if(dd&&dd.classList.contains('open')) _positionProfileDropdown();
 });
 
+function _openProfileSwitchSessionBrowser(){
+  try{
+    const isDesktop = (typeof _isDesktopWidth === 'function') ? _isDesktopWidth() : true;
+    if(isDesktop){
+      if(typeof expandSidebar === 'function') expandSidebar();
+      return;
+    }
+    const sidebar=document.querySelector('.sidebar');
+    if(!sidebar)return;
+    try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
+    sidebar.classList.remove('mobile-session-page');
+    sidebar.classList.add('mobile-panel-drawer','mobile-open');
+  }catch(_){}
+}
+
 async function switchToProfile(name) {
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
@@ -6442,14 +6457,17 @@ async function switchToProfile(name) {
   // context change where dismissing those transient affordances is correct.
   if (typeof _renamingSid !== 'undefined' && _renamingSid) _renamingSid = null;
   if (typeof closeSessionActionMenu === 'function') closeSessionActionMenu();
-  // Determine whether the current session has any messages.
-  // A session with messages is "in progress" and belongs to the current profile —
-  // we must not retag it.  We'll start a fresh session for the new profile instead.
-  const sessionInProgress = S.session && (
+  // Determine whether the current session must be replaced instead of being
+  // retagged in place. A session with messages/active runtime belongs to the
+  // current profile. After /api/profile/switch returns, we also treat an
+  // otherwise-empty session whose recorded profile does not match the target
+  // profile as replace-only: uploads send S.session.session_id and the backend
+  // correctly rejects old-profile sessions under the new profile cookie.
+  let sessionInProgress = !!(S.session && (
     (S.messages && S.messages.length > 0) ||
     S.session.active_stream_id ||
     S.session.pending_user_message
-  );
+  ));
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
@@ -6482,6 +6500,19 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    const targetActiveProfile = S.activeProfile || 'default';
+    let sessionProfileMatchesTarget = true;
+    if (!sessionInProgress && S.session) {
+      const currentSessionProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
+        ? S.session.profile.trim()
+        : 'default';
+      sessionProfileMatchesTarget = (typeof _profileMatchesActiveProfile === 'function')
+        ? _profileMatchesActiveProfile(currentSessionProfile, targetActiveProfile)
+        : (currentSessionProfile === targetActiveProfile || (currentSessionProfile === 'default' && !!S.activeProfileIsDefault));
+      if (!sessionProfileMatchesTarget) {
+        sessionInProgress = true;
+      }
+    }
     // #4650 review: a profile switch can change agent.reasoning_effort (and other
     // reasoning inputs like base_url) WITHOUT changing the default model/provider,
     // which is all the reasoning-chip cache key tracks. Force exactly one reasoning
@@ -6600,6 +6631,7 @@ async function switchToProfile(name) {
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
       if (_switchGen !== _profileSwitchGeneration) return;
+      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
       // (#4662 Opus gate). No-op when a real tree already rendered.
@@ -6622,6 +6654,7 @@ async function switchToProfile(name) {
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
       if (_switchGen !== _profileSwitchGeneration) return;
+      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
       // profile's workspace, not the previous one (#1214).
