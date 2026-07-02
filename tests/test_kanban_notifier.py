@@ -360,18 +360,19 @@ class TestDeliver:
 
         deliveries = clean_notifier._poll_once()
 
+        mock_resp = {"_status": 200, "stream_id": "s1"}
         with patch("api.background_process._session_has_active_turn", return_value=False) as mock_active, \
-             patch("api.background_process._start_server_side_wakeup_turn") as mock_wakeup, \
+             patch("api.routes.start_session_turn", return_value=mock_resp) as mock_turn, \
              patch("api.background_process.record_deferred_wakeup") as mock_defer:
             clean_notifier._deliver(deliveries)
 
             mock_active.assert_called_once_with("sess-1")
-            mock_wakeup.assert_called_once()
+            mock_turn.assert_called_once()
             mock_defer.assert_not_called()
             # Check the prompt
-            args = mock_wakeup.call_args
-            assert "sess-1" == args[0][0] or "sess-1" == args[1].get("session_id", args[0][0])
-            prompt = args[0][1] if len(args[0]) > 1 else args.kwargs.get("wakeup_prompt", "")
+            args = mock_turn.call_args
+            assert "sess-1" == args[0][0]
+            prompt = args[0][1]
             assert "t_1" in prompt
             assert "blocked" in prompt
 
@@ -385,15 +386,54 @@ class TestDeliver:
         deliveries = clean_notifier._poll_once()
 
         with patch("api.background_process._session_has_active_turn", return_value=True), \
-             patch("api.background_process._start_server_side_wakeup_turn") as mock_wakeup, \
+             patch("api.routes.start_session_turn") as mock_turn, \
              patch("api.background_process.record_deferred_wakeup") as mock_defer:
             clean_notifier._deliver(deliveries)
 
-            mock_wakeup.assert_not_called()
+            mock_turn.assert_not_called()
             mock_defer.assert_called_once()
             # Check the deferred prompt
             args = mock_defer.call_args
             assert args[0][0] == "sess-1" or args.kwargs.get("session_id") == "sess-1"
+
+    def test_defers_on_409_race(self, fake_kanban, clean_notifier):
+        """When start_session_turn returns 409 (active turn race),
+        the wakeup should be deferred, not treated as failure."""
+        fake_kanban.tasks = [FakeTask("t_1", "Test", "blocked", "w")]
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "blocked", {}, 100),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        deliveries = clean_notifier._poll_once()
+
+        mock_resp = {"_status": 409, "error": "turn active"}
+        with patch("api.background_process._session_has_active_turn", return_value=False), \
+             patch("api.routes.start_session_turn", return_value=mock_resp), \
+             patch("api.background_process.record_deferred_wakeup") as mock_defer:
+            clean_notifier._deliver(deliveries)
+            mock_defer.assert_called_once()
+
+    def test_rewinds_on_400_failure(self, fake_kanban, clean_notifier):
+        """When start_session_turn returns >=400 (not 409), the cursor
+        should be rewound for retry."""
+        fake_kanban.tasks = [FakeTask("t_1", "Test", "blocked", "w")]
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "blocked", {}, 100),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        deliveries = clean_notifier._poll_once()
+        assert fake_kanban.subs[0]["last_event_id"] == 1
+
+        mock_resp = {"_status": 404, "error": "session not found"}
+        with patch("api.background_process._session_has_active_turn", return_value=False), \
+             patch("api.routes.start_session_turn", return_value=mock_resp), \
+             patch("api.background_process.record_deferred_wakeup"):
+            clean_notifier._deliver(deliveries)
+
+        # Cursor should be rewound
+        assert fake_kanban.subs[0]["last_event_id"] == 0
 
     def test_cleans_up_terminal_subscription(self, fake_kanban, clean_notifier):
         fake_kanban.tasks = [FakeTask("t_1", "Done Task", "done", "w")]
@@ -405,8 +445,9 @@ class TestDeliver:
         deliveries = clean_notifier._poll_once()
         assert len(deliveries) == 1
 
+        mock_resp = {"_status": 200, "stream_id": "s1"}
         with patch("api.background_process._session_has_active_turn", return_value=False), \
-             patch("api.background_process._start_server_side_wakeup_turn"), \
+             patch("api.routes.start_session_turn", return_value=mock_resp), \
              patch("api.background_process.record_deferred_wakeup"):
             clean_notifier._deliver(deliveries)
 
@@ -422,8 +463,9 @@ class TestDeliver:
 
         deliveries = clean_notifier._poll_once()
 
+        mock_resp = {"_status": 200, "stream_id": "s1"}
         with patch("api.background_process._session_has_active_turn", return_value=False), \
-             patch("api.background_process._start_server_side_wakeup_turn"), \
+             patch("api.routes.start_session_turn", return_value=mock_resp), \
              patch("api.background_process.record_deferred_wakeup"):
             clean_notifier._deliver(deliveries)
 
@@ -438,16 +480,14 @@ class TestDeliver:
         fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="")]
 
         deliveries = clean_notifier._poll_once()
-        # With empty chat_id, should still poll but _deliver skips
         if deliveries:
-            with patch("api.background_process._start_server_side_wakeup_turn") as mock_wakeup:
+            with patch("api.routes.start_session_turn") as mock_turn:
                 clean_notifier._deliver(deliveries)
-                mock_wakeup.assert_not_called()
+                mock_turn.assert_not_called()
 
-    def test_rewinds_cursor_on_delivery_failure(self, fake_kanban, clean_notifier):
-        """When _start_server_side_wakeup_turn raises, the DB cursor is
-        rewound so the event is retried on the next tick instead of
-        being permanently lost."""
+    def test_rewinds_cursor_on_delivery_exception(self, fake_kanban, clean_notifier):
+        """When start_session_turn raises an exception, the DB cursor is
+        rewound so the event is retried on the next tick."""
         fake_kanban.tasks = [FakeTask("t_1", "Test", "blocked", "w")]
         fake_kanban.events = [
             FakeEvent(1, "t_1", None, "blocked", {"reason": "x"}, 100),
@@ -455,28 +495,14 @@ class TestDeliver:
         fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
 
         deliveries = clean_notifier._poll_once()
-        assert len(deliveries) == 1
-        old_cursor = deliveries[0]["old_cursor"]
-        new_cursor = deliveries[0]["new_cursor"]
-        assert old_cursor == 0
-        assert new_cursor == 1
-
-        # Verify cursor was advanced
         assert fake_kanban.subs[0]["last_event_id"] == 1
 
         with patch("api.background_process._session_has_active_turn", return_value=False), \
-             patch("api.background_process._start_server_side_wakeup_turn",
-                   side_effect=Exception("RPC failed")), \
+             patch("api.routes.start_session_turn", side_effect=Exception("RPC failed")), \
              patch("api.background_process.record_deferred_wakeup"):
             clean_notifier._deliver(deliveries)
 
-        # Cursor should be rewound back to old_cursor (0)
         assert fake_kanban.subs[0]["last_event_id"] == 0
-
-        # In-memory dedup should be cleared so retry is not skipped
-        task_key = f"default:t_1:sess-1"
-        assert task_key not in clean_notifier._DELIVERED_EVENTS or \
-               len(clean_notifier._DELIVERED_EVENTS.get(task_key, set())) == 0
 
     def test_retry_succeeds_after_rewind(self, fake_kanban, clean_notifier):
         """After a cursor rewind, the next _poll_once should re-claim the
@@ -487,27 +513,23 @@ class TestDeliver:
         ]
         fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
 
-        # First poll: claim events
         deliveries = clean_notifier._poll_once()
         assert len(deliveries) == 1
 
-        # Simulate delivery failure → rewind
         with patch("api.background_process._session_has_active_turn", return_value=False), \
-             patch("api.background_process._start_server_side_wakeup_turn",
-                   side_effect=Exception("transient")), \
+             patch("api.routes.start_session_turn", side_effect=Exception("transient")), \
              patch("api.background_process.record_deferred_wakeup"):
             clean_notifier._deliver(deliveries)
 
-        # Second poll: should re-claim the same events
         deliveries2 = clean_notifier._poll_once()
         assert len(deliveries2) == 1
         assert len(deliveries2[0]["events"]) == 1
 
-        # This time delivery succeeds
+        mock_resp = {"_status": 200, "stream_id": "s1"}
         with patch("api.background_process._session_has_active_turn", return_value=False), \
-             patch("api.background_process._start_server_side_wakeup_turn") as mock_wakeup:
+             patch("api.routes.start_session_turn", return_value=mock_resp) as mock_turn:
             clean_notifier._deliver(deliveries2)
-            mock_wakeup.assert_called_once()
+            mock_turn.assert_called_once()
 
     def test_does_not_unsub_on_delivery_failure_for_terminal_task(
         self, fake_kanban, clean_notifier
@@ -524,16 +546,41 @@ class TestDeliver:
         deliveries = clean_notifier._poll_once()
         assert len(deliveries) == 1
 
+        mock_resp = {"_status": 500, "error": "internal"}
         with patch("api.background_process._session_has_active_turn", return_value=False), \
-             patch("api.background_process._start_server_side_wakeup_turn",
-                   side_effect=Exception("fail")), \
+             patch("api.routes.start_session_turn", return_value=mock_resp), \
              patch("api.background_process.record_deferred_wakeup"):
             clean_notifier._deliver(deliveries)
 
-        # Subscription should still exist (delivery failed, cursor rewound)
         assert len(fake_kanban.subs) == 1
-        # Cursor should be rewound
         assert fake_kanban.subs[0]["last_event_id"] == 0
+
+    def test_dedup_key_cleared_on_terminal_unsub(self, fake_kanban, clean_notifier):
+        """When a terminal task's subscription is removed, the in-memory
+        dedup key should also be removed to prevent unbounded growth."""
+        fake_kanban.tasks = [FakeTask("t_1", "Done", "done", "w")]
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "completed", {}, 100),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        deliveries = clean_notifier._poll_once()
+
+        mock_resp = {"_status": 200, "stream_id": "s1"}
+        with patch("api.background_process._session_has_active_turn", return_value=False), \
+             patch("api.routes.start_session_turn", return_value=mock_resp), \
+             patch("api.background_process.record_deferred_wakeup"):
+            clean_notifier._deliver(deliveries)
+
+        key = clean_notifier._dedup_key("default", "t_1", "sess-1")
+        assert key not in clean_notifier._DELIVERED_EVENTS
+
+    def test_none_assignee_renders_empty(self, fake_kanban, clean_notifier):
+        """None assignee should render as empty string, not @None."""
+        prompt = clean_notifier._format_wakeup_prompt(
+            "t_1", "Test", None, "default", {"blocked"}
+        )
+        assert "@None" not in prompt
 
 
 class TestThreadLifecycle:

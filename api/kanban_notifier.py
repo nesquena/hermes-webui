@@ -24,7 +24,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +35,17 @@ _TERMINAL_STATUSES = {"done", "archived"}
 _NOTIFIER_THREAD: Optional[threading.Thread] = None
 _NOTIFIER_STOP = threading.Event()
 
-# Dedup: per-subscription set of already-processed (task_id, event_id) pairs.
+# Dedup: per-subscription set of already-processed event IDs.
 # Prevents double-wakeup if the cursor advance races with a re-poll.
+# Keys are cleaned up on terminal unsubscribe, so growth is bounded by the
+# number of active (non-terminal) subscriptions.
 _DELIVERED_EVENTS: dict[str, set[int]] = {}
 _DELIVERED_LOCK = threading.Lock()
+
+
+def _dedup_key(board: str, task_id: str, chat_id: str) -> str:
+    """Build the dedup dict key for a subscription."""
+    return f"{board}:{task_id}:{chat_id}"
 
 
 def _kb():
@@ -64,10 +71,11 @@ def _format_wakeup_prompt(task_id: str, title: str, assignee: str,
     }
     parts = [kind_labels.get(k, k) for k in sorted(kinds)]
     status = ", ".join(parts) or "status changed"
+    assignee_str = f"@{assignee}" if assignee else ""
     return (
         f"[kanban] Task {task_id} {status}.\n"
         f"Title: {title}\n"
-        f"Assignee: @{assignee}\n"
+        f"Assignee: {assignee_str}\n"
         f"Board: {board}\n\n"
         f"Check the result or decide the next step."
     )
@@ -130,7 +138,7 @@ def _poll_once() -> list[dict]:
                     continue
 
                 # Filter out already-delivered events (dedup safety net)
-                task_key = f"{slug}:{task_id}:{sub['chat_id']}"
+                task_key = _dedup_key(slug, task_id, sub["chat_id"])
                 with _DELIVERED_LOCK:
                     delivered = _DELIVERED_EVENTS.setdefault(task_key, set())
                     fresh = [ev for ev in events if ev.id not in delivered]
@@ -166,10 +174,15 @@ def _poll_once() -> list[dict]:
 
 
 def _deliver(deliveries: list[dict]) -> None:
-    """Start server-side wakeup turns for each delivery."""
+    """Start server-side wakeup turns for each delivery.
+
+    Unlike background_process._start_server_side_wakeup_turn (which spawns a
+    daemon and returns before the result is known), this calls
+    start_session_turn synchronously so we can distinguish success (200),
+    race (409 → defer), and genuine failure (≥400 / exception → rewind cursor).
+    """
     from api.background_process import (
         _session_has_active_turn,
-        _start_server_side_wakeup_turn,
         record_deferred_wakeup,
     )
 
@@ -183,7 +196,7 @@ def _deliver(deliveries: list[dict]) -> None:
 
         task_id = sub["task_id"]
         title = (task.title if task else task_id)[:120]
-        assignee = task.assignee if task else ""
+        assignee = task.assignee or ""
         kinds = {ev.kind for ev in d["events"]}
 
         prompt = _format_wakeup_prompt(task_id, title, assignee, board_slug, kinds)
@@ -191,6 +204,7 @@ def _deliver(deliveries: list[dict]) -> None:
         # Use a stable process_id for dedup: kanban:{task_id}:{board}
         process_id = f"kanban:{board_slug}:{task_id}"
 
+        delivery_ok = False
         try:
             if _session_has_active_turn(session_id):
                 # Session is busy — defer for next teardown/turn drain
@@ -200,16 +214,40 @@ def _deliver(deliveries: list[dict]) -> None:
                     "(task %s, events %s)",
                     session_id, task_id, kinds,
                 )
+                delivery_ok = True
             else:
-                _start_server_side_wakeup_turn(
-                    session_id, prompt, process_id=process_id,
+                # Call start_session_turn synchronously to get the real status.
+                # _start_server_side_wakeup_turn spawns a daemon that we cannot
+                # await, so we call the underlying primitive directly.
+                from api.routes import start_session_turn
+                resp = start_session_turn(
+                    session_id, prompt, source="kanban_wakeup"
                 )
-                logger.info(
-                    "kanban webui notifier: wakeup turn started for session %s "
-                    "(task %s, events %s)",
-                    session_id, task_id, kinds,
-                )
-            delivery_ok = True
+                status = int((resp or {}).get("_status", 200) or 200)
+                if status == 409:
+                    # Raced an active turn — defer for redelivery
+                    record_deferred_wakeup(session_id, process_id, prompt)
+                    logger.info(
+                        "kanban webui notifier: wakeup raced active turn for "
+                        "session %s (task %s); deferred",
+                        session_id, task_id,
+                    )
+                    delivery_ok = True
+                elif status >= 400:
+                    logger.warning(
+                        "kanban webui notifier: wakeup failed for session %s "
+                        "(task %s): status=%s err=%r",
+                        session_id, task_id, status,
+                        (resp or {}).get("error"),
+                    )
+                    delivery_ok = False
+                else:
+                    logger.info(
+                        "kanban webui notifier: wakeup turn started for session "
+                        "%s (task %s, events %s)",
+                        session_id, task_id, kinds,
+                    )
+                    delivery_ok = True
         except Exception:
             logger.warning(
                 "kanban webui notifier: wakeup failed for session %s (task %s) "
@@ -217,6 +255,8 @@ def _deliver(deliveries: list[dict]) -> None:
                 session_id, task_id, exc_info=True,
             )
             delivery_ok = False
+
+        if not delivery_ok:
             # Rewind the DB cursor so the event is re-delivered on the next
             # tick instead of being permanently lost. The in-memory dedup set
             # is also cleared for this sub so the retry is not skipped.
@@ -235,7 +275,7 @@ def _deliver(deliveries: list[dict]) -> None:
                     )
                 finally:
                     conn.close()
-                task_key = f"{board_slug}:{task_id}:{sub['chat_id']}"
+                task_key = _dedup_key(board_slug, task_id, sub["chat_id"])
                 with _DELIVERED_LOCK:
                     _DELIVERED_EVENTS.pop(task_key, None)
             except Exception:
@@ -268,6 +308,10 @@ def _deliver(deliveries: list[dict]) -> None:
                     "kanban webui notifier: failed to unsub %s", task_id,
                     exc_info=True,
                 )
+            # Clean up the in-memory dedup key as well
+            task_key = _dedup_key(board_slug, task_id, sub["chat_id"])
+            with _DELIVERED_LOCK:
+                _DELIVERED_EVENTS.pop(task_key, None)
 
 
 def _notifier_loop() -> None:
@@ -294,10 +338,29 @@ def start_notifier_thread() -> bool:
     Returns True on first start, False if already running.
     Called from ``server.py`` at WebUI startup, alongside
     ``background_process.start_drain_thread``.
+
+    Gated by ``kanban.webui_notifier`` in config.yaml (default: True).
+    Disable to turn off the polling thread entirely, e.g. when kanban
+    is not in use or the gateway's own notifier is sufficient.
     """
     global _NOTIFIER_THREAD
     if _NOTIFIER_THREAD is not None and _NOTIFIER_THREAD.is_alive():
         return False
+
+    # Config gate: allow disabling the notifier via config
+    try:
+        from hermes_cli.config import load_config, cfg_get
+        cfg = load_config()
+        enabled = cfg_get(cfg, "kanban", "webui_notifier", default=True)
+        if not enabled:
+            logger.info(
+                "kanban webui notifier: disabled via config kanban.webui_notifier=false"
+            )
+            return False
+    except Exception:
+        # If config can't load, default to enabled (same as auto_subscribe_on_create)
+        pass
+
     _NOTIFIER_STOP.clear()
     _NOTIFIER_THREAD = threading.Thread(
         target=_notifier_loop,
