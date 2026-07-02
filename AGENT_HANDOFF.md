@@ -828,3 +828,25 @@ Existing tests already comprehensively cover the agent-runs adapter (6 test file
 - Default adapter (legacy-direct) remains default
 - Runtime routes, journal, mobile APIs, deployment health unchanged
 
+
+---
+
+## Phase 20 -- Agent-Runs Real Smoke Readiness
+
+Date: 2026-07-02
+
+### Verification summary
+
+- Deterministic cross-repo Agent to WebUI smoke: PASSED, 11 passed, 0 failed.
+- DEEPSEEK_API_KEY: not present in the active environment.
+- Real DeepSeek cross-repo smoke: SKIPPED.
+- WebUI proxied status/events: PASSED via deterministic cross-repo smoke.
+- WebUI cancel/stop proxy: PASSED via deterministic cross-repo smoke.
+- Runtime adapter default behavior: unchanged; agent-runs remains opt-in.
+- No secrets were committed.
+
+### Remaining deferred items
+
+1. Re-run cross-repo real DeepSeek smoke when DEEPSEEK_API_KEY is available.
+2. Verify WebUI proxied status/events against a real DeepSeek-backed Agent run.
+3. Preserve deterministic cross-repo smoke as fallback coverage when credentials are unavailable.
