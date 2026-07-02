@@ -49683,7 +49683,12 @@ def _assert_secret_scanning_final_url_drift_rejected_before_body_read(
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     catalog = capy_memory.source_catalog(limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "catalog": catalog}, sort_keys=True).lower()
+    search = search_memory("secret scanning drift evidence", limit=5)
+    relevant = relevant_memory_for_space("space-secret-scanning-final-url-drift", limit=5)
+    serialized = json.dumps(
+        {"result": result, "jobs": jobs, "catalog": catalog, "search": search, "relevant": relevant},
+        sort_keys=True,
+    ).lower()
 
     assert calls == [{"url": expected_request_url, "timeout": 8, "accept": "application/json"}]
     assert body_reads == []
@@ -49692,6 +49697,8 @@ def _assert_secret_scanning_final_url_drift_rejected_before_body_read(
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert jobs["jobs"][0]["status"] == "pending"
+    assert search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / f"{source_id}.md").exists()
     for unsafe in (
         "secret_value_do_not_leak",
@@ -49720,7 +49727,7 @@ def _assert_secret_scanning_final_url_drift_rejected_before_body_read(
         "https://api.github.com/repos/capy/spaces/secret-scanning/alerts/31/locations",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_final_url_clean_endpoint_without_hide_secret_before_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_final_url_clean_endpoint_without_hide_secret_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     source_id,
@@ -49736,7 +49743,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_
     )
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_single_alert_final_url_query_fragment_drift_before_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_single_alert_final_url_query_fragment_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     clean_origin = "https://api.github.com/repos/capy/spaces/secret-scanning/alerts/37"
     _assert_secret_scanning_final_url_drift_rejected_before_body_read(
         tmp_path,
@@ -49748,7 +49755,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_
     )
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_alerts_final_url_query_fragment_drift_before_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_alerts_final_url_query_fragment_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     clean_origin = "https://api.github.com/repos/capy/spaces/secret-scanning/alerts"
     _assert_secret_scanning_final_url_drift_rejected_before_body_read(
         tmp_path,
@@ -49760,7 +49767,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_
     )
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_alert_locations_final_url_query_fragment_drift_before_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_alert_locations_final_url_query_fragment_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     clean_origin = "https://api.github.com/repos/capy/spaces/secret-scanning/alerts/31/locations"
     _assert_secret_scanning_final_url_drift_rejected_before_body_read(
         tmp_path,
