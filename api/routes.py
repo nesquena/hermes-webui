@@ -13720,6 +13720,9 @@ def handle_post(handler, parsed) -> bool:
         try:
             source = get_session(body["session_id"])
         except KeyError:
+            _foreign_session, _reason = _claim_or_synthesize_cli_session(body["session_id"])
+            if _reason == "not_claimable":
+                return bad(handler, "Read-only sessions cannot be branched from WebUI", 400)
             return bad(handler, "Session not found", 404)
 
         keep_count = body.get("keep_count")

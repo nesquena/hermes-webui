@@ -11,12 +11,15 @@ Verifies:
   8. git-branch icon exists in icons.js
 """
 import json
+import io
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
+import api.routes as routes
 import pytest
 
 
@@ -107,6 +110,43 @@ def _commands_harness(body: str) -> str:
 
 # ── Backend ────────────────────────────────────────────────────────────────────
 
+
+class _FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {"Content-Type": "application/json", "Content-Length": "1"}
+        self.rfile = io.BytesIO(b"")
+        self.wfile = io.BytesIO()
+        self.command = "POST"
+        self.path = "/api/session/branch"
+        self.client_address = ("127.0.0.1", 12345)
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.headers[key] = value
+
+    def end_headers(self):
+        pass
+
+
+def _capture_route(monkeypatch):
+    cap = {}
+
+    def _bad(_handler, msg, code=400):
+        cap["bad"] = (msg, code)
+        return True
+
+    def _j(_handler, obj, *_, **kwargs):
+        cap["ok"] = obj
+        cap["status"] = kwargs.get("status", 200)
+        return True
+
+    monkeypatch.setattr(routes, "bad", _bad)
+    monkeypatch.setattr(routes, "j", _j)
+    return cap
+
 def test_branch_endpoint_exists():
     """Verify the POST /api/session/branch route handler exists."""
     src = _read('api/routes.py')
@@ -126,6 +166,23 @@ def test_branch_endpoint_validates_session_id():
     block = branch_match.group(1)
     assert 'require(body, "session_id")' in block, \
         "Branch handler should validate session_id"
+
+
+def test_branch_endpoint_consults_foreign_session_guard_on_missing_sidecar():
+    """Missing sidecars should classify foreign read-only sessions before 404ing."""
+    src = _read('api/routes.py')
+    branch_match = re.search(
+        r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
+        src, re.DOTALL
+    )
+    assert branch_match, "Could not find /api/session/branch handler block"
+    block = branch_match.group(1)
+    assert '_claim_or_synthesize_cli_session(body["session_id"])' in block, \
+        "Branch handler should classify missing-sidecar foreign sessions before returning"
+    assert 'if _reason == "not_claimable":' in block, \
+        "Branch handler should branch on not_claimable foreign ownership"
+    assert 'return bad(handler, "Read-only sessions cannot be branched from WebUI", 400)' in block, \
+        "Branch handler should return a provenance-correct 400 for read-only foreign sessions"
 
 
 def test_branch_endpoint_returns_new_session_id():
@@ -256,6 +313,46 @@ def test_branch_auto_title():
     assert branch_match
     block = branch_match.group(1)
     assert '(fork)' in block, "Branch handler should auto-title as '(fork)'"
+
+
+def test_branch_route_rejects_not_claimable_foreign_sessions_with_400(monkeypatch):
+    """Direct or stale branch POSTs for read-only foreign sessions must refuse clearly."""
+    handler = _FakeHandler()
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "cron-1"})
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid, metadata_only=False: (_ for _ in ()).throw(KeyError("Session not found")),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_claim_or_synthesize_cli_session",
+        lambda _sid: (object(), "not_claimable"),
+    )
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/branch"))
+    assert cap["bad"] == ("Read-only sessions cannot be branched from WebUI", 400)
+
+
+def test_branch_route_keeps_404_for_truly_missing_sessions(monkeypatch):
+    """Only real foreign read-only sessions should switch from 404 to 400."""
+    handler = _FakeHandler()
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "ghost-1"})
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid, metadata_only=False: (_ for _ in ()).throw(KeyError("Session not found")),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_claim_or_synthesize_cli_session",
+        lambda _sid: (None, "no_foreign_state"),
+    )
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/branch"))
+    assert cap["bad"] == ("Session not found", 404)
 
 
 # ── Session model ──────────────────────────────────────────────────────────────
