@@ -73687,14 +73687,18 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runn
         assert unsafe not in public_output
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runner_groups_final_url_drift(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runner_groups_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
     init_memory_tree()
     source_id = "github-actions-org-runner-groups-final-url-drift"
     register_source_reference({"source_id": source_id, "title": "GitHub Actions Org Runner Groups Final URL Drift", "origin_uri": "https://api.github.com/orgs/capy/actions/runner-groups?access_token=***#raw-prompt"})
-    body = json.dumps({"total_count": 0, "runner_groups": []}).encode("utf-8")
+    hostile_body = json.dumps({
+        "total_count": 1,
+        "runner_groups": [{"id": 201, "name": "SECRET_VALUE_DO_NOT_LEAK", "html_url": "https://github.com/orgs/other/settings/actions/runner-groups/201"}],
+    }).encode("utf-8")
+    read_calls = []
 
     class FakeResponse:
         headers = {"Content-Type": "application/json; charset=utf-8"}
@@ -73709,17 +73713,38 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runn
             return "https://api.github.com/orgs/other/actions/runner-groups"
 
         def read(self, _limit=-1):
-            return body
+            read_calls.append("read")
+            return hostile_body
 
     monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
     result = run_source_refresh_jobs(limit=1)
-    serialized = json.dumps(result, sort_keys=True).lower()
+    search = search_memory("safe-looking org runner groups", limit=5)
+    relevant = relevant_memory_for_space("org-runner-groups-drift-space", limit=5)
+    serialized = json.dumps({"result": result, "search": search, "relevant": relevant}, sort_keys=True).lower()
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] in {"refresh fetcher disabled", "refresh failed"}
+    assert read_calls == []
     assert not (root / "vault" / f"{source_id}.md").exists()
-    assert "other" not in serialized
-    assert "api.github.com" not in serialized
+    assert search["results"] == []
+    assert relevant["results"] == []
+    for unsafe in (
+        "other",
+        "api.github.com",
+        "secret_value_do_not_leak",
+        "github.com/orgs/other",
+        "raw-prompt",
+        "access_token",
+        "renderer",
+        '"source"',
+        '"html"',
+        '"script"',
+        '"data"',
+        "api-auth",
+        "credential",
+        "access-token",
+    ):
+        assert unsafe not in serialized
 
 
 def test_github_actions_org_runner_group_runners_route_matcher_public_label_round_trip_and_adjacent_non_stealing():
