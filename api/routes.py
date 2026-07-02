@@ -12017,6 +12017,8 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
         try:
+            from api import profiles as profiles_api
+
             diag.stage("load_settings")
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
@@ -12027,7 +12029,7 @@ def handle_get(handler, parsed) -> bool:
             show_cron_sessions = bool(settings.get("show_cron_sessions"))
             show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
             agent_session_source_filter = settings.get("agent_session_source_filter")
-            active_profile = get_active_profile_name()
+            active_profile = profiles_api.get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
             include_archived = _query_flag(parsed, "include_archived")
             exclude_hidden = _query_flag(parsed, "exclude_hidden")
@@ -12088,7 +12090,9 @@ def handle_get(handler, parsed) -> bool:
         # ── Profile scoping (#1614) ────────────────────────────────────────
         # Default: filter to the active profile. ?all_profiles=1 returns the
         # aggregate list so settings/admin UIs can still see everything.
-        active_profile = get_active_profile_name()
+        from api import profiles as profiles_api
+
+        active_profile = profiles_api.get_active_profile_name()
         all_projects = load_projects()
         isolated_profile_mode = _is_isolated_profile_mode()
         all_profiles = _all_profiles_enabled(parsed)
@@ -12509,17 +12513,21 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
+        from api import profiles as profiles_api
+
         return j(
             handler,
             {
                 "profiles": list_profiles_api(),
-                "active": get_active_profile_name(),
+                "active": profiles_api.get_active_profile_name(),
                 "single_profile_mode": _is_isolated_profile_mode(),
             },
         )
 
     if parsed.path == "/api/profile/active":
-        active_profile_name = get_active_profile_name()
+        from api import profiles as profiles_api
+
+        active_profile_name = profiles_api.get_active_profile_name()
         # Resolve the ACTIVE PROFILE's configured workspace so a cold boot with a
         # profile cookie shows the right composer workspace chip on a blank
         # new-chat page (#5169). Use get_profile_default_workspace() (NOT
@@ -12537,8 +12545,8 @@ def handle_get(handler, parsed) -> bool:
             handler,
             {
                 "name": active_profile_name,
-                "path": str(get_active_hermes_home()),
-                "is_default": _is_root_profile(active_profile_name),
+                "path": str(profiles_api.get_active_hermes_home()),
+                "is_default": profiles_api._is_root_profile(active_profile_name),
                 "default_workspace": _profile_default_workspace,
             },
         )

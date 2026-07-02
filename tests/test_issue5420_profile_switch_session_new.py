@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from urllib.parse import urlparse
 
 import api.routes as routes
@@ -38,15 +37,15 @@ def _post_session_new(body: dict, monkeypatch):
 
 
 def test_handle_post_does_not_shadow_get_active_profile_name():
-  """handle_post must not re-import get_active_profile_name locally (#5420)."""
-  src = inspect.getsource(routes.handle_post)
-  tree = ast.parse(src)
-  for node in ast.walk(tree):
-      if isinstance(node, ast.ImportFrom) and node.module == "api.profiles":
-          for alias in node.names:
-              assert alias.name != "get_active_profile_name", (
-                  "local import shadows module-level get_active_profile_name"
-              )
+    """handle_post must not re-import get_active_profile_name locally (#5420)."""
+    src = inspect.getsource(routes.handle_post)
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "api.profiles":
+            for alias in node.names:
+                assert alias.name != "get_active_profile_name", (
+                    "local import shadows module-level get_active_profile_name"
+                )
 
 
 def test_session_new_succeeds_with_cross_profile_prev_session_id(monkeypatch):
