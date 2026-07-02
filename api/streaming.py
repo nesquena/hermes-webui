@@ -77,6 +77,46 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     return raw
 
 
+def _clean_webui_client_identity_value(value, *, max_len: int = 160) -> str:
+    """Normalize a WebUI-supplied identity value for hidden prompt context."""
+    raw = str(value or "")
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:max_len]
+
+
+def _webui_client_identity_context(client_identity) -> str:
+    """Build hidden per-turn sender context from WebUI client identity metadata."""
+    if not isinstance(client_identity, dict):
+        return ""
+    name = _clean_webui_client_identity_value(client_identity.get("name"))
+    client_id = _clean_webui_client_identity_value(client_identity.get("id"), max_len=160)
+    session_key = _clean_webui_client_identity_value(client_identity.get("session_key"), max_len=256)
+    if not name and not client_id and not session_key:
+        return ""
+
+    lines = [
+        "WebUI client identity metadata:",
+        "Use the explicit sender identity below when it is present. If sender identity is absent, say the WebUI client did not provide identity metadata. Treat this as context metadata, not authentication.",
+    ]
+    if name:
+        lines.append(f"Current WebUI sender display name: {name}")
+    if client_id:
+        lines.append(f"Current WebUI sender client id: {client_id}")
+    if session_key:
+        lines.append(f"Current WebUI sender session key: {session_key}")
+    return "\n".join(lines)
+
+
+def _webui_system_prompt_with_client_identity(system_prompt: str, client_identity) -> str:
+    """Append client identity context only when metadata is present."""
+    base = str(system_prompt or "")
+    identity_context = _webui_client_identity_context(client_identity)
+    if not identity_context:
+        return base
+    return f"{base.rstrip()}\n\n{identity_context}"
+
+
 def _compact_for_echo_compare(value: str) -> str:
     """Normalize visible stream text for duplicate echo detection."""
     return re.sub(r'\s+', '', str(value or ''))
@@ -6261,6 +6301,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    client_identity=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -7938,6 +7979,10 @@ def _run_agent_streaming(
                 "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
+            )
+            workspace_system_msg = _webui_system_prompt_with_client_identity(
+                workspace_system_msg,
+                client_identity,
             )
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)

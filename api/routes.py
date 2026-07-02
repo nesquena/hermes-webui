@@ -19123,6 +19123,7 @@ def _start_chat_stream_for_session(
     goal_related: bool = False,
     source: str = "webui",
     moa_config=None,
+    client_identity=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -19245,7 +19246,11 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_kwargs = {
+        "model_provider": model_provider,
+        "goal_related": goal_related,
+        "client_identity": client_identity,
+    }
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(
@@ -19321,6 +19326,39 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     return "set"
 
 
+def _webui_client_identity_from_request(handler, body) -> dict:
+    """Extract optional sender metadata from /api/chat/start headers or JSON body."""
+    try:
+        header_name = str(handler.headers.get("X-Hermes-Client-Name") or "").strip()
+        header_id = str(handler.headers.get("X-Hermes-Client-Id") or "").strip()
+        header_session_key = str(handler.headers.get("X-Hermes-Session-Key") or "").strip()
+    except Exception:
+        header_name = header_id = header_session_key = ""
+
+    body_identity = body.get("client_identity") if isinstance(body, dict) else None
+    if not isinstance(body_identity, dict):
+        body_identity = {}
+
+    def _body_value(key: str) -> str:
+        try:
+            return str(body_identity.get(key) or "").strip()
+        except Exception:
+            return ""
+
+    name = header_name or _body_value("name")
+    client_id = header_id or _body_value("id") or _body_value("client_id")
+    session_key = header_session_key or _body_value("session_key")
+
+    out = {}
+    if name:
+        out["name"] = name
+    if client_id:
+        out["id"] = client_id
+    if session_key:
+        out["session_key"] = session_key
+    return out
+
+
 def _start_run(
     s,
     *,
@@ -19334,6 +19372,7 @@ def _start_run(
     route: str,
     diag=None,
     moa_config=None,
+    client_identity=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -19374,6 +19413,7 @@ def _start_run(
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                client_identity=client_identity,
             )
 
         def _legacy_adapter_factory():
@@ -19414,6 +19454,7 @@ def _start_run(
         diag=diag,
         source=source,
         moa_config=moa_config,
+        client_identity=client_identity,
     )
 
 
@@ -19886,6 +19927,7 @@ def _handle_chat_start(handler, body, diag=None):
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
         # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
+        client_identity = _webui_client_identity_from_request(handler, body)
         start_run_kwargs = {
             "msg": msg,
             "attachments": attachments,
@@ -19896,6 +19938,7 @@ def _handle_chat_start(handler, body, diag=None):
             "source": "webui",
             "route": "/api/chat/start",
             "diag": diag,
+            "client_identity": client_identity,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
