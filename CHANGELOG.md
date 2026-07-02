@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **Transparent Stream no longer flickers during token-by-token streaming.** The 180ms enter animation (`transparent-event-enter`) on new event rows caused visible shimmer when rows were rapidly added. Replaced with `animation: none !important`, scoped to `#liveAssistantTurn` so settled message transitions (hover, recency-fade) are unaffected.
+
 - **The composer footer shows your model and workspace names again on desktop.** The Export-to-HTML button added to the composer footer in the previous release pushed the control row past its width budget, which collapsed the footer into icon-only mode and hid the model / workspace / profile text labels. The export button has been removed from the composer footer (export remains available from Settings), so the labels are visible again.
 
 ### Added
