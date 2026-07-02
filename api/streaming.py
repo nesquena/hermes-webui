@@ -9098,6 +9098,8 @@ def _run_agent_streaming(
                             model=model,
                             title=s.title,
                             message_count=len(s.messages),
+                            cache_read_tokens=s.cache_read_tokens or 0,
+                            cache_write_tokens=s.cache_write_tokens or 0,
                             # #2762: pass the session's profile explicitly so the
                             # background-thread state.db lookup doesn't fall
                             # through to the process-global active profile and

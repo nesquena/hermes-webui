@@ -134,7 +134,8 @@ def sync_session_start(session_id: str, model=None, profile: Optional[str] = Non
 
 def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=0,
                        estimated_cost=None, model=None, title: Optional[str] = None,
-                       message_count: Optional[int] = None, profile: Optional[str] = None) -> None:
+                       message_count: Optional[int] = None, profile: Optional[str] = None,
+                       cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> None:
     """Update token usage and title for a WebUI session in state.db.
     Called after each turn completes. Uses absolute=True to set totals
     (the WebUI Session already accumulates across turns).
@@ -153,11 +154,17 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
     try:
         # Ensure session exists first (idempotent)
         db.ensure_session(session_id=session_id, source='webui', model=model)
-        # Set absolute token counts
+        # Set absolute token counts. WebUI's sidecar already accumulates
+        # input/output/cache totals across turns, so mirror the same absolute
+        # values into state.db. Omitting cache counters makes insights/reporting
+        # show false 0% hit rates even when the live stream and sidecar saw warm
+        # prefix reads.
         db.update_token_counts(
             session_id=session_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
             estimated_cost_usd=estimated_cost,
             model=model,
             absolute=True,
