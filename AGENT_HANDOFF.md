@@ -632,3 +632,69 @@ Result: 149 passed, 8 failed in 5.98s
 
 **PR review / optional Hermex iOS client validation**
 
+---
+
+## Phase 11A — PR Review, Security Audit, and Merge-Readiness Package (completed)
+
+### State Before Phase 11A
+- **Commit:** `76a86fe`
+- **Message:** `Document live agent-runs smoke verification`
+
+### Review Scope
+Full branch diff (`feat/runtime-adapter-hermex-contract` vs `master`): 28 files, 8166 insertions, 3 deletions.
+
+### Security Audit
+- No API keys, tokens, passwords, or credentials in source files
+- No hardcoded personal paths
+- No accidental changes to `/api/chat/start` or `/api/chat/stream`
+- Agent-runs mode is opt-in — defaults to `legacy-direct`
+- Workspace search: symlink traversal blocked via `Path.resolve().relative_to()` containment check
+- Workspace search: secret-like patterns in previews redacted via regex
+- Deployment health: API key never present in response body
+- Runtime journal: events redacted via `RuntimeEvent.to_dict()` before disk write
+- SSE mirroring: gated behind `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal`
+
+### Bugs Found and Fixed
+
+| # | File | Issue | Severity | Fix |
+|---|------|-------|----------|-----|
+| 1 | `api/routes.py:13950-13960` | `body.setdefault("run_id", ...)` allowed body-supplied run_id to override URL path on cancel/approval/clarify POST routes (authorization bypass) | MEDIUM | Changed to `body["run_id"] = ...` — URL-derived run_id is now always authoritative |
+
+### Test Results
+
+**Focused tests (default mode, post-fix):**
+```
+./scripts/test.sh (14 test files) -v
+Result: 254 passed, 0 failed in 7.65s — PASS
+```
+
+**Agent-runs env tests (post-fix):**
+```
+HERMES_WEBUI_RUNTIME_ADAPTER=agent-runs ./scripts/test.sh (7 test files) -v
+Result: 149 passed, 8 failed — 8 expected failures in test_runtime_routes.py
+(tests designed for legacy-direct/journal mode; documented in Phase 5)
+```
+
+**Import smoke (post-fix):**
+```
+All 8 modules: api.runtime_contract, api.runtime_journal, api.runtime_routes,
+  api.runtime_adapter, api.runtime_adapters.agent_runs, api.mobile_routes,
+  api.deployment_health, api.workspace_search
+Result: All imports OK — PASS
+```
+
+### Remaining Known Issues
+1. RuntimeJournal cross-instance race — separate `threading.Lock` per instance; `os.replace()` is atomic so file corruption unlikely, but stale index reads possible (WARN)
+2. Dead code: `_redact_header_value` in `agent_runs.py` — never called (LOW)
+3. Dead code: `_RT_SKIP_EVENTS` in `streaming.py` — never used (LOW)
+4. Deployment health agent-runs check is synchronous, blocks for up to 5s (LOW)
+5. Mobile routes silently swallow adapter exceptions — safe degradation, may hide bugs (LOW)
+6. Workspace path may expose system username in deployment health response (LOW)
+7. 8 test_runtime_routes.py tests fail under agent-runs env — expected, documented (INFO)
+
+### Files Modified in Phase 11A
+- `api/routes.py` — body run_id precedence fix
+
+### Next task
+**Phase 11B — Harden approval/clarify live integration**
+

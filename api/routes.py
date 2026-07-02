@@ -13950,13 +13950,13 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path.startswith("/api/runs/"):
         run_path = parsed.path[len("/api/runs/"):]
         if run_path.endswith("/cancel"):
-            body.setdefault("run_id", run_path[:-len("/cancel")])
+            body["run_id"] = run_path[:-len("/cancel")]
             return handle_run_cancel(handler, body)
         if run_path.endswith("/approval"):
-            body.setdefault("run_id", run_path[:-len("/approval")])
+            body["run_id"] = run_path[:-len("/approval")]
             return handle_run_approval(handler, body)
         if run_path.endswith("/clarify"):
-            body.setdefault("run_id", run_path[:-len("/clarify")])
+            body["run_id"] = run_path[:-len("/clarify")]
             return handle_run_clarify(handler, body)
 
     # ── End runtime control routes ─────────────────────────────────────────

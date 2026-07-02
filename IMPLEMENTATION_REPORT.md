@@ -240,6 +240,68 @@ The `AgentRunsAdapter` (Phase 5) successfully communicated with the live Hermes 
 - Standalone server lacks `/v1/health` (deployment health reports `agent_runtime_reachable: false`; adapter works correctly)
 - `hermes gateway run` full startup blocked by messaging adapter dependencies in smoke environment
 
+## Phase 11A — PR Review (completed)
+
+### Code Review Findings
+
+Full branch diff: 28 files changed, 8166 insertions, 3 deletions.
+
+**No secrets leaked.** No hardcoded personal paths. No accidental changes to `/api/chat/start` or `/api/chat/stream`. Default behavior uses `legacy-direct` — agent-runs is opt-in. Workspace search blocks symlink traversal and redacts secrets in previews. Deployment health does not expose credentials.
+
+### Bugs Found and Fixed
+
+1. **Body `run_id` overrides URL path in control routes** (`api/routes.py:13950-13960`) — `body.setdefault("run_id", ...)` allowed a POST body-provided `run_id` to take precedence over the URL-derived run_id, creating an authorization bypass on cancel/approval/clarify routes. Fixed by using `body["run_id"] = ...` (always overwrites, URL is authoritative).
+
+### Test Results (Phase 11A)
+
+**Focused tests (default mode):**
+```
+./scripts/test.sh tests/test_runtime_contract.py tests/test_runtime_journal.py \
+  tests/test_runtime_routes.py tests/test_runtime_sse_reconnect.py \
+  tests/test_runtime_legacy_journal_mirror.py tests/test_agent_runs_adapter.py \
+  tests/test_runtime_adapter_selection.py tests/test_agent_runs_error_mapping.py \
+  tests/test_mobile_capabilities.py tests/test_mobile_run_dashboard.py \
+  tests/test_mobile_pending_actions.py tests/test_deployment_health.py \
+  tests/test_deployment_health_security_warnings.py tests/test_workspace_search.py \
+  -v
+
+Result: 254 passed, 0 failed in 7.65s — PASS
+```
+
+**Agent-runs env tests:**
+```
+HERMES_WEBUI_RUNTIME_ADAPTER=agent-runs \
+HERMES_WEBUI_AGENT_RUNS_BASE_URL=http://127.0.0.1:8642 \
+HERMES_WEBUI_AGENT_RUNS_API_KEY=test-key \
+./scripts/test.sh ... -v
+
+Result: 149 passed, 8 failed — 8 expected failures in test_runtime_routes.py
+(tests designed for legacy-direct/journal mode; documented in Phase 5)
+```
+
+**Import smoke:** All 8 modules import cleanly. AgentRunsAdapter config OK. PASS.
+
+### Remaining Risks
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| Body run_id precedence | **FIXED** | URL now authoritative via `body["run_id"] = ...` |
+| RuntimeJournal cross-instance race | MEDIUM | `os.replace()` is atomic on POSIX; stale index reads possible but unlikely. Not fixed — requires singleton refactor |
+| Dead code: `_redact_header_value` in agent_runs.py | LOW | Not called anywhere; no security impact |
+| Dead code: `_RT_SKIP_EVENTS` in streaming.py | LOW | Defined but never used |
+| Deployment health blocks for up to 5s | LOW | Agent-runs reachability check is synchronous; acceptable for health endpoint |
+| Mobile routes silently swallow adapter errors | LOW | Safe degradation; could hide bugs |
+| Workspace path exposes system username | LOW | Deployment health returns workspace path; intentional diagnostic |
+
+### PR Readiness
+
+- All 254 focused tests pass (0 failed)
+- Agent-runs env: 149 passed, 8 expected failures (documented)
+- Full test suite: 11937 passed, 5 pre-existing unrelated failures
+- No `/api/chat/start` or `/api/chat/stream` regressions
+- Agent-runs adapter is opt-in, defaults to legacy-direct
+- Merge-ready
+
 ## Rollback
 
 ```bash
