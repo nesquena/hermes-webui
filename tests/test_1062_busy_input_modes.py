@@ -384,19 +384,30 @@ class TestSendBusyBranchDispatch:
 
 class TestBootAndPanelsWiring:
     def test_boot_init_default_path(self):
-        """Boot success path initialises window._busyInputMode from settings."""
-        assert "window._busyInputMode=(s.busy_input_mode||'queue')" in BOOT_JS
+        """Boot success path initialises window._busyInputMode from settings.
+
+        #5167: the assignment now routes through _persistBusyInputMode() so the
+        resolved value is mirrored into localStorage (the synchronous source the
+        eager default reads) while still being the single source of truth once
+        /api/settings resolves.
+        """
+        assert "window._busyInputMode=_persistBusyInputMode(s.busy_input_mode)" in BOOT_JS
 
     def test_boot_init_fallback_path(self):
-        """Boot fallback path (settings load failed) initialises to safe default."""
-        # The fallback should set window._busyInputMode='queue'
-        assert "window._busyInputMode='queue'" in BOOT_JS
+        """Boot fallback path (settings load failed) keeps the persisted preference.
+
+        #5167: instead of hard-clobbering to 'queue', the catch path re-reads the
+        persisted mirror so a saved 'steer'/'interrupt' still applies when the
+        server is unreachable. _readPersistedBusyInputMode() normalizes to 'queue'.
+        """
+        assert "window._busyInputMode=_readPersistedBusyInputMode()" in BOOT_JS
 
     def test_panels_load_save_apply(self):
         assert "settingsBusyInputMode" in PANELS_JS, "panels.js must load the setting"
         assert "body.busy_input_mode" in PANELS_JS, "saveSettings must include busy_input_mode in body"
-        assert "window._busyInputMode=body.busy_input_mode" in PANELS_JS, (
-            "_applySavedSettingsUi must propagate busy_input_mode to the global"
+        assert "_persistBusyInputMode(body.busy_input_mode)" in PANELS_JS, (
+            "_applySavedSettingsUi must propagate busy_input_mode to the global "
+            "and persist it (so the next reload's eager default honors the save) (#5167)"
         )
 
     def test_index_html_dropdown_has_three_options(self):

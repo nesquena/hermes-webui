@@ -55,7 +55,13 @@ class TestTreeRenderer:
     def test_initTreeViews_called_in_post_render(self):
         with open("static/ui.js", "r", encoding="utf-8") as f:
             content = f.read()
-        assert "requestAnimationFrame(()=>postProcessRenderedMessages(inner))" in content
+        # Behavior assertion (#5338): post-render scheduled via
+        # _postProcessWithAnchorSuppression, which still calls postProcessRenderedMessages.
+        assert "requestAnimationFrame(()=>_postProcessWithAnchorSuppression(" in content
+        _wrap = content.find('function _postProcessWithAnchorSuppression')
+        assert _wrap != -1, "post-render should be wrapped by _postProcessWithAnchorSuppression"
+        assert 'postProcessRenderedMessages(container)' in content[_wrap:_wrap + 500], \
+            "the wrapper must still invoke postProcessRenderedMessages"
         start = content.find("function postProcessRenderedMessages")
         body = content[start:start + 500]
         assert "initTreeViews(container)" in body

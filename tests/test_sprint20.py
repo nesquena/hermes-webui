@@ -425,11 +425,10 @@ def test_boot_js_prefix_variable_declared():
 def test_boot_js_prefix_captured_on_start():
     """_prefix must be set from ta.value when the user starts recording."""
     js, _ = get_text("/static/boot.js")
-    # _prefix assignment must happen in the btn.onclick else branch (before recognition.start)
-    btn_onclick_idx = js.find("btn.onclick")
-    btn_onclick_end = js.find("};", btn_onclick_idx)
-    onclick_body = js[btn_onclick_idx:btn_onclick_end]
-    assert "_prefix=ta.value" in onclick_body or "_prefix = ta.value" in onclick_body
+    start_idx = js.find("async function _startMicCapture")
+    start_end = js.find("async function _toggleMicCapture", start_idx)
+    start_body = js[start_idx:start_end]
+    assert "_prefix=ta.value" in start_body or "_prefix = ta.value" in start_body
 
 
 def test_boot_js_onresult_prepends_prefix():

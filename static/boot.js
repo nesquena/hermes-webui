@@ -14,10 +14,21 @@
 // cancelStream: stop the active chat stream.
 // See docs/rfcs/webui-run-state-consistency-contract.md (Invariants #2, #4)
 // for the owner-aware + terminal-settle rationale.
-async function cancelStream(){
+async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
   if(!streamId) return;
+  // Interrupt provenance: log WHY the active run is being cancelled so operators
+  // can tell an explicit Stop / interrupt from any other trigger when they see a
+  // SIGINT/exit-code-130 in the backend logs. Only explicit user paths reach
+  // this function (Stop button, /stop, /interrupt, busy-interrupt); passive
+  // lifecycle events — session switch, tab hide, page unload — tear down the
+  // LOCAL SSE transport via closeLiveStream() and never call /api/chat/cancel,
+  // so they never interrupt the backend agent/tool run. (#5345)
+  const _reason = reason || 'explicit-cancel';
+  if(typeof console !== 'undefined' && console.info){
+    console.info('[stream] cancel requested', {reason:_reason, streamId, sessionId:sid});
+  }
   let respBody=null;
   try{
     const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
@@ -54,6 +65,11 @@ async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
   if(!streamId||!sid) return;
+  // Explicit sidebar "Stop response" — log provenance for the same reason as
+  // cancelStream(). (#5345)
+  if(typeof console !== 'undefined' && console.info){
+    console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
+  }
   try{
     await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
   }catch(e){/* close local stream; keep UI state honest below */}
@@ -629,6 +645,11 @@ function _micToastKeyForRecognitionError(error){
   let _finalText='';
   let _prefix='';
   let _isRecording=false;
+  let _micHoldTimer=null;
+  let _micHoldActive=false;
+  let _micPointerDown=false;
+  let _micStartSeq=0;
+  const _micHoldThresholdMs=300;
 
   function _setButtonTooltipAndKey(btn, key){
     const text = t(key);
@@ -735,14 +756,16 @@ function _micToastKeyForRecognitionError(error){
     }
   }
 
-  function _stopTracks(){
-    if(mediaStream){
-      mediaStream.getTracks().forEach(track=>track.stop());
-      mediaStream=null;
+  function _stopTracks(stream=mediaStream){
+    if(stream){
+      stream.getTracks().forEach(track=>track.stop());
+      if(mediaStream===stream) mediaStream=null;
     }
   }
 
   function _stopMic(){
+    _micStartSeq+=1;
+    _isRecording=false;
     if(!window._micActive) return;
     // Stop the backend that was ACTIVE WHEN RECORDING STARTED — not whatever
     // _rawAudioMode says now. The user can toggle Settings → Sound mid-recording,
@@ -852,7 +875,31 @@ function _micToastKeyForRecognitionError(error){
 
   _probeServerSttCapability();
 
-  btn.onclick=async()=>{
+  function _clearMicHoldTimer(){
+    if(_micHoldTimer){
+      clearTimeout(_micHoldTimer);
+      _micHoldTimer=null;
+    }
+  }
+
+  function _resetMicHoldState(){
+    _clearMicHoldTimer();
+    _micHoldActive=false;
+    _micPointerDown=false;
+  }
+
+  function _micButtonAvailable(){
+    if(!btn||btn.disabled) return false;
+    if(btn.style.display==='none') return false;
+    if(btn.classList.contains('composer-control-hidden')) return false;
+    if(btn.getAttribute('aria-hidden')==='true') return false;
+    if(window.getComputedStyle&&window.getComputedStyle(btn).display==='none') return false;
+    return true;
+  }
+
+  async function _startMicCapture(holdRequired=false){
+    if(!_micButtonAvailable()) return;
+    const startSeq=++_micStartSeq;
     // Race-condition guard: ignore rapid double-clicks
     if(_isRecording){
       _stopMic();
@@ -884,26 +931,38 @@ function _micToastKeyForRecognitionError(error){
       return;
     }
     try{
-      mediaStream=await navigator.mediaDevices.getUserMedia({audio:true});
+      const captureStream=await navigator.mediaDevices.getUserMedia({audio:true});
+      if(startSeq!==_micStartSeq||!_micButtonAvailable()||(holdRequired&&!_micHoldActive)){
+        _isRecording=false;
+        _stopTracks(captureStream);
+        return;
+      }
+      mediaStream=captureStream;
       const preferredTypes=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
       const mimeType=preferredTypes.find(type=>window.MediaRecorder.isTypeSupported?.(type))||'';
-      mediaRecorder=new MediaRecorder(mediaStream,mimeType?{mimeType}:undefined);
+      const captureMode=_rawAudioMode?'media-raw':'media-transcribe';
+      const recorder=new MediaRecorder(captureStream,mimeType?{mimeType}:undefined);
       audioChunks=[];
-      mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size)audioChunks.push(e.data);};
-      mediaRecorder.onerror=()=>{
+      const captureChunks=audioChunks;
+      recorder.ondataavailable=e=>{if(e.data&&e.data.size)captureChunks.push(e.data);};
+      recorder.onerror=()=>{
+        const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
         _isRecording=false;
-        _setRecording(false);
+        if(mediaRecorder===recorder) mediaRecorder=null;
+        if(isCurrentCapture) _setRecording(false);
         window._micPendingSend=false;
-        _stopTracks();
+        _stopTracks(captureStream);
         showToast(t('mic_network'));
       };
-      mediaRecorder.onstop=async()=>{
+      recorder.onstop=async()=>{
+        const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
+        if(mediaRecorder===recorder) mediaRecorder=null;
         _isRecording=false;
-        const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType||mimeType||'audio/webm'});
-        _setRecording(false);
-        _stopTracks();
+        const blob=new Blob(captureChunks,{type:recorder.mimeType||mimeType||'audio/webm'});
+        if(isCurrentCapture) _setRecording(false);
+        _stopTracks(captureStream);
         if(blob.size){
-          if(_activeCaptureMode==='media-raw'){
+          if(captureMode==='media-raw'){
             await _sendRawAudio(blob);
           }else{
             await _transcribeBlob(blob);
@@ -914,16 +973,81 @@ function _micToastKeyForRecognitionError(error){
         }
         _applyDeferredServerSttFlip();
       };
-      _activeCaptureMode=_rawAudioMode?'media-raw':'media-transcribe';
-      mediaRecorder.start();
+      _activeCaptureMode=captureMode;
+      mediaRecorder=recorder;
+      recorder.start();
       _setRecording(true);
     }catch(err){
+      if(startSeq!==_micStartSeq) return;
       _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();
       showToast(t(_micToastKeyForRecognitionError('not-allowed')||'mic_denied'));
     }
-  };
+  }
+
+  async function _toggleMicCapture(){
+    if(!_micButtonAvailable()) return;
+    if(window._micActive){
+      _stopMic();
+      return;
+    }
+    await _startMicCapture();
+  }
+  window._toggleMicCapture=_toggleMicCapture;
+
+  btn.addEventListener('pointerdown',e=>{
+    if(e.button!==0) return;
+    if(!_micButtonAvailable()) return;
+    _resetMicHoldState();
+    _micPointerDown=true;
+    _micHoldTimer=setTimeout(async()=>{
+      _micHoldTimer=null;
+      if(!_micPointerDown||window._micActive) return;
+      _micHoldActive=true;
+      await _startMicCapture(true);
+    },_micHoldThresholdMs);
+  });
+
+  btn.addEventListener('pointerup',async e=>{
+    if(e.button!==0||!_micPointerDown) return;
+    _clearMicHoldTimer();
+    if(_micHoldActive){
+      _micHoldActive=false;
+      _micPointerDown=false;
+      _stopMic();
+      return;
+    }
+    _micPointerDown=false;
+    await _toggleMicCapture();
+  });
+
+  btn.addEventListener('pointerleave',()=>{
+    _clearMicHoldTimer();
+    if(_micHoldActive){
+      _micHoldActive=false;
+      _micPointerDown=false;
+      _stopMic();
+      return;
+    }
+    _micPointerDown=false;
+  });
+
+  btn.addEventListener('pointercancel',()=>{
+    _clearMicHoldTimer();
+    if(_micHoldActive){
+      _micHoldActive=false;
+      _micPointerDown=false;
+      _stopMic();
+      return;
+    }
+    _micPointerDown=false;
+  });
+
+  btn.addEventListener('click',async e=>{
+    if(e.detail!==0) return;
+    await _toggleMicCapture();
+  });
 
   // Wire up the settings checkbox
   const rawAudioCheckbox = document.getElementById('settingsRawAudio');
@@ -939,6 +1063,35 @@ function _micToastKeyForRecognitionError(error){
 })();
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;
+
+// ── Busy input mode eager default (#5167) ───────────────────────────────────
+// The Busy input mode preference (queue/interrupt/steer) is read on the send
+// path via `window._busyInputMode||'queue'`. The authoritative value only
+// arrives once the async boot IIFE below resolves the `/api/settings` fetch.
+// Without an eager value, every send during that boot window silently falls
+// back to 'queue', ignoring a saved 'steer'/'interrupt' preference (worse on
+// slow/contended environments like WSL2, see #5132). Mirror the resolved value
+// into localStorage — the same synchronous-source pattern used by hermes-lang /
+// hermes-theme — so the very first send after a reload honors the saved choice.
+const _BUSY_INPUT_MODES=['queue','interrupt','steer'];
+function _normalizeBusyInputMode(mode){
+  return _BUSY_INPUT_MODES.includes(mode)?mode:'queue';
+}
+function _persistBusyInputMode(mode){
+  const m=_normalizeBusyInputMode(mode);
+  try{localStorage.setItem('hermes-busy-input-mode',m);}catch(_){}
+  return m;
+}
+function _readPersistedBusyInputMode(){
+  let stored=null;
+  try{stored=localStorage.getItem('hermes-busy-input-mode');}catch(_){}
+  return _normalizeBusyInputMode(stored);
+}
+window._persistBusyInputMode=_persistBusyInputMode;
+window._readPersistedBusyInputMode=_readPersistedBusyInputMode;
+// Eager default set BEFORE the async settings fetch resolves so first sends in
+// the boot window honor the persisted preference instead of defaulting to queue.
+window._busyInputMode=_readPersistedBusyInputMode();
 
 // ── Extension TTS-engine registry (registerHermesTtsEngine) ──────────────────
 // Defined at MODULE scope (not inside the voice-mode IIFE below) so the public
@@ -1923,7 +2076,8 @@ function _shouldAttachLargePastedText(text){
 }
 function _largeTextPasteFileName(now){
   const d=new Date(now||Date.now());
-  const stamp=d.toISOString().replace(/[:.]/g,'-').replace('T','_').replace('Z','');
+  const p=n=>String(n).padStart(2,'0');
+  const stamp=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}-${String(d.getMilliseconds()).padStart(3,'0')}`;
   const existing=new Set((S.pendingFiles||[]).map(f=>f&&f.name).filter(Boolean));
   let name=`pasted-text-${stamp}.md`;
   for(let i=2;existing.has(name);i++)name=`pasted-text-${stamp}-${i}.md`;
@@ -2428,31 +2582,82 @@ function applyBotName(){
 }
 
 const _COMPOSER_CONTROL_TOGGLE_DEFS=[
-  {key:'hide_composer_attach',label:'Attach',labelKey:'composer_control_attach',selectors:['#btnAttach']},
-  {key:'hide_composer_saved_prompts',label:'Saved prompts',labelKey:'composer_control_saved_prompts',selectors:['#btnSavedPrompts']},
-  {key:'hide_composer_mic',label:'Mic',labelKey:'composer_control_mic',selectors:['#btnMic']},
-  {key:'hide_composer_profile',label:'Profile',labelKey:'composer_control_profile',selectors:['#profileChipWrap']},
-  {key:'hide_composer_workspace',label:'Workspace',labelKey:'composer_control_workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction']},
-  {key:'hide_composer_model',label:'Model',labelKey:'composer_control_model',selectors:['.composer-model-wrap','#composerMobileModelAction']},
-  {key:'hide_composer_reasoning',label:'Reasoning',labelKey:'composer_control_reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction']},
-  {key:'hide_composer_context',label:'Context',labelKey:'composer_control_context',selectors:['#ctxIndicatorWrap','#composerMobileContextAction']},
+  {key:'hide_composer_attach',label:'Attach',labelKey:'composer_control_attach',selectors:['#btnAttach'],orderSelector:'#btnAttach',orderGroup:'left'},
+  {key:'hide_composer_saved_prompts',label:'Saved prompts',labelKey:'composer_control_saved_prompts',selectors:['#btnSavedPrompts'],orderSelector:'#btnSavedPrompts',orderGroup:'left'},
+  {key:'hide_composer_mic',label:'Mic',labelKey:'composer_control_mic',selectors:['#btnMic'],orderSelector:'#btnMic',orderGroup:'left'},
+  {key:'hide_composer_profile',label:'Profile',labelKey:'composer_control_profile',selectors:['#profileChipWrap'],orderSelector:'#profileChipWrap',orderGroup:'left'},
+  {key:'hide_composer_workspace',label:'Workspace',labelKey:'composer_control_workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction'],orderSelector:'.composer-ws-wrap',orderGroup:'left'},
+  {key:'hide_composer_model',label:'Model',labelKey:'composer_control_model',selectors:['.composer-model-wrap','#composerMobileModelAction'],orderSelector:'.composer-model-wrap',orderGroup:'left'},
+  {key:'hide_composer_reasoning',label:'Reasoning',labelKey:'composer_control_reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction'],orderSelector:'#composerReasoningWrap',orderGroup:'left'},
+  {key:'hide_composer_context',label:'Context',labelKey:'composer_control_context',selectors:['#ctxIndicatorWrap','#composerMobileContextAction'],orderSelector:'#ctxIndicatorWrap',orderGroup:'right'},
 ];
 window._COMPOSER_CONTROL_TOGGLE_DEFS=_COMPOSER_CONTROL_TOGGLE_DEFS;
 
 const _COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=[
-  {key:'hide_composer_voice_mode',label:'Voice mode',labelKey:'composer_control_voice_mode',selectors:['#btnVoiceMode']},
-  {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill']},
-  {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge']},
-  {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn']},
-  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip','#composerMobileQuotaAction']},
-  {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap']},
-  {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus']},
+  {key:'hide_composer_voice_mode',label:'Voice mode',labelKey:'composer_control_voice_mode',selectors:['#btnVoiceMode'],orderSelector:'#btnVoiceMode',orderGroup:'left'},
+  {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill'],orderSelector:'#yoloPill',orderGroup:'left'},
+  {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge'],orderSelector:'#bgBadge',orderGroup:'right'},
+  {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn'],orderSelector:'#composerMobileConfigBtn',orderGroup:'left'},
+  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip','#composerMobileQuotaAction'],orderSelector:'#providerQuotaChip',orderGroup:'left'},
+  {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap'],orderSelector:'#composerToolsetsWrap',orderGroup:'left'},
+  {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus'],orderSelector:'#composerStatus',orderGroup:'right'},
 ];
 window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS;
 
 function _allComposerControlToggleDefs(){
   return _COMPOSER_CONTROL_TOGGLE_DEFS.concat(_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS);
 }
+
+function _sanitizeComposerControlOrder(order){
+  if(!Array.isArray(order)) return [];
+  const allowed=new Set(_allComposerControlToggleDefs().map(def=>def.key));
+  const out=[];
+  order.forEach(key=>{
+    if(typeof key!=='string') return;
+    key=key.trim();
+    if(!key||!allowed.has(key)||out.includes(key)) return;
+    out.push(key);
+  });
+  return out;
+}
+window._sanitizeComposerControlOrder=_sanitizeComposerControlOrder;
+
+function _orderedComposerControlDefs(order){
+  const defs=_allComposerControlToggleDefs();
+  const byKey=new Map(defs.map(def=>[def.key,def]));
+  const out=[];
+  _sanitizeComposerControlOrder(Array.isArray(order)?order:window._composerControlOrder).forEach(key=>{
+    if(byKey.has(key)) out.push(byKey.get(key));
+  });
+  defs.forEach(def=>{if(!out.includes(def)) out.push(def);});
+  return out;
+}
+window._orderedComposerControlDefs=_orderedComposerControlDefs;
+
+function _applyComposerControlOrder(order){
+  window._composerControlOrder=_sanitizeComposerControlOrder(order);
+  const grouped=new Map();
+  _orderedComposerControlDefs(window._composerControlOrder).forEach(def=>{
+    const node=document.querySelector(def.orderSelector||def.selectors&&def.selectors[0]);
+    if(!node||!node.parentNode) return;
+    const parent=node.parentNode;
+    if(!grouped.has(parent)) grouped.set(parent,[]);
+    grouped.get(parent).push(node);
+  });
+  grouped.forEach((nodes,parent)=>{
+    if(!nodes.length) return;
+    const marker=document.createComment('composer-control-order');
+    parent.insertBefore(marker,nodes[0]);
+    let ref=marker;
+    nodes.forEach(node=>{
+      parent.insertBefore(node,ref.nextSibling);
+      ref=node;
+    });
+    marker.remove();
+  });
+  if(typeof _fitComposerFooter==='function') _fitComposerFooter();
+}
+window._applyComposerControlOrder=_applyComposerControlOrder;
 
 function _composerControlVisibilityFromSettings(settings){
   const next={};
@@ -2558,13 +2763,15 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       stringChars:parseInt(s.inflight_state_max_string_chars||60000,10)||60000,
       jsonChars:parseInt(s.inflight_state_max_json_chars||1500000,10)||1500000,
     };
-    window._busyInputMode=(s.busy_input_mode||'queue');
+    window._busyInputMode=_persistBusyInputMode(s.busy_input_mode);
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._autoScrollFollow=s.auto_scroll_follow!==false;
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!s.project_quick_create_buttons;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
+    window._composerControlOrder=_sanitizeComposerControlOrder(s.composer_control_order);
+    _applyComposerControlOrder(window._composerControlOrder);
     window._showTitlebarProfile=!!s.show_titlebar_profile;
     _applyTitlebarProfileVisibility();
     window._botName=s.bot_name||'Hermes';
@@ -2682,11 +2889,18 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._structuredCodeAutoTreeLines=10;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
-    window._busyInputMode='queue';
+    // Settings load failed: keep the persisted busy-input-mode preference (the
+    // eager default already read it from the localStorage mirror) instead of
+    // clobbering it with 'queue', so a saved 'steer'/'interrupt' still applies
+    // when the server is unreachable (#5167). The placeholder-hint has no
+    // persisted mirror, so it defaults off on failure.
+    window._busyInputMode=_readPersistedBusyInputMode();
     window._showBusyPlaceholderHint=false;
     window._sessionEndlessScrollEnabled=false;
     window._autoScrollFollow=true;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
+    window._composerControlOrder=[];
+    _applyComposerControlOrder(window._composerControlOrder);
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){

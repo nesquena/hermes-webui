@@ -167,12 +167,21 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     assert "esc(origin)" in sidecar_block
     assert "esc(healthPath)" in sidecar_block
     assert "esc(healthUrl)" in sidecar_block
+    assert "sidecar&&sidecar.proxy" in sidecar_block
+    assert "proxy.available===true" in sidecar_block
+    assert "proxy.consented===true" in sidecar_block
+    assert "proxy.consent_required===true" in sidecar_block
+    assert "proxy.origin_changed===true" in sidecar_block
+    assert "Proxy path" in sidecar_block
+    assert "data-extension-sidecar-proxy-id" in sidecar_block
+    assert "data-extension-sidecar-proxy-approved" in sidecar_block
     assert 'data-sidecar-runtime-index="${index}"' in sidecar_block
     assert "fetch(healthUrl,{credentials:'omit',cache:'no-store'" in monitor_block
     assert "function _monitorExtensionSidecars(sidecars,seq)" in monitor_block
     assert "const seq=_extensionsSidecarMonitorSeq" not in monitor_block
     assert "_monitorExtensionSidecars(sidecars,seq)" in render_block
     assert "function _renderExtensionsPanel(data,seq)" in render_block
+    assert "_bindExtensionSidecarProxyButtons(target)" in render_block
     assert "const seq=++_extensionsSidecarMonitorSeq" in load_block
     assert "opts&&opts.preserveExisting&&target.innerHTML.trim()" in load_block
     # A failed refresh must NOT be preserved as "existing content": the Loading/
@@ -202,6 +211,19 @@ def test_extensions_panel_renders_loopback_sidecar_monitor_safely():
     assert "api('/extensions/" not in monitor_block
     assert "sidecar/*" not in monitor_block
     assert not _contains_post_method(monitor_block)
+
+
+def test_extensions_panel_sidecar_proxy_consent_uses_dedicated_endpoint():
+    bind_block = _between("function _bindExtensionSidecarProxyButtons", "async function handleExtensionToggle")
+    consent_block = _between("async function handleExtensionSidecarProxyConsent", "function _readExtensionSettingsForm")
+
+    assert "handleExtensionSidecarProxyConsent" in bind_block
+    assert "data-extension-sidecar-proxy-id" in bind_block
+    assert "api('/api/extensions/sidecar-proxy-consent',{method:'POST',body:JSON.stringify({id,approved})})" in consent_block
+    assert "Extension sidecar proxy approved." in consent_block
+    assert "Extension sidecar proxy consent revoked." in consent_block
+    assert "Failed to update extension sidecar proxy consent" in consent_block
+    assert "api('/api/extensions/toggle'" not in consent_block
 
 
 def test_extensions_panel_toggle_uses_dedicated_endpoint_without_settings_or_install():
@@ -415,11 +437,13 @@ def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims
     assert "manifests" in diagnostics_section
     assert "fetch new extension assets" in diagnostics_section
     assert "uninstall files" in diagnostics_section
-    assert "proxy sidecars" in diagnostics_section
     assert "GET /api/extensions/status" in diagnostics_section
+    assert "`POST /api/extensions/sidecar-proxy-consent`" in diagnostics_section
     assert "sanitized loopback sidecars" in diagnostics_section
     assert "credentials: 'omit'" in diagnostics_section
-    assert "does **not** proxy sidecar requests" in diagnostics_section
+    assert "fixed per-extension sidecar path" in diagnostics_section
+    assert "WebUI strips `Cookie`, `Authorization`, and CSRF headers" in diagnostics_section
+    assert "does not create arbitrary extension-owned backend routes" in diagnostics_section
     assert "optional top-level `runtime` object" in diagnostics_section
     assert "allowlisted scalar fields" in diagnostics_section
     assert "browser-local controls" in diagnostics_section

@@ -514,3 +514,59 @@ def test_streaming_tick_calls_fix_before_dom_writes():
     assert guard_idx < render_idx, (
         "The mobile scroll-jank guard must run before streaming DOM work begins."
     )
+
+
+def test_post_process_runs_under_overflow_anchor_suppression():
+    """#5338 follow-up: the async post-render settle window must stay suppressed.
+
+    Root cause of the residual mobile "往回大跳": postProcessRenderedMessages()
+    is scheduled a FRAME LATER via requestAnimationFrame(), after the synchronous
+    _fixMobileScrollJank()/_suppressBrowserOverflowAnchor() guards have already
+    released. It runs highlightCode()/load*Inline()/katex/mermaid, all of which
+    can change the height of rows ABOVE the viewport. On mobile (overflow-anchor:
+    auto) the browser's native anchor engine then compensates scrollTop a SECOND
+    time in that unguarded frame, yanking an unpinned reader to another turn.
+
+    The fix wraps every deferred post-process in _postProcessWithAnchorSuppression()
+    so the browser layer stays suppressed across the post-process + one media-reflow
+    frame. Desktop rests at overflow-anchor:none so the wrapper is a no-op there.
+    """
+    # The wrapper exists and engages the shared suppression helper.
+    wrapper_idx = UI_JS.find("function _postProcessWithAnchorSuppression(")
+    assert wrapper_idx != -1, (
+        "_postProcessWithAnchorSuppression() wrapper must exist to keep the "
+        "browser overflow-anchor layer suppressed across the deferred post-render "
+        "settle window (#5338 mobile 往回大跳 follow-up)."
+    )
+    wrapper = UI_JS[wrapper_idx: wrapper_idx + 900]
+    assert "_suppressBrowserOverflowAnchor(scroller)" in wrapper, (
+        "_postProcessWithAnchorSuppression() must route through the shared "
+        "_suppressBrowserOverflowAnchor() helper so desktop stays a verified no-op."
+    )
+    assert "postProcessRenderedMessages(container)" in wrapper, (
+        "_postProcessWithAnchorSuppression() must still call the real "
+        "postProcessRenderedMessages() inside the suppression window."
+    )
+    # Suppression is held across ONE extra frame so late media/layout reflow
+    # cannot re-anchor either.
+    assert "requestAnimationFrame(release)" in wrapper, (
+        "_postProcessWithAnchorSuppression() must defer the suppression release "
+        "by one frame so image-decode / katex / mermaid reflow is also covered."
+    )
+
+    # EVERY deferred post-process dispatch must go through the wrapper — a raw
+    # requestAnimationFrame(()=>postProcessRenderedMessages(...)) would leave that
+    # path unguarded and re-open the jump.
+    raw_dispatch = "requestAnimationFrame(()=>postProcessRenderedMessages("
+    assert raw_dispatch not in UI_JS, (
+        "All deferred postProcessRenderedMessages() dispatches must go through "
+        "_postProcessWithAnchorSuppression(); a raw rAF dispatch re-opens the "
+        "unguarded async settle window on mobile (#5338)."
+    )
+    wrapped_dispatch = "requestAnimationFrame(()=>_postProcessWithAnchorSuppression("
+    assert UI_JS.count(wrapped_dispatch) >= 3, (
+        "All three post-render paths (fast-path cache branch, main render tail, "
+        "live-tool remount) must dispatch post-process through the suppression "
+        "wrapper; found fewer than 3."
+    )
+

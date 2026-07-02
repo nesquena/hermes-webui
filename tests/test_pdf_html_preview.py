@@ -242,7 +242,15 @@ class TestRAFIntegration:
 
     def test_message_render_uses_single_post_process_raf(self):
         ui = _read_js('ui.js')
-        assert ui.count('requestAnimationFrame(()=>postProcessRenderedMessages(inner))') == 2
+        # Behavior assertion (#5338): the two `(inner)` post-render dispatches are
+        # now routed through _postProcessWithAnchorSuppression (which still calls
+        # postProcessRenderedMessages). Assert on the wrapper's `(inner)` dispatch
+        # count rather than the old literal so a future rename doesn't re-orphan this.
+        assert ui.count('requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner))') == 2
+        _wrap = ui.find('function _postProcessWithAnchorSuppression')
+        assert _wrap != -1, "post-render should be wrapped by _postProcessWithAnchorSuppression"
+        assert 'postProcessRenderedMessages(container)' in ui[_wrap:_wrap + 500], \
+            "the wrapper must still invoke postProcessRenderedMessages"
 
 
 # ── CSS classes ────────────────────────────────────────────────────────────

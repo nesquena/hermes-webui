@@ -1,7 +1,7 @@
 """
 Hermes Web UI -- optional authentication.
 Off by default. Enable by setting HERMES_WEBUI_PASSWORD, configuring a
-password in Settings, or registering passkeys and then going passwordless.
+password in Settings, registering passkeys, or configuring native OIDC SSO.
 """
 import hashlib
 import hmac
@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from api.config import STATE_DIR, load_settings
+from api.config import STATE_DIR, get_config, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ def _resolve_session_ttl() -> int:
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
+    '/api/auth/oidc/start', '/api/auth/oidc/callback',
     '/api/auth/passkey/options', '/api/auth/passkey/login',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
@@ -443,9 +444,67 @@ def are_passkeys_enabled() -> bool:
         return False
 
 
+def is_oidc_auth_enabled() -> bool:
+    """True if native OIDC login is configured for WebUI sessions."""
+    try:
+        from api.auth_oidc import is_oidc_enabled
+
+        return is_oidc_enabled()
+    except Exception as exc:
+        logger.debug("Failed to inspect OIDC availability: %s", exc)
+        return False
+
+
+def get_oidc_startup_warning() -> str | None:
+    """Return a startup warning when OIDC auth is only partially configured."""
+    try:
+        cfg = get_config()
+        raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+    except Exception:
+        logger.debug("Failed to read webui_oidc config", exc_info=True)
+        raw = {}
+
+    def pick(name: str, env_name: str) -> str:
+        env_value = os.getenv(env_name)
+        value = env_value if env_value is not None else raw.get(name)
+        return str(value or "").strip()
+
+    issuer = bool(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER"))
+    client_id = bool(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID"))
+    allow_claim = bool(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM"))
+    allow_values = bool(pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES"))
+
+    if not any((issuer, client_id, allow_claim, allow_values)):
+        return None
+    if issuer and client_id and allow_claim and allow_values:
+        return None
+
+    missing = []
+    if not issuer:
+        missing.append("issuer")
+    if not client_id:
+        missing.append("client_id")
+    if not allow_claim:
+        missing.append("allow_claim")
+    if not allow_values:
+        missing.append("allow_values")
+
+    joined = ", ".join(missing)
+    return (
+        "Native OIDC login is only partially configured; missing "
+        f"{joined}. The WebUI will not enable OIDC auth until all four fields are set."
+    )
+
+
 def is_auth_enabled() -> bool:
-    """True if password auth or passkey-only auth is configured."""
-    return is_password_auth_enabled() or are_passkeys_enabled()
+    """True if password auth, passkeys, or OIDC login is configured."""
+    return (
+        is_password_auth_enabled()
+        or are_passkeys_enabled()
+        or is_oidc_auth_enabled()
+    )
 
 
 def verify_password(plain: str) -> bool:

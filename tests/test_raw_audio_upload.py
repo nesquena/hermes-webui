@@ -159,10 +159,11 @@ def test_stop_mic_uses_pinned_active_capture_mode_not_current_rawmode():
     # _stopMic decides backend from the pinned mode, not _rawAudioMode.
     assert "_activeCaptureMode==='speech'" in _BOOT_JS
     # onstop dispatches raw-vs-transcribe from the pinned mode too.
-    assert "_activeCaptureMode==='media-raw'" in _BOOT_JS
+    assert "if(captureMode==='media-raw')" in _BOOT_JS
     # the mode is pinned at both start branches.
     assert "_activeCaptureMode='speech'" in _BOOT_JS
-    assert "_activeCaptureMode=_rawAudioMode?'media-raw':'media-transcribe'" in _BOOT_JS
+    assert "const captureMode=_rawAudioMode?'media-raw':'media-transcribe';" in _BOOT_JS
+    assert "_activeCaptureMode=captureMode;" in _BOOT_JS
 
 
 def test_send_raw_audio_honors_explicit_pending_send():

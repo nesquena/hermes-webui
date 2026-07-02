@@ -194,20 +194,29 @@ def test_extension_settings_only_manifest_still_injects_runtime_config(tmp_path,
 def test_extension_route_remains_behind_webui_auth(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
 
-    from api.auth import check_auth
+    from api.auth import check_auth, _invalidate_password_hash_cache
 
-    extension = FakeHandler()
-    # SimpleNamespace must include `query` because api.auth.check_auth (since
-    # v0.50.258, the multi-param ?next= encoding fix) accesses `parsed.query`
-    # when constructing the redirect Location header.
-    assert check_auth(extension, SimpleNamespace(path="/extensions/app.js", query="")) is False
-    assert extension.status == 302
-    assert extension.header("Location") == "login?next=/extensions/app.js"
+    # The password hash is cached process-wide (PBKDF2 is ~1s/call). Invalidate
+    # before so this test reads the just-set env var rather than a stale None
+    # cached by an earlier auth-disabled test, and again in finally so the hash
+    # computed here can't leak into a later test that expects auth disabled.
+    # Without this the test's result depends on suite execution order.
+    _invalidate_password_hash_cache()
+    try:
+        extension = FakeHandler()
+        # SimpleNamespace must include `query` because api.auth.check_auth (since
+        # v0.50.258, the multi-param ?next= encoding fix) accesses `parsed.query`
+        # when constructing the redirect Location header.
+        assert check_auth(extension, SimpleNamespace(path="/extensions/app.js", query="")) is False
+        assert extension.status == 302
+        assert extension.header("Location") == "login?next=/extensions/app.js"
 
-    # Existing core static assets remain public; extension assets intentionally
-    # do not share that exemption because they are administrator-supplied code.
-    static = FakeHandler()
-    assert check_auth(static, SimpleNamespace(path="/static/ui.js", query="")) is True
+        # Existing core static assets remain public; extension assets intentionally
+        # do not share that exemption because they are administrator-supplied code.
+        static = FakeHandler()
+        assert check_auth(static, SimpleNamespace(path="/static/ui.js", query="")) is True
+    finally:
+        _invalidate_password_hash_cache()
 
 
 

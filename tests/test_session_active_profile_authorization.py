@@ -188,7 +188,7 @@ def test_chat_start_body_profile_cannot_retag_visible_empty_session_without_acti
     monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid, **_kwargs: empty_visible)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *_args, **_kwargs: "/workspace")
-    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None, None))
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",

@@ -22,8 +22,11 @@ let _kanbanEventSourceFailures = 0;
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
+let _currentCronDetailKey = '';
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _showAllCronProfiles = false;
+let _cronOtherProfileCount = 0;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -536,6 +539,57 @@ function _cronProfileTitle(profile){
   return t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time';
 }
 
+function _cronOwnerProfileName(job){
+  return _cronProfileName(job && (job.owner_profile ?? job.profile));
+}
+
+function _cronJobKey(job){
+  return `${_cronOwnerProfileName(job)}\u0000${String(job && job.id || '')}`;
+}
+
+function _cronItemId(job){
+  return 'cron-' + encodeURIComponent(_cronJobKey(job));
+}
+
+function _cronDetailMatches(jobId, detailKey){
+  return !!(
+    detailKey &&
+    _currentCronDetail &&
+    !_currentCronDetail.read_only &&
+    String(_currentCronDetail.id) === String(jobId) &&
+    _currentCronDetailKey === detailKey &&
+    _cronJobKey(_currentCronDetail) === detailKey
+  );
+}
+
+function _findCronJob(jobOrId){
+  if (jobOrId && typeof jobOrId === 'object') return jobOrId;
+  const id = String(jobOrId || '');
+  if (!_cronList || !id) return null;
+  return _cronList.find(j => !j.read_only && String(j.id) === id) ||
+    _cronList.find(j => String(j.id) === id) ||
+    null;
+}
+
+function _appendCronProfileToggle(parent){
+  if (!parent || (!_showAllCronProfiles && _cronOtherProfileCount <= 0)) return;
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'padding:10px 0 0';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sm-btn';
+  btn.style.cssText = 'width:100%;justify-content:center';
+  btn.textContent = _showAllCronProfiles
+    ? 'Show active profile only'
+    : `Show ${_cronOtherProfileCount} from other profiles`;
+  btn.onclick = async () => {
+    _showAllCronProfiles = !_showAllCronProfiles;
+    await loadCrons();
+  };
+  wrap.appendChild(btn);
+  parent.appendChild(wrap);
+}
+
 async function loadCronProfiles(){
   if (_cronProfilesCache) return _cronProfilesCache;
   try {
@@ -657,12 +711,13 @@ async function loadCrons(animate) {
   }
   try {
     await loadCronProfiles();
-    const data = await api('/api/crons');
+    const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
+    const data = await api('/api/crons' + allProfilesQS);
     _cronList = data.jobs || [];
-    if (!_cronList.length) {
-      box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('cron_no_jobs'))}</div>`;
-      if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
-      return;
+    _cronOtherProfileCount = Number(data.other_profile_count || 0);
+    if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
+      _showAllCronProfiles = false;
+      _cronOtherProfileCount = 0;
     }
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
@@ -677,23 +732,40 @@ async function loadCrons(animate) {
     const _appendCronItem = (parent, { job, status }) => {
       const item = document.createElement('div');
       item.className = 'cron-item';
-      item.id = 'cron-' + job.id;
-      const isNewRun = _cronNewJobIds.has(String(job.id));
+      item.id = _cronItemId(job);
+      if (job.read_only) {
+        item.classList.add('readonly');
+        item.style.opacity = '0.78';
+      }
+      const isNewRun = !job.read_only && _cronNewJobIds.has(String(job.id));
       const isAgentMode = !job.no_agent;
-      const profileLabel = _cronProfileLabel(job.profile);
-      const profileTitle = _cronProfileTitle(job.profile);
+      const ownerProfileLabel = _cronProfileLabel(_cronOwnerProfileName(job));
+      const ownerProfileTitle = `Owner profile: ${ownerProfileLabel}`;
+      const readOnlyBadge = job.read_only
+        ? '<span class="cron-status disabled" title="Read-only from another profile">Read-only</span>'
+        : '';
       item.innerHTML = `
         <div class="cron-header">
           ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
           ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : `<span class="cron-script-badge" title="${esc(t('cron_script_badge_title') || 'Script job (no agent)')}">📜</span>`}
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
-          <span class="cron-profile-badge" title="${esc(profileTitle)}">${esc(profileLabel)}</span>
+          <span class="cron-profile-badge" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
+          ${readOnlyBadge}
         </div>`;
-      item.onclick = () => openCronDetail(job.id, item);
-      if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
+      item.onclick = () => openCronDetail(job, item);
+      if (_currentCronDetailKey && _currentCronDetailKey === _cronJobKey(job)) item.classList.add('active');
       parent.appendChild(item);
     };
+    if (!_cronList.length) {
+      const emptyText = (!_showAllCronProfiles && _cronOtherProfileCount > 0)
+        ? 'No cron jobs in the active profile.'
+        : (t('cron_no_jobs') || 'No jobs yet');
+      box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(emptyText)}</div>`;
+      _appendCronProfileToggle(box);
+      if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
+      return;
+    }
     for (const entry of _activeJobs) _appendCronItem(box, entry);
     if (_pausedJobs.length) {
       let collapsed = true;
@@ -716,9 +788,10 @@ async function loadCrons(animate) {
       for (const entry of _pausedJobs) _appendCronItem(inner, entry);
       box.appendChild(details);
     }
+    _appendCronProfileToggle(box);
     // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
-      const refreshed = _cronList.find(j => j.id === _currentCronDetail.id);
+      const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
       if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
@@ -821,6 +894,7 @@ function _cronAgentPromptCardHtml(job){
 
 function _renderCronDetail(job){
   _currentCronDetail = job;
+  _currentCronDetailKey = _cronJobKey(job);
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -833,6 +907,7 @@ function _renderCronDetail(job){
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
   const isNoAgent = _isCronScriptJob(job);
+  const isReadOnly = !!job.read_only;
   const cronJobMode = _cronModeLabel(job);
   const modelProvider =
     job.provider && job.model ? `${esc(job.provider)}/${esc(job.model)}` :
@@ -841,12 +916,16 @@ function _renderCronDetail(job){
     isNoAgent ? '' : esc(t('cron_model_use_default') || 'Use profile default');
   const profileLabel = _cronProfileLabel(job.profile);
   const profileTitle = _cronProfileTitle(job.profile);
+  const ownerProfileName = _cronOwnerProfileName(job);
+  const ownerProfileLabel = _cronProfileLabel(ownerProfileName);
+  const ownerProfileTitle = `Owner profile: ${ownerProfileLabel}`;
+  const showOwnerRow = !!ownerProfileName && (isReadOnly || ownerProfileName !== _cronProfileName(job.profile));
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
   const attention = status.state === 'needs_attention' || status.state === 'schedule_error';
   const croniterHint = job.last_error && /croniter/i.test(job.last_error)
     ? `<p>${esc(t('cron_attention_croniter_hint'))}</p>`
     : '';
-  const attentionBanner = attention ? `
+  const attentionBanner = !isReadOnly && attention ? `
       <div class="detail-alert cron-attention-panel">
         <div class="detail-alert-title">${esc(t('cron_status_needs_attention'))}</div>
         <p>${esc(t('cron_attention_desc'))}</p>
@@ -857,6 +936,11 @@ function _renderCronDetail(job){
           <button type="button" class="cron-btn" onclick="copyCurrentCronDiagnostics()">${esc(t('cron_attention_copy_diagnostics'))}</button>
         </div>
       </div>` : '';
+  const readOnlyBanner = isReadOnly ? `
+      <div class="detail-alert">
+        <div class="detail-alert-title">Read-only from another profile</div>
+        <p>Switch to ${esc(ownerProfileLabel)} to run, edit, or inspect live status and output for this cron job.</p>
+      </div>` : '';
   const toastNotifications = job.toast_notifications !== false;
   const outputTitle = _cronOutputTitle(job);
   const skillsRow = isNoAgent ? '' : `<div class="detail-row"><div class="detail-row-label">${esc(t('cron_skills_label') || 'Skills')}</div><div class="detail-row-value">${esc(skills)}</div></div>`;
@@ -864,6 +948,7 @@ function _renderCronDetail(job){
   body.innerHTML = `
     <div class="main-view-content">
       ${attentionBanner}
+      ${readOnlyBanner}
       ${isNoAgent ? _cronScriptJobBannerHtml() : ''}
       <div class="detail-card">
         <div class="detail-card-title">${esc(t('cron_status_active').replace(/./,c=>c.toUpperCase()))}</div>
@@ -873,15 +958,16 @@ function _renderCronDetail(job){
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_mode_label') || 'Mode')}</div><div class="detail-row-value"><span class="detail-badge cron-mode-badge ${isNoAgent ? 'script' : 'agent'}" id="cronJobMode">${esc(cronJobMode)}</span>${modelProvider ? ` <code>${modelProvider}</code>` : ''}</div></div>
+        ${showOwnerRow ? `<div class="detail-row"><div class="detail-row-label">Owner profile</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? (t('cron_toast_notifications_enabled') || 'Enabled') : (t('cron_toast_notifications_disabled') || 'Disabled'))}</span></div></div>
         ${skillsRow}
         ${lastError}
       </div>
       ${instructionCard}
-      <div class="detail-card ${_cronNewJobIds.has(String(job.id)) ? 'has-new-run' : ''}" id="cronDetailRuns">
+      <div class="detail-card ${!isReadOnly && _cronNewJobIds.has(String(job.id)) ? 'has-new-run' : ''}" id="cronDetailRuns">
         <div class="detail-card-title">${esc(outputTitle)}</div>
-        <div style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
+        <div style="color:var(--muted);font-size:12px">${esc(isReadOnly ? 'Live output is available only when this profile is active here.' : (t('loading') || 'Loading'))}</div>
       </div>
     </div>`;
   body.style.display = '';
@@ -889,7 +975,7 @@ function _renderCronDetail(job){
   _cronMode = 'read';
   _setCronHeaderButtons('read', job);
   // Load runs asynchronously
-  _loadCronDetailRuns(job.id);
+  if (!isReadOnly) _loadCronDetailRuns(job.id, _currentCronDetailKey);
 }
 
 function _setCronHeaderButtons(mode, job) {
@@ -906,6 +992,10 @@ function _setCronHeaderButtons(mode, job) {
   const show = b => b && (b.style.display = '');
   if (mode === 'read') {
     if (header) header.style.display = 'flex';
+    if (job && job.read_only) {
+      [runBtn,pauseBtn,resumeBtn,editBtn,dupBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
+      return;
+    }
     show(runBtn);
     const status = job ? _cronStatusMeta(job) : null;
     const resumable = job && (
@@ -925,10 +1015,10 @@ function _setCronHeaderButtons(mode, job) {
   }
 }
 
-async function _loadCronDetailRuns(jobId){
+async function _loadCronDetailRuns(jobId, detailKey){
   try {
     const data = await api(`/api/crons/history?job_id=${encodeURIComponent(jobId)}&limit=50`);
-    if (!_currentCronDetail || _currentCronDetail.id !== jobId) return;
+    if (!_cronDetailMatches(jobId, detailKey)) return;
     const card = $('cronDetailRuns');
     if (!card) return;
     const outputTitle = _cronOutputTitle(_currentCronDetail);
@@ -1039,26 +1129,28 @@ async function _loadRunContent(jobId, filename, runId){
   }
 }
 
-function openCronDetail(id, el){
-  const job = _cronList ? _cronList.find(j => j.id === id) : null;
+function openCronDetail(jobOrId, el){
+  const job = _findCronJob(jobOrId);
   if (!job) return;
+  const detailKey = _cronJobKey(job);
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
-  const target = el || $('cron-' + id);
+  const target = el || $(_cronItemId(job));
   if (target) target.classList.add('active');
   // Remove new-run dot from this job since user is now viewing it
-  _clearCronUnreadForJob(id);
+  if (!job.read_only) _clearCronUnreadForJob(job.id);
   const dot = target && target.querySelector('.cron-new-dot');
-  if (dot) dot.remove();
+  if (dot && !job.read_only) dot.remove();
   _cronPreFormDetail = null;
   _editingCronId = null;
   _stopCronWatch();
   _renderCronDetail(job);
-  _checkCronWatchOnDetail(id);
+  if (!job.read_only) _checkCronWatchOnDetail(job.id, detailKey);
   _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearCronDetail(){
   _currentCronDetail = null;
+  _currentCronDetailKey = '';
   _cronMode = 'empty';
   _stopCronWatch();
   const title = $('taskDetailTitle');
@@ -1490,7 +1582,7 @@ async function saveCronForm(){
       showToast(t('cron_job_updated'));
       await loadCrons();
       const job = _cronList && _cronList.find(j => j.id === editedId);
-      if (job) openCronDetail(editedId);
+      if (job) openCronDetail(job);
       return;
     }
     const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications};
@@ -1516,7 +1608,7 @@ async function saveCronForm(){
     await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
     if (newId) openCronDetail(newId);
-    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1].id);
+    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1]);
   }catch(e){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
   }
@@ -1560,7 +1652,7 @@ let _cronWatchInterval = null;
 let _cronWatchStart = null;
 let _cronWatchTimerInterval = null;
 
-function _startCronWatch(jobId) {
+function _startCronWatch(jobId, detailKey) {
   _stopCronWatch();
   _cronWatchStart = Date.now();
   _cronWatchInterval = setInterval(async () => {
@@ -1568,13 +1660,13 @@ function _startCronWatch(jobId) {
       const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
       if (!data.running) {
         _stopCronWatch();
-        if (_currentCronDetail && _currentCronDetail.id === jobId) {
-          _loadCronDetailRuns(jobId);
+        if (_cronDetailMatches(jobId, detailKey)) {
+          _loadCronDetailRuns(jobId, detailKey);
         }
         return;
       }
       // Still running — update elapsed
-      if (_currentCronDetail && _currentCronDetail.id === jobId) {
+      if (_cronDetailMatches(jobId, detailKey)) {
         const el = $('cronRunningIndicator');
         if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed(data.elapsed);
       }
@@ -1582,13 +1674,13 @@ function _startCronWatch(jobId) {
   }, 3000);
   // Timer update every second
   _cronWatchTimerInterval = setInterval(() => {
-    if (_currentCronDetail && _cronWatchStart) {
+    if (_cronDetailMatches(jobId, detailKey) && _cronWatchStart) {
       const el = $('cronRunningIndicator');
       if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed((Date.now() - _cronWatchStart) / 1000);
     }
   }, 1000);
   // Inject running indicator into detail card
-  if (_currentCronDetail && _currentCronDetail.id === jobId) {
+  if (_cronDetailMatches(jobId, detailKey)) {
     _injectRunningIndicator();
   }
 }
@@ -1618,11 +1710,11 @@ function _formatElapsed(seconds) {
   return m + 'm ' + s + 's';
 }
 
-function _checkCronWatchOnDetail(jobId) {
+function _checkCronWatchOnDetail(jobId, detailKey) {
   // When opening a detail view, check if job is running
   api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false}).then(data => {
-    if (data.running && _currentCronDetail && _currentCronDetail.id === jobId) {
-      _startCronWatch(jobId);
+    if (data.running && _cronDetailMatches(jobId, detailKey)) {
+      _startCronWatch(jobId, detailKey);
     }
   }).catch(() => {});
 }
@@ -1631,7 +1723,7 @@ async function cronRun(id) {
   try {
     await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
     showToast(t('cron_job_triggered'));
-    _startCronWatch(id);
+    _startCronWatch(id, _currentCronDetailKey);
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
@@ -5833,6 +5925,14 @@ let _profileSwitchGeneration = 0;
 let _profileDropdownTrigger = null;  // tracks which element triggered the dropdown
 
 async function _profileSwitchPanelLoad(){
+  // Cross-profile cron visibility is an active-profile opt-in; never carry it
+  // into the next profile when the Tasks panel wasn't the visible panel.
+  _showAllCronProfiles = false;
+  _cronOtherProfileCount = 0;
+  _cronPreFormDetail = null;
+  _editingCronId = null;
+  _cronIsDuplicate = false;
+  _clearCronDetail();
   if (_currentPanel === 'skills') await loadSkills();
   if (_currentPanel === 'memory') await loadMemory();
   if (_currentPanel === 'tasks') await loadCrons();
@@ -5865,6 +5965,10 @@ function _refreshProfileSwitchBackground(gen){
     if (typeof _applyTabOrder === 'function') _applyTabOrder(order);
     if (typeof _applyTabVisibility === 'function') _applyTabVisibility(hidden);
     _ensureComposerControlVisibilityState(s||{});
+    if(Array.isArray(s&&s.composer_control_order)){
+      const nextOrder=_setComposerControlOrder(s.composer_control_order);
+      if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(nextOrder);
+    }
     _renderComposerControlChips();
     _renderComposerSituationalControlChips();
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
@@ -6708,7 +6812,10 @@ let _settingsPreferencesAutosaveRetryPayload = null;
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
 const _HIDDEN_TABS_LS_KEY = 'hermes-webui-hidden-tabs';
 const _TAB_ORDER_LS_KEY = 'hermes-webui-tab-order';
+const _COMPOSER_CONTROL_ORDER_LS_KEY = 'hermes-webui-composer-control-order';
 let _tabVisibilityDragSuppressUntil = 0;
+let _composerControlDragSuppressUntil = 0;
+let _composerControlDraggingKey = '';
 
 function _sanitizeTabPanelList(panels){
   if(!Array.isArray(panels)) return [];
@@ -6940,11 +7047,123 @@ function _ensureComposerControlVisibilityState(settings){
   Object.assign(window._composerControlVisibility, fromSettings);
 }
 
-function _composerControlVisibilityPayload(){
-  const payload={};
+function _composerControlDefsForSettings(){
   const baseDefs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
   const situationalDefs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
-  const defs=baseDefs.concat(situationalDefs);
+  return baseDefs.concat(situationalDefs);
+}
+
+function _getComposerControlOrder(){
+  if(Array.isArray(window._composerControlOrder)){
+    return typeof window._sanitizeComposerControlOrder==='function'
+      ? window._sanitizeComposerControlOrder(window._composerControlOrder)
+      : window._composerControlOrder.slice();
+  }
+  try{
+    const raw=localStorage.getItem(_COMPOSER_CONTROL_ORDER_LS_KEY);
+    if(raw){
+      const parsed=JSON.parse(raw);
+      if(typeof window._sanitizeComposerControlOrder==='function') return window._sanitizeComposerControlOrder(parsed);
+      if(Array.isArray(parsed)) return parsed.filter(key=>typeof key==='string');
+    }
+  }catch(e){}
+  return [];
+}
+
+function _setComposerControlOrder(order){
+  const sanitized=typeof window._sanitizeComposerControlOrder==='function'
+    ? window._sanitizeComposerControlOrder(order)
+    : (Array.isArray(order)?order.filter(key=>typeof key==='string') : []);
+  window._composerControlOrder=sanitized;
+  try{localStorage.setItem(_COMPOSER_CONTROL_ORDER_LS_KEY,JSON.stringify(sanitized));}catch(e){}
+  return sanitized;
+}
+
+function _orderedComposerControlDefsForSettings(defs){
+  defs=Array.isArray(defs)?defs:[];
+  const byKey=new Map(defs.map(def=>[def.key,def]));
+  const out=[];
+  _getComposerControlOrder().forEach(function(key){
+    if(byKey.has(key)) out.push(byKey.get(key));
+  });
+  defs.forEach(function(def){if(out.indexOf(def)===-1) out.push(def);});
+  return out;
+}
+
+function _composerControlOrderGroupKey(key){
+  const def=_composerControlDefsForSettings().find(item=>item&&item.key===key);
+  return def&&def.orderGroup?def.orderGroup:'';
+}
+
+function _composerControlDropAllowed(sourceKey,targetKey){
+  if(!sourceKey||!targetKey||sourceKey===targetKey) return false;
+  const sourceGroup=_composerControlOrderGroupKey(sourceKey);
+  const targetGroup=_composerControlOrderGroupKey(targetKey);
+  return !!sourceGroup&&sourceGroup===targetGroup;
+}
+
+function _clearComposerControlDragOver(){
+  document.querySelectorAll('[data-composer-control-key].drag-over').forEach(function(el){el.classList.remove('drag-over');});
+}
+
+function _moveComposerControlOrderKey(sourceKey,targetKey){
+  if(!_composerControlDropAllowed(sourceKey,targetKey)) return false;
+  const order=_orderedComposerControlDefsForSettings(_composerControlDefsForSettings()).map(def=>def.key);
+  const from=order.indexOf(sourceKey);
+  const to=order.indexOf(targetKey);
+  if(from===-1||to===-1) return false;
+  order.splice(from,1);
+  order.splice(to,0,sourceKey);
+  const next=_setComposerControlOrder(order);
+  if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(next);
+  _renderComposerControlChips();
+  _renderComposerSituationalControlChips();
+  _scheduleAppearanceAutosave();
+  return true;
+}
+
+function _handleComposerControlChipDrop(e,targetKey){
+  if(e){e.preventDefault();e.stopPropagation();}
+  _clearComposerControlDragOver();
+  const sourceKey=e&&e.dataTransfer?e.dataTransfer.getData('text/plain'):_composerControlDraggingKey;
+  if(_moveComposerControlOrderKey(sourceKey,targetKey)) _composerControlDragSuppressUntil=Date.now()+250;
+  _composerControlDraggingKey='';
+}
+
+function _wireComposerControlChipDrag(chip,key){
+  if(!chip)return;
+  chip.setAttribute('data-composer-control-key',key);
+  chip.setAttribute('draggable','true');
+  chip.addEventListener('dragstart',function(e){
+    _composerControlDraggingKey=key;
+    chip.classList.add('dragging');
+    if(e.dataTransfer){
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain',key);
+    }
+  });
+  chip.addEventListener('dragend',function(){
+    chip.classList.remove('dragging');
+    _clearComposerControlDragOver();
+    _composerControlDraggingKey='';
+  });
+  chip.addEventListener('dragover',function(e){
+    const sourceKey=_composerControlDraggingKey;
+    if(!_composerControlDropAllowed(sourceKey,key)){
+      if(e.dataTransfer)e.dataTransfer.dropEffect='none';
+      return;
+    }
+    e.preventDefault();
+    chip.classList.add('drag-over');
+    if(e.dataTransfer)e.dataTransfer.dropEffect='move';
+  });
+  chip.addEventListener('dragleave',function(){chip.classList.remove('drag-over');});
+  chip.addEventListener('drop',function(e){_handleComposerControlChipDrop(e,key);});
+}
+
+function _composerControlVisibilityPayload(){
+  const payload={};
+  const defs=_composerControlDefsForSettings();
   const state=window._composerControlVisibility||{};
   defs.forEach(function(def){payload[def.key]=!!state[def.key];});
   return payload;
@@ -6974,7 +7193,7 @@ function _renderComposerControlChips(){
   const defs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
   const state=window._composerControlVisibility||{};
   container.innerHTML='';
-  defs.forEach(function(def){
+  _orderedComposerControlDefsForSettings(defs).forEach(function(def){
     const chip=document.createElement('button');
     chip.type='button';
     chip.className='tab-visibility-chip';
@@ -6983,7 +7202,8 @@ function _renderComposerControlChips(){
     chip.textContent=_composerControlChipLabel(def);
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',hidden?'false':'true');
-    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};
+    _wireComposerControlChipDrag(chip,def.key);
     container.appendChild(chip);
   });
 }
@@ -6994,7 +7214,7 @@ function _renderComposerSituationalControlChips(){
   const defs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
   const state=window._composerControlVisibility||{};
   container.innerHTML='';
-  defs.forEach(function(def){
+  _orderedComposerControlDefsForSettings(defs).forEach(function(def){
     const chip=document.createElement('button');
     chip.type='button';
     chip.className='tab-visibility-chip';
@@ -7003,7 +7223,8 @@ function _renderComposerSituationalControlChips(){
     chip.textContent=_composerControlChipLabel(def);
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',hidden?'false':'true');
-    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};
+    _wireComposerControlChipDrag(chip,def.key);
     container.appendChild(chip);
   });
 }
@@ -7527,6 +7748,7 @@ function _appearancePayloadFromUi(){
     worklog_details_expanded_default: worklogDetailsExpanded,
     activity_feed_expanded_default: worklogDetailsExpanded,
     ..._composerControlVisibilityPayload(),
+    composer_control_order: _getComposerControlOrder(),
     hidden_tabs: _getHiddenTabs(),
     tab_order: _getTabOrder(),
   };
@@ -7635,6 +7857,10 @@ async function _autosaveAppearanceSettings(payload){
     }
     if(saved){
       _ensureComposerControlVisibilityState(saved);
+      if(Array.isArray(saved.composer_control_order)){
+        const nextOrder=_setComposerControlOrder(saved.composer_control_order);
+        if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(nextOrder);
+      }
       _renderComposerControlChips();
       _renderComposerSituationalControlChips();
       if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
@@ -7689,6 +7915,8 @@ function _preferencesPayloadFromUi(){
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
+  const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
+  if(showClaudeCodeCb) payload.show_claude_code_sessions=showClaudeCodeCb.checked;
   const showCronCb=$('settingsShowCronSessions');
   // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
   // identically to the explicit saveSettings() path, so neither save route can
@@ -7796,7 +8024,7 @@ async function _autosavePreferencesSettings(payload){
       if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     }
     if(payload&&payload.busy_input_mode!==undefined){
-      window._busyInputMode=(saved&&saved.busy_input_mode)||'queue';
+      window._busyInputMode=(typeof _persistBusyInputMode==='function')?_persistBusyInputMode(saved&&saved.busy_input_mode):((saved&&saved.busy_input_mode)||'queue');
       if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
     }
     if(payload&&payload.show_busy_placeholder_hint!==undefined){
@@ -8025,6 +8253,10 @@ async function loadSettingsPanel(){
       };
     }
     _ensureComposerControlVisibilityState(settings);
+    if(Array.isArray(settings.composer_control_order)){
+      const composerOrder=_setComposerControlOrder(settings.composer_control_order);
+      if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(composerOrder);
+    }
     _renderComposerControlChips();
     _renderComposerSituationalControlChips();
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
@@ -8217,12 +8449,23 @@ async function loadSettingsPanel(){
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=settings.show_cli_sessions!==false;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
+    if(showClaudeCodeCb){
+      showClaudeCodeCb.checked=!!settings.show_claude_code_sessions;
+      showClaudeCodeCb.disabled=showCliCb?!showCliCb.checked:true;
+      showClaudeCodeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    if(showCliCb){showCliCb.addEventListener('change',function(){
+      const enabled=!!showCliCb.checked;
+      if(showCronCb) showCronCb.disabled=!enabled;
+      if(showClaudeCodeCb) showClaudeCodeCb.disabled=!enabled;
+      _schedulePreferencesAutosave();
+    },{once:false});}
     const showCronCb=$('settingsShowCronSessions');
     if(showCronCb){
       showCronCb.checked=!!settings.show_cron_sessions;
       showCronCb.disabled=showCliCb?!showCliCb.checked:true;
       showCronCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-      if(showCliCb){showCliCb.addEventListener('change',function(){showCronCb.disabled=!showCliCb.checked;},{once:false});}
     }
     const showWebhookCb=$('settingsShowWebhookSessions');
     if(showWebhookCb){
@@ -8382,7 +8625,7 @@ async function loadSettingsPanel(){
     if(busyInputModeSel){
       const val=String(settings.busy_input_mode||'queue');
       busyInputModeSel.value=['queue','interrupt','steer'].includes(val)?val:'queue';
-      window._busyInputMode=busyInputModeSel.value;
+      window._busyInputMode=(typeof _persistBusyInputMode==='function')?_persistBusyInputMode(busyInputModeSel.value):busyInputModeSel.value;
       busyInputModeSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
@@ -8679,6 +8922,22 @@ function _extensionSidecarCard(sidecars){
     const origin=(sidecar&&sidecar.origin)||'';
     const healthPath=(sidecar&&sidecar.health_path)||'';
     const healthUrl=(sidecar&&sidecar.health_url)||'';
+    const proxy=(sidecar&&sidecar.proxy&&typeof sidecar.proxy==='object')?sidecar.proxy:{};
+    const proxyAvailable=proxy.available===true;
+    const proxyConsented=proxy.consented===true;
+    const proxyConsentRequired=proxy.consent_required===true;
+    const proxyOriginChanged=proxy.origin_changed===true;
+    const proxyPath=(proxy&&proxy.path)||'';
+    const proxyStatus=proxyConsented
+      ?'consented'
+      :(proxyOriginChanged
+        ?'reconfirm required'
+        :(proxyConsentRequired
+          ?'approval required'
+          :'unavailable'));
+    const proxyButton=(proxyAvailable&&id)
+      ?`<button class="sm-btn extension-toggle-btn" type="button" data-extension-sidecar-proxy-id="${esc(id)}" data-extension-sidecar-proxy-approved="${proxyConsented?'false':'true'}">${esc(proxyConsented?'Revoke proxy consent':'Approve proxy consent')}</button>`
+      :'';
     return `<div class="extension-sidecar-row" data-sidecar-index="${index}">
       <div class="extension-sidecar-row-head">
         <div class="extension-sidecar-title">${esc(title)}</div>
@@ -8689,7 +8948,10 @@ function _extensionSidecarCard(sidecars){
         <div><span>Origin</span><code>${esc(origin)}</code></div>
         <div><span>Health path</span><code>${esc(healthPath)}</code></div>
         <div><span>Health URL</span><code>${esc(healthUrl)}</code></div>
+        <div><span>Proxy</span><code>${esc(proxyStatus)}</code></div>
+        <div><span>Proxy path</span><code>${esc(proxyPath)}</code></div>
       </div>
+      <div class="extension-sidecar-actions">${proxyButton}</div>
       <div class="extension-sidecar-runtime" data-sidecar-runtime-index="${index}" hidden></div>
     </div>`;
   }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
@@ -8853,6 +9115,7 @@ function _renderExtensionsPanel(data,seq){
     </div>
   `;
   _bindExtensionToggleButtons(target);
+  _bindExtensionSidecarProxyButtons(target);
   _bindExtensionSettingsButtons(target);
   _monitorExtensionSidecars(sidecars,seq);
 }
@@ -8861,6 +9124,13 @@ function _bindExtensionToggleButtons(root){
   if(!root) return;
   root.querySelectorAll('[data-extension-toggle-id]').forEach(btn=>{
     btn.addEventListener('click',()=>handleExtensionToggle(btn));
+  });
+}
+
+function _bindExtensionSidecarProxyButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-sidecar-proxy-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionSidecarProxyConsent(btn));
   });
 }
 
@@ -8880,6 +9150,25 @@ async function handleExtensionToggle(btn){
     btn.disabled=false;
     btn.textContent=previousText;
     showToast('Failed to update extension: '+(e&&e.message?e.message:String(e)));
+  }
+}
+
+async function handleExtensionSidecarProxyConsent(btn){
+  if(!btn||btn.disabled) return;
+  const id=btn.dataset.extensionSidecarProxyId||'';
+  const approved=btn.dataset.extensionSidecarProxyApproved==='true';
+  if(!id) return;
+  const previousText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent=approved?'Approving…':'Revoking…';
+  try{
+    const data=await api('/api/extensions/sidecar-proxy-consent',{method:'POST',body:JSON.stringify({id,approved})});
+    showToast(approved?'Extension sidecar proxy approved.':'Extension sidecar proxy consent revoked.');
+    _renderExtensionsPanel(data,++_extensionsSidecarMonitorSeq);
+  }catch(e){
+    btn.disabled=false;
+    btn.textContent=previousText;
+    showToast('Failed to update extension sidecar proxy consent: '+(e&&e.message?e.message:String(e)));
   }
 }
 
@@ -10417,7 +10706,9 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
-  window._busyInputMode=body.busy_input_mode||'queue';
+  window._busyInputMode=(typeof _persistBusyInputMode==='function')
+    ? _persistBusyInputMode(body.busy_input_mode)
+    : (body.busy_input_mode||'queue');
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
   window._autoScrollFollow=body.auto_scroll_follow!==false;
   window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;
@@ -10430,6 +10721,17 @@ function _applySavedSettingsUi(saved, body, opts){
   else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  _ensureComposerControlVisibilityState(saved||body||{});
+  const composerOrderSource=(saved&&Array.isArray(saved.composer_control_order))
+    ? saved.composer_control_order
+    : (Array.isArray(body.composer_control_order)?body.composer_control_order:null);
+  if(composerOrderSource){
+    const composerOrder=_setComposerControlOrder(composerOrderSource);
+    if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(composerOrder);
+  }
+  _renderComposerControlChips();
+  _renderComposerSituationalControlChips();
+  if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
   const maxTokensField=$('settingsMaxTokens');
   if(maxTokensField){
     const savedRawMaxTokens=saved&&saved.max_tokens;
@@ -10968,6 +11270,7 @@ async function saveSettings(andClose){
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
+  const showClaudeCodeSessions=!!($('settingsShowClaudeCodeSessions')||{}).checked;
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showWebhookSessions=!!($('settingsShowWebhookSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
@@ -10994,6 +11297,8 @@ async function saveSettings(andClose){
   body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
   body.project_quick_create_buttons=!!($('settingsProjectQuickCreate')||{}).checked;
   Object.assign(body,_structuredCodeViewFromUi());
+  Object.assign(body,_composerControlVisibilityPayload());
+  body.composer_control_order=_getComposerControlOrder();
   body.language=language;
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
@@ -11013,6 +11318,8 @@ async function saveSettings(andClose){
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
+  // Persist the opt-out child independently; the read path applies the parent gate.
+  body.show_claude_code_sessions=showClaudeCodeSessions;
   // Cron and webhook sessions are gated on CLI sessions (server short-circuits otherwise);
   // mirror the autosave path so the explicit Save Settings button persists them too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;

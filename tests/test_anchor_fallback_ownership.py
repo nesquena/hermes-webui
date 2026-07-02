@@ -669,6 +669,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _maybeRecoverVirtualizedBlankViewport() {{ return false; }}
         function _updateMessageVirtualMeasurements() {{}}
         function postProcessRenderedMessages() {{}}
+        function _postProcessWithAnchorSuppression() {{}}
         function _formatGatewayModelLabel() {{ return ''; }}
         function _gatewayRoutingFailoverText() {{ return ''; }}
         function _gatewayModelWarningText() {{ return ''; }}
