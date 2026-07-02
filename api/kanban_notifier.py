@@ -209,12 +209,14 @@ def _deliver(deliveries: list[dict]) -> None:
                     "(task %s, events %s)",
                     session_id, task_id, kinds,
                 )
+            delivery_ok = True
         except Exception:
             logger.warning(
                 "kanban webui notifier: wakeup failed for session %s (task %s) "
                 "— rewinding cursor so the event is retried next tick",
                 session_id, task_id, exc_info=True,
             )
+            delivery_ok = False
             # Rewind the DB cursor so the event is re-delivered on the next
             # tick instead of being permanently lost. The in-memory dedup set
             # is also cleared for this sub so the retry is not skipped.
@@ -243,9 +245,11 @@ def _deliver(deliveries: list[dict]) -> None:
                     task_id, exc_info=True,
                 )
 
-        # If the task reached a truly terminal status, clean up the subscription
+        # If the task reached a truly terminal status and delivery succeeded,
+        # clean up the subscription. Skip removal when delivery failed (cursor
+        # was rewound) so the retry on the next tick can still find the sub.
         task_terminal = task and task.status in _TERMINAL_STATUSES
-        if task_terminal:
+        if task_terminal and delivery_ok:
             try:
                 kb = _kb()
                 conn = kb.connect(board=board_slug)

@@ -509,6 +509,32 @@ class TestDeliver:
             clean_notifier._deliver(deliveries2)
             mock_wakeup.assert_called_once()
 
+    def test_does_not_unsub_on_delivery_failure_for_terminal_task(
+        self, fake_kanban, clean_notifier
+    ):
+        """When delivery fails for a done/archived task, the subscription
+        must NOT be removed — the cursor was rewound and the retry needs
+        the sub to still exist."""
+        fake_kanban.tasks = [FakeTask("t_1", "Done Task", "done", "w")]
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "completed", {"summary": "ok"}, 100),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        deliveries = clean_notifier._poll_once()
+        assert len(deliveries) == 1
+
+        with patch("api.background_process._session_has_active_turn", return_value=False), \
+             patch("api.background_process._start_server_side_wakeup_turn",
+                   side_effect=Exception("fail")), \
+             patch("api.background_process.record_deferred_wakeup"):
+            clean_notifier._deliver(deliveries)
+
+        # Subscription should still exist (delivery failed, cursor rewound)
+        assert len(fake_kanban.subs) == 1
+        # Cursor should be rewound
+        assert fake_kanban.subs[0]["last_event_id"] == 0
+
 
 class TestThreadLifecycle:
     def test_start_and_stop(self, clean_notifier):
