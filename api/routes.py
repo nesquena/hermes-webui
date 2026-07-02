@@ -518,6 +518,11 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
 def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     if not path:
         return False
+    if method == "GET" and path == "/api/session":
+        # Detail-load owns profile mismatch handling so the frontend can switch
+        # to the session's profile instead of treating a valid cross-profile
+        # deep link as a deleted/stale session.
+        return True
     if method != "POST":
         return False
     # Import routes create/claim sessions before normal ownership exists, and
@@ -11579,7 +11584,12 @@ def handle_get(handler, parsed) -> bool:
             s = get_session(sid, metadata_only=(not load_messages))
             _session_profile = getattr(s, 'profile', None) or None
             if not _session_visible_to_active_profile(_session_profile, handler):
-                return bad(handler, "Session not found", 404)
+                return j(handler, {
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": sid,
+                    "profile": _session_profile,
+                }, status=409)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -11906,7 +11916,12 @@ def handle_get(handler, parsed) -> bool:
             cli_meta = _lookup_cli_session_metadata(sid)
             _session_profile = (cli_meta or {}).get("profile") or None
             if not _session_visible_to_active_profile(_session_profile, handler):
-                return bad(handler, "Session not found", 404)
+                return j(handler, {
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": sid,
+                    "profile": _session_profile,
+                }, status=409)
             synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta or {})
             if reason == "was_webui":
                 # Deleted WebUI session: 404 so the client self-heals

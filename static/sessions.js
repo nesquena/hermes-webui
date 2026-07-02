@@ -1176,6 +1176,41 @@ function _rearmActiveSessionStream(){
   if(activeSid) startSessionStream(activeSid);
 }
 
+function _sessionProfileMismatchFromError(e){
+  if(!e || e.status!==409 || !e.body) return null;
+  try{
+    const body=JSON.parse(e.body);
+    if(body && body.code==='session_profile_mismatch' && body.profile){
+      return {profile:String(body.profile), session_id:String(body.session_id||'')};
+    }
+  }catch(_){ }
+  return null;
+}
+
+async function _switchProfileForSessionLoad(profile){
+  const name=String(profile||'').trim();
+  if(!name) throw new Error('missing profile');
+  if(name===S.activeProfile) return;
+  if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
+  if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
+  if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
+  try{
+    const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
+    S.activeProfile=data.active||name;
+    S.activeProfileIsDefault=!!data.is_default;
+    if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
+    else localStorage.removeItem('hermes-webui-model');
+    if(data.default_model) window._defaultModel=data.default_model;
+    if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+    if(typeof startGatewaySSE==='function') startGatewaySSE();
+    if(typeof syncTopbar==='function') syncTopbar();
+    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
+    if(typeof renderSessionList==='function') await renderSessionList();
+  }finally{
+    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
+  }
+}
+
 async function loadSession(sid){
   const opts = arguments[1] || {};
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
@@ -1304,6 +1339,21 @@ async function loadSession(sid){
   try {
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
+    const profileMismatch=_sessionProfileMismatchFromError(e);
+    if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
+      if (_loadingSessionId !== sid) {
+        _rearmActiveSessionStream();
+        return;
+      }
+      try{
+        if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
+        await _switchProfileForSessionLoad(profileMismatch.profile);
+        if (_loadingSessionId === sid) _loadingSessionId = null;
+        return loadSession(sid,{...opts,skipProfileResolve:true,force:true});
+      }catch(switchErr){
+        e=switchErr;
+      }
+    }
     const _msgInner = $('msgInner');
     // Stale-load guard (Codex): a newer loadSession() may have started while this
     // request was awaiting (e.g. the user clicked a healthy session during a
