@@ -2010,6 +2010,34 @@ class TestWhatsNewSummaryToggle:
         assert cap_value is not None
         assert 200 * 1024 <= cap_value <= 256 * 1024
 
+    def test_summary_storage_byte_length_fallback_counts_utf8_bytes(self):
+        runtime = _extract_summary_cache_js()
+        script = f"""
+{runtime}
+global.TextEncoder = undefined;
+if(_summaryStorageByteLength('abc') !== 3) throw new Error('ASCII byte count should match length');
+if(_summaryStorageByteLength('é') !== 2) throw new Error('Latin-1 should count as two UTF-8 bytes');
+if(_summaryStorageByteLength('漢') !== 3) throw new Error('BMP CJK should count as three UTF-8 bytes');
+if(_summaryStorageByteLength('😀') !== 4) throw new Error('astral symbols should count as four UTF-8 bytes');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_summary_cache_recency_sort_does_not_mutate_input_entries(self):
+        runtime = _extract_summary_cache_js()
+        script = f"""
+{runtime}
+const entries = [
+  ['zeta', {{ updatedAt: 1 }}],
+  ['webui', {{}}],
+  ['agent', {{}}],
+];
+const sorted = _summaryCacheEntriesSortedByRecency(entries);
+if(entries[0][0] !== 'zeta' || entries[1][0] !== 'webui' || entries[2][0] !== 'agent') throw new Error('sort helper must not mutate caller entries');
+if(sorted[0][0] !== 'zeta') throw new Error('updated entries should sort before legacy fallback entries');
+if(sorted[1][0] !== 'webui' || sorted[2][0] !== 'agent') throw new Error('legacy fallback order should prefer webui then agent');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
     def test_persist_generated_summaries_bounds_aggregate_cache_size(self):
         runtime = _extract_summary_cache_js()
         script = f"""

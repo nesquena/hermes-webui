@@ -8263,10 +8263,15 @@ function _summaryStorageByteLength(value){
   const text=typeof value==='string'?value:JSON.stringify(value);
   if(text==null) return 0;
   if(typeof TextEncoder==='function') return new TextEncoder().encode(text).length;
-  return text.length;
+  let bytes=0;
+  for(const ch of text){
+    const code=ch.codePointAt(0);
+    bytes+=code<=0x7f?1:(code<=0x7ff?2:(code<=0xffff?3:4));
+  }
+  return bytes;
 }
 function _summaryCacheEntriesSortedByRecency(entries){
-  return entries.sort((left,right)=>{
+  return entries.slice().sort((left,right)=>{
     const leftKey=left[0];
     const rightKey=right[0];
     const leftSummary=left[1];
@@ -8305,9 +8310,6 @@ function _persistGeneratedSummaries(){
       const candidate={...next,...Object.fromEntries([entry])};
       if(_summaryStorageByteLength(JSON.stringify(candidate))<=WHATS_NEW_SUMMARY_STORAGE_MAX_BYTES){
         Object.assign(next, Object.fromEntries([entry]));
-      }else{
-        const key=entry[0];
-        if(current[key]) delete current[key];
       }
     });
     window._whatsNewGeneratedSummaries=next;
