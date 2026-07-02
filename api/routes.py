@@ -8800,6 +8800,22 @@ from api.run_journal import (
     read_run_events,
     stale_interrupted_event,
 )
+from api.runtime_routes import (
+    handle_runtime_capabilities,
+    handle_active_run,
+    handle_run_status,
+    handle_run_events,
+    handle_run_cancel,
+    handle_run_approval,
+    handle_run_clarify,
+)
+from api.mobile_routes import (
+    handle_mobile_capabilities,
+    handle_mobile_runs,
+    handle_mobile_pending_actions,
+    handle_mobile_resolve_action,
+    handle_mobile_reconnect,
+)
 from api.todo_state import attach_todo_state
 from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
 from api.onboarding import (
@@ -11353,6 +11369,12 @@ def handle_get(handler, parsed) -> bool:
         j(handler, build_system_health_payload())
         return True
 
+    if parsed.path == "/api/deployment/health":
+        from api.deployment_health import handle_deployment_health
+
+        handle_deployment_health(handler, parsed)
+        return True
+
     if parsed.path == "/api/models":
         # Profile-scoping for non-default profiles (#3957) is handled INSIDE
         # get_available_models() — it binds the active profile's env + TLS on
@@ -12290,6 +12312,40 @@ def handle_get(handler, parsed) -> bool:
         else:
             cancelled = cancel_stream(stream_id)
         return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id})
+
+    # ── Runtime routes ──────────────────────────────────────────────────────
+    if parsed.path == "/api/runtime/capabilities":
+        return handle_runtime_capabilities(handler, parsed)
+
+    if parsed.path.endswith("/active-run") and parsed.path.startswith("/api/sessions/"):
+        return handle_active_run(handler, parsed)
+
+    if parsed.path.endswith("/events") and parsed.path.startswith("/api/runs/"):
+        return handle_run_events(handler, parsed)
+
+    if parsed.path.startswith("/api/runs/") and not parsed.path.endswith("/events"):
+        return handle_run_status(handler, parsed)
+
+    # ── End runtime routes ──────────────────────────────────────────────────
+
+    # ── Workspace search ───────────────────────────────────────────────────
+    if parsed.path == "/api/workspace/search":
+        from api.workspace_search import handle_workspace_search
+        return handle_workspace_search(handler, parsed)
+
+    # ── Mobile routes ───────────────────────────────────────────────────────
+    if parsed.path == "/api/mobile/capabilities":
+        return handle_mobile_capabilities(handler, parsed)
+
+    if parsed.path == "/api/mobile/runs":
+        return handle_mobile_runs(handler, parsed)
+
+    if parsed.path == "/api/mobile/pending-actions":
+        return handle_mobile_pending_actions(handler, parsed)
+
+    if parsed.path.startswith("/api/mobile/reconnect/"):
+        return handle_mobile_reconnect(handler, parsed)
+    # ── End mobile routes ───────────────────────────────────────────────────
 
     if parsed.path == "/api/chat/stream":
         return _handle_sse_stream(handler, parsed)
@@ -13905,6 +13961,26 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
+
+    # ── Runtime control routes ─────────────────────────────────────────────
+    if parsed.path.startswith("/api/runs/"):
+        run_path = parsed.path[len("/api/runs/"):]
+        if run_path.endswith("/cancel"):
+            body["run_id"] = run_path[:-len("/cancel")]
+            return handle_run_cancel(handler, body)
+        if run_path.endswith("/approval"):
+            body["run_id"] = run_path[:-len("/approval")]
+            return handle_run_approval(handler, body)
+        if run_path.endswith("/clarify"):
+            body["run_id"] = run_path[:-len("/clarify")]
+            return handle_run_clarify(handler, body)
+
+    # ── End runtime control routes ─────────────────────────────────────────
+
+    # ── Mobile control routes ───────────────────────────────────────────────
+    if parsed.path.endswith("/resolve") and parsed.path.startswith("/api/mobile/pending-actions/"):
+        return handle_mobile_resolve_action(handler, parsed, body)
+    # ── End mobile control routes ───────────────────────────────────────────
 
     if parsed.path == "/api/chat":
         return _handle_chat_sync(handler, body)

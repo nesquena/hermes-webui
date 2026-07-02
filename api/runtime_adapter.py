@@ -20,10 +20,12 @@ _RUNTIME_ADAPTER_ENV = "HERMES_WEBUI_RUNTIME_ADAPTER"
 _RUNTIME_ADAPTER_DIRECT = "legacy-direct"
 _RUNTIME_ADAPTER_JOURNAL = "legacy-journal"
 _RUNTIME_ADAPTER_RUNNER_LOCAL = "runner-local"
+_RUNTIME_ADAPTER_AGENT_RUNS = "agent-runs"
 _VALID_RUNTIME_ADAPTER_MODES = {
     _RUNTIME_ADAPTER_DIRECT,
     _RUNTIME_ADAPTER_JOURNAL,
     _RUNTIME_ADAPTER_RUNNER_LOCAL,
+    _RUNTIME_ADAPTER_AGENT_RUNS,
 }
 
 
@@ -117,11 +119,16 @@ def runtime_adapter_runner_enabled(environ: dict[str, str] | None = None) -> boo
     return runtime_adapter_mode(environ) == _RUNTIME_ADAPTER_RUNNER_LOCAL
 
 
+def runtime_adapter_agent_runs_enabled(environ: dict[str, str] | None = None) -> bool:
+    return runtime_adapter_mode(environ) == _RUNTIME_ADAPTER_AGENT_RUNS
+
+
 def build_runtime_adapter(
     *,
     environ: dict[str, str] | None = None,
     legacy_adapter_factory: Callable[[], RuntimeAdapter] | None = None,
     runner_client_factory: Callable[[], Any] | None = None,
+    agent_runs_adapter_factory: Callable[[], RuntimeAdapter] | None = None,
 ) -> RuntimeAdapter | None:
     """Build the configured RuntimeAdapter without changing route behavior.
 
@@ -130,6 +137,7 @@ def build_runtime_adapter(
     supplied legacy factory.  ``runner-local`` is also opt-in and only constructs
     a ``RunnerRuntimeAdapter`` around an injected client; this function does not
     create process-global runner state or wire live chat to the runner backend.
+    ``agent-runs`` delegates to the Hermes Agent /v1/runs runtime contract.
     """
     mode = runtime_adapter_mode(environ)
     if mode == _RUNTIME_ADAPTER_DIRECT:
@@ -138,9 +146,15 @@ def build_runtime_adapter(
         if legacy_adapter_factory is None:
             raise NotImplementedError("legacy-journal mode requires a legacy adapter factory")
         return legacy_adapter_factory()
-    if runner_client_factory is None:
-        raise NotImplementedError("runner-local mode requires a runner client factory")
-    return RunnerRuntimeAdapter(client=runner_client_factory())
+    if mode == _RUNTIME_ADAPTER_RUNNER_LOCAL:
+        if runner_client_factory is None:
+            raise NotImplementedError("runner-local mode requires a runner client factory")
+        return RunnerRuntimeAdapter(client=runner_client_factory())
+    if mode == _RUNTIME_ADAPTER_AGENT_RUNS:
+        if agent_runs_adapter_factory is not None:
+            return agent_runs_adapter_factory()
+        raise NotImplementedError("agent-runs mode requires an agent-runs adapter factory")
+    return None
 
 
 def _cursor_to_after_seq(cursor: str | None) -> int | None:

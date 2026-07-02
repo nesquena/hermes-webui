@@ -48,6 +48,80 @@ from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
+from api.runtime_adapter import runtime_adapter_enabled as _runtime_adapter_enabled
+
+_runtime_journal_instance = None
+_RT_MIRROR_SEQ: dict[str, list[int]] = {}
+
+def _ensure_runtime_journal():
+    global _runtime_journal_instance
+    if _runtime_journal_instance is not None:
+        return _runtime_journal_instance
+    from api.runtime_journal import RuntimeJournal
+
+    _runtime_journal_instance = RuntimeJournal()
+    return _runtime_journal_instance
+
+
+def _reset_runtime_journal_for_test():
+    global _runtime_journal_instance
+    _runtime_journal_instance = None
+    _RT_MIRROR_SEQ.clear()
+
+
+_SSE_TO_CONTRACT_EVENT: dict[str, str] = {
+    "token": "token.delta",
+    "reasoning": "reasoning.delta",
+    "interim_assistant": "token.delta",
+    "tool": "progress",
+    "tool_complete": "tool.done",
+    "done": "done",
+    "apperror": "error",
+    "cancel": "done",
+    "approval": "approval.requested",
+    "clarify": "clarify.requested",
+    "compressing": "progress",
+    "compressed": "progress",
+    "metering": "usage.updated",
+    "context_status": "run.status",
+    "warning": "run.status",
+    "goal": "run.status",
+    "goal_continue": "run.status",
+    "pending_steer_leftover": "run.status",
+    "state_saved": "run.status",
+    "todo_state": "run.status",
+}
+_TERMINAL_SSE_EVENTS = frozenset({"done", "apperror", "cancel", "error"})
+_RT_SKIP_EVENTS = frozenset({"stream_end", "metering"})
+
+
+def _mirror_to_runtime_journal(stream_id, session_id, sse_event, data):
+    j = _ensure_runtime_journal()
+    rt_seq = _RT_MIRROR_SEQ.setdefault(stream_id, [0])
+    rt_seq[0] += 1
+    seq = rt_seq[0]
+    contract_type = _SSE_TO_CONTRACT_EVENT.get(sse_event)
+    if contract_type is not None:
+        from api.runtime_contract import make_event
+
+        payload = dict(data) if isinstance(data, dict) else {}
+        if sse_event == "tool":
+            if isinstance(data, dict) and data.get("event_type") == "tool.started":
+                contract_type = "tool.started"
+            else:
+                contract_type = "progress"
+        event = make_event(
+            run_id=stream_id,
+            session_id=session_id,
+            seq=seq,
+            type=contract_type,
+            terminal=sse_event in _TERMINAL_SSE_EVENTS,
+            payload=payload,
+        )
+        try:
+            j.append_event(event)
+        except ValueError:
+            pass
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
@@ -6289,6 +6363,32 @@ def _run_agent_streaming(
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize run journal for stream %s", stream_id, exc_info=True)
+    _rt_mirror_active = False
+    if _runtime_adapter_enabled():
+        try:
+            _rt_journal = _ensure_runtime_journal()
+            _rt_journal.create_run(session_id=session_id, run_id=stream_id)
+            from api.runtime_contract import make_event
+
+            rt_seq = _RT_MIRROR_SEQ.setdefault(stream_id, [0])
+            rt_seq[0] += 1
+            _rt_journal.append_event(
+                make_event(
+                    run_id=stream_id,
+                    session_id=session_id,
+                    seq=rt_seq[0],
+                    type="run.started",
+                    terminal=False,
+                    payload={
+                        "model": str(model or ""),
+                        "workspace": str(workspace or ""),
+                        "ephemeral": bool(ephemeral),
+                    },
+                )
+            )
+            _rt_mirror_active = True
+        except Exception:
+            logger.debug("Failed to initialize runtime journal mirror for stream %s", stream_id, exc_info=True)
     if not ephemeral:
         try:
             append_turn_journal_event_for_stream(
@@ -6628,6 +6728,11 @@ def _run_agent_streaming(
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
+        if _rt_mirror_active:
+            try:
+                _mirror_to_runtime_journal(stream_id, session_id, event, data)
+            except Exception:
+                logger.debug("Failed to mirror runtime journal event %s for stream %s", event, stream_id, exc_info=True)
         if event_id and hasattr(q, "note_last_event_id"):
             try:
                 q.note_last_event_id(event_id)
@@ -9718,6 +9823,11 @@ def _run_agent_streaming(
                 session_id,
                 exc_info=True,
             )
+
+        try:
+            _RT_MIRROR_SEQ.pop(stream_id, None)
+        except Exception:
+            pass
 
 # ============================================================
 # SECTION: HTTP Request Handler
