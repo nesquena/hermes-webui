@@ -615,7 +615,7 @@ def _run_agents_command() -> str:
     try:
         from tools.process_registry import process_registry
         processes = process_registry.list_processes()
-    except Exception as exc:
+    except Exception:
         logger.warning("Agents/process registry unavailable", exc_info=True)
         return "No background agents or tracked processes are currently visible."
     if not processes:
