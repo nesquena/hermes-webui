@@ -7751,8 +7751,304 @@ function _appearancePayloadFromUi(){
     composer_control_order: _getComposerControlOrder(),
     hidden_tabs: _getHiddenTabs(),
     tab_order: _getTabOrder(),
+    custom_logo_enabled: !!($('settingsCustomLogoEnabled')||{}).checked,
+    custom_logo_dark_mode: !!($('settingsCustomLogoDarkMode')||{}).checked,
+    custom_logo_light_path: window._customLogoLightPath||'',
+    custom_logo_dark_path: window._customLogoDarkPath||'',
+    custom_logo_light_version: window._customLogoLightVersion||'',
+    custom_logo_dark_version: window._customLogoDarkVersion||'',
   };
 }
+function _initLogoUpload(){
+  var enabledCb=$('settingsCustomLogoEnabled');
+  var darkModeCb=$('settingsCustomLogoDarkMode');
+  var uploadAreas=$('logoUploadAreas');
+  var darkField=$('logoUploadDarkField');
+  var lightLabel=$('logoUploadLightLabel');
+
+  function _logoAssetUrl(path,mode){
+    if(typeof customLogoAssetUrl==="function") return customLogoAssetUrl(path,mode);
+    return path?"branding/"+path:"";
+  }
+
+  function _clearLogoPreviewObjectUrl(preview){
+    if(preview&&preview.dataset.logoObjectUrl){
+      URL.revokeObjectURL(preview.dataset.logoObjectUrl);
+      delete preview.dataset.logoObjectUrl;
+    }
+  }
+
+  function _setLogoPreviewSrc(preview,src){
+    if(!preview) return;
+    _clearLogoPreviewObjectUrl(preview);
+    preview.removeAttribute("src");
+    if(src) preview.src=src;
+    preview.style.display=src?"block":"none";
+  }
+
+  function _setLogoPreviewFile(preview,file){
+    if(!preview||!file) return;
+    _clearLogoPreviewObjectUrl(preview);
+    var src=URL.createObjectURL(file);
+    preview.dataset.logoObjectUrl=src;
+    preview.removeAttribute("src");
+    preview.src=src;
+    preview.style.display="block";
+  }
+
+  function _restoreLogoPreview(preview,path,mode){
+    _setLogoPreviewSrc(preview,path?_logoAssetUrl(path,mode):"");
+  }
+
+  function _showHideAreas(){
+    var on=enabledCb&&enabledCb.checked;
+    var dark=darkModeCb&&darkModeCb.checked;
+    window._customLogoEnabled=!!on;
+    window._customLogoDarkMode=!!dark;
+    if(uploadAreas) uploadAreas.style.display=on?"":"none";
+    if(uploadAreas) uploadAreas.classList.toggle("is-split",!!(on&&dark));
+    if(darkField) darkField.style.display=(on&&dark)?"":"none";
+    if(lightLabel) lightLabel.textContent=dark?"Light":"";
+    if(typeof applyCustomLogo==="function") applyCustomLogo(_appearancePayloadFromUi());
+    _scheduleAppearanceAutosave();
+  }
+
+  function _setupDropZone(mode){
+    var zone=$("logoDrop"+mode.charAt(0).toUpperCase()+mode.slice(1));
+    var preview=$("logoPreview"+mode.charAt(0).toUpperCase()+mode.slice(1));
+    var removeBtn=$("logoRemove"+mode.charAt(0).toUpperCase()+mode.slice(1));
+    var fileInput=$("logoFileInput"+mode.charAt(0).toUpperCase()+mode.slice(1));
+
+    if(!zone) return;
+
+    zone.onclick=function(){
+      if(fileInput) fileInput.click();
+    };
+
+    zone.ondragover=function(e){e.preventDefault();zone.classList.add("drag-over");};
+    zone.ondragleave=function(){zone.classList.remove("drag-over");};
+    zone.ondrop=function(e){
+      e.preventDefault();
+      zone.classList.remove("drag-over");
+      var file=e.dataTransfer.files[0];
+      if(file) _uploadLogoFile(mode,file,preview,removeBtn);
+    };
+
+    if(fileInput){
+      fileInput.onchange=function(){
+        var file=this.files[0];
+        if(file) _uploadLogoFile(mode,file,preview,removeBtn);
+        this.value="";
+      };
+    }
+
+    if(removeBtn){
+      removeBtn.onclick=function(e){
+        e.stopPropagation();
+        _deleteLogo(mode,preview,removeBtn);
+      };
+    }
+  }
+
+  function _setLogoUploadStatus(message,state){
+    var el=$("logoUploadStatus");
+    if(!el) return;
+    el.className="logo-upload-status";
+    if(!message){
+      el.textContent="";
+      return;
+    }
+    el.textContent=message;
+    el.classList.add(state==="ok"?"is-ok":"is-error");
+  }
+
+  function _formatLogoBytes(size){
+    return Math.ceil((Number(size)||0)/1024)+" KB";
+  }
+
+  function _logoRequirementMessage(details){
+    var base="Logo must be PNG or ICO, max 256x256 px and 200 KB.";
+    return details?base+" Your file: "+details+".":base;
+  }
+
+  function _readFilePrefix(file){
+    return new Promise(function(resolve,reject){
+      var reader=new FileReader();
+      reader.onload=function(){
+        resolve(new Uint8Array(reader.result||new ArrayBuffer(0)));
+      };
+      reader.onerror=function(){
+        reject(new Error("Could not read file header."));
+      };
+      reader.readAsArrayBuffer(file.slice(0,4096));
+    });
+  }
+
+  function _sniffLogoKind(prefix,file){
+    var name=(file&&file.name||"").toLowerCase();
+    var type=(file&&file.type||"").toLowerCase();
+    var isPng=prefix.length>=8&&prefix[0]===0x89&&prefix[1]===0x50&&prefix[2]===0x4e&&prefix[3]===0x47&&prefix[4]===0x0d&&prefix[5]===0x0a&&prefix[6]===0x1a&&prefix[7]===0x0a;
+    if(isPng) return "png";
+    var isIco=prefix.length>=4&&prefix[0]===0x00&&prefix[1]===0x00&&prefix[2]===0x01&&prefix[3]===0x00;
+    if(isIco) return "ico";
+    if(type==="image/png"||name.endsWith(".png")) return "png";
+    if(type==="image/x-icon"||type==="image/vnd.microsoft.icon"||name.endsWith(".ico")) return "ico";
+    return "";
+  }
+
+  function _readImageDimensions(file){
+    return new Promise(function(resolve,reject){
+      var url=URL.createObjectURL(file);
+      var img=new Image();
+      img.onload=function(){
+        var dims={width:img.naturalWidth||0,height:img.naturalHeight||0};
+        URL.revokeObjectURL(url);
+        resolve(dims);
+      };
+      img.onerror=function(){
+        URL.revokeObjectURL(url);
+        reject(new Error("Could not read image dimensions."));
+      };
+      img.src=url;
+    });
+  }
+
+  async function _validateLogoFileBeforeUpload(file){
+    var kind="";
+    try{
+      kind=_sniffLogoKind(await _readFilePrefix(file),file);
+    }catch(e){
+      return "Invalid image: "+e.message;
+    }
+    if(!kind) return _logoRequirementMessage("unsupported file type");
+    var issues=[];
+    if(file.size>200*1024) issues.push(_formatLogoBytes(file.size));
+    if(kind==="png"){
+      try{
+        var dims=await _readImageDimensions(file);
+        if(dims.width>256||dims.height>256) issues.push(dims.width+"x"+dims.height+"px");
+      }catch(e){
+        return "Invalid PNG: "+e.message;
+      }
+    }
+    return issues.length?_logoRequirementMessage(issues.join("; ")):null;
+  }
+
+  async function _uploadLogoFile(mode,file,preview,removeBtn){
+    try{
+      _setLogoUploadStatus("",null);
+      var validationError=await _validateLogoFileBeforeUpload(file);
+      if(validationError){
+        _setLogoUploadStatus(validationError,"error");
+        showToast(validationError);
+        return;
+      }
+      var previousPath=mode==="light"?window._customLogoLightPath:window._customLogoDarkPath;
+      _setLogoPreviewFile(preview,file);
+      var form=new FormData();
+      form.append("file",file);
+      form.append("mode",mode);
+      var resp=await api("/api/settings/upload-logo",{method:"POST",body:form,headers:{}});
+      if(resp.ok){
+        var path=resp.path;
+        var version=resp.version||String(Date.now());
+        window._customLogoVersionByPath=window._customLogoVersionByPath||{};
+        window._customLogoVersionByPath[path]=version;
+        if(mode==="light"){
+          window._customLogoLightPath=path;
+          window._customLogoLightVersion=version;
+        }else{
+          window._customLogoDarkPath=path;
+          window._customLogoDarkVersion=version;
+        }
+        if(typeof _cacheCustomLogoState==="function") _cacheCustomLogoState(_appearancePayloadFromUi());
+        if(removeBtn) removeBtn.style.display="";
+        var zone=$("logoDrop"+mode.charAt(0).toUpperCase()+mode.slice(1));
+        if(zone){
+          var hint=zone.querySelector(".logo-drop-hint");
+          if(hint) hint.style.display="none";
+        }
+        _setLogoUploadStatus("Logo uploaded.","ok");
+        _scheduleAppearanceAutosave();
+        if(typeof applyCustomLogo==="function") applyCustomLogo(_appearancePayloadFromUi());
+      }else{
+        var message=resp.error||"Upload failed";
+        _restoreLogoPreview(preview,previousPath,mode);
+        _setLogoUploadStatus(message,"error");
+        showToast(message);
+      }
+    }catch(e){
+      var message="Upload failed: "+e.message;
+      _restoreLogoPreview(preview,previousPath,mode);
+      _setLogoUploadStatus(message,"error");
+      showToast(message);
+    }
+  }
+
+  async function _deleteLogo(mode,preview,removeBtn){
+    try{
+      var resp=await api("/api/settings/delete-logo",{
+        method:"POST",
+        body:JSON.stringify({mode:mode}),
+        headers:{"Content-Type":"application/json"}
+      });
+      if(resp.ok){
+        if(mode==="light"){
+          window._customLogoLightPath="";
+          window._customLogoLightVersion="";
+        }else{
+          window._customLogoDarkPath="";
+          window._customLogoDarkVersion="";
+        }
+        if(typeof _cacheCustomLogoState==="function") _cacheCustomLogoState(_appearancePayloadFromUi());
+        _setLogoPreviewSrc(preview,"");
+        if(removeBtn) removeBtn.style.display="none";
+        var zone=$("logoDrop"+mode.charAt(0).toUpperCase()+mode.slice(1));
+        if(zone){
+          var hint=zone.querySelector(".logo-drop-hint");
+          if(hint) hint.style.display="";
+        }
+        _setLogoUploadStatus("Logo removed.","ok");
+        _scheduleAppearanceAutosave();
+        if(typeof applyCustomLogo==="function") applyCustomLogo(_appearancePayloadFromUi());
+      }else{
+        showToast(resp.error||"Delete failed");
+      }
+    }catch(e){
+      showToast("Delete failed: "+e.message);
+    }
+  }
+
+  if(enabledCb){
+    enabledCb.onchange=_showHideAreas;
+  }
+  if(darkModeCb){
+    darkModeCb.onchange=_showHideAreas;
+  }
+
+  _setupDropZone("light");
+  _setupDropZone("dark");
+
+  if(window._customLogoLightPath){
+    var lp=$("logoPreviewLight");
+    var lr=$("logoRemoveLight");
+    var lz=$("logoDropLight");
+    _setLogoPreviewSrc(lp,_logoAssetUrl(window._customLogoLightPath,"light"));
+    if(lr) lr.style.display="";
+    if(lz){var lh=lz.querySelector(".logo-drop-hint");if(lh) lh.style.display="none";}
+  }
+  if(window._customLogoDarkPath){
+    var dp=$("logoPreviewDark");
+    var dr=$("logoRemoveDark");
+    var dz=$("logoDropDark");
+    _setLogoPreviewSrc(dp,_logoAssetUrl(window._customLogoDarkPath,"dark"));
+    if(dr) dr.style.display="";
+    if(dz){var dh=dz.querySelector(".logo-drop-hint");if(dh) dh.style.display="none";}
+  }
+
+  _showHideAreas();
+}
+
 
 function _syncChatActivityDisplayModeControl(mode){
   const next=mode==='transparent_stream'?'transparent_stream':'compact_worklog';
@@ -8691,6 +8987,19 @@ async function loadSettingsPanel(){
     if(typeof loadDashboardSettings==='function') loadDashboardSettings();
     loadProvidersPanel(); // load provider cards in background
     loadPluginsPanel(); // load plugin/hook visibility in background
+    // Restore custom logo state and wire up upload UI
+    window._customLogoEnabled = !!settings.custom_logo_enabled;
+    window._customLogoDarkMode = !!settings.custom_logo_dark_mode;
+    window._customLogoLightPath = settings.custom_logo_light_path || '';
+    window._customLogoDarkPath = settings.custom_logo_dark_path || '';
+    window._customLogoLightVersion = settings.custom_logo_light_version || '';
+    window._customLogoDarkVersion = settings.custom_logo_dark_version || '';
+    var logoEnabledCb = $('settingsCustomLogoEnabled');
+    var logoDarkCb = $('settingsCustomLogoDarkMode');
+    if (logoEnabledCb) logoEnabledCb.checked = !!settings.custom_logo_enabled;
+    if (logoDarkCb) logoDarkCb.checked = !!settings.custom_logo_dark_mode;
+    if (typeof _initLogoUpload === 'function') _initLogoUpload();
+    if (typeof applyCustomLogo === 'function') applyCustomLogo(settings);
     loadExtensionsPanel(); // load extension diagnostics in background
     switchSettingsSection(_settingsSection);
   }catch(e){
