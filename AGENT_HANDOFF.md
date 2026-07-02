@@ -416,5 +416,74 @@ Preserved. Not modified. The deployment health endpoint is an independent read-o
 
 ### Next task
 
-**Phase 8: Safe workspace search**
+**Phase 8: Safe workspace search** — COMPLETE (see below)
+
+---
+
+## Phase 8: Safe workspace search — COMPLETE
+
+| Field | Value |
+|---|---|
+| **Status** | Complete |
+| **HEAD before commit** | `02dbf5e` |
+| **Changed files** | `api/workspace_search.py` (created), `api/routes.py` (modified), `api/mobile_routes.py` (modified), `tests/test_workspace_search.py` (created), `docs/rfcs/runtime-api-contract.md` (updated) |
+
+### Workspace search endpoint added
+
+- GET `/api/workspace/search` — safe recursive workspace search with name and/or content search
+
+### Mobile capabilities update
+
+- `features.workspace_search` changed from `false` to `true` in `/api/mobile/capabilities`.
+
+### Verification
+
+```bash
+# Focused workspace search tests — 27 passed
+./scripts/test.sh tests/test_workspace_search.py -v
+
+# Full regression — 191 passed
+HERMES_WEBUI_RUNTIME_ADAPTER=legacy-direct ./scripts/test.sh \
+  tests/test_workspace_search.py \
+  tests/test_mobile_capabilities.py \
+  tests/test_deployment_health.py \
+  tests/test_deployment_health_security_warnings.py \
+  tests/test_runtime_routes.py \
+  tests/test_runtime_sse_reconnect.py \
+  tests/test_runtime_legacy_journal_mirror.py \
+  tests/test_agent_runs_adapter.py \
+  tests/test_runtime_adapter_selection.py \
+  tests/test_agent_runs_error_mapping.py \
+  -v
+
+# Agent-runs env regression — 37 passed (mobile + workspace search)
+HERMES_WEBUI_RUNTIME_ADAPTER=agent-runs \
+HERMES_WEBUI_AGENT_RUNS_BASE_URL=http://127.0.0.1:8642 \
+HERMES_WEBUI_AGENT_RUNS_API_KEY=test-key \
+./scripts/test.sh tests/test_workspace_search.py tests/test_mobile_capabilities.py -v
+
+# Manual import smoke
+python3 -c 'import api.workspace_search; print("OK")'
+```
+
+### Deliverables
+
+- `api/workspace_search.py` — `handle_workspace_search()` route handler. Name search via `os.walk` with case-insensitive basename/path matching. Content search reads text files safely, returns first matching line with line number and trimmed preview. Safety: workspace root resolution via `api.config.DEFAULT_WORKSPACE`, symlink escape blocked, ignored directories excluded, binary files skipped, files >1MB skipped for content search, secret redaction on previews.
+- `api/routes.py` — Registered `GET /api/workspace/search` in `handle_get()` dispatcher, before mobile routes section.
+- `api/mobile_routes.py` — `features.workspace_search` flipped from `false` to `true`.
+- `tests/test_workspace_search.py` — 27 tests covering basic endpoint, name search, content search, both mode, safety, and mobile integration.
+- `docs/rfcs/runtime-api-contract.md` — Added workspace search endpoint section documenting path, query params, response shape, safety properties, error responses, and mobile integration.
+
+### /api/chat/start compatibility
+
+Preserved. Not modified. The workspace search endpoint is independent of the chat path.
+
+### Deferred
+
+- No WebUI frontend UI added (endpoint + tests + docs is sufficient for this phase).
+- Server smoke test deferred (requires live server; test suite provides comprehensive coverage).
+
+### Next task
+
+**Phase 9: Full verification and final implementation report**
 

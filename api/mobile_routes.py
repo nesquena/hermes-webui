@@ -121,7 +121,7 @@ def handle_mobile_capabilities(handler, parsed):
             "run_dashboard": True,
             "approvals": is_agent_runs,
             "clarify": is_agent_runs,
-            "workspace_search": False,
+            "workspace_search": True,
             "deployment_health": True,
             "file_uploads": True,
             "voice_metadata": False,

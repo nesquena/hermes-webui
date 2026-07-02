@@ -312,3 +312,91 @@ or stack traces are exposed.
   phase. The legacy chat-start path remains unchanged.
 - Live Hermes Agent HTTP smoke is deferred because the Agent Phase 4 route
   module is not yet mounted into a live server.
+
+## Workspace search endpoint (Phase 8)
+
+WebUI provides a safe recursive workspace search endpoint for Hermex and mobile
+users to find files by name or content without manually expanding large directory trees.
+
+### Endpoint
+
+| Method | Path | Description |
+|---|---|---|
+| GET | ``/api/workspace/search`` | Search workspace files by name and/or content |
+
+### Query parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| ``q`` | string | (required) | Search query |
+| ``type`` | ``name`` \| ``content`` \| ``both`` | ``both`` | Search mode |
+| ``limit`` | int | ``50`` | Max results; capped at ``100`` |
+
+### Response shape
+
+```json
+{
+  "query": "runtime",
+  "type": "both",
+  "limit": 50,
+  "results": [
+    {
+      "path": "api/runtime_contract.py",
+      "type": "file",
+      "match_type": "name",
+      "size": 1234,
+      "line": null,
+      "preview": "api/runtime_contract.py"
+    },
+    {
+      "path": "docs/rfcs/runtime-api-contract.md",
+      "type": "file",
+      "match_type": "content",
+      "size": 4567,
+      "line": 44,
+      "preview": "Every replayable runtime event..."
+    }
+  ]
+}
+```
+
+### Result fields
+
+| Field | Type | Description |
+|---|---|---|
+| ``path`` | ``string`` | Workspace-relative POSIX path |
+| ``type`` | ``file`` \| ``dir`` | File or directory |
+| ``match_type`` | ``name`` \| ``content`` | How the match was found |
+| ``size`` | ``int`` \| ``null`` | File size in bytes (``null`` for dirs) |
+| ``line`` | ``int`` \| ``null`` | Line number of content match (``null`` for name matches) |
+| ``preview`` | ``string`` | Basename/path for name matches; trimmed line text for content matches |
+
+### Safety
+
+- Workspace root resolved from ``api.config.DEFAULT_WORKSPACE``
+- Symlink escape blocked via ``_safe_search_path()`` check
+- Ignored directories: ``.git``, ``node_modules``, ``.venv``, ``venv``, ``__pycache__``, ``dist``, ``build``, ``.mypy_cache``, ``.pytest_cache``, ``.ruff_cache``, ``.next``, ``.turbo``, ``target``
+- Binary files (>8K chunk with null bytes) skipped for content search
+- Files >1 MB skipped for content search
+- Secret redaction: ``api_key``, ``apikey``, ``token``, ``access_token``, ``refresh_token``, ``password``, ``secret``, ``authorization``, ``bearer`` and their values are replaced with ``[REDACTED]``
+- No absolute paths, home directories, usernames, API keys, or raw env values in response
+- Results sorted: exact name matches first, then path alphabetically, then content matches
+
+### Error responses
+
+| Status | ``error`` | When |
+|---|---|---|
+| 400 | (text) | Missing or empty ``q`` |
+| 400 | (text) | Invalid ``type`` value |
+| 503 | ``workspace_unavailable`` | Workspace root not configured or unavailable |
+
+### Implementation
+
+- ``api/workspace_search.py`` — search handler, name/content search, safety checks
+- ``api/routes.py`` — registered ``GET /api/workspace/search``
+- ``api/mobile_routes.py`` — ``features.workspace_search`` flipped to ``true``
+
+### Mobile integration
+
+Hermex clients should check ``/api/mobile/capabilities`` → ``features.workspace_search``
+before attempting to use this endpoint.

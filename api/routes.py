@@ -12322,6 +12322,11 @@ def handle_get(handler, parsed) -> bool:
 
     # ── End runtime routes ──────────────────────────────────────────────────
 
+    # ── Workspace search ───────────────────────────────────────────────────
+    if parsed.path == "/api/workspace/search":
+        from api.workspace_search import handle_workspace_search
+        return handle_workspace_search(handler, parsed)
+
     # ── Mobile routes ───────────────────────────────────────────────────────
     if parsed.path == "/api/mobile/capabilities":
         return handle_mobile_capabilities(handler, parsed)
