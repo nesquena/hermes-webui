@@ -1,6 +1,20 @@
 import json
 
+import pytest
+
+from api import log_stream
 from server import Handler
+
+
+@pytest.fixture(autouse=True)
+def _log_via_print(monkeypatch):
+    """Route access logs through plain print() so capsys can observe them.
+
+    These tests assert on record *content*; durable_print normally bypasses
+    sys.stdout via the fd duplicated at startup (#0095), which capsys cannot
+    see. tests/test_access_log_stdout_hijack.py covers the durable fd path.
+    """
+    monkeypatch.setattr(log_stream, "_log_fd", None)
 
 
 def test_log_request_handles_malformed_request_without_path(capsys):
