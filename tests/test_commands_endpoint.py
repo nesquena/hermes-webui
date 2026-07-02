@@ -552,6 +552,59 @@ def test_concurrent_reload_mcp_calls_are_serialized(monkeypatch):
     assert not errors
 
 
+def test_learn_command_returns_agent_message_payload(monkeypatch):
+    """`/learn` resolves to a normal agent-turn message instead of a fake output-only command."""
+    import sys
+
+    agent_pkg = sys.modules.get("agent") or ModuleType("agent")
+    agent_pkg.__path__ = []
+    learn_prompt = ModuleType("agent.learn_prompt")
+    cast(Any, learn_prompt).build_learn_prompt = lambda req: f"LEARN PROMPT: {req or '<conversation>'}"
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.learn_prompt", learn_prompt)
+
+    from api.commands import execute_agent_command
+
+    result = execute_agent_command('/learn what we just fixed')
+    assert result == {
+        "output": "⚡ Learning a skill from what you described.",
+        "message": "LEARN PROMPT: what we just fixed",
+    }
+
+
+def test_blueprint_command_can_return_agent_seed(monkeypatch):
+    """Blueprint commands with missing slots should seed the agent turn in WebUI."""
+    import sys
+
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    hermes_cli_pkg.__path__ = []
+    blueprint_cmd = ModuleType("hermes_cli.blueprint_cmd")
+    cast(Any, blueprint_cmd).handle_blueprint_command = lambda args: SimpleNamespace(
+        text=f"Blueprint: {args}",
+        agent_seed=f"ASK FOR SLOTS: {args}",
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.blueprint_cmd", blueprint_cmd)
+
+    from api.commands import execute_agent_command
+
+    assert execute_agent_command('/blueprint morning') == {
+        "output": "Blueprint: morning",
+        "message": "ASK FOR SLOTS: morning",
+    }
+
+
+def test_webui_safe_agent_commands_are_allowlisted(monkeypatch):
+    """Safe non-CLI agent commands should be accepted by the executor allowlist."""
+    from api import commands
+
+    monkeypatch.setattr(commands, "_run_kanban_command", lambda arg: f"kanban {arg}")
+    monkeypatch.setattr(commands, "_run_profile_command", lambda: "profile ok")
+
+    assert commands.execute_agent_command('/kanban list') == "kanban list"
+    assert commands.execute_agent_command('/whoami') == "profile ok"
+
+
 @requires_agent_modules
 def test_commands_exec_cli_only_command_returns_404():
     """CLI-only commands should stay blocked from the generic execution endpoint."""
@@ -561,8 +614,8 @@ def test_commands_exec_cli_only_command_returns_404():
 
 
 @requires_agent_modules
-def test_commands_exec_regular_agent_command_returns_404():
-    """Non-allowlisted agent commands must not become generic WebUI exec targets."""
+def test_commands_exec_regular_unallowlisted_agent_command_returns_404():
+    """Unallowlisted agent commands must not become generic WebUI exec targets."""
     status, body = _post('/api/commands/exec', {'command': '/help'})
     assert status == 404
     assert isinstance(body, dict)

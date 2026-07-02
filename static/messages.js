@@ -1131,9 +1131,14 @@ let _sendInProgressSid = null;  // session_id of the in-flight send
 const _sessionTitleProvisionalBySid = new Map();
 // Agent commands that are safe to execute directly in the WebUI even though
 // their canonical command is registered on the backend (for example
-// /reload-mcp). Keep this intentionally narrow and include underscore variants
-// observed by users so typing either form still routes through executeAgentCommand.
-const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills', 'codex-runtime', 'codex_runtime', 'credits']);
+// Agent-side commands the WebUI can execute safely through /api/commands/exec.
+// Keep CLI-only/TUI/clipboard/gateway lifecycle commands out of this set.
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
+  'agents','blueprint','bundles','codex-runtime','codex_runtime','credits','curator',
+  'debug','fast','footer','insights','kanban','learn','memory','profile',
+  'reload-mcp','reload_mcp','reload-skills','reload_skills','resume','rollback',
+  'sessions','subgoal','suggestions','version','whoami'
+]);
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;
@@ -1477,19 +1482,28 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
-        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-        let _agentOutput='(no output)';
+        let _agentResult=null;
         try{
-          _agentOutput=typeof executeAgentCommand==='function'
+          _agentResult=typeof executeAgentCommand==='function'
             ? await executeAgentCommand(text,_agentCmd||{name:_agentCmdName})
             : 'Agent command runtime unavailable in WebUI.';
         }catch(e){
-          _agentOutput=`Agent command error: ${e&&e.message||e}`;
+          if(!S.session){await newSession();await renderSessionList();}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:`Agent command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
+          renderMessages();
+          $('msg').value='';autoResize();hideCmdDropdown();return;
         }
-        S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
-        renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
+        if(_agentResult&&typeof _agentResult==='object'&&typeof _agentResult.message==='string'&&_agentResult.message.trim()){
+          _slashDisplayTextOverride=text;
+          text=_agentResult.message.trim();
+        }else{
+          if(!S.session){await newSession();await renderSessionList();}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:String(_agentResult||'(no output)'),_ts:Date.now()/1000});
+          renderMessages();
+          $('msg').value='';autoResize();hideCmdDropdown();return;
+        }
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
         if(!S.session){await newSession();await renderSessionList();}

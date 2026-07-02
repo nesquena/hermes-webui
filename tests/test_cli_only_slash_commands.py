@@ -473,15 +473,18 @@ def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():
     assert "executeAgentCommand(text,_agentCmd||{name:_agentCmdName})" in intercept
 
 
-def test_reload_mcp_reload_skills_and_codex_runtime_webui_intercept_aliases_are_defined_in_js_whitelist():
-    assert "'reload-mcp'" in MESSAGES_JS
-    assert "'reload_mcp'" in MESSAGES_JS
-    assert "'reload-skills'" in MESSAGES_JS
-    assert "'reload_skills'" in MESSAGES_JS
-    assert "'codex-runtime'" in MESSAGES_JS
-    assert "'codex_runtime'" in MESSAGES_JS
-    assert "'credits'" in MESSAGES_JS
-    assert "if(_agentCmd&&_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" not in MESSAGES_JS
+def test_webui_agent_command_whitelist_includes_safe_agent_commands():
+    for command in (
+        'learn', 'memory', 'curator', 'kanban', 'sessions', 'resume',
+        'agents', 'profile', 'whoami', 'version', 'bundles', 'blueprint',
+        'suggestions', 'insights', 'fast', 'footer', 'rollback', 'subgoal',
+        'debug', 'reload-mcp', 'reload_mcp', 'reload-skills', 'reload_skills',
+        'codex-runtime', 'codex_runtime', 'credits',
+    ):
+        assert repr(command) in MESSAGES_JS
+    assert "if(_agentResult&&typeof _agentResult==='object'&&typeof _agentResult.message==='string'" in MESSAGES_JS
+    assert "_slashDisplayTextOverride=text;" in MESSAGES_JS
+    assert "text=_agentResult.message.trim();" in MESSAGES_JS
 
 
 def test_reload_skills_agent_command_metadata_resolves_alias():
@@ -537,7 +540,7 @@ def test_unknown_slash_commands_still_fall_through_to_agent():
     assert "if(_parsedCmd&&!_cmd)" in intercept
     assert "if(!_agentCmd" not in intercept
     assert "if(_agentCmd){" not in intercept
-    assert "else" not in intercept[intercept.find("if(_agentCmd&&_agentCmd.cli_only)") :]
+    assert "if(_agentCmd&&!_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" not in intercept
 
 
 def test_builtin_command_opt_outs_do_not_hit_agent_metadata_lookup():
