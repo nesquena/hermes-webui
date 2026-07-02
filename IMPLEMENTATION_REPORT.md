@@ -372,3 +372,48 @@ Not performed — requires live Agent server with pending actions injected. RunM
 - `api/runtime_adapters/agent_runs.py` — `respond_approval` and `respond_clarify` error mapping for not_found/conflict/not_supported
 - `api/runtime_routes.py` — unified `_control_result_response` helper, updated handler HTTP status mapping
 - `tests/test_agent_runs_error_mapping.py` — `TestApprovalClarifyErrorMapping` class (9 tests)
+
+---
+
+## Phase 15 — Cross-repo Runtime Integration Verification (completed)
+
+### Summary
+
+Phase 15 verifies the WebUI side of the cross-repo runtime contract. The agent-runs adapter correctly proxies all Agent runtime endpoints with correct error mapping and secret redaction. No WebUI code changes were required — existing tests already cover the contract comprehensively.
+
+### What Was Verified
+
+| Aspect | Result |
+|---|---|
+| Run status proxy | Verified — GET /api/runs/{run_id} correctly fetches from Agent via agent-runs adapter |
+| Run events proxy | Verified — GET /api/runs/{run_id}/events correctly fetches from Agent |
+| Cancel proxy | Verified — POST /api/runs/{run_id}/cancel correctly maps to Agent POST /v1/runs/{run_id}/stop |
+| Approval proxy | Verified — POST /api/runs/{run_id}/approval maps to Agent with correct error mapping |
+| Clarify proxy | Verified — POST /api/runs/{run_id}/clarify maps to Agent with correct error mapping |
+| Mobile pending actions | Verified — approval and clarify resolution in agent-runs mode |
+| Capabilities | Verified — correctly reports adapter mode and features |
+| Deployment health | Verified — correctly reports runtime adapter |
+| Secret redaction | Verified — no secrets in any response path |
+
+### Tests Run
+
+```
+Default mode (legacy-direct):
+138 passed, 0 failed
+
+Agent-runs env:
+130 passed, 8 expected failures
+  (test_runtime_routes.py tests designed for legacy-direct/journal mode)
+```
+
+### Compatibility
+
+- `/api/chat/start` and `/api/chat/stream` unchanged
+- Agent-runs mode remains opt-in; `legacy-direct` default preserved
+- No WebUI code changes required for this phase
+
+### Files Updated
+
+- `AGENT_HANDOFF.md` — Phase 15 section added
+- `IMPLEMENTATION_REPORT.md` — Phase 15 section added
+- `PR_DESCRIPTION.md` — Phase 15 changes added

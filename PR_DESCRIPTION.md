@@ -93,6 +93,17 @@ Live smoke (Phase 10B): PASS
 - Workspace search double-walks for `type=both` queries
 - 8 test_runtime_routes.py tests fail under agent-runs env (expected — tests designed for legacy-direct/journal mode)
 
+## Phase 15 Changes (this PR)
+
+Phase 15 verifies the WebUI side of cross-repo runtime integration. No code changes were required — the existing agent-runs adapter and test suite already correctly implement the Agent runtime contract.
+
+**Verification results:**
+- Agent contract shapes (create, status, events, stop, approval, clarify) all correctly proxied
+- Error mapping verified: not_found→404, conflict→409, success→200
+- Secret redaction preserved across all response paths
+- 138 tests passed (default mode), 130 passed/8 expected failures (agent-runs mode)
+- 345 Agent runtime tests pass with the same contract
+
 ## Rollback Plan
 
 ```bash

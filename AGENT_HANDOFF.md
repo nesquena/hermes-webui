@@ -739,3 +739,47 @@ Not performed as a full HTTP integration (requires live Agent server with inject
 ### Next task
 **Phase 11C — True live AIAgent interruption and continuation, or PR submission if continuation remains out of scope.**
 
+---
+
+## Phase 15 — Cross-repo Runtime Integration Verification (completed)
+
+### State Before Phase 15
+- **Commit:** `d29e380`
+- **Message:** `Phase 11B: Harden approval and clarify proxy handling`
+
+### What Was Verified
+
+The WebUI agent-runs adapter was verified to correctly proxy all required Agent runtime endpoints:
+
+| WebUI Endpoint | Agent Endpoint | Status |
+|---|---|---|
+| GET /api/runs/{run_id} | GET /v1/runs/{run_id} | Verified |
+| GET /api/runs/{run_id}/events | GET /v1/runs/{run_id}/events | Verified |
+| POST /api/runs/{run_id}/cancel | POST /v1/runs/{run_id}/stop | Verified |
+| POST /api/runs/{run_id}/approval | POST /v1/runs/{run_id}/approval | Verified |
+| POST /api/runs/{run_id}/clarify | POST /v1/runs/{run_id}/clarify | Verified |
+| POST /api/mobile/pending-actions/{id}/resolve (approval) | POST /v1/runs/{run_id}/approval | Verified |
+| POST /api/mobile/pending-actions/{id}/resolve (clarify) | POST /v1/runs/{run_id}/clarify | Verified |
+
+Error mapping verified:
+- Agent `not_found` -> WebUI 404 (`action_not_found`)
+- Agent `conflict` -> WebUI 409
+- Agent success -> WebUI 200
+
+Secret redaction verified across all paths.
+
+### No Code Changes Required
+
+Existing tests already comprehensively cover the agent-runs adapter (6 test files, 138+ tests).
+
+### Test Results
+
+**Default mode: 138 passed, 0 failed**
+**Agent-runs env: 130 passed, 8 expected failures**
+
+### Files Updated
+
+- `AGENT_HANDOFF.md` - Phase 15 section added
+- `IMPLEMENTATION_REPORT.md` - Phase 15 section added
+- `PR_DESCRIPTION.md` - Phase 15 changes added
+
