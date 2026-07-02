@@ -3981,6 +3981,17 @@ body.resizing .sidebar{transition:none!important;}
    base row class replayed the whole transcript's shimmer on every renderMessages
    rebuild. (Trifecta finding V9.) */
 #liveAssistantTurn .transparent-event-row{animation:transparent-event-enter .18s ease-out both;}
+/* Live transparent anchor scene rows are rebuilt during streaming as the anchor
+   projection receives token/reasoning updates. Replaying the entrance animation
+   on those replacement rows restarts opacity at 0 and produces visible flicker. */
+#liveAssistantTurn .transparent-event-row[data-anchor-live-scene-row="1"],
+#liveAssistantTurn .transparent-event-row[data-live-stream-owned="1"]{
+  animation:none!important;
+  opacity:1!important;
+  transition-property:none!important;
+  transition-duration:0s!important;
+  transition-delay:0s!important;
+}
 .transparent-event-row[data-event-type="thinking"]{
   background:transparent;
   border-color:transparent;
