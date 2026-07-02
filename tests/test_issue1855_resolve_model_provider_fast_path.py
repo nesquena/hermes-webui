@@ -331,3 +331,190 @@ class TestChatStartHandlerStillStagesResolveModelProvider:
             "diagnostic stage so production slow-request alerts (PR #1911) "
             "continue to surface this stage when it's slow."
         )
+
+
+class TestValidateResolvedModel:
+    """Post-resolution model validation guard.
+
+    _validate_resolved_model() checks the resolved model against the same catalog
+    the model picker uses. These tests cover the four scenarios the reviewer
+    requested for PR #5205.
+    """
+
+    def test_local_provider_model_from_catalog_passes_through(self):
+        """A configured local provider whose models come from the catalog /
+        live discovery must pass through — the validator rejects only truly
+        unknown models, not models that the picker legitimately offered.
+        """
+        from api.routes import _validate_resolved_model
+
+        with patch("api.config.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "ollama",
+                "default_model": "gemma4:e2b",
+                "groups": [
+                    {"provider_id": "ollama", "models": [
+                        {"id": "gemma4:e2b"},
+                        {"id": "phi4-mini"},
+                    ]},
+                ],
+            }
+            result = _validate_resolved_model("gemma4:e2b", "ollama")
+
+        assert result == "gemma4:e2b", (
+            "A model present in the catalog must pass through unchanged."
+        )
+
+    def test_invalid_model_falls_back_to_provider_first_model(self):
+        """A genuinely invalid model gets a provider-coherent fallback — the
+        provider's first catalog model, never the global default.
+        """
+        from api.routes import _validate_resolved_model
+
+        with patch("api.config.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "ollama",
+                "default_model": "gemma4:e2b",
+                "groups": [
+                    {"provider_id": "ollama", "models": [
+                        {"id": "gemma4:e2b"},
+                        {"id": "phi4-mini"},
+                    ]},
+                ],
+            }
+            result = _validate_resolved_model("nonexistent-model", "ollama")
+
+        assert result == "gemma4:e2b", (
+            "Fallback should return the provider's first catalog model, "
+            "not the global default."
+        )
+
+    def test_empty_model_returns_empty(self):
+        """No-model / onboarding-not-done — empty string passes through
+        unchanged (no catalog look-up needed).
+        """
+        from api.routes import _validate_resolved_model
+
+        result = _validate_resolved_model("", "ollama")
+        assert result == "", (
+            "Empty model string must pass through unchanged — the validator "
+            "only acts on concrete model IDs."
+        )
+
+    def test_cloud_provider_model_passes_through(self):
+        """A cloud provider (openai, openrouter, anthropic) that is present
+        in the catalog must not be wrongly rejected. Known models pass through.
+        """
+        from api.routes import _validate_resolved_model
+
+        with patch("api.config.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "openai",
+                "default_model": "gpt-5.5",
+                "groups": [
+                    {"provider_id": "openai", "models": [
+                        {"id": "gpt-5.5"},
+                        {"id": "gpt-5.5-mini"},
+                    ]},
+                ],
+            }
+            result = _validate_resolved_model("gpt-5.5", "openai")
+
+        assert result == "gpt-5.5", (
+            "A known cloud provider model must pass through."
+        )
+
+    def test_provider_not_in_catalog_passes_through(self):
+        """A provider not present in the picker catalog must pass through
+        untouched — the validator only acts on configured local providers
+        that appear in the catalog.
+        """
+        from api.routes import _validate_resolved_model
+
+        with patch("api.config.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "openai",
+                "default_model": "gpt-5.5",
+                "groups": [
+                    {"provider_id": "openai", "models": [{"id": "gpt-5.5"}]},
+                ],
+            }
+            result = _validate_resolved_model("claude-opus-4.7", "anthropic")
+
+        assert result == "claude-opus-4.7", (
+            "A provider not in the catalog must pass through — the validator "
+            "cannot verify models for unknown providers."
+        )
+
+    def test_no_model_provider_passes_through(self):
+        """When no model_provider is supplied, pass through — the validator
+        needs a provider to check against the catalog.
+        """
+        from api.routes import _validate_resolved_model
+
+        result = _validate_resolved_model("some-model", None)
+        assert result == "some-model"
+
+    def test_prefixed_model_for_non_active_provider_passes_through(self):
+        """A @provider:model selection for a non-active provider must pass
+        through — session-persisted prefixed IDs should match catalog entries
+        that went through _apply_provider_prefix.
+        """
+        from api.routes import _validate_resolved_model
+
+        with patch("api.config.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "openai",
+                "default_model": "gpt-5.5",
+                "groups": [
+                    {"provider_id": "openai", "models": [{"id": "gpt-5.5"}]},
+                    {"provider_id": "ollama", "models": [
+                        {"id": "@ollama:gemma4:e2b"},
+                        {"id": "@ollama:phi4-mini"},
+                    ]},
+                ],
+            }
+            result = _validate_resolved_model("@ollama:gemma4:e2b", "ollama")
+
+        assert result == "@ollama:gemma4:e2b", (
+            "Prefixed @provider:model for non-active provider must pass through."
+        )
+
+    def test_bare_model_matches_prefixed_catalog_entry(self):
+        """A bare model ID persisted in a session must match a catalog entry
+        that was rewritten to @provider:model by _apply_provider_prefix
+        (non-active provider scenario).
+        """
+        from api.routes import _validate_resolved_model
+
+        with patch("api.config.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "openai",
+                "default_model": "gpt-5.5",
+                "groups": [
+                    {"provider_id": "openai", "models": [{"id": "gpt-5.5"}]},
+                    {"provider_id": "ollama", "models": [
+                        {"id": "@ollama:gemma4:e2b"},
+                        {"id": "@ollama:phi4-mini"},
+                    ]},
+                ],
+            }
+            result = _validate_resolved_model("gemma4:e2b", "ollama")
+
+        assert result == "gemma4:e2b", (
+            "Bare model must match prefixed catalog entry via @provider:bare_model check."
+        )
+
+    def test_catalog_failure_passes_through_gracefully(self):
+        """If get_available_models() raises, pass through gracefully —
+        don't block chat start on a catalog issue.
+        """
+        from api.routes import _validate_resolved_model
+
+        with patch("api.config.get_available_models") as mock_catalog:
+            mock_catalog.side_effect = RuntimeError("catalog timeout")
+            result = _validate_resolved_model("gemma4:e2b", "ollama")
+
+        assert result == "gemma4:e2b", (
+            "Catalog failure must not block chat start — pass through."
+        )

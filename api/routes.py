@@ -4850,13 +4850,19 @@ def _validate_resolved_model(model: str, model_provider: str | None) -> str:
             if not isinstance(m, dict):
                 continue
             mid = str(m.get("id") or "").strip().lower()
-            if mid == _normalized:
+            # Direct match or @provider:model prefixed form
+            # (non-active provider IDs are rewritten by _apply_provider_prefix)
+            if mid == _normalized or mid == f"@{_requested}:{_normalized}":
                 return model  # model is valid — pass through
         # Model not found — use this provider's first model as fallback
         _models = group.get("models", [])
         if _models and isinstance(_models[0], dict):
             _fallback = _models[0].get("id", "")
             if _fallback:
+                logger.warning(
+                    "Model %r not found for provider %r — falling back to %r",
+                    model, model_provider, _fallback,
+                )
                 return _fallback
         break  # provider matched but empty catalog — don't fall through to global
     return model
