@@ -69637,7 +69637,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_repository_custo
         assert unsafe not in serialized
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_custom_properties_final_url_query_drift_before_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_custom_properties_final_url_query_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -69705,6 +69705,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_custo
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
+    assert relevant["results"] == []
     assert not (root / "vault" / f"{source_id}.md").exists()
     for unsafe in (
         "secret_value_do_not_leak",
