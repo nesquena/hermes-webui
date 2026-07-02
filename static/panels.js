@@ -10384,6 +10384,14 @@ function _buildProviderCard(p){
     saveBtn.onclick=()=>_saveSelfHostedProvider(p.id);
     saveBtn.disabled=true;
     saveRow.appendChild(saveBtn);
+    if(p.has_key){
+      const removeBtn=document.createElement('button');
+      removeBtn.type='button';
+      removeBtn.className='provider-card-btn provider-card-btn-danger';
+      removeBtn.textContent=t('providers_remove');
+      removeBtn.onclick=()=>_removeProviderKey(p.id);
+      saveRow.appendChild(removeBtn);
+    }
     modelRow.appendChild(modelInput);
     modelField.appendChild(modelRow);
     body.appendChild(baseUrlField);

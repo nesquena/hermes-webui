@@ -268,6 +268,29 @@ def test_apply_self_hosted_provider_setup_omits_env_write_for_empty_optional_key
     assert calls == ["invalidate"]
 
 
+def test_apply_self_hosted_provider_setup_writes_only_target_provider_key_and_skips_reload_config(
+    isolated_self_hosted_env,
+    monkeypatch,
+):
+    tmp_path, _fake_config_path = isolated_self_hosted_env
+    invalidate_calls = []
+    reload_calls = []
+    monkeypatch.setattr(onboarding, "invalidate_models_cache", lambda: invalidate_calls.append("invalidate"))
+    monkeypatch.setattr(onboarding, "reload_config", lambda: reload_calls.append("reload"))
+    body = onboarding.apply_self_hosted_provider_setup({
+        "provider": "lmstudio",
+        "model": "local-model",
+        "base_url": "http://127.0.0.1:1234/v1",
+        "api_key": "lm-key-12345678",
+    })
+    assert body["ok"] is True
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LM_API_KEY=lm-key-12345678" in env_text
+    assert "OLLAMA_API_KEY" not in env_text
+    assert invalidate_calls == ["invalidate"]
+    assert reload_calls == []
+
+
 def test_post_self_hosted_provider_rejects_invalid_provider(isolated_self_hosted_env):
     body, status = _post("/api/providers/self-hosted", {
         "provider": "custom",
@@ -343,6 +366,13 @@ def test_save_self_hosted_provider_posts_expected_payload(tmp_path):
     assert payload["refreshCount"] == 1
     assert payload["reloadCount"] == 1
     assert payload["apiKeyAfter"] == ""
+
+
+def test_self_hosted_provider_card_keeps_remove_key_path():
+    card_src = extract_function(PANELS_JS, "_buildProviderCard", prefix="function")
+    assert "if(p.has_key){" in card_src
+    assert "removeBtn.onclick=()=>_removeProviderKey(p.id);" in card_src
+    assert "removeBtn.textContent=t('providers_remove');" in card_src
 
 
 def test_probe_self_hosted_provider_populates_model_and_enables_save(tmp_path):
