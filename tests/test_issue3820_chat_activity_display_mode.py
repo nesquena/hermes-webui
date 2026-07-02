@@ -641,9 +641,11 @@ def test_transparent_tool_completion_preserves_expand_state():
 
 
 def test_transparent_entrance_animation_is_live_turn_only():
-    """The entrance animation must be scoped to the live turn so it doesn't
-    replay across the whole transcript on every renderMessages. (Trifecta V9.)"""
-    assert "#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter" in STYLE_CSS
+    """The entrance animation on live-turn rows must stay scoped to the live turn
+    so it doesn't replay across the whole transcript on every renderMessages.
+    The animation is now disabled (none) rather than a fade-in — the scope guard
+    still protects against the original renderMessages-replay bug. (Trifecta V9.)"""
+    assert "#liveAssistantTurn .transparent-event-row{animation:none" in STYLE_CSS
 
 
 def test_live_worklog_reason_mirror_is_gated_to_compact_mode():
