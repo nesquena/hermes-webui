@@ -9807,7 +9807,11 @@ async function _loadPluginPage(path, label) {
 
 // ── Providers panel ─────────────────────────────────────────────────────────
 
-const _providerCardEls = new Map(); // providerId → {card, statusDot, input, saveBtn, removeBtn}
+const _providerCardEls = new Map(); // providerId → entry used by save/remove/test handlers
+const _SELF_HOSTED_DEFAULT_BASE_URLS = Object.freeze({
+  ollama: 'http://localhost:11434/v1',
+  lmstudio: 'http://localhost:1234/v1',
+});
 
 async function _fetchProviderQuotaStatus(force=false){
   const endpoint=force?`/api/provider/quota?refresh=1&ts=${Date.now()}`:'/api/provider/quota';
@@ -9823,7 +9827,7 @@ async function loadProvidersPanel(){
   try{
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider);
+    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted);
     list.innerHTML='';
     _providerCardEls.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
@@ -10299,7 +10303,140 @@ function _buildProviderCard(p){
   }
 
   let input=null;
+  let focusInput=null;
   let saveBtn=null;
+  if(p.is_self_hosted){
+    const defaultBaseUrl=_SELF_HOSTED_DEFAULT_BASE_URLS[p.id];
+    const baseUrlField=document.createElement('div');
+    baseUrlField.className='provider-card-field';
+    const baseUrlLabel=document.createElement('label');
+    baseUrlLabel.className='provider-card-label';
+    baseUrlLabel.textContent='Base URL';
+    baseUrlField.appendChild(baseUrlLabel);
+    const baseUrlRow=document.createElement('div');
+    baseUrlRow.className='provider-card-row';
+    const baseUrlInput=document.createElement('input');
+    baseUrlInput.type='text';
+    baseUrlInput.className='provider-card-input';
+    baseUrlInput.placeholder=defaultBaseUrl||'http://localhost:11434/v1';
+    baseUrlInput.value=(p.base_url||'').trim()||defaultBaseUrl||'';
+    baseUrlInput.autocomplete='off';
+    const testBtn=document.createElement('button');
+    testBtn.type='button';
+    testBtn.className='provider-card-btn provider-card-btn-ghost';
+    testBtn.textContent='Test connection';
+    const probeStatus=document.createElement('div');
+    probeStatus.className='provider-card-hint';
+    baseUrlRow.appendChild(baseUrlInput);
+    baseUrlRow.appendChild(testBtn);
+    baseUrlField.appendChild(baseUrlRow);
+    baseUrlField.appendChild(probeStatus);
+
+    const keyField=document.createElement('div');
+    keyField.className='provider-card-field';
+    const keyLabel=document.createElement('label');
+    keyLabel.className='provider-card-label';
+    keyLabel.textContent='API key (optional)';
+    keyField.appendChild(keyLabel);
+    const keyRow=document.createElement('div');
+    keyRow.className='provider-card-row';
+    const keyInput=document.createElement('input');
+    keyInput.type='password';
+    keyInput.className='provider-card-input';
+    keyInput.autocomplete='off';
+    keyInput.placeholder='Optional';
+    keyRow.appendChild(keyInput);
+    keyField.appendChild(keyRow);
+
+    const modelField=document.createElement('div');
+    modelField.className='provider-card-field';
+    const modelLabel=document.createElement('label');
+    modelLabel.className='provider-card-label';
+    modelLabel.textContent=t('providers_status_model')||'Model';
+    modelField.appendChild(modelLabel);
+    const modelRow=document.createElement('div');
+    modelRow.className='provider-card-row';
+    const modelInput=document.createElement('input');
+    modelInput.type='text';
+    modelInput.className='provider-card-input';
+    modelInput.autocomplete='off';
+    modelInput.placeholder='model id';
+    const modelDatalist=document.createElement('datalist');
+    const modelListId='providerModelList-'+p.id;
+    modelDatalist.id=modelListId;
+    modelInput.setAttribute('list',modelListId);
+    const setModelChoices=(models)=>{
+      modelDatalist.innerHTML='';
+      const choices=Array.isArray(models)?models:[];
+      for(const model of choices){
+        const modelId=model&&model.id?model.id:model;
+        const option=document.createElement('option');
+        option.value=modelId;
+        modelDatalist.appendChild(option);
+      }
+    };
+    const initialModelChoices=Array.isArray(p.models)?p.models:[];
+    setModelChoices(initialModelChoices);
+
+    const saveRow=document.createElement('div');
+    saveRow.className='provider-card-row';
+    saveRow.style.marginTop='6px';
+    saveBtn=document.createElement('button');
+    saveBtn.type='button';
+    saveBtn.className='provider-card-btn provider-card-btn-primary';
+    saveBtn.textContent=t('providers_save');
+    saveBtn.onclick=()=>_saveSelfHostedProvider(p.id);
+    saveBtn.disabled=true;
+    saveRow.appendChild(saveBtn);
+    if(p.has_key){
+      const removeBtn=document.createElement('button');
+      removeBtn.type='button';
+      removeBtn.className='provider-card-btn provider-card-btn-danger';
+      removeBtn.textContent=t('providers_remove');
+      removeBtn.onclick=()=>_removeProviderKey(p.id);
+      saveRow.appendChild(removeBtn);
+    }
+    modelRow.appendChild(modelInput);
+    modelField.appendChild(modelRow);
+    body.appendChild(baseUrlField);
+    body.appendChild(keyField);
+    body.appendChild(modelField);
+    body.appendChild(saveRow);
+    body.appendChild(modelDatalist);
+    card.appendChild(body);
+
+    const checkSaveEnabled=()=>{
+      const hasUrl=baseUrlInput.value.trim().length>0;
+      const hasModel=modelInput.value.trim().length>0;
+      saveBtn.disabled=!(hasUrl&&hasModel);
+    };
+    baseUrlInput.addEventListener('input',checkSaveEnabled);
+    modelInput.addEventListener('input',checkSaveEnabled);
+    checkSaveEnabled();
+
+    _providerCardEls.set(p.id,{
+      card,
+      baseUrlInput,
+      apiKeyInput:keyInput,
+      modelInput,
+      modelDatalist,
+      saveBtn,
+      testBtn,
+      probeStatus,
+      isSelfHosted:true,
+      setModelChoices,
+      updateSaveState:checkSaveEnabled,
+    });
+    focusInput=modelInput;
+    testBtn.onclick=()=>_testSelfHostedConnection(p.id);
+    header.addEventListener('click',e=>{
+      if(e.target.closest('.provider-card-body')) return;
+      card.classList.toggle('open');
+      if(card.classList.contains('open')) setTimeout(()=>focusInput&&focusInput.focus(),0);
+    });
+    return card;
+  }
+
   if(p.configurable){
     const field=document.createElement('div');
     field.className='provider-card-field';
@@ -10343,6 +10480,8 @@ function _buildProviderCard(p){
     }
     field.appendChild(row);
     body.appendChild(field);
+    focusInput=input;
+
   }else{
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
@@ -10412,7 +10551,7 @@ function _buildProviderCard(p){
     // Don't toggle when clicking inside body (defensive; body isn't inside header)
     if(e.target.closest('.provider-card-body')) return;
     card.classList.toggle('open');
-    if(card.classList.contains('open')) setTimeout(()=>input.focus(),0);
+    if(card.classList.contains('open')) setTimeout(()=>focusInput&&focusInput.focus(),0);
   });
   return card;
 }
@@ -10484,6 +10623,108 @@ async function _removeProviderKey(providerId){
       showToast('Error: '+e.message);
     }
     if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
+  }
+}
+
+async function _testSelfHostedConnection(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els||!els.isSelfHosted) return;
+  const baseUrl=(els.baseUrlInput.value||'').trim();
+  const apiKey=(els.apiKeyInput.value||'').trim();
+  if(!baseUrl){
+    showToast('Base URL is required');
+    return;
+  }
+
+  const testBtn=els.testBtn;
+  if(!testBtn) return;
+  const prevLabel=testBtn.textContent;
+  testBtn.disabled=true;
+  testBtn.textContent='Testing...';
+  if(els.probeStatus){
+    els.probeStatus.style.color='var(--muted)';
+    els.probeStatus.textContent='Testing connection...';
+  }
+
+  try{
+    const res=await api('/api/onboarding/probe',{
+      method:'POST',
+      body:JSON.stringify({provider:providerId,base_url:baseUrl,api_key:apiKey||undefined}),
+    });
+    if(res&&res.ok){
+      const models=Array.isArray(res.models)?res.models:[];
+      if(els.setModelChoices){
+        els.setModelChoices(models);
+      }
+      if(els.probeStatus){
+        const count=models.length;
+        els.probeStatus.style.color='var(--ok)';
+        els.probeStatus.textContent=`Connected. ${count} model(s) available.`;
+      }
+      if(!els.modelInput.value&&models.length&&models[0]){
+        els.modelInput.value=models[0].id||models[0];
+      }
+      if(els.updateSaveState){
+        els.updateSaveState();
+      }
+    }else{
+      const err=(res&&res.error)||'unreachable';
+      const detail=(res&&res.detail)?` (${res.detail})`:'';
+      if(els.probeStatus){
+        els.probeStatus.style.color='var(--accent)';
+        els.probeStatus.textContent=`${err}${detail}`;
+      }
+      showToast(`Connection test failed: ${err}`);
+    }
+  }catch(e){
+    if(els.probeStatus){
+      els.probeStatus.style.color='var(--accent)';
+      els.probeStatus.textContent=e&&e.message?e.message:'Connection test failed';
+    }
+    showToast('Connection test failed: '+(e&&e.message||'request error'));
+  }finally{
+    testBtn.disabled=false;
+    testBtn.textContent=prevLabel;
+  }
+}
+
+async function _saveSelfHostedProvider(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els||!els.isSelfHosted) return;
+  const baseUrl=(els.baseUrlInput.value||'').trim();
+  const key=(els.apiKeyInput.value||'').trim();
+  const model=(els.modelInput.value||'').trim();
+  if(!baseUrl){
+    showToast('Base URL is required');
+    return;
+  }
+  if(!model){
+    showToast('Model is required');
+    return;
+  }
+  if(!els.saveBtn) return;
+  const saveBtn=els.saveBtn;
+  const prevLabel=saveBtn.textContent;
+  saveBtn.disabled=true;
+  saveBtn.textContent='Saving...';
+  try{
+    const payload={provider:providerId,base_url:baseUrl,model:model};
+    if(key) payload.api_key=key;
+    const res=await api('/api/providers/self-hosted',{method:'POST',body:JSON.stringify(payload)});
+    if(res&&res.ok){
+      showToast(`${res.provider} configured`);
+      if(els.apiKeyInput) els.apiKeyInput.value='';
+      _refreshModelDropdownsAfterProviderChange();
+      await loadProvidersPanel();
+    }else{
+      showToast(res&&res.error||'Failed to save provider');
+      saveBtn.disabled=false;
+      saveBtn.textContent=prevLabel;
+    }
+  }catch(e){
+    showToast('Error: '+(e&&e.message||'Failed to save provider'));
+    saveBtn.disabled=false;
+    saveBtn.textContent=prevLabel;
   }
 }
 

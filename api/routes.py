@@ -13194,6 +13194,13 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
 
+    if parsed.path == "/api/providers/self-hosted":
+        try:
+            from api.onboarding import apply_self_hosted_provider_setup
+            return j(handler, apply_self_hosted_provider_setup(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+
     if parsed.path == "/api/models/refresh":
         provider_id = (body.get("provider") or "").strip().lower()
         if not provider_id:

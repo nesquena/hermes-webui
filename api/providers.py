@@ -745,6 +745,8 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     "opencode-go": ("OPENCODE_API_KEY",),
 }
 
+_SELF_HOSTED_PROVIDER_IDS = frozenset({"ollama", "lmstudio"})
+
 
 def _provider_credential_env_vars() -> tuple[str, ...]:
     names = {name for name in _PROVIDER_ENV_VAR.values() if name}
@@ -2584,12 +2586,20 @@ def get_providers() -> dict[str, Any]:
                 if pid != "nous":
                     models_total = len(models)
 
+        is_self_hosted = pid in _SELF_HOSTED_PROVIDER_IDS
+        try:
+            from api.config import _get_provider_base_url
+            provider_base_url = _get_provider_base_url(pid) if is_self_hosted else None
+        except Exception:
+            provider_base_url = None
         _is_plugin = is_plugin_model_provider(pid)
         providers.append({
             "id": pid,
             "display_name": display_name,
             "has_key": has_key,
             "configurable": not is_oauth and bool(_provider_env_var_for(pid)),
+            "is_self_hosted": is_self_hosted,
+            "base_url": provider_base_url,
             "is_plugin_provider": _is_plugin,
             "is_oauth": is_oauth,
             "key_source": key_source,

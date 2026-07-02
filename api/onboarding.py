@@ -17,6 +17,7 @@ from api.config import (
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
     _HERMES_FOUND,
+    invalidate_models_cache,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _get_config_path,
@@ -1042,6 +1043,80 @@ def apply_onboarding_setup(body: dict) -> dict:
 
     reload_config()
     return get_onboarding_status()
+
+
+def apply_self_hosted_provider_setup(body: dict) -> dict:
+    provider = str(body.get("provider") or "").strip().lower()
+    model = str(body.get("model") or "").strip()
+    api_key = str(body.get("api_key") or "").strip()
+    base_url = _normalize_base_url(str(body.get("base_url") or ""))
+    activate = body.get("activate")
+    do_activate = activate is None or bool(activate)
+
+    if provider not in {"ollama", "lmstudio"}:
+        raise ValueError(f"unsupported self-hosted provider: {provider}")
+    if not model:
+        raise ValueError("model is required")
+
+    provider_meta = _SUPPORTED_PROVIDER_SETUPS.get(provider, {})
+    if provider_meta.get("requires_base_url"):
+        if not base_url:
+            raise ValueError("base_url is required for this provider")
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("base_url must start with http:// or https://")
+
+    config_path = _get_config_path()
+    cfg = _load_yaml_config(config_path)
+    providers_cfg = cfg.setdefault("providers", {})
+    if not isinstance(providers_cfg, dict):
+        providers_cfg = {}
+        cfg["providers"] = providers_cfg
+
+    provider_cfg = providers_cfg.setdefault(provider, {})
+    if not isinstance(provider_cfg, dict):
+        provider_cfg = {}
+        providers_cfg[provider] = provider_cfg
+
+    provider_cfg["base_url"] = base_url
+
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    original_model_cfg = dict(model_cfg)
+    env_var = provider_meta.get("env_var")
+
+    if do_activate:
+        model_cfg["provider"] = provider
+        model_cfg["default"] = _normalize_model_for_provider(provider, model)
+        model_cfg["base_url"] = base_url
+        cfg["model"] = model_cfg
+    elif "model" in cfg:
+        cfg["model"] = original_model_cfg
+    _save_yaml_config(config_path, cfg)
+
+    if api_key and env_var:
+        _write_env_file(_get_active_hermes_home() / ".env", {env_var: api_key})
+        os.environ[env_var] = api_key
+
+    try:
+        from api.profiles import _reload_dotenv
+        _reload_dotenv(_get_active_hermes_home())
+    except Exception:
+        logger.debug("Failed to reload dotenv")
+
+    try:
+        # hermes_cli may cache config at import time; ask it to reload if possible.
+        from hermes_cli.config import reload as _cli_reload
+        _cli_reload()
+    except Exception:
+        logger.debug("Failed to reload hermes_cli config")
+
+    invalidate_models_cache()
+    result = {"ok": True, "provider": provider, "base_url": base_url}
+    if do_activate:
+        result["model"] = model_cfg.get("default")
+    return result
 
 
 def complete_onboarding() -> dict:
