@@ -62517,7 +62517,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_actions_reposito
     assert "raw_prompt" not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_repository_permissions_final_url_query_fragment_drift_before_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_repository_permissions_final_url_query_fragment_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -62587,6 +62587,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_reposito
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / f"{source_id}.md").exists()
+    assert relevant["results"] == []
     for unsafe in (
         "secret_value_do_not_leak",
         "access_token",
