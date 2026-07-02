@@ -16354,9 +16354,8 @@ def _tts_host_is_blocked_target(hostname: str) -> bool:
     return False
 
 
-def _tts_resolve_pinned_address(hostname: str) -> str:
-    """Resolve a hostname once and return a vetted literal address to dial."""
-    import ipaddress
+def _tts_resolve_pinned_addresses(hostname: str, port: int | None) -> list[str]:
+    """Resolve once, validate the RRset, and preserve candidate dial order."""
     import socket
 
     host = (hostname or "").strip().lower()
@@ -16364,25 +16363,26 @@ def _tts_resolve_pinned_address(hostname: str) -> str:
         raise ValueError("invalid OpenAI TTS base_url host")
 
     try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        pass
-    else:
-        if _tts_addr_is_blocked(host):
-            raise ValueError("resolved OpenAI TTS target is not allowed")
-        return host
-
-    try:
-        infos = socket.getaddrinfo(host, None)
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except Exception as exc:
         raise ValueError("could not resolve OpenAI TTS base_url host") from exc
-    if not infos:
-        raise ValueError("could not resolve OpenAI TTS base_url host")
+    pinned_hosts = []
     for info in infos:
         sockaddr = info[4]
-        if sockaddr and _tts_addr_is_blocked(str(sockaddr[0])):
+        if not sockaddr:
+            continue
+        pinned_host = str(sockaddr[0])
+        if _tts_addr_is_blocked(pinned_host):
             raise ValueError("resolved OpenAI TTS target is not allowed")
-    return str(infos[0][4][0])
+        pinned_hosts.append(pinned_host)
+    if not pinned_hosts:
+        raise ValueError("could not resolve OpenAI TTS base_url host")
+    return pinned_hosts
+
+
+def _tts_resolve_pinned_address(hostname: str) -> str:
+    """Return the first vetted literal address for direct helper callers."""
+    return _tts_resolve_pinned_addresses(hostname, None)[0]
 
 
 def _normalized_openai_tts_base_url(base_url: str) -> str:
@@ -16460,10 +16460,19 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self):
         sys.audit("http.client.connect", self, self.host, self.port)
-        pinned_host = _tts_resolve_pinned_address(self.host)
-        self.sock = self._create_connection(
-            (pinned_host, self.port), self.timeout, self.source_address
-        )
+        last_error = None
+        for pinned_host in _tts_resolve_pinned_addresses(self.host, self.port):
+            try:
+                self.sock = _socket.create_connection(
+                    (pinned_host, self.port), self.timeout, self.source_address
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+        else:
+            if last_error is not None:
+                raise last_error
+            raise OSError("could not connect to any pinned OpenAI TTS target")
         try:
             self.sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
         except OSError as exc:

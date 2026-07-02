@@ -294,6 +294,53 @@ def test_openai_tts_pinned_connection_preserves_host_and_sni(monkeypatch):
     assert f"Host: {host}" in sent
 
 
+def test_openai_tts_pinned_connection_tries_later_vetted_candidate(monkeypatch):
+    host = "multi-openai.example.com"
+    response_bytes = _http_response_bytes(200, b"audio-openai")
+    fake_socket = _FakeSocketForHttps(response_bytes)
+    observed = {"getaddrinfo": 0, "server_hostname": None}
+    created = []
+
+    def _fake_getaddrinfo(target_host, target_port=None, *_args, **_kwargs):
+        observed["getaddrinfo"] += 1
+        assert target_host == host
+        port = target_port or 443
+        return [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700:4700::1111", port, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port)),
+        ]
+
+    def _fake_create_connection(address, *_args, **_kwargs):
+        created.append(address)
+        if address[0] == "2606:4700:4700::1111":
+            raise OSError("ipv6 unavailable")
+        if address[0] == "1.1.1.1":
+            return fake_socket
+        raise AssertionError(f"unexpected connect target {address}")
+
+    def _fake_wrap_socket(_context, sock, *args, server_hostname=None, **_kwargs):
+        observed["server_hostname"] = server_hostname
+        return sock
+
+    import api.config as config
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(socket, "create_connection", _fake_create_connection)
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", _fake_wrap_socket)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {"openai": {"base_url": f"https://{host}/v1"}}
+    })
+    h = _post({"text": "Hello", "engine": "openai"}, client="10.82.0.12")
+    routes._handle_tts(h, None)
+
+    assert h.status == 200
+    assert h.wfile.getvalue() == b"audio-openai"
+    assert created == [("2606:4700:4700::1111", 443), ("1.1.1.1", 443)]
+    assert observed["getaddrinfo"] == 2
+    assert observed["server_hostname"] == host
+
+
 def test_openai_tts_rejects_redirect_with_pinned_opener(monkeypatch):
     host = "redirect-openai.example.com"
     response_bytes = _http_response_bytes(302, headers={"Location": "http://169.254.169.254/v1/audio/speech"}, reason="Found")
