@@ -654,6 +654,13 @@ def main() -> None:
         print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
 
     try:
+        from api.kanban_notifier import start_notifier_thread
+        if start_notifier_thread():
+            print('[ok] kanban notifier thread started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: kanban notifier failed to start: {e}', flush=True)
+
+    try:
         from api.background_process import start_session_channel_reaper
         if start_session_channel_reaper():
             print('[ok] SessionChannel reaper thread started', flush=True)
