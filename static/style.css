@@ -3980,7 +3980,9 @@ body.resizing .sidebar{transition:none!important;}
 /* Only animate entrance for rows in the LIVE turn — putting the animation on the
    base row class replayed the whole transcript's shimmer on every renderMessages
    rebuild. (Trifecta finding V9.) */
-#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter .18s ease-out both;}
+/* Enter animation disabled to prevent flickering during token-by-token streaming.
+   New event rows appear instantly; recency-fade (data-transparent-fade) is unaffected. */
+#liveAssistantTurn .transparent-event-row{animation:none!important;}
 .transparent-event-row[data-event-type="thinking"]{
   background:transparent;
   border-color:transparent;
@@ -4266,10 +4268,6 @@ body.resizing .sidebar{transition:none!important;}
   .transparent-event-row .tool-card-header,
   .transparent-event-row .thinking-card-header{min-height:30px;padding:5px 8px;}
   .transparent-detail-mode{padding:4px 6px 5px;}
-}
-@keyframes transparent-event-enter{
-  from{opacity:0;transform:translateY(2px);}
-  to{opacity:1;transform:translateY(0);}
 }
 
 /* ── Old-event fading (transparent mode: medium → low) ─────────────── */
