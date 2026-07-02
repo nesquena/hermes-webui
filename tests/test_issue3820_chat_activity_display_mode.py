@@ -641,10 +641,10 @@ def test_transparent_tool_completion_preserves_expand_state():
 
 
 def test_transparent_entrance_animation_is_live_turn_only():
-    """The entrance animation on live-turn rows must stay scoped to the live turn
-    so it doesn't replay across the whole transcript on every renderMessages.
-    The animation is now disabled (none) rather than a fade-in — the scope guard
-    still protects against the original renderMessages-replay bug. (Trifecta V9.)"""
+    """The live-turn entrance animation was disabled (animation:none) to prevent
+    flickering during streaming. The rule must stay scoped to #liveAssistantTurn
+    so any future animation added to the base .transparent-event-row class does
+    not replay across the whole transcript on every renderMessages. (Trifecta V9.)"""
     assert "#liveAssistantTurn .transparent-event-row{animation:none" in STYLE_CSS
 
 

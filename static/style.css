@@ -4266,10 +4266,6 @@ body.resizing .sidebar{transition:none!important;}
   .transparent-event-row .thinking-card-header{min-height:30px;padding:5px 8px;}
   .transparent-detail-mode{padding:4px 6px 5px;}
 }
-@keyframes transparent-event-enter{
-  from{opacity:0;transform:translateY(2px);}
-  to{opacity:1;transform:translateY(0);}
-}
 
 /* ── Old-event fading (transparent mode: medium → low) ─────────────── */
 /* ── Old-event fading (transparent mode, LIVE turn only — gated in JS) ───── */
