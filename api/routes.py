@@ -11365,6 +11365,12 @@ def handle_get(handler, parsed) -> bool:
         j(handler, build_system_health_payload())
         return True
 
+    if parsed.path == "/api/deployment/health":
+        from api.deployment_health import handle_deployment_health
+
+        handle_deployment_health(handler, parsed)
+        return True
+
     if parsed.path == "/api/models":
         # Profile-scoping for non-default profiles (#3957) is handled INSIDE
         # get_available_models() — it binds the active profile's env + TLS on

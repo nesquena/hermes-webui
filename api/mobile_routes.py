@@ -122,7 +122,7 @@ def handle_mobile_capabilities(handler, parsed):
             "approvals": is_agent_runs,
             "clarify": is_agent_runs,
             "workspace_search": False,
-            "deployment_health": False,
+            "deployment_health": True,
             "file_uploads": True,
             "voice_metadata": False,
         },

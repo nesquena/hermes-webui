@@ -353,3 +353,68 @@ Preserved. Not modified. Mobile routes are read-only observers of the runtime st
 
 **Phase 7: Deployment health diagnostics**
 
+--- 
+
+## Phase 7: Deployment health diagnostics — COMPLETE
+
+| Field | Value |
+|---|---|
+| **Status** | Complete |
+| **HEAD before commit** | `3e0a1fb` |
+| **Changed files** | `api/deployment_health.py` (created), `api/routes.py` (modified), `api/mobile_routes.py` (modified), `tests/test_deployment_health.py` (created), `tests/test_deployment_health_security_warnings.py` (created) |
+
+### Deployment endpoint added
+
+- GET `/api/deployment/health` — Read-only health diagnostics for server safety, runtime readiness, auth exposure risk, workspace readiness, and runtime adapter status. No secrets exposed.
+
+### Mobile capabilities update
+
+- `features.deployment_health` changed from `false` to `true` in `/api/mobile/capabilities`.
+
+### Verification
+
+```bash
+# Focused deployment health tests — 42 passed
+./scripts/test.sh tests/test_deployment_health.py tests/test_deployment_health_security_warnings.py -v
+
+# Full regression — 185 passed
+./scripts/test.sh \
+  tests/test_mobile_capabilities.py tests/test_mobile_run_dashboard.py \
+  tests/test_mobile_pending_actions.py tests/test_runtime_routes.py \
+  tests/test_runtime_sse_reconnect.py tests/test_runtime_legacy_journal_mirror.py \
+  tests/test_agent_runs_adapter.py tests/test_runtime_adapter_selection.py \
+  tests/test_agent_runs_error_mapping.py tests/test_deployment_health.py \
+  tests/test_deployment_health_security_warnings.py -v
+
+# Agent-runs env regression — 46 passed, 8 expected failures
+HERMES_WEBUI_RUNTIME_ADAPTER=agent-runs \
+HERMES_WEBUI_AGENT_RUNS_BASE_URL=http://127.0.0.1:8642 \
+HERMES_WEBUI_AGENT_RUNS_API_KEY=test-key \
+./scripts/test.sh tests/test_deployment_health.py tests/test_mobile_capabilities.py \
+  tests/test_runtime_routes.py -v
+
+# Manual import smoke
+python3 -c 'import api.deployment_health; print("OK")'
+```
+
+### Deliverables
+
+- `api/deployment_health.py` — `handle_deployment_health()` route handler producing the `/api/deployment/health` response. Includes helpers for OS isolation detection, workspace checks, provider configuration probing, agent-runs reachability checks, Tailscale/Cloudflare Tunnel detection, and structured warnings list.
+- `api/routes.py` — Registered `GET /api/deployment/health` in `handle_get()` dispatcher, immediately after the existing `/api/system/health` route.
+- `api/mobile_routes.py` — Flipped `features.deployment_health` from `false` to `true` so Hermex can discover the endpoint.
+- `tests/test_deployment_health.py` — 24 tests covering response shape, sections, schema stability, secret exclusion, runtime adapter reporting, workspace path/exists/writable, provider configured state, warning/ok status classification, and mobile capabilities integration.
+- `tests/test_deployment_health_security_warnings.py` — 18 tests covering public bind without password, HTTP public access warnings, Tailscale/Cloudflare Tunnel suppression, legacy-direct/runtime adapter warnings, agent-runs reachable/unreachable, OS isolation reporting, and secret exclusion from warnings.
+
+### /api/chat/start compatibility
+
+Preserved. Not modified. The deployment health endpoint is an independent read-only route.
+
+### Deferred
+
+- No WebUI settings page was added for this endpoint (deployment health is consumed by Hermex and diagnostics tools).
+- Server smoke test deferred (requires live server; test suite provides comprehensive coverage).
+
+### Next task
+
+**Phase 8: Safe workspace search**
+
