@@ -10801,7 +10801,87 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!blocks) return false;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
-  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  const transparentLiveRowAttributePairs = typeof _transparentLiveRowAttributePairs === 'function'
+    ? _transparentLiveRowAttributePairs
+    : (node)=>{
+      if(!node) return [];
+      if(typeof node.getAttributeNames === 'function'){
+        return node.getAttributeNames().map(name=>[name, node.getAttribute(name)]);
+      }
+      const attrs = node.attributes;
+      if(!attrs || typeof attrs !== 'object') return [];
+      if(typeof attrs.length === 'number'){
+        const pairs = [];
+        for(let i=0;i<attrs.length;i++){
+          const attr = typeof attrs.item === 'function' ? attrs.item(i) : attrs[i];
+          if(!attr || !attr.name) continue;
+          pairs.push([attr.name, attr.value]);
+        }
+        return pairs;
+      }
+      return Object.keys(attrs).map(name=>[name, attrs[name]]);
+    };
+  const keyTransparentLiveRow = typeof _transparentLiveRowKey === 'function'
+    ? _transparentLiveRowKey
+    : (node, currentStreamId)=>{
+      if(!node || !node.getAttribute) return '';
+      const rowId = String(node.getAttribute('data-anchor-row-id') || '').trim();
+      if(!rowId) return '';
+      const rowStreamId = String(currentStreamId || node.getAttribute('data-anchor-stream-id') || '').trim();
+      const rowRole = String(node.getAttribute('data-anchor-row-role') || 'activity').trim();
+      const rowSource = String(node.getAttribute('data-anchor-source-event-type') || '').trim();
+      return `${rowStreamId}\u0000${rowId}\u0000${rowRole}\u0000${rowSource}`;
+    };
+  const transparentLiveRowsCompatible = typeof _transparentLiveRowsCompatible === 'function'
+    ? _transparentLiveRowsCompatible
+    : (existing, candidate)=>!!(
+      existing &&
+      candidate &&
+      existing.getAttribute('data-anchor-row-id') === candidate.getAttribute('data-anchor-row-id') &&
+      existing.getAttribute('data-anchor-row-role') === candidate.getAttribute('data-anchor-row-role') &&
+      existing.getAttribute('data-anchor-source-event-type') === candidate.getAttribute('data-anchor-source-event-type')
+    );
+  const refreshTransparentLiveRow = typeof _refreshTransparentLiveRow === 'function'
+    ? _refreshTransparentLiveRow
+    : (existing, node)=>{
+      if(!existing || !node || !existing.getAttribute) return node;
+      if(existing===node) return existing;
+      const pairs = transparentLiveRowAttributePairs(node);
+      const kept = Object.create(null);
+      for(const [name, value] of pairs){
+        kept[String(name)] = String(value ?? '');
+      }
+      for(const [name] of transparentLiveRowAttributePairs(existing)){
+        if(!Object.prototype.hasOwnProperty.call(kept, name)) existing.removeAttribute(name);
+      }
+      for(const [name, value] of pairs){
+        existing.setAttribute(name, value);
+      }
+      existing.className = node.className || '';
+      existing.textContent = node.textContent || '';
+      existing.innerHTML = node.innerHTML || '';
+      return existing;
+    };
+  const activeStreamId = String(streamId || S.activeStreamId || '');
+  const activeSessionId = String(S.session && S.session.session_id || '');
+  const preserveByKey = new Map();
+  blocks.querySelectorAll('.transparent-event-row[data-live-stream-owned="1"][data-anchor-row-id]').forEach(node=>{
+    if(!node||!node.getAttribute) return;
+    const rowStream = String(node.getAttribute('data-anchor-stream-id') || '');
+    if(rowStream && rowStream !== activeStreamId) return;
+    const rowSession = String(node.getAttribute('data-session-id') || '');
+    if(rowSession && activeSessionId && rowSession !== activeSessionId) return;
+    const key = keyTransparentLiveRow(node, activeStreamId);
+    if(key && !preserveByKey.has(key)) preserveByKey.set(key, node);
+  });
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"]').forEach(el=>el.remove());
+  blocks.querySelectorAll('[data-anchor-scene-row="1"]').forEach(el=>{
+    if(el.getAttribute('data-live-stream-owned') === '1'){
+      const key = keyTransparentLiveRow(el, activeStreamId);
+      if(key && preserveByKey.get(key) === el) return;
+    }
+    el.remove();
+  });
   // Clear every legacy live activity surface this renderer can replace. The
   // anchor-scene rows are now the source of truth for visible live activity.
   blocks.querySelectorAll(
@@ -10811,7 +10891,6 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     '.tool-card-row[data-live-tid],'+
     '.agent-activity-thinking[data-live-thinking="1"],'+
     '.transparent-event-row[data-live-tid],'+
-    '[data-live-stream-owned="1"],'+
     '.interim-collapse-toggle'
   ).forEach(el=>el.remove());
   // Match the compact path: keep legacy live segments as hidden anchors so
@@ -10831,10 +10910,18 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       sessionId:S.session&&S.session.session_id,
     });
     if(!node) continue;
-    if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(node,liveFooter);
-    else blocks.appendChild(node);
+    const key = keyTransparentLiveRow(node, activeStreamId);
+    const existing = key ? preserveByKey.get(key) : null;
+    const renderedNode = existing && transparentLiveRowsCompatible(existing, node)
+      ? refreshTransparentLiveRow(existing, node)
+      : node;
+    if(existing) preserveByKey.delete(key);
+    if(!renderedNode) continue;
+    if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(renderedNode,liveFooter);
+    else blocks.appendChild(renderedNode);
     wrote=true;
   }
+  preserveByKey.forEach(stale=>stale.remove());
   if(wrote) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
@@ -10846,6 +10933,66 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   }
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return wrote;
+}
+
+function _transparentLiveRowKey(node, streamId){
+  if(!node || !node.getAttribute) return '';
+  const rowId = String(node.getAttribute('data-anchor-row-id') || '').trim();
+  if(!rowId) return '';
+  const rowStreamId = String(streamId || node.getAttribute('data-anchor-stream-id') || '').trim();
+  const rowRole = String(node.getAttribute('data-anchor-row-role') || 'activity').trim();
+  const rowSource = String(node.getAttribute('data-anchor-source-event-type') || '').trim();
+  return `${rowStreamId}\u0000${rowId}\u0000${rowRole}\u0000${rowSource}`;
+}
+
+function _transparentLiveRowsCompatible(existing, candidate){
+  if(!existing || !candidate) return false;
+  return !!(
+    existing.getAttribute('data-anchor-row-id') === candidate.getAttribute('data-anchor-row-id') &&
+    existing.getAttribute('data-anchor-row-role') === candidate.getAttribute('data-anchor-row-role') &&
+    existing.getAttribute('data-anchor-source-event-type') === candidate.getAttribute('data-anchor-source-event-type')
+  );
+}
+
+function _transparentLiveRowAttributePairs(node){
+  if(!node) return [];
+  if(typeof node.getAttributeNames === 'function'){
+    return node.getAttributeNames().map(name=>[name, node.getAttribute(name)]);
+  }
+  const attrs = node.attributes;
+  if(!attrs || typeof attrs !== 'object') return [];
+  if(typeof attrs.length === 'number'){
+    const pairs = [];
+    for(let i=0;i<attrs.length;i++){
+      const attr = typeof attrs.item === 'function' ? attrs.item(i) : attrs[i];
+      if(!attr || !attr.name) continue;
+      pairs.push([attr.name, attr.value]);
+    }
+    return pairs;
+  }
+  return Object.keys(attrs).map(name=>[name, attrs[name]]);
+}
+
+function _refreshTransparentLiveRow(existing, node){
+  if(!existing || !node || !existing.getAttribute) return node;
+  if(existing===node) return existing;
+  const pairs = _transparentLiveRowAttributePairs(node);
+  const kept = Object.create(null);
+  for(const pair of pairs){
+    const [name, value] = pair;
+    kept[String(name)] = String(value ?? '');
+  }
+  for(const [name] of _transparentLiveRowAttributePairs(existing)){
+    if(!Object.prototype.hasOwnProperty.call(kept, name)) existing.removeAttribute(name);
+  }
+  for(const pair of pairs){
+    const [name, value] = pair;
+    existing.setAttribute(name, value);
+  }
+  existing.className = node.className || '';
+  existing.textContent = node.textContent || '';
+  existing.innerHTML = node.innerHTML || '';
+  return existing;
 }
 function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
   const mode=(typeof isTransparentStream==='function'&&isTransparentStream())
