@@ -12282,6 +12282,26 @@ let _mobileAnchorSuppressReleaseTimer=null;
 let _mobileAnchorSuppressRafId=0;
 let _mobileAnchorTransitionListenerBound=false;
 let _mobileAnchorSuppressArmedAt=0;
+// Independent hard-cap timer. Unlike the settle/rAF release (which the
+// transitionrun handler CANCELS to hold across an animation), this one is NEVER
+// cancelled by re-arm or by onRun — it is only ever cleared when suppression is
+// actually lifted, and re-armed to a fresh deadline on each _fixMobileScrollJank
+// call. This guarantees overflow-anchor returns to the mobile resting 'auto'
+// even if EVERY transitionend/transitioncancel is missed (animation interrupted,
+// element detached mid-transition, etc.) — the #5338 contract that mobile rests
+// at 'auto' must hold no matter what. (Gate-cert defect: the previous
+// _MOBILE_ANCHOR_MAX_HOLD_MS was only a guard clause inside onRun, so a missed
+// transitionend pinned 'none' forever.)
+let _mobileAnchorMaxHoldTimer=null;
+function _liftMobileAnchorSuppression(el){
+  if(_mobileAnchorSuppressReleaseTimer){ clearTimeout(_mobileAnchorSuppressReleaseTimer); _mobileAnchorSuppressReleaseTimer=null; }
+  if(_mobileAnchorMaxHoldTimer){ clearTimeout(_mobileAnchorMaxHoldTimer); _mobileAnchorMaxHoldTimer=null; }
+  if(_mobileAnchorSuppressRafId&&typeof cancelAnimationFrame==='function'){ cancelAnimationFrame(_mobileAnchorSuppressRafId); }
+  _mobileAnchorSuppressRafId=0;
+  // Only clear the inline value we set; a concurrent path may have legitimately
+  // re-armed it (checked via the 'none' guard).
+  if(el&&el.style&&el.style.overflowAnchor==='none') el.style.overflowAnchor='';
+}
 function _bindMobileAnchorTransitionExtender(el){
   if(_mobileAnchorTransitionListenerBound||!el||!el.addEventListener) return;
   _mobileAnchorTransitionListenerBound=true;
@@ -12291,8 +12311,9 @@ function _bindMobileAnchorTransitionExtender(el){
     if(!e||e.propertyName!=='max-height') return;
     if(el.style.overflowAnchor!=='none') return;
     if(_mobileAnchorSuppressArmedAt && (performance.now()-_mobileAnchorSuppressArmedAt)>_MOBILE_ANCHOR_MAX_HOLD_MS) return;
-    // An animation is running — cancel the pending release so we stay suppressed
-    // until it ends (transitionend re-schedules the release).
+    // An animation is running — cancel the pending SETTLE release so we stay
+    // suppressed until it ends (transitionend re-schedules the settle). The
+    // independent max-hold timer is deliberately NOT cancelled here.
     if(_mobileAnchorSuppressReleaseTimer){ clearTimeout(_mobileAnchorSuppressReleaseTimer); _mobileAnchorSuppressReleaseTimer=null; }
     if(_mobileAnchorSuppressRafId&&typeof cancelAnimationFrame==='function'){ cancelAnimationFrame(_mobileAnchorSuppressRafId); }
     _mobileAnchorSuppressRafId=0;
@@ -12305,7 +12326,7 @@ function _bindMobileAnchorTransitionExtender(el){
     if(_mobileAnchorSuppressReleaseTimer){ clearTimeout(_mobileAnchorSuppressReleaseTimer); }
     _mobileAnchorSuppressReleaseTimer=setTimeout(()=>{
       _mobileAnchorSuppressReleaseTimer=null;
-      if(el.style.overflowAnchor==='none') el.style.overflowAnchor='';
+      _liftMobileAnchorSuppression(el);
     },_MOBILE_ANCHOR_POST_TRANSITION_MS);
   };
   el.addEventListener('transitionrun',onRun,{passive:true});
@@ -12316,12 +12337,18 @@ function _bindMobileAnchorTransitionExtender(el){
 window._fixMobileScrollJank=function _fixMobileScrollJank(){
   const el=document.getElementById('messages');
   if(!el) return;
-  // Route through the same "is the browser scroll-anchor layer active?" predicate
-  // as _suppressBrowserOverflowAnchor so the two guards can't drift (#5338 review).
-  // Desktop rests at overflow-anchor:none (predicate false) → nothing to suppress.
-  // Mobile touch devices rest at auto (predicate true) → suppress anchor
-  // re-selection across the whole render/collapse/reflow window (see above).
-  if(!_browserOverflowAnchorActive(el)) return;
+  // Engage when the browser scroll-anchor layer is active (mobile auto), OR when
+  // WE are already holding an inline suppression from a prior call in the same
+  // burst. The predicate reads the COMPUTED value, which our own inline
+  // overflow-anchor:none flips to 'none' — so on the 2nd..Nth call of a
+  // STREAM_DONE burst the predicate would say false and short-circuit the re-arm
+  // below, collapsing the whole "consecutive renders extend the window" behavior
+  // to a single first-call window. Treat an inline 'none' WE set as still-armed
+  // so re-arm actually runs. Desktop rests at computed 'none' with EMPTY inline,
+  // so `alreadySuppressed` is false there and this stays a no-op. (Gate-cert
+  // defect: re-arm was dead code without this.)
+  const alreadySuppressed=el.style.overflowAnchor==='none';
+  if(!alreadySuppressed && !_browserOverflowAnchorActive(el)) return;
   el.style.overflowAnchor='none';
   _bindMobileAnchorTransitionExtender(el);
   _mobileAnchorSuppressArmedAt=performance.now();
@@ -12331,6 +12358,13 @@ window._fixMobileScrollJank=function _fixMobileScrollJank(){
   if(_mobileAnchorSuppressReleaseTimer){ clearTimeout(_mobileAnchorSuppressReleaseTimer); _mobileAnchorSuppressReleaseTimer=null; }
   if(_mobileAnchorSuppressRafId&&typeof cancelAnimationFrame==='function'){ cancelAnimationFrame(_mobileAnchorSuppressRafId); }
   _mobileAnchorSuppressRafId=0;
+  // Independent hard cap: (re)arm a release that NOTHING cancels except an actual
+  // lift, so a missed transitionend can never pin 'none' past the cap.
+  if(_mobileAnchorMaxHoldTimer){ clearTimeout(_mobileAnchorMaxHoldTimer); }
+  _mobileAnchorMaxHoldTimer=setTimeout(()=>{
+    _mobileAnchorMaxHoldTimer=null;
+    _liftMobileAnchorSuppression(el);
+  },_MOBILE_ANCHOR_MAX_HOLD_MS);
   const rafHop=(cb)=>{ if(typeof requestAnimationFrame==='function') return requestAnimationFrame(cb); return setTimeout(cb,16); };
   // Base window: two animation frames (paint + post-render reflow settle) THEN a
   // settle timeout. CSS max-height animations are covered by the transitionrun/
@@ -12339,9 +12373,7 @@ window._fixMobileScrollJank=function _fixMobileScrollJank(){
     _mobileAnchorSuppressRafId=rafHop(()=>{
       _mobileAnchorSuppressReleaseTimer=setTimeout(()=>{
         _mobileAnchorSuppressReleaseTimer=null;
-        // Only clear the inline value we set; a concurrent path may have legitimately
-        // re-armed it (checked via the 'none' guard).
-        if(el.style.overflowAnchor==='none') el.style.overflowAnchor='';
+        _liftMobileAnchorSuppression(el);
       },_MOBILE_ANCHOR_BASE_SETTLE_MS);
     });
   });

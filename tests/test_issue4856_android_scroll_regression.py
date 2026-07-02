@@ -57,16 +57,22 @@ def test_fix_sets_none_not_auto():
 
 
 def test_raf_cleanup_checks_none():
-    # The deferred-release cleanup must check for 'none' so it only clears the
-    # inline style it set; checking 'auto' was always false and left the inline
-    # style on. (Now inside the settle-timeout callback, but the invariant holds.)
-    fn = _extract_fix_mobile_scroll_jank(UI_JS)
-    raf = _extract_raf_body(fn)
-    assert "overflowAnchor==='none'" in raf, (
-        "The cleanup in _fixMobileScrollJank() must check for 'none' so it "
-        "clears only the inline style it set, after the height-churn window."
+    # The release cleanup must check for 'none' so it only clears the inline
+    # style it set; checking 'auto' was always false and left the inline style
+    # on. The cleanup now lives in the shared _liftMobileAnchorSuppression()
+    # helper (called by every release path: base settle, transition settle, and
+    # the independent hard cap), so assert the invariant there.
+    lift_idx = UI_JS.find("function _liftMobileAnchorSuppression(")
+    assert lift_idx != -1, (
+        "_liftMobileAnchorSuppression() must exist as the single cleanup path "
+        "shared by the base-settle, transition-settle, and hard-cap releases."
     )
-    assert "overflowAnchor==='auto'" not in raf, (
+    lift = _balanced_block(UI_JS, UI_JS.index("{", lift_idx))
+    assert "overflowAnchor==='none'" in lift, (
+        "The cleanup in _liftMobileAnchorSuppression() must check for 'none' so "
+        "it clears only the inline style it set, not a legitimately re-armed one."
+    )
+    assert "overflowAnchor==='auto'" not in lift, (
         "The cleanup must not check for 'auto'; that check was always false."
     )
 
@@ -665,5 +671,145 @@ def test_fix_mobile_scroll_jank_tracks_css_max_height_animations():
         "A max-hold cap must bound the transition-extended suppression so a "
         "looping transition cannot pin overflow-anchor:none indefinitely."
     )
+
+
+# ── Behavioral harness: execute the REAL _fixMobileScrollJank against a mock
+# #messages element + fake timers, so we test BEHAVIOR (does re-arm push the
+# release out? does the hard cap fire when transitionend is missed?) instead of
+# source strings. These two behaviors were the gate-cert defects on #5392:
+#   1. re-arm was DEAD CODE — the computed-value predicate short-circuited the
+#      2nd..Nth call of a burst because our own inline overflow-anchor:none had
+#      already flipped computed to 'none', so consecutive renders never extended
+#      the window (collapsed to a single first-call window).
+#   2. the "hard cap" was only a guard clause inside onRun, not an independent
+#      release timer — so a MISSED transitionend (interrupted animation, detached
+#      element) pinned overflow-anchor:none forever, violating the #5338 contract
+#      that mobile rests at 'auto'.
+# Both assertions are mutation-verified: reverting either fix flips the matching
+# test to FAIL (proven at authoring time by reverting each hunk).
+_ANCHOR_BLOCK_START = "const _MOBILE_ANCHOR_BASE_SETTLE_MS"
+
+
+def _extract_anchor_block(src: str) -> str:
+    start = src.find(_ANCHOR_BLOCK_START)
+    assert start != -1, "anchor suppression block not found in ui.js"
+    fn_mark = src.find("window._fixMobileScrollJank=function", start)
+    assert fn_mark != -1, "_fixMobileScrollJank not found"
+    brace_open = src.index("{", src.index("(){", fn_mark))
+    depth = 0
+    end = -1
+    for i in range(brace_open, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    assert end != -1, "could not balance _fixMobileScrollJank braces"
+    return src[start : src.index(";", end) + 1]
+
+
+_ANCHOR_HARNESS = r"""
+const block = %s;
+function makeSandbox() {
+  let now = 0; const timers = []; let nextId = 1;
+  const schedule = (cb, delay) => { const id = nextId++; timers.push({ id, at: now + (delay||0), cb }); return id; };
+  const cancel = (id) => { const i = timers.findIndex(t => t.id === id); if (i >= 0) timers.splice(i, 1); };
+  const advance = (ms) => { const target = now + ms;
+    for (;;) { const due = timers.filter(t => t.at <= target).sort((a,b)=>a.at-b.at);
+      if (!due.length) break; const t = due[0]; timers.splice(timers.indexOf(t),1); now = t.at; t.cb(); }
+    now = target; };
+  const setTimeout = (cb,d)=>schedule(cb,d); const clearTimeout = (id)=>cancel(id);
+  const requestAnimationFrame = (cb)=>schedule(cb,16); const cancelAnimationFrame = (id)=>cancel(id);
+  const performance = { now: () => now };
+  const listeners = {};
+  const el = { style:{overflowAnchor:'auto'},
+    addEventListener:(t,f)=>{(listeners[t]=listeners[t]||[]).push(f);},
+    _fire:(t,e)=>{(listeners[t]||[]).forEach(f=>f(e));} };
+  const _browserOverflowAnchorActive = (e)=>e.style.overflowAnchor==='auto';
+  const document = { getElementById:(id)=>id==='messages'?el:null }; const win = {};
+  new Function('setTimeout','clearTimeout','requestAnimationFrame','cancelAnimationFrame',
+    'performance','document','window','_browserOverflowAnchorActive', block
+  )(setTimeout,clearTimeout,requestAnimationFrame,cancelAnimationFrame,
+    performance,document,win,_browserOverflowAnchorActive);
+  return { fix: win._fixMobileScrollJank, el, advance };
+}
+const out = {};
+// TEST 1: re-arm extends the window across consecutive calls.
+{ const s = makeSandbox();
+  s.fix(); const armed1 = s.el.style.overflowAnchor;
+  s.advance(200); const midStill = s.el.style.overflowAnchor;
+  s.fix(); s.advance(300); const afterFirstWouldRelease = s.el.style.overflowAnchor;
+  s.advance(400); const afterSecond = s.el.style.overflowAnchor;
+  out.rearm = { armed1, midStill, afterFirstWouldRelease, afterSecond }; }
+// TEST 2: hard cap releases when transitionend is missed.
+{ const s = makeSandbox();
+  s.fix(); s.el._fire('transitionrun', { propertyName:'max-height' });
+  s.advance(500); const heldMid = s.el.style.overflowAnchor;
+  s.advance(1000); const afterCap = s.el.style.overflowAnchor;
+  out.hardcap = { heldMid, afterCap }; }
+console.log(JSON.stringify(out));
+"""
+
+
+def _run_anchor_harness() -> dict:
+    block = _extract_anchor_block(UI_JS)
+    script = _ANCHOR_HARNESS % json.dumps(block)
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    return json.loads(result.stdout.strip())
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_behavioral_rearm_extends_suppression_window():
+    """Consecutive _fixMobileScrollJank() calls must EXTEND the window.
+
+    Gate-cert defect: the computed-value predicate short-circuited the 2nd call
+    (our inline 'none' made computed 'none' -> predicate false -> early return),
+    so re-arm never ran. Behaviorally: with the bug, the release stays anchored
+    to call #1 and fires ~432ms in, so at t=500 (after a 2nd call at t=200) the
+    anchor is already restored. With the fix, the 2nd call re-arms and the anchor
+    is STILL 'none' at t=500. Mutation-verified: reverting the `alreadySuppressed`
+    guard flips `afterFirstWouldRelease` from 'none' to ''.
+    """
+    r = _run_anchor_harness()["rearm"]
+    assert r["armed1"] == "none", "first call must engage suppression"
+    assert r["midStill"] == "none", "suppression must hold within the first window"
+    assert r["afterFirstWouldRelease"] == "none", (
+        "the 2nd _fixMobileScrollJank() call must RE-ARM and extend the window; "
+        "if suppression released here, re-arm is dead code (the computed-value "
+        "predicate short-circuited the 2nd call)."
+    )
+    assert r["afterSecond"] == "", (
+        "suppression must eventually release to the mobile resting 'auto' after "
+        "the (extended) window elapses."
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_behavioral_hard_cap_releases_when_transitionend_missed():
+    """A missed transitionend must NOT pin overflow-anchor:none forever.
+
+    Gate-cert defect: the 'hard cap' was only a guard clause inside onRun, not an
+    independent release timer. If a max-height animation STARTS (transitionrun
+    holds suppression) but its transitionend never fires (interrupted / element
+    detached), nothing restored 'auto' -> stuck 'none', violating the #5338
+    resting-value contract. With the fix, an independent max-hold timer restores
+    'auto' by _MOBILE_ANCHOR_MAX_HOLD_MS. Mutation-verified: removing the
+    independent timer leaves `afterCap` stuck at 'none'.
+    """
+    r = _run_anchor_harness()["hardcap"]
+    assert r["heldMid"] == "none", (
+        "transitionrun must HOLD suppression across the animation (the settle "
+        "release is cancelled while animating)."
+    )
+    assert r["afterCap"] == "", (
+        "when transitionend is missed, the independent hard-cap timer MUST still "
+        "restore the mobile resting 'auto'; a guard-clause-only cap pins 'none' "
+        "forever."
+    )
+
 
 
