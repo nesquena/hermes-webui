@@ -169,6 +169,13 @@ function labelsFromToolbar(viewer) {
 }
 
 function runScenario(payload) {
+  if (Number.isFinite(payload.viewportWidth)) {
+    window.innerWidth = payload.viewportWidth;
+  }
+  if (Number.isFinite(payload.viewportHeight)) {
+    window.innerHeight = payload.viewportHeight;
+  }
+
   const svg = makeSvg(payload.width || 480, payload.height || 320);
   const host = makeHost(svg);
   const viewer = _mountMermaidViewer(svg, payload.options || {});
@@ -215,6 +222,30 @@ function runScenario(payload) {
     state.viewport.onwheel({deltaY: -3, deltaMode: 1, clientX: 240, clientY: 160, preventDefault() {}});
     const afterLineWheel = {scale: state.scale, x: state.x, y: state.y};
     return {fitScale, zoomInScale, zoomOutScale, maxScale, reset, beforeWheel, afterWheel, beforeLineWheel, afterLineWheel};
+  }
+
+  if (payload.scenario === 'wide-inline') {
+    return {
+      scale: state.scale,
+      viewportWidth: state.viewport.style.width,
+      viewportHeight: state.viewport.style.height,
+    };
+  }
+
+  if (payload.scenario === 'wide-lightbox') {
+    const lightboxSvg = makeSvg(payload.width || 480, payload.height || 320);
+    const lightbox = _mountMermaidViewer(lightboxSvg, {mode:'lightbox'});
+    const lightboxState = lightbox._mermaidViewer;
+    lightboxState.viewport.clientWidth = payload.viewportWidth || 960;
+    lightboxState.viewport.clientHeight = payload.viewportHeight || 540;
+    lightboxState.viewport.getBoundingClientRect = () => ({left: 0, top: 0, width: lightboxState.viewport.clientWidth, height: lightboxState.viewport.clientHeight});
+    return {
+      scale: lightboxState.scale,
+      viewportWidth: lightboxState.viewport.style.width,
+      viewportHeight: lightboxState.viewport.style.height,
+      lightboxLabels: labelsFromToolbar(lightbox),
+      mode: lightboxState.mode,
+    };
   }
 
   if (payload.scenario === 'drag') {
@@ -288,6 +319,10 @@ def _run_node(driver_path: str, payload: dict) -> dict:
     return json.loads(result.stdout)
 
 
+def _px(value) -> int:
+    return int(float(str(value).rstrip("px")))
+
+
 @pytest.fixture(scope="module")
 def _driver_path(tmp_path_factory):
     path = tmp_path_factory.mktemp("mermaid_toolbar_driver") / "driver.js"
@@ -305,10 +340,25 @@ def test_inline_viewer_mounts_toolbar_and_shell(_driver_path):
     })
 
     assert result["className"] == "mermaid-viewer mermaid-viewer--inline"
-    assert result["labels"] == ["Zoom in", "Zoom out", "Reset view", "Fit to screen", "Fullscreen"]
+    assert result["labels"] == ["Zoom in", "Zoom out", "Reset view", "Fullscreen"]
     assert result["canvasWidth"] == "480px"
     assert result["viewportWidth"] == "100%"
     assert result["hasInlineFullscreen"] is True
+
+
+def test_inline_wide_diagram_reads_readable_height_on_mobile(_driver_path):
+    result = _run_node(_driver_path, {
+        "scenario": "wide-inline",
+        "width": 2400,
+        "height": 320,
+        "viewportWidth": 360,
+        "viewportHeight": 640,
+        "options": {"mode": "inline"},
+    })
+
+    assert _px(result["viewportHeight"]) >= 220
+    assert result["scale"] > 0.25
+    assert result["scale"] < 1.0
 
 
 def test_zoom_fit_reset_and_wheel_update_state(_driver_path):
@@ -338,7 +388,24 @@ def test_drag_suppresses_accidental_lightbox_open(_driver_path):
 def test_lightbox_mode_uses_same_viewer_helper_without_fullscreen(_driver_path):
     result = _run_node(_driver_path, {"scenario": "fullscreen", "options": {"mode": "inline"}})
 
-    assert result["inlineLabels"] == ["Zoom in", "Zoom out", "Reset view", "Fit to screen", "Fullscreen"]
+    assert result["inlineLabels"] == ["Zoom in", "Zoom out", "Reset view", "Fullscreen"]
     assert result["lightboxLabels"] == ["Zoom in", "Zoom out", "Reset view", "Fit to screen"]
     assert result["opens"] == ["inline-lightbox"]
     assert result["lightboxClassName"] == "mermaid-viewer mermaid-viewer--lightbox"
+
+
+def test_lightbox_wide_diagram_fits_modal_envelope(_driver_path):
+    result = _run_node(_driver_path, {
+        "scenario": "wide-lightbox",
+        "width": 2400,
+        "height": 320,
+        "viewportWidth": 360,
+        "viewportHeight": 640,
+        "options": {"mode": "inline"},
+    })
+
+    assert result["mode"] == "lightbox"
+    assert _px(result["viewportWidth"]) <= 324
+    assert _px(result["viewportWidth"]) > 0
+    assert _px(result["viewportHeight"]) > 0
+    assert result["scale"] < 0.25

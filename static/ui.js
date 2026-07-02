@@ -1397,8 +1397,10 @@ function _openImgLightbox(imgEl) {
 }
 
 const _MERMAID_VIEWER_MIN_SCALE = 0.25;
+const _MERMAID_VIEWER_LIGHTBOX_MIN_SCALE = 0.1;
 const _MERMAID_VIEWER_MAX_SCALE = 8;
 const _MERMAID_VIEWER_ZOOM_STEP = 1.2;
+const _MERMAID_VIEWER_INLINE_MIN_HEIGHT = 220;
 
 function _mermaidViewerIcon(kind) {
   const icons = {
@@ -1503,14 +1505,36 @@ function _mountMermaidViewer(svgEl, options = {}) {
   };
   root._mermaidViewer = state;
 
+  function _viewportFallbackSize(){
+    const width = mode === 'lightbox' ? Math.round((window.innerWidth || box.width) * 0.9) : Math.round(window.innerWidth || box.width);
+    const height = mode === 'lightbox' ? Math.round((window.innerHeight || box.height) * 0.9) : Math.round((window.innerHeight || box.height) * 0.7);
+    return {
+      width: Math.max(1, Number.isFinite(width) ? width : 1),
+      height: Math.max(1, Number.isFinite(height) ? height : 1),
+    };
+  }
+
   function _viewportSize(){
     const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
-    const width = viewport.clientWidth || (rect && rect.width) || (mode === 'lightbox' ? Math.round((window.innerWidth || box.width) * 0.9) : Math.round(window.innerWidth || box.width));
-    const height = viewport.clientHeight || (rect && rect.height) || (mode === 'lightbox' ? Math.round((window.innerHeight || box.height) * 0.9) : Math.round((window.innerHeight || box.height) * 0.7));
+    const fallback = _viewportFallbackSize();
+    const width = viewport.clientWidth || (rect && rect.width) || fallback.width;
+    const height = viewport.clientHeight || (rect && rect.height) || fallback.height;
     return {
       width: Math.max(1, Number(width) || box.width || 1),
       height: Math.max(1, Number(height) || box.height || 1),
     };
+  }
+
+  function _minScale(){
+    return mode === 'lightbox' ? _MERMAID_VIEWER_LIGHTBOX_MIN_SCALE : _MERMAID_VIEWER_MIN_SCALE;
+  }
+
+  function _inlineViewportHeight(){
+    const size = _viewportSize();
+    const widthFitScale = size.width / Math.max(1, box.width);
+    const widthBasedHeight = Math.max(1, Math.round(box.height * widthFitScale));
+    const fallback = _viewportFallbackSize();
+    return Math.min(fallback.height, Math.max(_MERMAID_VIEWER_INLINE_MIN_HEIGHT, widthBasedHeight));
   }
 
   function _applyTransform(){
@@ -1528,11 +1552,11 @@ function _mountMermaidViewer(svgEl, options = {}) {
 
   function _fitScale(){
     const size = _viewportSize();
-    return Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, Math.min(size.width / box.width, size.height / box.height)));
+    return Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, Math.min(size.width / box.width, size.height / box.height)));
   }
 
   function _setScale(nextScale, anchorX, anchorY){
-    const bounded = Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, nextScale));
+    const bounded = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, nextScale));
     if(!Number.isFinite(bounded) || !box.width || !box.height) return;
     const focusX = Number.isFinite(anchorX) ? anchorX : _viewportSize().width / 2;
     const focusY = Number.isFinite(anchorY) ? anchorY : _viewportSize().height / 2;
@@ -1643,22 +1667,25 @@ function _mountMermaidViewer(svgEl, options = {}) {
   toolbar.appendChild(_createMermaidViewerButton('Zoom in', 'zoomIn', _zoomIn));
   toolbar.appendChild(_createMermaidViewerButton('Zoom out', 'zoomOut', _zoomOut));
   toolbar.appendChild(_createMermaidViewerButton('Reset view', 'reset', _resetViewer));
-  toolbar.appendChild(_createMermaidViewerButton('Fit to screen', 'fit', _fitViewer));
-  if(mode === 'inline'){
+  if(mode === 'lightbox'){
+    toolbar.appendChild(_createMermaidViewerButton('Fit to screen', 'fit', _fitViewer));
+  } else {
     toolbar.appendChild(_createMermaidViewerButton('Fullscreen', 'fullscreen', openLightbox));
   }
 
-  const initialFit = _fitScale();
-  state.scale = initialFit;
-  _centerForScale(initialFit);
-  _applyTransform();
   if(mode === 'lightbox'){
-    viewport.style.width = Math.max(1, Math.round(box.width * initialFit)) + 'px';
-    viewport.style.height = Math.max(1, Math.round(box.height * initialFit)) + 'px';
+    state.scale = _fitScale();
+    viewport.style.width = Math.max(1, Math.round(box.width * state.scale)) + 'px';
+    viewport.style.height = Math.max(1, Math.round(box.height * state.scale)) + 'px';
   } else {
+    const initialHeight = _inlineViewportHeight();
+    const readableScale = initialHeight / Math.max(1, box.height);
+    state.scale = Math.max(_MERMAID_VIEWER_MIN_SCALE, Math.min(_MERMAID_VIEWER_MAX_SCALE, readableScale));
     viewport.style.width = '100%';
-    viewport.style.height = Math.max(1, Math.round(box.height * initialFit)) + 'px';
+    viewport.style.height = Math.max(1, Math.round(initialHeight)) + 'px';
   }
+  _centerForScale(state.scale);
+  _applyTransform();
 
   return root;
 }
