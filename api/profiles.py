@@ -1584,6 +1584,31 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
 _SKILLS_STATS_CACHE: dict[Path, tuple[int, int, int, float]] = {}
 _SKILLS_STATS_CACHE_TTL = 300.0  # seconds — long because .clear() handles programmatic changes
 
+# Per-profile compute locks (#5364). Without these, concurrent cold-startup
+# requests (ThreadingHTTPServer runs one OS thread per request) all miss the
+# unlocked _SKILLS_STATS_CACHE at once and each walks + parses the whole skill
+# tree simultaneously — a thundering herd that stalled workers 57–70s under
+# Docker overlay2. A per-profile lock lets independent profiles compute in
+# parallel while collapsing concurrent misses on the SAME profile to a single
+# shared compute (double-checked locking below). The lock registry is guarded by
+# its own meta-lock and is bounded by the (small) number of profiles.
+_SKILLS_STATS_LOCKS: dict[Path, threading.Lock] = {}
+_SKILLS_STATS_LOCKS_GUARD = threading.Lock()
+
+
+def _skills_stats_lock_for(profile_dir: Path) -> threading.Lock:
+    """Return (creating if needed) the per-profile compute lock for profile_dir.
+
+    profile_dir must already be resolved so distinct spellings of the same
+    directory share one lock.
+    """
+    with _SKILLS_STATS_LOCKS_GUARD:
+        lock = _SKILLS_STATS_LOCKS.get(profile_dir)
+        if lock is None:
+            lock = threading.Lock()
+            _SKILLS_STATS_LOCKS[profile_dir] = lock
+        return lock
+
 
 def _skill_tree_max_mtime_ns(skills_dir: Path, config_path: Path) -> int:
     """Return the max st_mtime_ns across config.yaml, skill dirs, and SKILL.md files."""
@@ -1725,13 +1750,29 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         if current_mtime_ns == cached_mtime_ns and now < expiry:
             return enabled, compat
 
-    # Cache miss, mtime changed, or TTL expired — snapshot mtime BEFORE compute
-    # so any concurrent SKILL.md write during the compute window causes a mismatch
-    # on the next probe instead of silently serving stale data (TOCTOU).
-    new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
-    res = _compute_profile_skills_stats(profile_dir)
-    _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], new_mtime_ns, now + _SKILLS_STATS_CACHE_TTL)
-    return res
+    # Cache miss, mtime changed, or TTL expired — serialize per-profile so a
+    # burst of concurrent misses (cold startup) collapses to ONE compute instead
+    # of a thundering herd of simultaneous os.walk + SKILL.md parses (#5364).
+    lock = _skills_stats_lock_for(profile_dir)
+    with lock:
+        # Double-checked locking: another thread may have populated a fresh entry
+        # while we waited for the lock. Reuse it when the mtime we already probed
+        # still matches and the entry is within its TTL — no second compute.
+        cached = _SKILLS_STATS_CACHE.get(profile_dir)
+        if cached is not None:
+            enabled, compat, cached_mtime_ns, expiry = cached
+            if current_mtime_ns == cached_mtime_ns and time.time() < expiry:
+                return enabled, compat
+
+        # Snapshot mtime BEFORE compute so any concurrent SKILL.md write during
+        # the compute window causes a mismatch on the next probe instead of
+        # silently serving stale data (TOCTOU).
+        new_mtime_ns = _skill_tree_max_mtime_ns(skills_dir, config_path)
+        res = _compute_profile_skills_stats(profile_dir)
+        _SKILLS_STATS_CACHE[profile_dir] = (
+            res[0], res[1], new_mtime_ns, time.time() + _SKILLS_STATS_CACHE_TTL
+        )
+        return res
 
 
 _LIST_PROFILES_CACHE: tuple[list, float] | None = None
@@ -1890,14 +1931,21 @@ def list_profiles_api() -> list:
             'total_skills': total_count,
         }]
 
+    # Single-flight the build (#5364): hold the cache lock across the row build
+    # so a cold-startup burst of concurrent requests collapses to ONE build while
+    # the others wait and then serve the freshly-cached rows — instead of every
+    # thread rebuilding (each walking all profiles' skill trees) at once. The
+    # per-profile skills locks taken inside _build_profile_rows_fast are always
+    # acquired AFTER this lock (never the reverse), so there is no deadlock.
     with _LIST_PROFILES_CACHE_LOCK:
         cached = _LIST_PROFILES_CACHE
-    if cached is not None and now - cached[1] < _LIST_PROFILES_CACHE_TTL:
-        active = get_active_profile_name()
-        # Return a fresh copy with is_active recomputed (cheap, per-request).
-        return [{**p, 'is_active': p['name'] == active} for p in cached[0]]
+        if cached is not None and now - cached[1] < _LIST_PROFILES_CACHE_TTL:
+            rows = cached[0]
+        else:
+            rows = _build_profile_rows_fast()
+            if rows is not None:
+                _LIST_PROFILES_CACHE = (rows, now)
 
-    rows = _build_profile_rows_fast()
     if rows is None:
         # Fallback: cheap helpers unavailable — use the original (slow) path,
         # or the default-only dict if hermes_cli isn't importable at all.
@@ -1930,9 +1978,6 @@ def list_profiles_api() -> list:
                 'total_skills': total_count,
             })
         return result
-
-    with _LIST_PROFILES_CACHE_LOCK:
-        _LIST_PROFILES_CACHE = (rows, now)
 
     active = get_active_profile_name()
     return [{**p, 'is_active': p['name'] == active} for p in rows]

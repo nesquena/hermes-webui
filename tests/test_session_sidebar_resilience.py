@@ -56,22 +56,44 @@ def test_sessions_and_projects_load_independently_so_projects_failure_cannot_bla
     assert "_applySessionListPayload(sessData,projData)" in block
 
 
-def test_sessions_api_uses_longer_timeout_and_timeout_retry_for_boot_refresh_only():
+def test_sessions_api_always_retries_transient_upstream_statuses_and_boot_keeps_longer_timeout():
+    # #5394: the sidebar session-list GET is idempotent, so retries + retryStatuses
+    # (502/503/504) must be set on EVERY refresh — not gated to cold boot — so a
+    # transient 502 during an nginx->backend restart on a warm refresh (profile
+    # switch, focus/visible/reconnect) is retried instead of leaving the sidebar
+    # stale. The larger boot timeout + timeout retry stay boot-only.
     sessions_src = _sessions_js()
     workspace_src = _workspace_js()
+    refresh_start = sessions_src.find("async function _runRenderSessionListRefresh")
+    assert refresh_start > 0
+    refresh_end = sessions_src.find("async function _loadSidebarSessionListPayload", refresh_start)
+    assert refresh_end > refresh_start
+    refresh = sessions_src[refresh_start:refresh_end]
     helper_start = sessions_src.find("async function _loadSidebarSessionListPayload")
     assert helper_start > 0
     helper_end = sessions_src.find("async function _drainRenderSessionListQueue", helper_start)
     assert helper_end > helper_start
     helper = sessions_src[helper_start:helper_end]
 
-    assert "const sessionRequestOpts={timeoutToast:false};" in sessions_src
-    assert "if(!_sessionListHasLoadedOnce){" in sessions_src
-    assert "sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;" in sessions_src
+    # Always-on retry options live in the base opts object.
+    assert "const sessionRequestOpts={" in refresh
+    assert "retries:1," in refresh
+    assert "retryStatuses:[502,503,504]," in refresh
+
+    boot_gate = refresh.find("if(!_sessionListHasLoadedOnce){")
+    assert boot_gate > 0
+    # The retry options are declared BEFORE the boot-only gate (i.e. unconditional).
+    assert refresh.index("retries:1,") < boot_gate
+    assert refresh.index("retryStatuses:[502,503,504],") < boot_gate
+
+    # Boot-only path still carries the larger timeout + timeout retry.
+    assert "sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;" in refresh
+    assert refresh.index("sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;") > boot_gate
+    assert "sessionRequestOpts.retryTimeouts=true;" in refresh
+    assert refresh.index("sessionRequestOpts.retryTimeouts=true;") > boot_gate
+
     assert "const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);" in helper
     assert "api('/api/sessions' + sessionListQS,{timeoutToast:false})" not in helper
-    assert "sessionRequestOpts.retryTimeouts=true" in sessions_src
-    assert "sessionRequestOpts.retryStatuses=[502,503,504]" in sessions_src
     assert "retryTimeouts" in workspace_src
     assert "retryStatuses" in workspace_src
 

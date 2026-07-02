@@ -63,7 +63,7 @@ def test_busy_placeholder_helper_preserves_compression_and_drafts():
     assert "if(_composerHasContent())" in helper_block
     assert "assistantDisplayName()" in helper_block
     assert "window._showBusyPlaceholderHint" in helper_block
-    assert "window._busyInputMode||'queue'" in helper_block
+    assert "window._defaultMessageMode||'steer'" in helper_block
     assert "composer_placeholder_busy_queue" in helper_block
     assert "composer_placeholder_busy_interrupt" in helper_block
     assert "composer_placeholder_busy_steer" in helper_block
@@ -77,7 +77,7 @@ def test_busy_placeholder_helper_preserves_compression_and_drafts():
 
 
 def test_locale_blocks_cover_new_keys():
-    locale_blocks = I18N_JS.count("settings_busy_input_mode_steer")
+    locale_blocks = I18N_JS.count("settings_default_message_mode_steer")
     assert locale_blocks == 14
     for key in [
         "settings_label_busy_placeholder_hint",

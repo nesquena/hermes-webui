@@ -112,6 +112,7 @@ from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
+from api.crash_visibility import install_crash_visibility
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -545,6 +546,12 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+
+    # Crash visibility FIRST (issue #4633): enable faulthandler + excepthooks +
+    # exit audit before any heavy startup work so a native crash or a daemon /
+    # handler-thread exception during startup or serving produces a diagnostic
+    # instead of a silent death. The paired memory root-cause is #4765.
+    install_crash_visibility()
 
     print_startup_config()
 

@@ -70,7 +70,7 @@ def test_cron_list_remains_single_source_of_truth():
     unchanged when grouping is introduced."""
     src = _read("static/panels.js")
     # The detail-refresh lookup post-render must still scan the whole _cronList.
-    assert "_cronList.find(j => j.id === _currentCronDetail.id)" in src
+    assert "_cronList.find(j => _cronJobKey(j) === _currentCronDetailKey)" in src
 
 
 def test_paused_section_styling_present():

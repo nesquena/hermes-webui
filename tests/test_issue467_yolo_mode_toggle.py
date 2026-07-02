@@ -134,7 +134,7 @@ class TestYoloCommandRegistration:
 
     @pytest.fixture(scope="class")
     def commands_js(self):
-        with open("static/commands.js", "r") as f:
+        with open("static/commands.js", "r", encoding="utf-8") as f:
             return f.read()
 
     def test_yolo_command_in_array(self, commands_js):
@@ -155,7 +155,7 @@ class TestYoloBusySendPath:
 
     @pytest.fixture(scope="class")
     def messages_js(self):
-        with open("static/messages.js", "r") as f:
+        with open("static/messages.js", "r", encoding="utf-8") as f:
             return f.read()
 
     def test_yolo_in_busy_send_allowlist(self, messages_js):
@@ -166,7 +166,7 @@ class TestYoloBusySendPath:
         intercept_start = messages_js.find("if(text.startsWith('/')", busy_start)
         assert intercept_start >= 0, "busy slash intercept block not found in send()"
         intercept_idx = messages_js.find("'steer','interrupt','queue','terminal','goal','yolo'", intercept_start)
-        busymode_idx = messages_js.find("_busyInputMode||'queue'", busy_start)
+        busymode_idx = messages_js.find("_defaultMessageMode||'steer'", busy_start)
         assert intercept_idx >= 0, "Busy-path slash allowlist must include yolo in the mid-turn branch"
         assert intercept_idx < busymode_idx, "Busy-path intercept must run before busyMode routing"
 
@@ -188,7 +188,7 @@ class TestYoloPillHTML:
 
     @pytest.fixture(scope="class")
     def index_html(self):
-        with open("static/index.html", "r") as f:
+        with open("static/index.html", "r", encoding="utf-8") as f:
             return f.read()
 
     def test_yolo_pill_element_exists(self, index_html):
@@ -211,7 +211,7 @@ class TestYoloCSS:
 
     @pytest.fixture(scope="class")
     def style_css(self):
-        with open("static/style.css", "r") as f:
+        with open("static/style.css", "r", encoding="utf-8") as f:
             return f.read()
 
     def test_yolo_pill_class(self, style_css):
@@ -242,7 +242,7 @@ class TestYoloI18n:
 
     @pytest.fixture(scope="class")
     def i18n_js(self):
-        with open("static/i18n.js", "r") as f:
+        with open("static/i18n.js", "r", encoding="utf-8") as f:
             return f.read()
 
     @pytest.mark.parametrize("locale", LOCALES)

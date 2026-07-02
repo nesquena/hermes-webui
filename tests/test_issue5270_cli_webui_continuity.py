@@ -275,7 +275,7 @@ def test_chat_start_refreshes_cli_messages_before_first_webui_turn(monkeypatch, 
     monkeypatch.setattr(routes, "_get_or_materialize_session", _fake_get_or_materialize_session)
     monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *args, **kwargs: True)
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *args, **kwargs: str(tmp_path))
-    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *args, **kwargs: (None, None, None))
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",

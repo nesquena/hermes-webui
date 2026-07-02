@@ -51,6 +51,7 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
+    _evict_sessions_over_cap,
     get_state_db_session_messages,
     reconciled_state_db_messages_for_session,
 )
@@ -1308,6 +1309,43 @@ def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = 
         msg
         for msg in list(messages or [])
         if not _is_synthetic_max_iteration_summary_request(msg)
+    ]
+
+
+# Structured markers the Hermes Agent stamps on synthetic scaffolding turns that
+# drive its internal verify-before-finish loop. The agent appends BOTH a
+# synthetic assistant "premature done" answer AND a synthetic ``user`` nudge
+# (e.g. "[System: You edited code in this turn, but the workspace does not have
+# fresh passing verification evidence yet...]") to preserve role alternation for
+# the next API turn, and flags each with one of these keys. They exist only to
+# run the loop; they must never surface as visible user/assistant turns in the
+# WebUI transcript. This mirrors ``run_agent._EPHEMERAL_SCAFFOLDING_FLAGS`` on
+# the agent side (which keeps them out of the durable session store); WebUI
+# honors the same markers when building the visible transcript. Keep roughly in
+# sync with the agent set. (#5334; same class as #3320/#3821/#4373/#4875)
+_SYNTHETIC_CONTROL_MESSAGE_FLAGS = (
+    "_verification_stop_synthetic",
+    "_pre_verify_synthetic",
+)
+
+
+def _is_synthetic_control_message(message) -> bool:
+    """Return True for an Agent-internal synthetic scaffolding turn flagged by marker."""
+    return isinstance(message, dict) and any(
+        message.get(flag) for flag in _SYNTHETIC_CONTROL_MESSAGE_FLAGS
+    )
+
+
+def _drop_synthetic_control_messages(messages):
+    """Remove Agent-internal synthetic scaffolding turns from the WebUI transcript.
+
+    Honors the structured ``_verification_stop_synthetic`` / ``_pre_verify_synthetic``
+    markers the agent already sets, rather than string-matching the nudge copy.
+    """
+    return [
+        msg
+        for msg in list(messages or [])
+        if not _is_synthetic_control_message(msg)
     ]
 
 
@@ -4941,6 +4979,15 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         m for m in list(previous_display or [])
         if not _is_context_compression_marker(m)
     ]
+    # Drop Hermes Agent internal verify-loop scaffolding (synthetic "premature
+    # done" answer + the "[System: ...verification evidence...]" nudge) before
+    # it can become a visible user/assistant turn. The agent flags these with
+    # structured markers (_verification_stop_synthetic / _pre_verify_synthetic)
+    # and already keeps them out of its own durable store; honor the same
+    # markers here so they never leak into the WebUI transcript. Filter all
+    # three inputs consistently so prefix/delta detection below stays aligned.
+    # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
+    previous_display = _drop_synthetic_control_messages(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -4967,6 +5014,11 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     previous_display = _deduped
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
+    # Same marker filter for the model-history inputs: the synthetic verify-loop
+    # answer/nudge live in the agent's returned messages and prior context, and
+    # would otherwise slip into the merged transcript as a real delta. (#5334)
+    previous_context = _drop_synthetic_control_messages(previous_context)
+    result_messages = _drop_synthetic_control_messages(result_messages)
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
@@ -6642,15 +6694,35 @@ def _run_agent_streaming(
         s = get_session(session_id)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
-        s.model = model
+        _last_persisted_model = None
+        _last_persisted_provider = None
+        _turn_owns_persisted_model = False
         provider_context = (
             str(model_provider).strip().lower()
             if model_provider is not None
             else getattr(s, "model_provider", None)
         )
-        s.model_provider = provider_context or None
-
+        provider_context = str(provider_context).strip().lower() if provider_context else None
         _agent_lock = _get_session_agent_lock(session_id)
+        # #4251: the route layer already persisted this turn's model under the
+        # session lock before dispatch, so a mismatch here means a newer picker
+        # write won the race and must not be clobbered by the worker thread.
+        with _agent_lock:
+            _last_persisted_model = getattr(s, "model", None)
+            _last_persisted_provider = getattr(s, "model_provider", None)
+            if _last_persisted_provider is not None:
+                _last_persisted_provider = str(_last_persisted_provider).strip().lower() or None
+            _persisted_model_is_empty = _last_persisted_model in (None, "")
+            _provider_matches = _last_persisted_provider in (None, provider_context)
+            if _persisted_model_is_empty or (
+                _last_persisted_model == model and _provider_matches
+            ):
+                s.model = model
+                s.model_provider = provider_context
+                _last_persisted_model = model
+                _last_persisted_provider = provider_context
+                _turn_owns_persisted_model = True
+
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
@@ -6690,9 +6762,21 @@ def _run_agent_streaming(
             profile_home=_profile_home,
             has_profile=bool(getattr(s, "profile", None)),
         )
-        s.model_provider = provider_context
-        if _repaired and model != (s.model or ""):
-            s.model = model
+        # #4251: only apply the profile-repair persistence if this turn still
+        # owns the session model/provider pair it last wrote.
+        provider_context = str(provider_context).strip().lower() if provider_context else None
+        with _agent_lock:
+            _current_provider = getattr(s, "model_provider", None)
+            if _current_provider is not None:
+                _current_provider = str(_current_provider).strip().lower() or None
+            if (
+                _turn_owns_persisted_model
+                and getattr(s, "model", None) == _last_persisted_model
+                and _current_provider == _last_persisted_provider
+            ):
+                s.model_provider = provider_context
+                if _repaired and model != (s.model or ""):
+                    s.model = model
 
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
@@ -8215,8 +8299,7 @@ def _run_agent_streaming(
                                 )
                         SESSIONS[new_sid] = s
                         SESSIONS.move_to_end(new_sid)
-                        while len(SESSIONS) > SESSIONS_MAX:
-                            SESSIONS.popitem(last=False)
+                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
                     # Migrate the per-session lock: alias new_sid to the held
                     # _agent_lock reference directly (not via old_sid lookup),
                     # then remove the old_sid entry to prevent a leak.

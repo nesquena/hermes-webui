@@ -402,8 +402,13 @@
         <span id="updateMsg"></span>
         <div id="updateWhatsNewLinks" style="display:none;font-size:11px;margin-left:8px;white-space:nowrap"></div>
         <div id="updateSummaryPanel" style="display:none;font-size:12px;line-height:1.45;margin-top:6px;padding:8px 10px;border:1px solid var(--border2);border-radius:8px;background:rgba(255,255,255,.04);max-width:720px;white-space:normal">
-          <div id="updateSummaryText"></div>
-          <div id="updateSummaryDiffLinks" style="display:none;font-size:11px;margin-top:8px"></div>
+          <div id="updateSummaryToolbar" style="display:none;justify-content:flex-end;margin-bottom:6px">
+            <button type="button" id="btnUpdateSummaryExpand" class="linklike update-summary-toggle" aria-expanded="false" onclick="toggleUpdateSummaryExpanded()">Expand summary</button>
+          </div>
+          <div id="updateSummaryScroll">
+            <div id="updateSummaryText"></div>
+            <div id="updateSummaryDiffLinks" style="display:none;font-size:11px;margin-top:8px"></div>
+          </div>
         </div>
         <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word"></div>
       </div>
@@ -925,6 +930,7 @@
             <div class="hermes-action-grid">
               <button class="settings-action-btn" id="btnDownload" title="Download as Markdown" data-i18n-title="download_transcript"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> <span data-i18n="transcript">Transcript</span></button>
               <button class="settings-action-btn" id="btnExportJSON" title="Export full session as JSON" data-i18n-title="export_session_json_tooltip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"/></svg> <span data-i18n="export_session_json">JSON</span></button>
+              <button class="settings-action-btn" id="btnExportHTML" title="Export as a self-contained HTML page" data-i18n-title="export_session_html_tooltip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 13l-2 2 2 2"/><path d="M15 13l2 2-2 2"/></svg> <span data-i18n="export_session_html">HTML</span></button>
               <button class="settings-action-btn" id="btnImportJSON" title="Import session from JSON" data-i18n-title="import_session_json_tooltip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> <span data-i18n="import">Import</span></button>
               <button class="settings-action-btn danger" id="btnClearConvModal" onclick="clearConversation()" title="Clear all messages in this conversation" data-i18n-title="clear_conversation_btn_tooltip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 1 2 2 2v2"/></svg> <span data-i18n="clear">Clear</span></button>
             </div>
@@ -1356,14 +1362,14 @@
               </select>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_auto_title_refresh">Automatically re-generates the session title based on the latest exchange, keeping it relevant as the conversation evolves. Requires an LLM title generation model to be configured.</div>
             </div>
-            <div class="settings-field" data-settings-search="message default while running queue interrupt steer">
-              <label for="settingsBusyInputMode" data-i18n="settings_label_busy_input_mode">Busy input mode</label>
-              <select id="settingsBusyInputMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
-                <option value="queue" data-i18n="settings_busy_input_mode_queue">Queue follow-up</option>
-                <option value="interrupt" data-i18n="settings_busy_input_mode_interrupt">Interrupt current turn</option>
-                <option value="steer" data-i18n="settings_busy_input_mode_steer">Steer (mid-turn correction)</option>
+          <div class="settings-field" data-settings-search="busy input mode message default while running queue interrupt steer">
+              <label for="settingsDefaultMessageMode" data-i18n="settings_label_default_message_mode">Default message mode</label>
+              <select id="settingsDefaultMessageMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="queue" data-i18n="settings_default_message_mode_queue">Queue follow-up</option>
+                <option value="interrupt" data-i18n="settings_default_message_mode_interrupt">Interrupt current turn</option>
+                <option value="steer" data-i18n="settings_default_message_mode_steer">Steer (mid-turn correction)</option>
               </select>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_busy_input_mode">Controls what happens when you send a message while the agent is running. Queue waits for the current task; Interrupt cancels and starts fresh; Steer injects a mid-turn correction without interrupting. If Steer is unavailable, the draft is restored so you can choose the next action.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_default_message_mode">Controls what happens when you send a message while the agent is running. Queue waits for the current task; Interrupt cancels and starts fresh; Steer injects a mid-turn correction without interrupting. If Steer is unavailable, the draft is restored so you can choose the next action.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1385,6 +1391,13 @@
                 <span data-i18n="settings_label_cron_sessions">Show cron sessions</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_cron_sessions">Surface cron job output as conversations in the sidebar. Only active when non-WebUI sessions are enabled. Defaults off; high-frequency jobs can flood the sidebar.</div>
+            </div>
+            <div class="settings-field" id="settingsShowClaudeCodeSessionsField" style="margin-left:24px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowClaudeCodeSessions" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_claude_code_sessions">Show Claude Code sessions</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_claude_code_sessions">Show Claude Code imported sessions in the sidebar, or hide them while leaving other external sessions visible.</div>
             </div>
             <div class="settings-field" id="settingsShowWebhookSessionsField" style="margin-left:24px">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

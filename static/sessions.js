@@ -12,6 +12,7 @@ const ICONS={
   edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
   spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
+  download:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10.5v2.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2.5"/><polyline points="4.5 7 8 10.5 11.5 7"/><line x1="8" y1="10.5" x2="8" y2="2"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -247,6 +248,43 @@ const SESSION_LONG_PRESS_DELAY_MS = 400;
 const SESSION_ARCHIVE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_DELETE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_SWIPE_CANCEL_RATIO = 0.75;
+
+function _manualTitleAuxConfigFromPayload(auxData){
+  if(!auxData||typeof auxData!=='object'||Array.isArray(auxData)) return null;
+  if(auxData.title_generation&&typeof auxData.title_generation==='object') return auxData;
+  const tasks=Array.isArray(auxData.tasks)?auxData.tasks:null;
+  if(!tasks) return null;
+  const taskMap={};
+  for(const task of tasks){
+    if(task&&typeof task==='object'&&typeof task.task==='string'&&task.task){
+      taskMap[task.task]=task;
+    }
+  }
+  if(!Object.keys(taskMap).length) return null;
+  return taskMap;
+}
+
+async function _loadManualTitleAuxConfig(){
+  try{
+    const auxData=await api('/api/model/auxiliary',{retries:0,timeoutToast:false});
+    return _manualTitleAuxConfigFromPayload(auxData);
+  }catch(_){
+    return null;
+  }
+}
+
+async function _manualTitleRegenerateTimeoutMs(){
+  let cfg=null;
+  try{
+    const auxConfig=await _loadManualTitleAuxConfig();
+    cfg=auxConfig&&auxConfig.title_generation;
+  }catch(_){
+    return null;
+  }
+  const timeoutSeconds=Number(cfg&&cfg.timeout);
+  if(!Number.isFinite(timeoutSeconds)||timeoutSeconds<=0) return null;
+  return Math.max(30000,Math.round((timeoutSeconds+5)*1000));
+}
 
 function _formatSessionModelWithGateway(s){
   if(!s||!s.model)return'';
@@ -3749,6 +3787,25 @@ function _appendSessionDuplicateAction(menu, session){
   ));
 }
 
+function _appendSessionExportHtmlAction(menu, session){
+  // Per-conversation "Export as HTML" — the sidebar ⋮ menu is the app's uniform
+  // home for per-conversation actions (matches ChatGPT / Open WebUI). Operates
+  // on THIS row's session, not just the active one; the export endpoint accepts
+  // any session_id in the active profile and is non-mutating, so it's offered
+  // for read-only/imported sessions too. exportSessionHTML(session) is a global
+  // defined in boot.js (loaded after sessions.js under defer, so it's bound by
+  // the time this click can fire).
+  menu.appendChild(_buildSessionAction(
+    t('session_export_html'),
+    t('session_export_html_desc'),
+    ICONS.download,
+    ()=>{
+      closeSessionActionMenu();
+      if(typeof exportSessionHTML==='function') exportSessionHTML(session);
+    }
+  ));
+}
+
 function _playSessionActionMenuEntrance(menu){
   if(!menu) return;
   const reduce=_sessionPrefersReducedMotion();
@@ -3804,6 +3861,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.className='session-action-menu';
   _appendSessionCopyLinkAction(menu, session);
   if(isReadOnly){
+    _appendSessionExportHtmlAction(menu, session);
     _mountSessionActionMenu(menu, session, anchorEl);
     return;
   }
@@ -3895,6 +3953,7 @@ function _openSessionActionMenu(session, anchorEl){
   if(!isExternalSession){
     _appendSessionDuplicateAction(menu, session);
   }
+  _appendSessionExportHtmlAction(menu, session);
   if(session.active_stream_id){
     menu.appendChild(_buildSessionAction(
       t('session_stop_response'),
@@ -3917,7 +3976,10 @@ function _openSessionActionMenu(session, anchorEl){
       closeSessionActionMenu();
       try{
         if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
-        const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+        const requestOpts={method:'POST',body:JSON.stringify({session_id:session.session_id})};
+        const timeoutMs=await _manualTitleRegenerateTimeoutMs();
+        if(timeoutMs) requestOpts.timeoutMs=timeoutMs;
+        const response=await api('/api/session/title/regenerate',requestOpts);
         const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
         if(nextTitle){
           session.title=nextTitle;
@@ -4377,12 +4439,20 @@ async function _runRenderSessionListRefresh(opts, _gen){
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const sessionListQS = _sessionListQueryString();
-    const sessionRequestOpts={timeoutToast:false};
+    // #5394: the sidebar session-list GET is idempotent, so 502/503/504 retry
+    // must be unconditional. Previously retries/retryStatuses were boot-gated, so
+    // a transient 502 during an nginx->backend restart on a warm refresh (profile
+    // switch, focus/visible/reconnect) failed on the first attempt and left the
+    // sidebar stale until a hard reload. Boot still keeps the larger timeout +
+    // timeout retry; every refresh now retries the transient upstream statuses.
+    const sessionRequestOpts={
+      timeoutToast:false,
+      retries:1,
+      retryStatuses:[502,503,504],
+    };
     if(!_sessionListHasLoadedOnce){
       sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;
-      sessionRequestOpts.retries=1;
       sessionRequestOpts.retryTimeouts=true;
-      sessionRequestOpts.retryStatuses=[502,503,504];
     }
     const {sessData, projData}=await _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
     // Discard stale response — a newer renderSessionList() call superseded us.

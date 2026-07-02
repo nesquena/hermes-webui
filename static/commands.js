@@ -1211,7 +1211,7 @@ async function cmdPersonality(args){
 async function cmdStop(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(!S.activeStreamId){showToast(t('no_active_task'));return;}
-  if(typeof cancelStream==='function'){await cancelStream();showToast(t('stream_stopped'));}
+  if(typeof cancelStream==='function'){await cancelStream('slash-stop');showToast(t('stream_stopped'));}
   else showToast(t('cancel_unavailable'));
 }
 
@@ -1273,12 +1273,12 @@ async function cmdGoal(args){
 }
 
 // ── Busy-input mode commands ──────────────────────────────────────────────
-// These commands let users override the default busy_input_mode setting for a
+// These commands let users override the default message mode setting for a
 // specific message.  They are only meaningful while the agent is running.
 
 /**
  * /queue <message> — Explicitly queue a message for the next turn.
- * Works regardless of the busy_input_mode setting.
+ * Works regardless of the default message mode setting.
  */
 async function cmdQueue(args){
   const msg=(args||'').trim();
@@ -1317,7 +1317,7 @@ async function cmdInterrupt(args){
   updateQueueBadge(S.session.session_id);
   S.pendingFiles=[];renderTray();
   // Cancel the active stream; setBusy(false) will drain the queue
-  if(typeof cancelStream==='function'){await cancelStream();}
+  if(typeof cancelStream==='function'){await cancelStream('slash-interrupt');}
   showToast(t('cmd_interrupt_confirm'),2000);
 }
 
@@ -1403,7 +1403,7 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
 }
 
 /**
- * Shared implementation for /steer and the busy_input_mode='steer' path.
+ * Shared implementation for /steer and the default_message_mode='steer' path.
  *
  * Tries the real steer endpoint first. On any non-accept response (no cached
  * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
@@ -1644,7 +1644,15 @@ function cmdReasoning(args){
 }
 function cmdVoice(){
   const mic=document.getElementById('btnMic');
-  if(mic&&mic.style.display!=='none'&&!mic.disabled){try{mic.click();return;}catch(_){}}
+  const micVisible=!!(
+    mic
+    && mic.style.display!=='none'
+    && !mic.disabled
+    && !mic.classList.contains('composer-control-hidden')
+    && mic.getAttribute('aria-hidden')!=='true'
+    && (!window.getComputedStyle||window.getComputedStyle(mic).display!=='none')
+  );
+  if(micVisible){try{mic.click();return;}catch(_){}}
   showToast(t('cmd_voice_use_mic'));
 }
 

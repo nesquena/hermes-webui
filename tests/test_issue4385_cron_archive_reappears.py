@@ -123,7 +123,8 @@ def test_cron_state_projection_preserves_archived_sidecar(monkeypatch, tmp_path)
         encoding="utf-8",
     )
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
-    monkeypatch.setattr(models, "ensure_cron_project", lambda: "cron-project")
+    monkeypatch.setattr(models, "_profile_has_user_projects", lambda: False)
+    monkeypatch.setattr(models, "ensure_cron_project", lambda **_: "cron-project")
     models.clear_sidecar_metadata_cache()
 
     rows = models._load_cli_sessions_uncached(
