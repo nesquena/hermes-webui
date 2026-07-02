@@ -4,6 +4,7 @@ Hermes Web UI — Branding: user-uploaded logo/favicon management.
 Uploaded logos are stored under STATE_DIR / 'branding' and served
 via the /branding/<filename> route (see api/routes.py).
 """
+import binascii
 import re as _re
 import struct
 from pathlib import Path
@@ -35,6 +36,7 @@ _MAX_LOGO_DIMENSION = 256
 
 # Valid mode values
 _VALID_MODES = {"light", "dark"}
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 def _logo_path_from_settings_value(value: str) -> Path | None:
     """Resolve a stored logo filename if it is one of our canonical assets."""
@@ -71,22 +73,88 @@ def _branding_version(path: Path) -> str:
 
 
 def _png_dimensions(data: bytes) -> tuple[int, int]:
-    """Parse PNG IHDR chunk to extract width and height.
+    """Validate PNG chunk structure and extract IHDR width and height.
 
     Returns (width, height) or raises ValueError if not a valid PNG.
     """
-    # PNG signature: 8 bytes
-    if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n":
+    if len(data) < 8 or data[:8] != _PNG_SIGNATURE:
         raise ValueError("Not a valid PNG file")
-    # IHDR chunk starts at byte 8: 4 bytes length, 4 bytes 'IHDR',
-    # then 4 bytes width (big-endian), 4 bytes height (big-endian).
-    w = struct.unpack(">I", data[16:20])[0]
-    h = struct.unpack(">I", data[20:24])[0]
-    return w, h
+
+    pos = 8
+    width = 0
+    height = 0
+    saw_ihdr = False
+    saw_iend = False
+
+    while pos < len(data):
+        if len(data) - pos < 12:
+            raise ValueError("Invalid PNG: truncated chunk")
+        chunk_length = struct.unpack(">I", data[pos : pos + 4])[0]
+        chunk_type = data[pos + 4 : pos + 8]
+        chunk_start = pos + 8
+        chunk_end = chunk_start + chunk_length
+        crc_end = chunk_end + 4
+        if chunk_end > len(data) or crc_end > len(data):
+            raise ValueError("Invalid PNG: chunk extends beyond file")
+        if not all((65 <= b <= 90) or (97 <= b <= 122) for b in chunk_type):
+            raise ValueError("Invalid PNG: invalid chunk type")
+        expected_crc = binascii.crc32(chunk_type + data[chunk_start:chunk_end]) & 0xFFFFFFFF
+        actual_crc = struct.unpack(">I", data[chunk_end:crc_end])[0]
+        if actual_crc != expected_crc:
+            raise ValueError("Invalid PNG: bad chunk checksum")
+
+        if not saw_ihdr:
+            if chunk_type != b"IHDR" or chunk_length != 13:
+                raise ValueError("Invalid PNG: missing IHDR")
+            width = struct.unpack(">I", data[chunk_start : chunk_start + 4])[0]
+            height = struct.unpack(">I", data[chunk_start + 4 : chunk_start + 8])[0]
+            if width <= 0 or height <= 0:
+                raise ValueError("Invalid PNG: invalid dimensions")
+            saw_ihdr = True
+        elif chunk_type == b"IHDR":
+            raise ValueError("Invalid PNG: duplicate IHDR")
+
+        if chunk_type == b"IEND":
+            if chunk_length != 0:
+                raise ValueError("Invalid PNG: invalid IEND")
+            saw_iend = True
+            pos = crc_end
+            break
+
+        pos = crc_end
+
+    if not saw_ihdr or not saw_iend:
+        raise ValueError("Invalid PNG: missing IEND")
+    if pos != len(data):
+        raise ValueError("Invalid PNG: trailing data after IEND")
+    return width, height
+
+
+def _dib_dimensions(data: bytes) -> tuple[int, int]:
+    """Parse a bounded ICO DIB/BMP payload enough to validate image dimensions."""
+    if len(data) < 16:
+        raise ValueError("Invalid ICO: embedded bitmap is truncated")
+    header_size = struct.unpack("<I", data[:4])[0]
+    if header_size == 12:
+        if len(data) < 12:
+            raise ValueError("Invalid ICO: embedded bitmap header is truncated")
+        w = struct.unpack("<H", data[4:6])[0]
+        stored_h = struct.unpack("<H", data[6:8])[0]
+        h = stored_h // 2 if stored_h > 1 else stored_h
+        return w, h
+    if header_size < 40 or header_size > len(data):
+        raise ValueError("Invalid ICO: embedded bitmap header is invalid")
+    w = abs(struct.unpack("<i", data[4:8])[0])
+    stored_h = abs(struct.unpack("<i", data[8:12])[0])
+    planes = struct.unpack("<H", data[12:14])[0]
+    bit_count = struct.unpack("<H", data[14:16])[0]
+    if w <= 0 or stored_h <= 0 or planes != 1 or bit_count not in {1, 4, 8, 16, 24, 32}:
+        raise ValueError("Invalid ICO: embedded bitmap header is invalid")
+    return w, stored_h // 2 if stored_h > 1 else stored_h
 
 
 def _ico_dimensions(data: bytes) -> tuple[int, int]:
-    """Parse ICO directory entries and embedded PNG sizes, returning max dimensions."""
+    """Parse ICO directory entries and validate each bounded payload."""
     if len(data) < 22 or data[:4] != b"\x00\x00\x01\x00":
         raise ValueError("Not a valid ICO file")
     count = struct.unpack("<H", data[4:6])[0]
@@ -97,6 +165,7 @@ def _ico_dimensions(data: bytes) -> tuple[int, int]:
 
     max_w = 0
     max_h = 0
+    ranges: list[tuple[int, int]] = []
     for idx in range(count):
         entry = data[6 + (idx * 16) : 6 + ((idx + 1) * 16)]
         w = entry[0] or 256
@@ -105,14 +174,31 @@ def _ico_dimensions(data: bytes) -> tuple[int, int]:
         offset = struct.unpack("<I", entry[12:16])[0]
         if size <= 0 or offset <= 0 or offset + size > len(data):
             raise ValueError("Invalid ICO: image entry points outside file")
+        ranges.append((offset, offset + size))
         image = data[offset : offset + size]
-        if image[:8] == b"\x89PNG\r\n\x1a\n":
+        if image[:8] == _PNG_SIGNATURE:
             try:
                 w, h = _png_dimensions(image)
             except ValueError as err:
-                raise ValueError("Invalid ICO: could not parse embedded PNG dimensions") from err
+                raise ValueError("Invalid ICO: invalid embedded PNG") from err
+        else:
+            try:
+                dib_w, dib_h = _dib_dimensions(image)
+            except ValueError as err:
+                raise ValueError("Invalid ICO: invalid embedded bitmap") from err
+            if dib_w != w or dib_h != h:
+                raise ValueError("Invalid ICO: bitmap dimensions do not match directory")
         max_w = max(max_w, w)
         max_h = max(max_h, h)
+
+    covered = bytearray(len(data))
+    covered[: 6 + (count * 16)] = b"\x01" * (6 + (count * 16))
+    for start, end in ranges:
+        if any(covered[start:end]):
+            raise ValueError("Invalid ICO: overlapping image entries")
+        covered[start:end] = b"\x01" * (end - start)
+    if not all(covered):
+        raise ValueError("Invalid ICO: trailing or unreferenced data")
     return max_w, max_h
 
 

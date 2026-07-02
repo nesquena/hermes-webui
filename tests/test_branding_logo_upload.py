@@ -1,6 +1,7 @@
 """Regression coverage for custom logo upload validation and DOM hooks."""
 
 import struct
+import binascii
 from pathlib import Path
 from io import BytesIO
 from types import SimpleNamespace
@@ -18,15 +19,24 @@ from api.branding import (
 )
 
 
+def _png_chunk(chunk_type: bytes, payload: bytes = b"") -> bytes:
+    crc = binascii.crc32(chunk_type + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + chunk_type + payload + struct.pack(">I", crc)
+
+
 def _png_header(width: int, height: int, payload: bytes = b"") -> bytes:
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + b"\x00\x00\x00\rIHDR"
-        + struct.pack(">I", width)
+    ihdr = (
+        struct.pack(">I", width)
         + struct.pack(">I", height)
         + b"\x08\x06\x00\x00\x00"
-        + b"\x00\x00\x00\x00"
-        + payload
+    )
+    chunks = [_png_chunk(b"IHDR", ihdr)]
+    if payload:
+        chunks.append(_png_chunk(b"IDAT", payload))
+    chunks.append(_png_chunk(b"IEND"))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + b"".join(chunks)
     )
 
 
@@ -56,7 +66,7 @@ def test_logo_upload_rejects_large_png_dimensions():
 
 def test_logo_upload_rejects_large_file_size():
     header = _png_header(128, 128)
-    body = _png_header(128, 128, b"x" * ((201 * 1024) - len(header)))
+    body = _png_header(128, 128, b"x" * ((201 * 1024) - len(header) - 12))
 
     with pytest.raises(ValueError) as exc:
         _validate_upload(body, "logo.png")
@@ -73,6 +83,21 @@ def test_logo_upload_accepts_small_png():
 
     assert data == body
     assert ext == ".png"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _png_header(32, 32) + b"<script>alert(1)</script>",
+        _png_header(32, 32) + b'<svg onload="alert(1)"></svg>',
+        _png_header(32, 32)[:-12] + b"junk-without-iend",
+    ],
+)
+def test_logo_upload_rejects_png_polyglots_and_incomplete_pngs(body):
+    with pytest.raises(ValueError) as exc:
+        _validate_upload(body, "logo.png")
+
+    assert "Invalid PNG" in str(exc.value)
 
 
 def test_logo_upload_rejects_large_ico_embedded_png_dimensions():
