@@ -6066,6 +6066,26 @@ const APPROVAL_MIN_VISIBLE_MS = 30000;
 
 // showApprovalCard moved above respondApproval
 
+function _setPromptFlyoutHidden(card, hidden) {
+  if (!card) return;
+  if (hidden) {
+    card.setAttribute("aria-hidden", "true");
+    card.setAttribute("inert", "");
+    const markHidden = () => {
+      if (!card.classList || !card.classList.contains("visible")) card.hidden = true;
+    };
+    if (typeof setTimeout === "function") setTimeout(markHidden, 450);
+    else markHidden();
+    return;
+  }
+  card.hidden = false;
+  card.setAttribute("aria-hidden", "false");
+  card.removeAttribute("inert");
+  // Force the unhidden, pre-visible state to be observed so the existing
+  // transform/opacity transition can still animate when `.visible` is added.
+  void card.offsetHeight;
+}
+
 function _clearApprovalHideTimer() {
   if (_approvalHideTimer) {
     clearTimeout(_approvalHideTimer);
@@ -6099,6 +6119,7 @@ function hideApprovalCard(force=false) {
   _resetApprovalCardState();
   card.classList.remove("visible");
   card.classList.remove("collapsed");
+  _setPromptFlyoutHidden(card, true);
   _syncApprovalTranscriptSpace(null);
   $("approvalCmd").textContent = "";
   $("approvalDesc").textContent = "";
@@ -6261,6 +6282,7 @@ function showApprovalCard(pending, pendingCount) {
     responding ? _approvalResponding.choice : null,
     responding,
   );
+  _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
   _syncApprovalCollapseButton(card);
   _syncApprovalTranscriptSpace(card, {immediate: true});
@@ -7038,6 +7060,7 @@ function _ensureClarifyCardDom() {
   card.setAttribute("role", "dialog");
   card.setAttribute("aria-labelledby", "clarifyHeading");
   card.setAttribute("aria-describedby", "clarifyQuestion clarifyHint");
+  _setPromptFlyoutHidden(card, true);
   card.innerHTML = `
     <div class="clarify-inner">
       <div class="clarify-header">
@@ -7250,6 +7273,7 @@ function hideClarifyCard(force=false, reason="dismissed") {
   _clarifySessionId = null;
   _resetClarifyCardState();
   card.classList.remove("visible");
+  _setPromptFlyoutHidden(card, true);
   _syncClarifyTranscriptSpace(null);
   if (typeof unlockComposerForClarify === "function") unlockComposerForClarify();
   $("clarifyQuestion").textContent = "";
@@ -7368,6 +7392,7 @@ function showClarifyCard(pending) {
   }
   _clarifySetControlsDisabled(false, false);
   _ensureClarifyResizeListener();
+  _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
   _syncClarifyCollapseButton(card);
   _syncClarifyTranscriptSpace(card, {immediate: true});
