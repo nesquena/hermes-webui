@@ -1,6 +1,8 @@
 """OpenAI-compatible TTS endpoint and UI wiring coverage for #4982."""
 import io
 import json
+import socket
+import ssl
 from pathlib import Path
 
 import pytest
@@ -53,6 +55,39 @@ class _StreamOnceResponse:
         if self._chunks:
             return self._chunks.pop(0)
         return b""
+
+
+def _http_response_bytes(status_code: int, body=b"", *, reason="OK", headers=None):
+    hdr = {"Content-Length": str(len(body)), "Content-Type": "audio/mpeg"}
+    if headers:
+        hdr.update(headers)
+    lines = [f"HTTP/1.1 {status_code} {reason}\r\n"]
+    for key, value in hdr.items():
+        lines.append(f"{key}: {value}\r\n")
+    lines.append("\r\n")
+    return "".join(lines).encode("utf-8") + body
+
+
+class _FakeSocketForHttps:
+    def __init__(self, response_body: bytes):
+        self.writes = []
+        self.response = io.BytesIO(response_body)
+        self.closed = False
+
+    def sendall(self, data):
+        self.writes.append(data)
+
+    def setsockopt(self, *_args, **_kwargs):
+        return None
+
+    def makefile(self, *_args, **_kwargs):
+        return self.response
+
+    def shutdown(self, *_args, **_kwargs):
+        return None
+
+    def close(self):
+        self.closed = True
 
 
 def _post(body_dict, **kw):
@@ -149,6 +184,186 @@ def test_openai_tts_config_overrides(monkeypatch):
     assert h.status == 200
     assert captured["url"] == "https://custom.example.com/v1/audio/speech"
     assert captured["body"] == {"model": "tts-custom", "input": "Hello", "voice": "nova"}
+
+
+def test_tts_resolve_pinned_address_accepts_public_ip(monkeypatch):
+    def _fake_getaddrinfo(*_args, **_kwargs):
+        return [(0, 0, 0, "", ("1.1.1.1", 0))]
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    assert routes._tts_resolve_pinned_address("1.1.1.1") == "1.1.1.1"
+
+
+def test_tts_resolve_pinned_address_rejects_blocked_target(monkeypatch):
+    def _fake_getaddrinfo(*_args, **_kwargs):
+        return [(0, 0, 0, "", ("10.0.0.5", 0))]
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    with pytest.raises(ValueError, match="not allowed"):
+        routes._tts_resolve_pinned_address("public.example.com")
+
+
+def test_tts_resolve_pinned_address_rejects_mixed_addresses(monkeypatch):
+    def _fake_getaddrinfo(*_args, **_kwargs):
+        return [
+            (0, 0, 0, "", ("203.0.113.10", 0)),
+            (0, 0, 0, "", ("127.0.0.1", 0)),
+        ]
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    with pytest.raises(ValueError, match="not allowed"):
+        routes._tts_resolve_pinned_address("public.example.com")
+
+
+def test_openai_tts_does_not_connect_to_rebound_private_address(monkeypatch):
+    host = "rebind-openai.example.com"
+    counts = {"getaddrinfo": 0}
+    created = []
+
+    def _fake_getaddrinfo(*_args, **_kwargs):
+        counts["getaddrinfo"] += 1
+        if counts["getaddrinfo"] == 1:
+            return [(0, 0, 0, "", ("1.1.1.1", 443))]
+        return [(0, 0, 0, "", ("169.254.169.254", 443))]
+
+    def _fake_create_connection(address, *args, **_kwargs):
+        dial_host, dial_port = address
+        try:
+            socket.inet_aton(dial_host)
+            resolved = dial_host
+        except OSError:
+            resolved = socket.getaddrinfo(dial_host, dial_port)[0][4][0]
+        created.append((resolved, dial_port))
+        raise AssertionError(f"connect should not run with this test; got {(resolved, dial_port)}")
+
+    def _fake_wrap_socket(_context, sock, *args, **kwargs):
+        return sock
+
+    import api.config as config
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(socket, "create_connection", _fake_create_connection)
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", _fake_wrap_socket)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {"openai": {"base_url": f"https://{host}/v1"}}
+    })
+
+    h = _post({"text": "Hello", "engine": "openai"}, client="10.82.0.8")
+    routes._handle_tts(h, None)
+
+    assert counts["getaddrinfo"] == 2
+    assert created == []
+    assert h.status == 502
+    assert "OpenAI TTS generation failed" in (h.payload() or {}).get("error", "")
+
+
+def test_openai_tts_pinned_connection_preserves_host_and_sni(monkeypatch):
+    host = "static-openai.example.com"
+    response_bytes = _http_response_bytes(200, b"audio-openai")
+    fake_socket = _FakeSocketForHttps(response_bytes)
+    observed = {}
+    created = []
+
+    def _fake_getaddrinfo(*_args, **_kwargs):
+        return [(0, 0, 0, "", ("1.1.1.1", 443))]
+
+    def _fake_create_connection(address, *_args, **_kwargs):
+        created.append(address)
+        return fake_socket
+
+    def _fake_wrap_socket(_context, sock, *args, server_hostname=None, **_kwargs):
+        observed["server_hostname"] = server_hostname
+        return sock
+
+    import api.config as config
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(socket, "create_connection", _fake_create_connection)
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", _fake_wrap_socket)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {"openai": {"base_url": f"https://{host}/v1"}}
+    })
+    h = _post({"text": "Hello", "engine": "openai"}, client="10.82.0.9")
+    routes._handle_tts(h, None)
+
+    assert h.status == 200
+    assert h.sent_headers["Content-Type"] == "audio/mpeg"
+    assert h.wfile.getvalue() == b"audio-openai"
+    assert created == [("1.1.1.1", 443)]
+    assert observed["server_hostname"] == host
+    sent = b"".join(fake_socket.writes).decode("utf-8", "replace")
+    assert f"Host: {host}" in sent
+
+
+def test_openai_tts_rejects_redirect_with_pinned_opener(monkeypatch):
+    host = "redirect-openai.example.com"
+    response_bytes = _http_response_bytes(302, headers={"Location": "http://169.254.169.254/v1/audio/speech"}, reason="Found")
+    fake_socket = _FakeSocketForHttps(response_bytes)
+    created = []
+
+    def _fake_getaddrinfo(*_args, **_kwargs):
+        return [(0, 0, 0, "", ("1.1.1.1", 443))]
+
+    def _fake_create_connection(address, *_args, **_kwargs):
+        created.append(address)
+        return fake_socket
+
+    def _fake_wrap_socket(_context, sock, *args, **kwargs):
+        return sock
+
+    import api.config as config
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(socket, "create_connection", _fake_create_connection)
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", _fake_wrap_socket)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {"openai": {"base_url": f"https://{host}/v1"}}
+    })
+    h = _post({"text": "Hello", "engine": "openai"}, client="10.82.0.10")
+    routes._handle_tts(h, None)
+
+    assert h.status in (500, 502)
+    assert created == [("1.1.1.1", 443)]
+    assert "OpenAI TTS generation failed" in (h.payload() or {}).get("error", "")
+
+
+def test_openai_tts_ignores_https_proxy_and_dials_pinned_target(monkeypatch):
+    host = "proxy-safe-openai.example.com"
+    response_bytes = _http_response_bytes(200, b"audio-openai")
+    fake_socket = _FakeSocketForHttps(response_bytes)
+    created = []
+
+    def _fake_getaddrinfo(target_host, *_args, **_kwargs):
+        if target_host == host:
+            return [(0, 0, 0, "", ("1.1.1.1", 443))]
+        if target_host == "127.0.0.1":
+            return [(0, 0, 0, "", ("127.0.0.1", 8888))]
+        raise AssertionError(f"unexpected DNS lookup for {target_host}")
+
+    def _fake_create_connection(address, *_args, **_kwargs):
+        created.append(address)
+        return fake_socket
+
+    def _fake_wrap_socket(_context, sock, *args, **kwargs):
+        return sock
+
+    import api.config as config
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(socket, "create_connection", _fake_create_connection)
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", _fake_wrap_socket)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:8888")
+    monkeypatch.setattr(config, "get_config", lambda: {
+        "tts": {"openai": {"base_url": f"https://{host}/v1"}}
+    })
+    h = _post({"text": "Hello", "engine": "openai"}, client="10.82.0.11")
+    routes._handle_tts(h, None)
+
+    assert h.status == 200
+    assert h.wfile.getvalue() == b"audio-openai"
+    assert created == [("1.1.1.1", 443)]
 
 
 @pytest.mark.parametrize("base_url", [

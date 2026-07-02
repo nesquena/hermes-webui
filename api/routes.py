@@ -26,12 +26,14 @@ import sys
 import threading
 import time
 import uuid
+import http.client
+import socket as _socket
 from collections import defaultdict
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
@@ -16296,6 +16298,24 @@ _TTS_PROXY_MAX_BYTES = 16 * 1024 * 1024
 _TTS_LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
+def _tts_addr_is_blocked(ip_str: str) -> bool:
+    """Return True when IP is in a private or otherwise non-routable class."""
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
 def _tts_host_is_blocked_target(hostname: str) -> bool:
     """True if the hostname resolves to (or literally is) a private / loopback /
     link-local / reserved / multicast address — the SSRF-risk targets that an
@@ -16309,24 +16329,10 @@ def _tts_host_is_blocked_target(hostname: str) -> bool:
     if not host:
         return True
 
-    def _addr_blocked(ip_str: str) -> bool:
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            return False
-        return (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        )
-
     # Literal IP host?
     try:
         ipaddress.ip_address(host)
-        return _addr_blocked(host)
+        return _tts_addr_is_blocked(host)
     except ValueError:
         pass
 
@@ -16343,9 +16349,40 @@ def _tts_host_is_blocked_target(hostname: str) -> bool:
         return False
     for info in infos:
         sockaddr = info[4]
-        if sockaddr and _addr_blocked(str(sockaddr[0])):
+        if sockaddr and _tts_addr_is_blocked(str(sockaddr[0])):
             return True
     return False
+
+
+def _tts_resolve_pinned_address(hostname: str) -> str:
+    """Resolve a hostname once and return a vetted literal address to dial."""
+    import ipaddress
+    import socket
+
+    host = (hostname or "").strip().lower()
+    if not host:
+        raise ValueError("invalid OpenAI TTS base_url host")
+
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if _tts_addr_is_blocked(host):
+            raise ValueError("resolved OpenAI TTS target is not allowed")
+        return host
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception as exc:
+        raise ValueError("could not resolve OpenAI TTS base_url host") from exc
+    if not infos:
+        raise ValueError("could not resolve OpenAI TTS base_url host")
+    for info in infos:
+        sockaddr = info[4]
+        if sockaddr and _tts_addr_is_blocked(str(sockaddr[0])):
+            raise ValueError("resolved OpenAI TTS target is not allowed")
+    return str(infos[0][4][0])
 
 
 def _normalized_openai_tts_base_url(base_url: str) -> str:
@@ -16406,6 +16443,43 @@ def _buffer_tts_audio_response(resp, *, max_bytes: int | None = None) -> bytes:
         if len(audio_data) > max_bytes:
             raise ValueError("upstream audio exceeded byte limit")
     return bytes(audio_data)
+
+class _NoRedirectTtsHandler(HTTPRedirectHandler):
+    """Refuse to follow redirects on the TTS call.
+
+    A redirect is never a legitimate response to POST /audio/speech and can
+    carry the Authorization bearer to a target that bypasses the base_url check.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("OpenAI TTS upstream attempted a redirect")
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Connect to a pinned IP while keeping Host and TLS SNI on the hostname."""
+
+    def connect(self):
+        sys.audit("http.client.connect", self, self.host, self.port)
+        pinned_host = _tts_resolve_pinned_address(self.host)
+        self.sock = self._create_connection(
+            (pinned_host, self.port), self.timeout, self.source_address
+        )
+        try:
+            self.sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+        except OSError as exc:
+            if exc.errno != errno.ENOPROTOOPT:
+                raise
+
+        if self._tunnel_host:
+            self._tunnel()
+
+        server_hostname = self._tunnel_host or self.host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+
+
+class _PinnedHTTPSHandler(HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
 
 
 def _tts_open(req, *, timeout=30, opener_factory=None):
@@ -16658,29 +16732,18 @@ def _handle_tts(handler, parsed):
             "voice": oai_voice,
         }).encode("utf-8")
 
-        from urllib.request import Request, build_opener, HTTPRedirectHandler, urlopen as _urlopen
-
-        class _NoRedirectTtsHandler(HTTPRedirectHandler):
-            """Refuse to follow redirects on the TTS call. A redirect is never a
-            legitimate response to a POST /audio/speech, and following one would
-            (a) carry the Authorization bearer to the redirect target and
-            (b) let a public host bounce the request to a private/link-local
-            SSRF target after the base-url validation already passed."""
-
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                raise ValueError("OpenAI TTS upstream attempted a redirect")
-
+        from urllib.request import Request, build_opener, urlopen as _urlopen
         req = Request(url, data=req_body, headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "audio/mpeg",
         })
 
-        # Use a no-redirect opener so an upstream redirect can't carry the bearer
-        # to (or SSRF-bounce into) a different/private target. _tts_open is a thin
-        # module seam so tests can still intercept the network call.
+        # Use a pinned HTTPS opener so the resolved address is the one that gets
+        # dialed. Keep the no-redirect handler in the same chain to block
+        # bearer leaks and SSRF bounce redirects after hostname validation.
         try:
-            with _tts_open(req, timeout=30, opener_factory=lambda: build_opener(_NoRedirectTtsHandler())) as resp:
+            with _tts_open(req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler(), _PinnedHTTPSHandler())) as resp:
                 audio_data = _buffer_tts_audio_response(resp)
         except ValueError:
             logger.warning("OpenAI TTS rejected an invalid upstream response", exc_info=True)
