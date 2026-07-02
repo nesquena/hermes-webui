@@ -10801,7 +10801,26 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!blocks) return false;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
-  // Some DOM-harness tests extract this renderer without the later helper declarations.
+  const transparentLiveRowAttributePairs = typeof _transparentLiveRowAttributePairs === 'function'
+    ? _transparentLiveRowAttributePairs
+    : (node)=>{
+      if(!node) return [];
+      if(typeof node.getAttributeNames === 'function'){
+        return node.getAttributeNames().map(name=>[name, node.getAttribute(name)]);
+      }
+      const attrs = node.attributes;
+      if(!attrs || typeof attrs !== 'object') return [];
+      if(typeof attrs.length === 'number'){
+        const pairs = [];
+        for(let i=0;i<attrs.length;i++){
+          const attr = typeof attrs.item === 'function' ? attrs.item(i) : attrs[i];
+          if(!attr || !attr.name) continue;
+          pairs.push([attr.name, attr.value]);
+        }
+        return pairs;
+      }
+      return Object.keys(attrs).map(name=>[name, attrs[name]]);
+    };
   const keyTransparentLiveRow = typeof _transparentLiveRowKey === 'function'
     ? _transparentLiveRowKey
     : (node, currentStreamId)=>{
@@ -10813,7 +10832,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       const rowSource = String(node.getAttribute('data-anchor-source-event-type') || '').trim();
       return `${rowStreamId}\u0000${rowId}\u0000${rowRole}\u0000${rowSource}`;
     };
-  const isTransparentLiveRowsCompatible = typeof _transparentLiveRowsCompatible === 'function'
+  const transparentLiveRowsCompatible = typeof _transparentLiveRowsCompatible === 'function'
     ? _transparentLiveRowsCompatible
     : (existing, candidate)=>!!(
       existing &&
@@ -10826,9 +10845,21 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     ? _refreshTransparentLiveRow
     : (existing, node)=>{
       if(!existing || !node || !existing.getAttribute) return node;
+      if(existing===node) return existing;
+      const pairs = transparentLiveRowAttributePairs(node);
+      const kept = Object.create(null);
+      for(const [name, value] of pairs){
+        kept[String(name)] = String(value ?? '');
+      }
+      for(const [name] of transparentLiveRowAttributePairs(existing)){
+        if(!Object.prototype.hasOwnProperty.call(kept, name)) existing.removeAttribute(name);
+      }
+      for(const [name, value] of pairs){
+        existing.setAttribute(name, value);
+      }
+      existing.className = node.className || '';
       existing.textContent = node.textContent || '';
       existing.innerHTML = node.innerHTML || '';
-      existing.className = node.className || '';
       return existing;
     };
   const activeStreamId = String(streamId || S.activeStreamId || '');
@@ -10845,7 +10876,10 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   });
   blocks.querySelectorAll('[data-anchor-scene-owner="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('[data-anchor-scene-row="1"]').forEach(el=>{
-    if(el.getAttribute('data-live-stream-owned') === '1') return;
+    if(el.getAttribute('data-live-stream-owned') === '1'){
+      const key = keyTransparentLiveRow(el, activeStreamId);
+      if(key && preserveByKey.get(key) === el) return;
+    }
     el.remove();
   });
   // Clear every legacy live activity surface this renderer can replace. The
@@ -10878,7 +10912,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     if(!node) continue;
     const key = keyTransparentLiveRow(node, activeStreamId);
     const existing = key ? preserveByKey.get(key) : null;
-    const renderedNode = existing && isTransparentLiveRowsCompatible(existing, node)
+    const renderedNode = existing && transparentLiveRowsCompatible(existing, node)
       ? refreshTransparentLiveRow(existing, node)
       : node;
     if(existing) preserveByKey.delete(key);
@@ -10925,8 +10959,18 @@ function _transparentLiveRowAttributePairs(node){
   if(typeof node.getAttributeNames === 'function'){
     return node.getAttributeNames().map(name=>[name, node.getAttribute(name)]);
   }
-  if(!node.attributes || typeof node.attributes !== 'object') return [];
-  return Object.keys(node.attributes).map(name=>[name, node.attributes[name]]);
+  const attrs = node.attributes;
+  if(!attrs || typeof attrs !== 'object') return [];
+  if(typeof attrs.length === 'number'){
+    const pairs = [];
+    for(let i=0;i<attrs.length;i++){
+      const attr = typeof attrs.item === 'function' ? attrs.item(i) : attrs[i];
+      if(!attr || !attr.name) continue;
+      pairs.push([attr.name, attr.value]);
+    }
+    return pairs;
+  }
+  return Object.keys(attrs).map(name=>[name, attrs[name]]);
 }
 
 function _refreshTransparentLiveRow(existing, node){
@@ -10938,14 +10982,8 @@ function _refreshTransparentLiveRow(existing, node){
     const [name, value] = pair;
     kept[String(name)] = String(value ?? '');
   }
-  if(typeof existing.getAttributeNames === 'function'){
-    for(const name of existing.getAttributeNames()){
-      if(!Object.prototype.hasOwnProperty.call(kept, name)) existing.removeAttribute(name);
-    }
-  }else if(existing.attributes && typeof existing.attributes === 'object'){
-    for(const name of Object.keys(existing.attributes)){
-      if(!Object.prototype.hasOwnProperty.call(kept, name)) existing.removeAttribute(name);
-    }
+  for(const [name] of _transparentLiveRowAttributePairs(existing)){
+    if(!Object.prototype.hasOwnProperty.call(kept, name)) existing.removeAttribute(name);
   }
   for(const pair of pairs){
     const [name, value] = pair;

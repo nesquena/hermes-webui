@@ -272,6 +272,18 @@ const secondScene = {{
     {{ row_id:'row-new', role:'prose', source_event_type:'process_prose', text:'new row appears' }},
   ],
 }};
+const thirdScene = {{
+  version:'activity_scene_v1',
+  activity_rows:[
+    {{ role:'prose', source_event_type:'process_prose', text:'keyless row first' }},
+  ],
+}};
+const fourthScene = {{
+  version:'activity_scene_v1',
+  activity_rows:[
+    {{ role:'prose', source_event_type:'process_prose', text:'keyless row second' }},
+  ],
+}};
 
 const firstRender = _renderLiveAnchorActivitySceneTransparent('stream-1', firstScene, {{ sessionId:'session-1' }});
 const keptAfterFirst = turn.querySelector('.transparent-event-row[data-anchor-row-id=\"row-kept\"]');
@@ -293,6 +305,11 @@ const idxs = {{
   stale: rows.findIndex((child) => child.getAttribute('data-anchor-row-id') === 'row-stale'),
 }};
 
+_renderLiveAnchorActivitySceneTransparent('stream-1', thirdScene, {{ sessionId:'session-1' }});
+const keylessRowsAfterThird = turn.querySelectorAll('.transparent-event-row[data-anchor-row-id=\"\"]');
+_renderLiveAnchorActivitySceneTransparent('stream-1', fourthScene, {{ sessionId:'session-1' }});
+const keylessRowsAfterFourth = turn.querySelectorAll('.transparent-event-row[data-anchor-row-id=\"\"]');
+
 process.stdout.write(JSON.stringify({{
   firstRender,
   secondRender,
@@ -305,6 +322,10 @@ process.stdout.write(JSON.stringify({{
   idxs,
   hasNewRow: !!newAfterSecond,
   newRowSession: newAfterSecond && newAfterSecond.getAttribute('data-session-id'),
+  keylessAfterThird: keylessRowsAfterThird.length,
+  keylessAfterFourth: keylessRowsAfterFourth.length,
+  keylessTextsAfterFourth: keylessRowsAfterFourth.map((child) => child.textContent),
+  totalRowsAfterFourth: turn.children.filter((child) => child.classList.contains('transparent-event-row')).length,
 }}));
 """
     script = script.replace("{{", "{").replace("}}", "}")
@@ -327,3 +348,7 @@ process.stdout.write(JSON.stringify({{
     assert data["idxs"]["staleInVisibleRows"] == -1
     assert data["hasNewRow"] is True
     assert data["newRowSession"] == "session-1"
+    assert data["keylessAfterThird"] == 1
+    assert data["keylessAfterFourth"] == 1
+    assert data["keylessTextsAfterFourth"] == ["keyless row second"]
+    assert data["totalRowsAfterFourth"] == 1
