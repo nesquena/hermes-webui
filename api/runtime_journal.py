@@ -293,6 +293,31 @@ class RuntimeJournal:
             return None
         return self.get_status(active_run_id)
 
+    def list_active_runs(self) -> list[dict]:
+        index = _load_index(self._index_file)
+        active = index["active_sessions"]
+        runs = index["runs"]
+        results: list[dict] = []
+        for sid, rid in active.items():
+            entry = runs.get(rid)
+            if entry is None:
+                continue
+            results.append({
+                "run_id": entry["run_id"],
+                "session_id": entry["session_id"],
+                "status": entry.get("status", "unknown"),
+                "terminal": bool(entry.get("terminal", False)),
+                "last_event_id": entry.get("last_event_id"),
+                "last_seq": entry.get("last_seq"),
+                "controls": entry.get("controls", []),
+                "pending_approval_ids": entry.get("pending_approval_ids", []),
+                "pending_clarify_ids": entry.get("pending_clarify_ids", []),
+                "error": entry.get("error"),
+                "result": entry.get("result"),
+                "created_at": entry.get("created_at"),
+            })
+        return results
+
     def mark_terminal(
         self,
         run_id: str,

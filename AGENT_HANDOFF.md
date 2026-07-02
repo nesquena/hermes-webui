@@ -272,5 +272,84 @@ Deferred. Hermes Agent Phase 4 route module is not yet mounted into a live serve
 
 ### Next task
 
-**Phase 6: Hermex/mobile API contract**
+**Phase 6: Hermex/mobile API contract** — COMPLETE (see below)
+
+---
+
+## Phase 6: Hermex/mobile API contract — COMPLETE
+
+| Field | Value |
+|---|---|
+| **Status** | Complete |
+| **HEAD before commit** | `2db908b` |
+| **Changed files** | `api/mobile_routes.py` (created), `api/runtime_journal.py` (modified), `api/routes.py` (modified), `tests/test_mobile_capabilities.py` (created), `tests/test_mobile_run_dashboard.py` (created), `tests/test_mobile_pending_actions.py` (created) |
+
+### Mobile endpoints added
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/mobile/capabilities` | Stable capability discovery |
+| GET | `/api/mobile/runs` | Active run dashboard |
+| GET | `/api/mobile/pending-actions` | Pending approvals/clarifications |
+| POST | `/api/mobile/pending-actions/{action_id}/resolve` | Resolve approval or clarify |
+| GET | `/api/mobile/reconnect/{session_id}` | Reconnect helper (optional) |
+
+### Verification
+
+```bash
+# Focused mobile tests — 31 passed
+./scripts/test.sh \
+  tests/test_mobile_capabilities.py \
+  tests/test_mobile_run_dashboard.py \
+  tests/test_mobile_pending_actions.py \
+  -v
+
+# Full integration/regression — 143 passed
+./scripts/test.sh \
+  tests/test_runtime_routes.py \
+  tests/test_runtime_sse_reconnect.py \
+  tests/test_runtime_legacy_journal_mirror.py \
+  tests/test_agent_runs_adapter.py \
+  tests/test_runtime_adapter_selection.py \
+  tests/test_agent_runs_error_mapping.py \
+  tests/test_mobile_capabilities.py \
+  tests/test_mobile_run_dashboard.py \
+  tests/test_mobile_pending_actions.py \
+  -v
+
+# Agent-runs env regression — 43 passed, 8 expected failures
+HERMES_WEBUI_RUNTIME_ADAPTER=agent-runs \
+HERMES_WEBUI_AGENT_RUNS_BASE_URL=http://127.0.0.1:8642 \
+HERMES_WEBUI_AGENT_RUNS_API_KEY=test-key \
+./scripts/test.sh \
+  tests/test_mobile_capabilities.py \
+  tests/test_mobile_run_dashboard.py \
+  tests/test_mobile_pending_actions.py \
+  tests/test_runtime_routes.py \
+  -v
+
+# Manual import smoke
+python -c 'import api.mobile_routes; print("OK")'
+```
+
+### Deliverables
+
+- `api/mobile_routes.py` — Route handlers for 5 mobile endpoints. Delegates to `RuntimeJournal` and runtime adapters for data. Returns stable JSON payloads with null for unavailable metadata fields, redacted secrets, and clean error responses.
+- `api/runtime_journal.py` — Added `list_active_runs()` method to enumerate all active runs from the index for the run dashboard.
+- `api/routes.py` — Registered mobile GET routes (capabilities, runs, pending-actions, reconnect) and POST route (pending-actions resolve) in the `handle_get`/`handle_post` dispatchers.
+- `tests/test_mobile_capabilities.py` — 10 tests covering /api/mobile/capabilities across all adapter modes, feature keys, secret exclusion.
+- `tests/test_mobile_run_dashboard.py` — 10 tests covering active run enumeration, required fields, terminal exclusion, pending action reporting, secret redaction, null fields for unavailable metadata.
+- `tests/test_mobile_pending_actions.py` — 11 tests covering pending action listing, approval/clarify resolution in legacy/agent-runs modes, validation errors, not_supported propagation, secret exclusion.
+
+### Hermex source note
+
+Hermex source was unavailable during this phase. The implementation is the server-side contract according to the Phase 6 specification.
+
+### /api/chat/start compatibility
+
+Preserved. Not modified. Mobile routes are read-only observers of the runtime state and do not alter the chat path.
+
+### Next task
+
+**Phase 7: Deployment health diagnostics**
 

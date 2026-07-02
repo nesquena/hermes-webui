@@ -8805,6 +8805,13 @@ from api.runtime_routes import (
     handle_run_approval,
     handle_run_clarify,
 )
+from api.mobile_routes import (
+    handle_mobile_capabilities,
+    handle_mobile_runs,
+    handle_mobile_pending_actions,
+    handle_mobile_resolve_action,
+    handle_mobile_reconnect,
+)
 from api.todo_state import attach_todo_state
 from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
 from api.onboarding import (
@@ -12309,6 +12316,20 @@ def handle_get(handler, parsed) -> bool:
 
     # ── End runtime routes ──────────────────────────────────────────────────
 
+    # ── Mobile routes ───────────────────────────────────────────────────────
+    if parsed.path == "/api/mobile/capabilities":
+        return handle_mobile_capabilities(handler, parsed)
+
+    if parsed.path == "/api/mobile/runs":
+        return handle_mobile_runs(handler, parsed)
+
+    if parsed.path == "/api/mobile/pending-actions":
+        return handle_mobile_pending_actions(handler, parsed)
+
+    if parsed.path.startswith("/api/mobile/reconnect/"):
+        return handle_mobile_reconnect(handler, parsed)
+    # ── End mobile routes ───────────────────────────────────────────────────
+
     if parsed.path == "/api/chat/stream":
         return _handle_sse_stream(handler, parsed)
 
@@ -13928,6 +13949,11 @@ def handle_post(handler, parsed) -> bool:
             return handle_run_clarify(handler, body)
 
     # ── End runtime control routes ─────────────────────────────────────────
+
+    # ── Mobile control routes ───────────────────────────────────────────────
+    if parsed.path.endswith("/resolve") and parsed.path.startswith("/api/mobile/pending-actions/"):
+        return handle_mobile_resolve_action(handler, parsed, body)
+    # ── End mobile control routes ───────────────────────────────────────────
 
     if parsed.path == "/api/chat":
         return _handle_chat_sync(handler, body)
