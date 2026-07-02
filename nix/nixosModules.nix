@@ -175,7 +175,7 @@ in
           Type = "simple";
           User = cfg.user;
           Group = cfg.group;
-          ExecStartPre = lib.optional (cfg.environmentFiles != [ ]) "${protectedEnvironmentFileCheck} ${lib.escapeShellArgs (map builtins.toString cfg.environmentFiles)}";
+          ExecStartPre = lib.optional (cfg.environmentFiles != [ ]) "+${protectedEnvironmentFileCheck} ${lib.escapeShellArgs (map builtins.toString cfg.environmentFiles)}";
           ExecStart = "${cfg.package}/bin/hermes-webui";
           Restart = "on-failure";
           Environment = mappedEnvironment;
