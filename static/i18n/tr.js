@@ -1651,7 +1651,7 @@
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
-  
-  
-  
+
+
+
   };

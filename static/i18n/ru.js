@@ -1241,7 +1241,7 @@
     profile_name_label: 'Имя',
     profile_base_url_label: 'Базовый URL',
     profile_api_key_label: 'API-ключ',
-  
+
     // Session management and settings keys (en fallback — pending translation)
     session_archive: 'Archive conversation',
     session_hide_external: 'Скрыть из списка',

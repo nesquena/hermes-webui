@@ -1223,7 +1223,7 @@
     profile_name_label: 'Nombre',
     profile_base_url_label: 'URL base',
     profile_api_key_label: 'Clave API',
-  
+
     cmd_status: 'Show session info',
     // Session management and settings keys (en fallback — pending translation)
     session_archive: 'Archive conversation',

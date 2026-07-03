@@ -23,7 +23,7 @@
     voice_recording_active: 'Dừng ghi âm',
     voice_mode_toggle: 'Chế độ giọng nói',
     voice_mode_toggle_active: 'Thoát chế độ giọng nói',
-    // Turn-based voice mode (#1333)    
+    // Turn-based voice mode (#1333)
     voice_listening: 'Đang nghe…',
     voice_speaking: 'Đang nói…',
     voice_thinking: 'Đang suy nghĩ…',

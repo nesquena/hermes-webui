@@ -894,7 +894,7 @@
     profile_name_label: 'Name',
     profile_base_url_label: 'Basis-URL',
     profile_api_key_label: 'API-Schlüssel',
-  
+
     // Session management and settings keys (en fallback — pending translation)
     session_archive: 'Archive conversation',
     session_hide_external: 'Aus Liste ausblenden',
