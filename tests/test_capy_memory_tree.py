@@ -10719,7 +10719,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_pull_files_metad
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_files_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_files_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -10773,7 +10773,11 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_files_final
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory(hostile_body_sentinel, limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search_results": search["results"]}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("pull-files-drift-space", limit=5)
+    serialized = json.dumps(
+        {"result": result, "jobs": jobs, "search_results": search["results"], "relevant": relevant},
+        sort_keys=True,
+    ).lower()
 
     assert calls == [{"url": "https://api.github.com/repos/capy/spaces/pulls/42/files", "timeout": 8}]
     assert read_calls == []
@@ -10783,6 +10787,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_files_final
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / "github-pr-files-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for forbidden in (
         "evil/leaky",
         "pulls/99/files",
