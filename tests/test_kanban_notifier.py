@@ -605,6 +605,81 @@ class TestDeliver:
             assert "t_1" in prompt
             assert "@None" not in prompt
 
+    def test_silent_terminal_event_cleans_up_subscription(
+        self, fake_kanban, clean_notifier
+    ):
+        """A task that reaches done via a non-wake event (e.g. 'status')
+        should NOT trigger a wakeup prompt, but SHOULD clean up the
+        subscription and dedup entry — no stale-sub leak."""
+        fake_kanban.tasks = [FakeTask("t_1", "Done Task", "done", "w")]
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "status", {"to": "done"}, 100),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        deliveries = clean_notifier._poll_once()
+        assert len(deliveries) == 1
+
+        with patch("api.routes.start_session_turn") as mock_turn:
+            clean_notifier._deliver(deliveries)
+            # No prompt should be sent for a silent terminal event
+            mock_turn.assert_not_called()
+
+        # Subscription should be removed (cleanup ran)
+        assert len(fake_kanban.subs) == 0
+        # Dedup key should be cleaned up too
+        key = clean_notifier._dedup_key("default", "t_1", "sess-1")
+        assert key not in clean_notifier._DELIVERED_EVENTS
+
+    def test_silent_terminal_event_no_cleanup_for_non_terminal(
+        self, fake_kanban, clean_notifier
+    ):
+        """A silent event (e.g. 'status') for a non-terminal task should
+        neither prompt nor clean up — just skip."""
+        fake_kanban.tasks = [FakeTask("t_1", "Running Task", "running", "w")]
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "status", {"to": "running"}, 100),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        deliveries = clean_notifier._poll_once()
+        assert len(deliveries) == 1
+
+        with patch("api.routes.start_session_turn") as mock_turn:
+            clean_notifier._deliver(deliveries)
+            mock_turn.assert_not_called()
+
+        # Subscription should still exist (task is not terminal)
+        assert len(fake_kanban.subs) == 1
+
+    def test_mixed_wake_and_silent_events(self, fake_kanban, clean_notifier):
+        """When a delivery contains both wake and silent kinds, only the
+        wake kinds should appear in the prompt, and cleanup should still
+        run if the task is terminal."""
+        fake_kanban.tasks = [FakeTask("t_1", "Done Task", "done", "w")]
+        fake_kanban.events = [
+            FakeEvent(1, "t_1", None, "completed", {"summary": "ok"}, 100),
+            FakeEvent(2, "t_1", None, "status", {"to": "done"}, 101),
+        ]
+        fake_kanban.subs = [_make_sub(task_id="t_1", chat_id="sess-1")]
+
+        deliveries = clean_notifier._poll_once()
+        assert len(deliveries) == 1
+        assert len(deliveries[0]["events"]) == 2
+
+        mock_resp = {"_status": 200, "stream_id": "s1"}
+        with patch("api.background_process._session_has_active_turn", return_value=False), \
+             patch("api.routes.start_session_turn", return_value=mock_resp) as mock_turn:
+            clean_notifier._deliver(deliveries)
+            mock_turn.assert_called_once()
+            prompt = mock_turn.call_args[0][1]
+            # Only "completed" should be in the prompt, not "status"
+            assert "completed" in prompt
+            assert "status changed" not in prompt
+
+        # Cleanup should run (task is done)
+        assert len(fake_kanban.subs) == 0
+
 
 class TestThreadLifecycle:
     def test_start_and_stop(self, clean_notifier):

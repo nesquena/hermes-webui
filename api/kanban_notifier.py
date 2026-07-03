@@ -29,7 +29,15 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 15
+# Kinds that trigger a wakeup prompt to the creator agent
 _WAKE_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
+# Additional kinds that don't wake the agent but signal a silent terminal
+# transition — we claim them so _deliver can clean up the subscription
+# and dedup entry. Without this, a task that reaches done/archived via
+# a non-wake event would leak its subscription forever.
+_SILENT_TERMINAL_KINDS = ("status", "archived", "unblocked")
+# Kinds to claim from the DB: wake kinds + silent terminal kinds
+_CLAIM_KINDS = _WAKE_KINDS + _SILENT_TERMINAL_KINDS
 _TERMINAL_STATUSES = {"done", "archived"}
 
 _NOTIFIER_THREAD: Optional[threading.Thread] = None
@@ -131,7 +139,7 @@ def _poll_once() -> list[dict]:
                     platform=sub["platform"],
                     chat_id=sub["chat_id"],
                     thread_id=sub.get("thread_id") or None,
-                    kinds=_WAKE_KINDS,
+                    kinds=_CLAIM_KINDS,
                 )
 
                 if not events:
@@ -195,66 +203,81 @@ def _deliver(deliveries: list[dict]) -> None:
             continue
 
         task_id = sub["task_id"]
+        all_kinds = {ev.kind for ev in d["events"]}
+        # Split into wake kinds (trigger prompt) and silent kinds (cleanup only)
+        wake_kinds = all_kinds & set(_WAKE_KINDS)
+        silent_kinds = all_kinds - set(_WAKE_KINDS)
+
         title = (task.title if task else task_id)[:120]
         assignee = (task.assignee if task else None) or ""
-        kinds = {ev.kind for ev in d["events"]}
-
-        prompt = _format_wakeup_prompt(task_id, title, assignee, board_slug, kinds)
 
         # Use a stable process_id for dedup: kanban:{task_id}:{board}
         process_id = f"kanban:{board_slug}:{task_id}"
 
-        delivery_ok = False
-        try:
-            if _session_has_active_turn(session_id):
-                # Session is busy — defer for next teardown/turn drain
-                record_deferred_wakeup(session_id, process_id, prompt)
-                logger.info(
-                    "kanban webui notifier: deferred wakeup for session %s "
-                    "(task %s, events %s)",
-                    session_id, task_id, kinds,
-                )
-                delivery_ok = True
-            else:
-                # Call start_session_turn synchronously to get the real status.
-                # _start_server_side_wakeup_turn spawns a daemon that we cannot
-                # await, so we call the underlying primitive directly.
-                from api.routes import start_session_turn
-                resp = start_session_turn(
-                    session_id, prompt, source="kanban_wakeup"
-                )
-                status = int((resp or {}).get("_status", 200) or 200)
-                if status == 409:
-                    # Raced an active turn — defer for redelivery
-                    record_deferred_wakeup(session_id, process_id, prompt)
-                    logger.info(
-                        "kanban webui notifier: wakeup raced active turn for "
-                        "session %s (task %s); deferred",
-                        session_id, task_id,
-                    )
-                    delivery_ok = True
-                elif status >= 400:
-                    logger.warning(
-                        "kanban webui notifier: wakeup failed for session %s "
-                        "(task %s): status=%s err=%r",
-                        session_id, task_id, status,
-                        (resp or {}).get("error"),
-                    )
-                    delivery_ok = False
-                else:
-                    logger.info(
-                        "kanban webui notifier: wakeup turn started for session "
-                        "%s (task %s, events %s)",
-                        session_id, task_id, kinds,
-                    )
-                    delivery_ok = True
-        except Exception:
-            logger.warning(
-                "kanban webui notifier: wakeup failed for session %s (task %s) "
-                "— rewinding cursor so the event is retried next tick",
-                session_id, task_id, exc_info=True,
+        # If there are no wake kinds, this is a silent-terminal delivery.
+        # Skip the prompt but still clean up if the task is terminal.
+        if not wake_kinds:
+            delivery_ok = True  # nothing to deliver, so no failure
+            logger.debug(
+                "kanban webui notifier: silent terminal event for task %s "
+                "(kinds=%s) — skipping prompt, checking cleanup",
+                task_id, silent_kinds,
+            )
+        else:
+            prompt = _format_wakeup_prompt(
+                task_id, title, assignee, board_slug, wake_kinds
             )
             delivery_ok = False
+            try:
+                if _session_has_active_turn(session_id):
+                    # Session is busy — defer for next teardown/turn drain
+                    record_deferred_wakeup(session_id, process_id, prompt)
+                    logger.info(
+                        "kanban webui notifier: deferred wakeup for session %s "
+                        "(task %s, events %s)",
+                        session_id, task_id, wake_kinds,
+                    )
+                    delivery_ok = True
+                else:
+                    # Call start_session_turn synchronously to get the real status.
+                    # _start_server_side_wakeup_turn spawns a daemon that we cannot
+                    # await, so we call the underlying primitive directly.
+                    from api.routes import start_session_turn
+                    resp = start_session_turn(
+                        session_id, prompt, source="kanban_wakeup"
+                    )
+                    status = int((resp or {}).get("_status", 200) or 200)
+                    if status == 409:
+                        # Raced an active turn — defer for redelivery
+                        record_deferred_wakeup(session_id, process_id, prompt)
+                        logger.info(
+                            "kanban webui notifier: wakeup raced active turn for "
+                            "session %s (task %s); deferred",
+                            session_id, task_id,
+                        )
+                        delivery_ok = True
+                    elif status >= 400:
+                        logger.warning(
+                            "kanban webui notifier: wakeup failed for session %s "
+                            "(task %s): status=%s err=%r",
+                            session_id, task_id, status,
+                            (resp or {}).get("error"),
+                        )
+                        delivery_ok = False
+                    else:
+                        logger.info(
+                            "kanban webui notifier: wakeup turn started for session "
+                            "%s (task %s, events %s)",
+                            session_id, task_id, wake_kinds,
+                        )
+                        delivery_ok = True
+            except Exception:
+                logger.warning(
+                    "kanban webui notifier: wakeup failed for session %s (task %s) "
+                    "— rewinding cursor so the event is retried next tick",
+                    session_id, task_id, exc_info=True,
+                )
+                delivery_ok = False
 
         if not delivery_ok:
             # Rewind the DB cursor so the event is re-delivered on the next
