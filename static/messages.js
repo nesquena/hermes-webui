@@ -1122,6 +1122,7 @@ if(typeof document!=='undefined'){
 // setBusy(true) is only called after the first await inside send().
 let _sendInProgress = false;
 let _sendInProgressSid = null;  // session_id of the in-flight send
+let _failedSendSnapshot = null;  // {sid, text} snapshot kept until success or retry
 const _sessionTitleProvisionalBySid = new Map();
 // Agent commands that are safe to execute directly in the WebUI even though
 // their canonical command is registered on the backend (for example
@@ -1495,6 +1496,10 @@ async function send(){
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
+  // Snapshot the user's text before clearing the composer. Used to restore the
+  // draft and mark the failed user turn retryable if /api/chat/start fails.
+  _failedSendSnapshot = {sid: activeSid, text: text||''};
+
   $('msg').value='';autoResize();
   // Clear persisted composer draft since message was sent.
   if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
@@ -1662,10 +1667,14 @@ async function send(){
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
         await loadSession(activeSid);
+        _failedSendSnapshot = null;
         setComposerStatus('');
         return;
       }catch(_){
-        // Fall through to standard error handling if session reload fails.
+        _failedSendSnapshot = null;
+        setBusy(false);
+        setComposerStatus('');
+        return;
       }
     }
 
@@ -1675,8 +1684,23 @@ async function send(){
     // Only hide approval card if it belongs to the session that just finished
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+    if(_failedSendSnapshot&&_failedSendSnapshot.sid===activeSid){
+      const _failedUserTurn=[...S.messages].reverse().find(m=>m.role==='user');
+      if(_failedUserTurn){
+        _failedUserTurn._send_failed_retry=true;
+        _failedUserTurn._send_failed_text=_failedSendSnapshot.text||'';
+      }
+    }
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    _queueDrainSid=activeSid;renderMessages();setBusy(false);
+    if(_failedSendSnapshot&&_failedSendSnapshot.sid===activeSid){
+      const _snapText=_failedSendSnapshot.text;
+      if($('msg')&&!$('msg').value&&_snapText){$('msg').value=_snapText;if(typeof autoResize==='function')autoResize();}
+      if(typeof updateSendBtn==='function')updateSendBtn();
+      setComposerStatus(t('send_draft_restored'));
+    }else{
+      setComposerStatus(`Error: ${errMsg}`);
+    }
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
@@ -1756,6 +1780,38 @@ async function send(){
   attachLiveStream(activeSid, streamId, uploadedNames);
 
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+}
+
+async function retryFailedSend(btn){
+  if(!S.session||S.busy||!_failedSendSnapshot) return;
+  const row=btn&&btn.closest('[data-msg-idx]');
+  if(!row) return;
+  const userIdx=parseInt(row.dataset.msgIdx,10);
+  const m=S.messages[userIdx];
+  if(!m||m.role!=='user'||!m._send_failed_retry) return;
+  if(_failedSendSnapshot.sid!==S.session.session_id) return;
+  const retryText=m._send_failed_text||'';
+  if(!retryText) return;
+  const initialSid=S.session.session_id;
+  const absoluteKeepCount=(typeof _oldestIdx!=='undefined'?_oldestIdx:0)+userIdx;
+  if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+  if(!S.session||S.session.session_id!==initialSid) return;
+  const loadedOldest=(typeof _oldestIdx!=='undefined'?_oldestIdx:0);
+  const localKeepCount=absoluteKeepCount-loadedOldest;
+  const current=S.messages[localKeepCount];
+  if(!current||current.role!=='user'||!current._send_failed_retry) return;
+  try{
+    await api('/api/session/truncate',{method:'POST',body:JSON.stringify({session_id:initialSid,keep_count:absoluteKeepCount})});
+    S.messages=S.messages.slice(0,localKeepCount);
+    _failedSendSnapshot=null;
+    renderMessages();
+    if($('msg')) $('msg').value=retryText;
+    if(typeof autoResize==='function') autoResize();
+    if(typeof updateSendBtn==='function') updateSendBtn();
+    await send();
+  }catch(e){
+    if(typeof setComposerStatus==='function') setComposerStatus(t('retry_failed')+(e&&e.message||e));
+  }
 }
 
 const LIVE_STREAMS={};
@@ -5063,6 +5119,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
         _clearOwnerInflightState();
+        if(_failedSendSnapshot&&_failedSendSnapshot.sid===activeSid) _failedSendSnapshot=null;
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
@@ -5913,6 +5970,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       },null);
       clearLiveToolCards();if(!assistantText)removeThinking();
       _ensureSingleTerminalStreamErrorMarker(S.messages);
+      if(_failedSendSnapshot&&_failedSendSnapshot.sid===activeSid&&!assistantText){
+        const _failedUserTurn=[...S.messages].reverse().find(m=>m.role==='user'&&!m._error&&!m._recovered);
+        if(_failedUserTurn){
+          _failedUserTurn._send_failed_retry=true;
+          _failedUserTurn._send_failed_text=_failedSendSnapshot.text||'';
+        }
+      }
       _attachProjectedAnchorSceneToLastAssistant(S.messages);
       renderMessages({preserveScroll:true});
       // If they were following the stream, force the viewport to the bottom after
