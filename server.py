@@ -112,6 +112,7 @@ from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
+from api.crash_visibility import install_crash_visibility
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -546,6 +547,12 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
 
+    # Crash visibility FIRST (issue #4633): enable faulthandler + excepthooks +
+    # exit audit before any heavy startup work so a native crash or a daemon /
+    # handler-thread exception during startup or serving produces a diagnostic
+    # instead of a silent death. The paired memory root-cause is #4765.
+    install_crash_visibility()
+
     print_startup_config()
 
     fd_limit = _raise_fd_soft_limit()
@@ -584,7 +591,8 @@ def main() -> None:
     if within_container:
         print('[ok] Running within container.', flush=True)
 
-    from api.auth import is_auth_enabled
+    # Security: warn if binding non-loopback without authentication
+    from api.auth import get_oidc_startup_warning, is_auth_enabled
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
         print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
         print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
@@ -596,6 +604,10 @@ def main() -> None:
         print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
         print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
         print(f'        enable authentication.', flush=True)
+
+    oidc_startup_warning = get_oidc_startup_warning()
+    if oidc_startup_warning:
+        print(f'[!!] WARNING: {oidc_startup_warning}', flush=True)
 
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:

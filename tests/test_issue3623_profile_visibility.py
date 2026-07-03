@@ -107,7 +107,8 @@ def _function_body(src: str, signature: str) -> str:
 def test_profile_dropdown_filters_hidden_profiles_but_preserves_active():
     body = _function_body(_panels_js(), "function renderProfileDropdown(data)")
 
-    assert "const allProfiles = data.profiles || [];" in body
+    assert "data = data || {};" in body
+    assert "const allProfiles = (Array.isArray(data.profiles) ? data.profiles : []).filter(p => p && typeof p.name === 'string');" in body
     assert "allProfiles.some(p => p.name === S.activeProfile)" in body
     assert "const profiles = allProfiles.filter(p => p && (p.visible !== false || p.name === active));" in body
 

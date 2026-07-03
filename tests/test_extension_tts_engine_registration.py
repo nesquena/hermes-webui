@@ -31,8 +31,11 @@ def test_public_api_present():
 
 def test_reserved_builtins_guarded():
     assert "_HERMES_TTS_RESERVED" in BOOT_JS
-    # browser/edge/elevenlabs must be reserved so an extension can't shadow them
-    assert "browser:1" in BOOT_JS and "edge:1" in BOOT_JS and "elevenlabs:1" in BOOT_JS
+    # browser/edge/elevenlabs/openai must be reserved so an extension can't shadow them
+    assert "browser:1" in BOOT_JS
+    assert "edge:1" in BOOT_JS
+    assert "elevenlabs:1" in BOOT_JS
+    assert "openai:1" in BOOT_JS
 
 
 def test_both_playback_paths_check_registry():
@@ -75,6 +78,8 @@ def test_registration_behavior():
         // reserved key rejected
         results.reservedRejected = (window.registerHermesTtsEngine({
           id: 'edge', label: 'x', synthesize: () => new ArrayBuffer(1) }) === false);
+        results.openaiReservedRejected = (window.registerHermesTtsEngine({
+          id: 'openai', label: 'x', synthesize: () => new ArrayBuffer(1) }) === false);
         // bad id rejected
         results.badIdRejected = (window.registerHermesTtsEngine({
           id: 'Bad Id!', label: 'x', synthesize: () => new ArrayBuffer(1) }) === false);
@@ -101,6 +106,7 @@ def test_registration_behavior():
     assert r["validOk"] is True
     assert r["isRegistered"] is True
     assert r["reservedRejected"] is True
+    assert r["openaiReservedRejected"] is True
     assert r["badIdRejected"] is True
     assert r["noSynthRejected"] is True
     assert r["optionListed"] is True

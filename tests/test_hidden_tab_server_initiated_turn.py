@@ -89,7 +89,7 @@ def test_hidden_poll_hits_session_status_and_attaches_as_replay():
     """
     start = MESSAGES_JS.find("function _startHiddenActiveStreamPoll(sid)")
     assert start != -1
-    body = MESSAGES_JS[start:start + 1400]
+    body = MESSAGES_JS[start:start + 2400]
     assert "api/session/status?session_id=" in body
     assert "d.active_stream_id" in body
     # attaches as replay (recovered=true) — turn is already mid-flight
@@ -127,3 +127,59 @@ def test_hidden_poll_stops_on_session_teardown():
     assert stop_idx != -1
     block = MESSAGES_JS[stop_idx:stop_idx + 400]
     assert "_stopHiddenActiveStreamPoll()" in block
+
+
+# ── Multi-pane: attach returns bool; poll only stops on a real attach ──────
+
+def test_attach_returns_bool_and_bails_false_on_non_current_pane():
+    """_attachServerInitiatedStream must signal success/failure so the poll can
+    decide whether to keep trying. In the multi-pane edge where the active pane
+    is a DIFFERENT session, it must NOT attach to that pane's UI and must return
+    false (so the poll keeps retrying for the right pane) — never a bare
+    `return;` that the caller can't distinguish from success.
+    """
+    fn_idx = MESSAGES_JS.find("function _attachServerInitiatedStream(sid, streamId, recovered)")
+    assert fn_idx != -1, "_attachServerInitiatedStream signature not found"
+    body = MESSAGES_JS[fn_idx:fn_idx + 4000]
+    # Non-current pane bails with an explicit false, not a bare return.
+    assert "if (!isCurrent) return false;" in body
+    # Bad/empty args also bail false; success paths return true.
+    assert "if (!streamId) return false;" in body
+    assert "return true;" in body
+    # The catch returns false so a thrown attach keeps the poll alive.
+    catch_idx = body.find("catch (_)")
+    assert catch_idx != -1, "function must keep its try/catch"
+    catch_body = body[catch_idx:]
+    assert "return false;" in catch_body
+    # Gate must-fix #1: on a mid-setup throw the catch must CLEAR the partial
+    # state it set before the DOM calls (S.busy / S.activeStreamId /
+    # S.session.active_stream_id), guarded to only clear when this pane still owns
+    # the stream — otherwise the next poll tick sees a stale activeStreamId, exits
+    # early as "already attached", and wedges the turn invisible + composer busy.
+    assert "S.activeStreamId = null;" in catch_body
+    assert "S.busy = false;" in catch_body
+    # And a post-handoff failure (after attachLiveStream took the stream) must NOT
+    # be reported as failure — the stream is already in good hands.
+    assert "handedOff" in body
+    assert "if (handedOff) return true;" in catch_body
+
+
+def test_poll_stops_only_when_attach_succeeds():
+    """The hidden poll must gate _stopHiddenActiveStreamPoll on the attach
+    return value — stopping unconditionally would, in the multi-pane edge,
+    cancel the poll while the turn was never attached (renders only on next
+    interaction). So: capture the bool, stop ONLY when true.
+    """
+    start = MESSAGES_JS.find("function _startHiddenActiveStreamPoll(sid)")
+    assert start != -1, "_startHiddenActiveStreamPoll signature not found"
+    # Window 2400: the multi-pane follow-up adds an explanatory comment block
+    # before the attach call, pushing it past a narrower slice.
+    body = MESSAGES_JS[start:start + 3200]
+    assert "const attached = _attachServerInitiatedStream(sid, streamId, true)" in body
+    # Stop the poll only on a true attach (the false branch keeps polling within
+    # the bounded-retry budget rather than stopping).
+    assert "if (attached) {" in body
+    assert "_stopHiddenActiveStreamPoll();" in body
+    # The bounded-retry give-up: a never-current pane stops after the budget.
+    assert "_sessionStreamHiddenPollFalseCount" in body
+    assert "_SESSION_STREAM_HIDDEN_POLL_MAX_FALSE" in body

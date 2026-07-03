@@ -32,6 +32,7 @@ SOURCE_LABELS = {
     'telegram': 'Telegram',
     'tool': 'Tool',
     'tui': 'TUI',
+    'webhook': 'Webhook',
     'webui': 'WebUI',
     'weixin': 'Weixin',
 }
@@ -54,6 +55,8 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
         session_source = 'messaging'
     elif raw == 'cron':
         session_source = 'cron'
+    elif raw == 'webhook':
+        session_source = 'webhook'
     elif raw == 'tool':
         session_source = 'tool'
     elif raw == 'api_server':
@@ -173,7 +176,11 @@ def is_cli_session_row(row: dict) -> bool:
     source_label = _safe_lower(row.get("source_label"))
     if "webui" in {source, source_tag, raw_source, source_name, source_label}:
         return False
-    non_cli_sources = MESSAGING_SOURCES | {"cron", "tool", "api", "api_server"}
+    # 'subagent' is a delegated delegate_task child: view-only, owned by the
+    # runner, never a writable WebUI/CLI session (#5307). Classify it non-CLI so
+    # sidebar rows and every is_cli_session_row() consumer keep it out of the
+    # CLI/writable treatment.
+    non_cli_sources = MESSAGING_SOURCES | {"cron", "webhook", "tool", "api", "api_server", "subagent"}
     if {source, source_tag, raw_source, source_name, source_label} & non_cli_sources:
         return False
     if source == "messaging":

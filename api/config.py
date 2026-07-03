@@ -14,6 +14,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -1138,6 +1139,7 @@ _PROVIDER_DISPLAY = {
     "openai-codex": "OpenAI Codex",
     "xai-oauth": "xAI Grok OAuth",
     "copilot": "GitHub Copilot",
+    "moa": "Mixture of Agents",
     "cursor-acp": "Cursor ACP",
     "zai": "Z.AI / GLM",
     "kimi-coding": "Kimi / Moonshot",
@@ -1677,15 +1679,31 @@ _PROVIDER_MODELS = {
         {"id": "MiniMax-M2.7", "label": "MiniMax M2.7"},
     ],
     # GitHub Copilot — model IDs served via the Copilot API
+    # Fallback ONLY — the live GitHub Copilot catalog
+    # (hermes_cli.models.provider_model_ids("copilot")) is authoritative and is
+    # tried first by _read_live_provider_model_ids(). This static list is the
+    # safety net shown when the live probe fails (cold start / token blip). Keep
+    # it in sync with the real integrator allowlist so a probe miss never renders
+    # legacy junk (GPT-4o / gpt-3.5-turbo). Last synced 2026-06-30 from the live
+    # copilot-4-cli catalog (16 models).
     "copilot": [
+        {"id": "claude-opus-4.8", "label": "Claude Opus 4.8"},
+        {"id": "claude-opus-4.7", "label": "Claude Opus 4.7"},
+        {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
+        {"id": "claude-sonnet-5", "label": "Claude Sonnet 5"},
+        {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
+        {"id": "claude-sonnet-4.5", "label": "Claude Sonnet 4.5"},
+        {"id": "claude-haiku-4.5", "label": "Claude Haiku 4.5"},
         {"id": "gpt-5.5", "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4", "label": "GPT-5.4"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
+        {"id": "gpt-5.3-codex", "label": "GPT-5.3 Codex"},
+        {"id": "gpt-5-mini", "label": "GPT-5 Mini"},
+        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash"},
+        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+        {"id": "mai-code-1-flash-picker", "label": "MAI Code 1 Flash"},
         {"id": "gpt-4o", "label": "GPT-4o"},
-        {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
-        {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
-        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
     ],
     # Cursor ACP — models served via Cursor CLI agent acp
     "cursor-acp": [
@@ -2901,10 +2919,32 @@ def parse_reasoning_effort(effort):
     return None
 
 
-def _strip_provider_hint_for_reasoning(model_id: str) -> str:
-    """Remove WebUI routing hints before provider-specific capability lookup."""
+def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = None) -> str:
+    """Remove WebUI routing hints before provider-specific capability lookup.
+
+    A plain ``@provider:model`` hint strips cleanly on the first colon. But a
+    *named* custom provider hint is ``@custom:<slug>:model`` — two colons —
+    and the naive first-colon split only strips the leading ``@custom:``,
+    leaving ``<slug>:model`` behind. That leftover slug fragment can hide a
+    nested gateway route from prefix-based checks like
+    ``_nested_route_reasoning_denied()`` (e.g. ``agg:vertex/gemini-image-1.0``
+    no longer starts with ``vertex/gemini-``), silently re-enabling reasoning
+    controls on routes that must never expose them.
+
+    When the resolved *provider* is known (e.g. ``"custom:agg"``), strip the
+    exact ``@{provider}:`` prefix first so both segments are removed in one
+    pass. Falls back to the generic first-colon split when no provider is
+    given or it doesn't match — preserving prior behavior for plain
+    ``@provider:model`` hints.
+    """
     model = str(model_id or "").strip()
-    if model.startswith("@") and ":" in model:
+    if not model.startswith("@"):
+        return model
+    if provider:
+        exact_prefix = f"@{provider}:".lower()
+        if model.lower().startswith(exact_prefix):
+            return model[len(exact_prefix) :]
+    if ":" in model:
         return model.split(":", 1)[1]
     return model
 
@@ -3000,17 +3040,38 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
     return False
 
 
+# Matches the nested Gemini gateway route prefix anywhere it appears in a
+# model id, as long as it isn't embedded inside a larger alphanumeric token
+# (the negative lookbehind excludes false positives like "notvertex/gemini-x").
+# Scanning for the pattern at any position — rather than requiring the whole
+# string to start with it — makes the check independent of how many wrapper
+# layers precede the route: ``@provider:``, a named custom-provider slug
+# (``@custom:<slug>:``), or any future nesting scheme none of us have
+# invented yet. This invariant (Gemini image/embedding routes must never
+# expose a reasoning toggle) was bypassed twice via different edge cases in
+# the prefix-stripping logic before being made structurally boundary-based
+# instead of prefix-based — see PR #5313 review history.
+_NESTED_ROUTE_PATTERN = re.compile(r"(?<![a-z0-9])(vertex/gemini-|gemini_cli/gemini-)(.*)$")
+
+
 def _nested_route_reasoning_denied(model: str) -> bool:
-    """Hard deny for nested Gemini gateway routes that must never show a reasoning toggle."""
+    """Hard deny for nested Gemini gateway routes that must never show a reasoning toggle.
+
+    Matches the route pattern anywhere in *model*, not just when the whole
+    string starts with it, so this check does not depend on a caller having
+    stripped exactly the right wrapper prefix first. Callers should still
+    pass the least-wrapped form they have (e.g. after
+    ``_strip_provider_hint_for_reasoning``) for clarity, but correctness no
+    longer hinges on it.
+    """
     lower = str(model or "").strip().lower()
     if not lower:
         return False
-    for prefix in ("vertex/gemini-", "gemini_cli/gemini-"):
-        if lower.startswith(prefix):
-            tail = lower[len(prefix) :]
-            if tail.startswith("embedding") or "image" in tail or "imagine" in tail:
-                return True
-    return False
+    match = _NESTED_ROUTE_PATTERN.search(lower)
+    if not match:
+        return False
+    tail = match.group(2)
+    return tail.startswith("embedding") or "image" in tail or "imagine" in tail
 
 
 def _nested_gateway_route_reasoning(model: str) -> bool:
@@ -3338,13 +3399,45 @@ def resolve_model_reasoning_efforts(
             provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
+
+    # IDE-copilot providers never expose reasoning effort options.
+    # Guard early so a stray config entry can't override this.
     if provider in {"cursor-acp", "copilot-acp"}:
         return []
 
-    hinted_model = _strip_provider_hint_for_reasoning(model)
+    hinted_model = _strip_provider_hint_for_reasoning(model, provider)
 
+    # Master hides reasoning controls for nested image/embedding routes. Keep
+    # that hard deny above provider config so an explicit allowlist cannot
+    # re-enable controls for routes that should never expose them.
     if _nested_route_reasoning_denied(hinted_model):
         return []
+
+    # 0. Provider config: providers.<name>.reasoning_efforts or named
+    # custom_providers[].reasoning_efforts. When the user has explicitly listed
+    # valid efforts for a provider, return that list directly — no heuristics,
+    # no models.dev lookup.
+    # Only short-circuits when the filtered list is non-empty; an all-invalid
+    # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
+    _re_list = None
+    try:
+        if provider and provider.startswith("custom:"):
+            for _entry in _custom_provider_entries():
+                if _custom_provider_slug_from_name(_entry.get("name")) == provider:
+                    _re_list = _entry.get("reasoning_efforts")
+                    break
+        elif provider:
+            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            if isinstance(_prov_entry, dict):
+                _re_list = _prov_entry.get("reasoning_efforts")
+        if isinstance(_re_list, list) and _re_list:
+            _filtered = [str(x).strip().lower() for x in _re_list
+                         if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
+            _filtered = list(dict.fromkeys(_filtered))
+            if _filtered:
+                return _filtered
+    except Exception:
+        pass
 
     if provider in {"copilot", "github-copilot"}:
         try:
@@ -5482,6 +5575,28 @@ def _models_from_live_provider_ids(provider_id: str, live_ids: list[str]) -> lis
     return models
 
 
+def _moa_preset_models_from_config(config_obj: dict | None = None) -> list[dict]:
+    """Return enabled MoA presets from local config as picker model entries."""
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    moa_cfg = source.get("moa") if isinstance(source, dict) else None
+    if not isinstance(moa_cfg, dict) or not bool(moa_cfg.get("enabled", True)):
+        return []
+    presets = moa_cfg.get("presets")
+    if not isinstance(presets, dict):
+        return []
+    models: list[dict] = []
+    seen: set[str] = set()
+    for name, preset_cfg in presets.items():
+        preset_name = str(name or "").strip()
+        if not preset_name or preset_name in seen:
+            continue
+        if isinstance(preset_cfg, dict) and preset_cfg.get("enabled") is False:
+            continue
+        seen.add(preset_name)
+        models.append({"id": preset_name, "label": preset_name})
+    return models
+
+
 def _read_visible_codex_cache_model_ids() -> list[str]:
     """Return visible model slugs from Codex's local models_cache.json.
 
@@ -5963,7 +6078,28 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     or _is_plugin_model_provider(_canonical)
                 )
                 _is_provider_config = isinstance(_provider_cfg, dict)
-                if not (_is_known_provider or _is_provider_config):
+                _has_provider_route = False
+                if _is_provider_config:
+                    _has_provider_route = any(
+                        str(_provider_cfg.get(_route_key) or "").strip()
+                        for _route_key in ("api", "base_url", "api_key", "key_env")
+                    )
+                # A models-only provider config (no api/base_url/api_key/key_env)
+                # is only admitted as evidence when it's the active/configured
+                # provider (e.g. the lmstudio-style custom shape from #1970).
+                # This must NOT re-open the door for a spurious duplicate alias
+                # of a known provider (e.g. ``copilot-2: {name: "copilot",
+                # models: {...}}`` from #644/dedup regression) — that case is
+                # still rejected because it isn't the active provider and it
+                # isn't a route-bearing config in its own right.
+                _has_models_only_active_route = (
+                    not _has_provider_route
+                    and _is_provider_config
+                    and isinstance(_provider_cfg.get("models"), (dict, list))
+                    and _provider_cfg["models"]
+                    and _canonical == _canonicalise_provider_id(active_provider)
+                )
+                if not (_is_known_provider or _has_provider_route or _has_models_only_active_route):
                     continue
 
                 _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
@@ -6400,6 +6536,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _canonicalised_detected.add(_c)
             detected_providers = _canonicalised_detected
 
+        try:
+            _moa_cfg = cfg.get("moa") if isinstance(cfg, dict) else None
+            if isinstance(_moa_cfg, dict):
+                _moa_enabled = bool(_moa_cfg.get("enabled", True))
+                _moa_presets = _moa_cfg.get("presets")
+                if _moa_enabled and isinstance(_moa_presets, dict) and _moa_presets:
+                    detected_providers.add("moa")
+        except Exception:
+            logger.debug("Failed to inspect MoA presets for model picker", exc_info=True)
+
         # 5. Build model groups
         if detected_providers:
             _picker_selected_model_id = (
@@ -6739,6 +6885,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         _append_picker_group(provider_name, pid, raw_models)
                 elif (
                     pid in _PROVIDER_MODELS
+                    or pid in _PROVIDER_DISPLAY
                     or pid in _canonical_to_raw_provider_key
                     or _is_plugin_model_provider(pid)
                 ):
@@ -6752,11 +6899,21 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
-                    # source-of-truth and should still beat auto-discovery.
-                    # Otherwise, ask Hermes CLI first so WebUI tracks the same
-                    # live catalog as the agent/CLI picker; WebUI's static
-                    # _PROVIDER_MODELS table is now a fallback only (#1240).
-                    if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+                    # source-of-truth for custom/plugin providers, AND for most
+                    # built-in Hermes providers (e.g. providers.anthropic.models
+                    # is a real picker allowlist — see #644). Copilot is the
+                    # exception: it uses providers.copilot.models as a per-model
+                    # settings map (reasoning_effort, limits, etc.), so treating
+                    # that as an allowlist collapsed the Copilot picker to
+                    # whichever model had local settings. Only Copilot skips the
+                    # config-models allowlist branch and asks Hermes CLI for the
+                    # live catalog first (static _PROVIDER_MODELS is fallback only).
+                    _uses_models_as_settings_map = pid == "copilot"
+                    if (
+                        not _uses_models_as_settings_map
+                        and isinstance(provider_cfg, dict)
+                        and "models" in provider_cfg
+                    ):
                         cfg_models = provider_cfg["models"]
                         if isinstance(cfg_models, dict):
                             raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
@@ -6766,10 +6923,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                            for k in cfg_models]
 
                     if not raw_models:
-                        raw_models = _models_from_live_provider_ids(
-                            pid,
-                            _read_live_provider_model_ids(pid),
-                        )
+                        if pid == "moa":
+                            raw_models = _moa_preset_models_from_config(cfg)
+                        else:
+                            raw_models = _models_from_live_provider_ids(
+                                pid,
+                                _read_live_provider_model_ids(pid),
+                            )
 
                     if not raw_models:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
@@ -7354,10 +7514,47 @@ _INDEX_HTML_PATH = REPO_ROOT / "static" / "index.html"
 
 # ── Thread synchronisation ───────────────────────────────────────────────────
 LOCK = threading.Lock()
-# Max compact Session objects held in the in-memory LRU (issue #3506). Lighter
-# than the agent cache (no live agent runtime), but still bounded and operator-
-# tunable via HERMES_WEBUI_SESSIONS_MAX for installs with hundreds of sessions.
-SESSIONS_MAX = _env_int("HERMES_WEBUI_SESSIONS_MAX", 100)
+# Max compact Session objects held in the in-memory LRU (issue #3506, #4765).
+# Lighter than the agent cache (no live agent runtime), but still bounded so a
+# long-running self-hosted install cannot accumulate every session it ever
+# touched in RAM and eventually segfault (the #4765/#2233/#4633 crash cluster).
+#
+# Precedence for the effective cap is resolved by get_sessions_cache_max():
+#   1. config.yaml  webui.sessions_cache_max   (preferred, no new env var)
+#   2. HERMES_WEBUI_SESSIONS_MAX env var        (legacy operator override)
+#   3. DEFAULT_SESSIONS_CACHE_MAX               (sane bounded default)
+DEFAULT_SESSIONS_CACHE_MAX = 300
+SESSIONS_MAX = _env_int("HERMES_WEBUI_SESSIONS_MAX", DEFAULT_SESSIONS_CACHE_MAX)
+
+
+def get_sessions_cache_max(config_data: dict | None = None) -> int:
+    """Return the effective in-memory SESSIONS cache cap (issue #4765).
+
+    The bound is configurable through ``webui.sessions_cache_max`` in
+    ``config.yaml`` so operators of large self-hosted installs can size the
+    cache without editing source or adding a new ``HERMES_*`` env var (this
+    project forbids new env vars for non-secret config). A missing, empty,
+    non-numeric, or below-1 value falls back to the legacy
+    ``HERMES_WEBUI_SESSIONS_MAX`` env override, then to
+    ``DEFAULT_SESSIONS_CACHE_MAX`` — a typo can never disable the bound and
+    reintroduce unbounded memory growth.
+    """
+    active_cfg = config_data if isinstance(config_data, dict) else get_config()
+    webui_cfg = active_cfg.get("webui", {}) if isinstance(active_cfg, dict) else {}
+    if isinstance(webui_cfg, dict):
+        raw = webui_cfg.get("sessions_cache_max")
+        if raw is not None:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                value = None
+            if value is not None and value >= 1:
+                return value
+    # config.yaml did not specify a valid cap: honor the legacy env override
+    # (already parsed into SESSIONS_MAX) and finally the hardened default.
+    if isinstance(SESSIONS_MAX, int) and SESSIONS_MAX >= 1:
+        return SESSIONS_MAX
+    return DEFAULT_SESSIONS_CACHE_MAX
 CHAT_LOCK = threading.Lock()
 
 
@@ -7791,17 +7988,20 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
 _SETTINGS_DEFAULTS = {
     "default_workspace": str(DEFAULT_WORKSPACE),
     "onboarding_completed": False,
-    "send_key": "enter",  # 'enter' or 'ctrl+enter'
+    "send_key": "enter",  # 'enter', 'ctrl+enter', or 'shift+enter'
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
+    "show_busy_placeholder_hint": False,  # opt-in busy composer placeholder hint
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
     "virtualize_transcript": False,  # #4343: virtualize long (>80 msg) transcripts. EXPERIMENTAL, opt-IN (default OFF). Was opt-out/default-on in #4325 but caused scroll-up flicker on long sessions with tall tool-call rows (variable-height anchor oscillation) — flipped off for everyone in #4343; re-enabling requires an explicit opt-in (see virtualize_transcript_optin migration in load_settings).
     "virtualize_transcript_optin": False,  # #4343 migration marker: True only once the user explicitly enables virtualize_transcript AFTER the default-off flip. A stored virtualize_transcript=True WITHOUT this marker is a stale pre-flip value and is reset to False on load (force-off-for-everyone migration).
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": True,  # merge CLI/TUI/messaging sessions from state.db into the sidebar by default (#3988); established installs are grandfathered OFF by the load_settings backfill
+    "show_claude_code_sessions": True,  # allow filtering Claude Code rows without hiding other imported sources
     "show_cron_sessions": False,  # surface cron sessions in the sidebar (subordinate to show_cli_sessions)
+    "show_webhook_sessions": False,  # surface webhook sessions in the sidebar (subordinate to show_cli_sessions)
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
@@ -7812,6 +8012,8 @@ _SETTINGS_DEFAULTS = {
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "render_user_markdown": False,  # opt-in: render full markdown in user messages (#3870)
+    "large_text_paste_as_attachment": True,  # convert very large composer text pastes into .md attachments by default
+    "project_quick_create_buttons": False,  # opt-in: show per-project "+" quick-create buttons on sidebar project chips (#4676)
     "structured_code_default_view": "auto",  # JSON/YAML fenced-block default render: auto | on | off (#484 follow-up). auto => Tree when line count >= structured_code_auto_tree_lines, else Raw.
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
@@ -7842,6 +8044,7 @@ _SETTINGS_DEFAULTS = {
     "inflight_state_max_json_chars": 1500000,  # max serialized recovery snapshot payload before pruning
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "tab_order": [],  # user-defined sidebar/rail tab order for reorderable tabs; chat/settings stay fixed
+    "composer_control_order": [],  # user-defined composer footer control order; invalid/duplicate keys are ignored
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
@@ -7857,9 +8060,10 @@ _SETTINGS_DEFAULTS = {
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
-    "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
+    "default_message_mode": "steer",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
+    "provider_cost_budget": None,
 }
 _SETTINGS_LEGACY_DROP_KEYS = {
     "assistant_language",
@@ -7867,6 +8071,9 @@ _SETTINGS_LEGACY_DROP_KEYS = {
     "default_model",
     "activity_feed_expanded_default",
     "simplified_tool_calling",
+}
+_COMPOSER_CONTROL_ORDER_KEYS = {
+    key for key in _SETTINGS_DEFAULTS if key.startswith("hide_composer_")
 }
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
 _SETTINGS_SKIN_VALUES = {
@@ -7884,6 +8091,8 @@ _SETTINGS_SKIN_VALUES = {
     "geist-contrast",
     "zeus",
     "verdigris",
+    "neon-soft",
+    "neon-paint",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.
@@ -7962,6 +8171,12 @@ def load_settings() -> dict:
                         if k not in _SETTINGS_LEGACY_DROP_KEYS
                     }
                 )
+                if (
+                    "default_message_mode" not in stored
+                    and "busy_input_mode" in stored
+                ):
+                    settings["default_message_mode"] = stored.get("busy_input_mode")
+                settings.pop("busy_input_mode", None)
                 # Grandfather established installs OFF for show_cli_sessions (#3988).
                 # The default flipped True so NEW users see CLI/TUI/messaging
                 # sessions without hunting for the toggle — but an existing user
@@ -8016,11 +8231,11 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "simplified_tool_calling",
 }
 _SETTINGS_ENUM_VALUES = {
-    "send_key": {"enter", "ctrl+enter"},
+    "send_key": {"enter", "ctrl+enter", "shift+enter"},
     "sidebar_density": {"compact", "detailed"},
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
-    "busy_input_mode": {"queue", "interrupt", "steer"},
+    "default_message_mode": {"queue", "interrupt", "steer"},
     "chat_activity_display_mode": {"compact_worklog", "transparent_stream"},
     "structured_code_default_view": {"auto", "on", "off"},
 }
@@ -8038,13 +8253,16 @@ _SETTINGS_BOOL_KEYS = {
     "show_token_usage",
     "show_quota_chip",
     "show_conversation_outline",
+    "show_busy_placeholder_hint",
     "hide_empty_state_suggestions",
     "virtualize_transcript",
     "virtualize_transcript_optin",
     "show_tps",
     "fade_text_effect",
     "show_cli_sessions",
+    "show_claude_code_sessions",
     "show_cron_sessions",
+    "show_webhook_sessions",
     "show_previous_messaging_sessions",
     "sync_to_insights",
     "check_for_updates",
@@ -8059,6 +8277,8 @@ _SETTINGS_BOOL_KEYS = {
     "api_redact_enabled",
     "session_jump_buttons",
     "render_user_markdown",
+    "large_text_paste_as_attachment",
+    "project_quick_create_buttons",
     "session_endless_scroll",
     "auto_scroll_follow",
     "worklog_details_expanded_default",
@@ -8087,6 +8307,17 @@ _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").Lock()
 
 
+def _coerce_provider_cost_budget(value: Any) -> float | None:
+    """Normalize a monthly budget to the persisted two-decimal representation."""
+    try:
+        rounded = round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < rounded < 1e9) or not math.isfinite(rounded):
+        return None
+    return rounded
+
+
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     current = load_settings()
@@ -8098,6 +8329,12 @@ def save_settings(settings: dict) -> dict:
             "activity_feed_expanded_default"
         )
     settings.pop("activity_feed_expanded_default", None)
+    if (
+        "default_message_mode" not in settings
+        and "busy_input_mode" in settings
+    ):
+        settings["default_message_mode"] = settings.get("busy_input_mode")
+    settings.pop("busy_input_mode", None)
     settings.pop("simplified_tool_calling", None)
     pending_theme = current.get("theme")
     pending_skin = current.get("skin")
@@ -8157,10 +8394,10 @@ def save_settings(settings: dict) -> dict:
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)
             ):
                 continue
-            # Validate list-valued sidebar tab settings. Chat/settings stay fixed
-            # even if a tampered POST tries to persist them, and duplicates are
-            # collapsed while preserving the first requested order.
-            if k in {"hidden_tabs", "tab_order"}:
+            # Validate list-valued ordering settings. Chat/settings stay fixed
+            # for tabs; composer ordering only accepts known control keys.
+            # Duplicates are collapsed while preserving the first requested order.
+            if k in {"hidden_tabs", "tab_order", "composer_control_order"}:
                 if not isinstance(v, list):
                     continue
                 seen = set()
@@ -8169,11 +8406,24 @@ def save_settings(settings: dict) -> dict:
                     if not isinstance(s, str):
                         continue
                     s = s.strip()
-                    if not s or s in {"chat", "settings"} or s in seen:
+                    if not s or s in seen:
+                        continue
+                    if k in {"hidden_tabs", "tab_order"} and s in {"chat", "settings"}:
+                        continue
+                    if k == "composer_control_order" and s not in _COMPOSER_CONTROL_ORDER_KEYS:
                         continue
                     seen.add(s)
                     cleaned.append(s)
                 v = cleaned
+            if k == "provider_cost_budget":
+                if v is None or v == "":
+                    current[k] = None
+                    continue
+                budget = _coerce_provider_cost_budget(v)
+                if budget is None:
+                    continue
+                current[k] = budget
+                continue
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)

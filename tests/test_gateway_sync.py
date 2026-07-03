@@ -960,6 +960,7 @@ def test_agent_session_source_normalization_contract():
         'discord': ('messaging', 'Discord'),
         'slack': ('messaging', 'Slack'),
         'cron': ('cron', 'Cron'),
+        'webhook': ('webhook', 'Webhook'),
         'tool': ('tool', 'Tool'),
         'api_server': ('api', 'API'),
         'something_new': ('other', 'Something New'),

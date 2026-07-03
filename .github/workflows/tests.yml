@@ -102,7 +102,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio pytest-shard
+          # Office parsers stay optional at runtime; CI installs them explicitly for the workspace preview tests.
+          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio pytest-shard python-docx openpyxl python-pptx
           # ruff is installed so tests/test_ruff_forward_lint.py runs its E9/F821
           # tree-clean assertions in-suite (mirrors how eslint is available for
           # tests/test_static_js_runtime_lint.py). If install fails the test

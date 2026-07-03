@@ -127,3 +127,64 @@ def test_moa_config_is_per_turn_not_persisted():
     js_source = js_path.read_text(encoding="utf-8")
     assert "moa_config:_pendingMoaConfig?true:undefined" in js_source
     assert "_pendingMoaConfig=null" in js_source
+
+
+def test_moa_gateway_chat_start_fails_closed(monkeypatch, tmp_path):
+    """Gateway-backed WebUI sessions must reject /moa until the gateway consumes runtime overrides."""
+    import api.commands as commands
+    import api.routes as routes
+
+    class _Handler:
+        def __init__(self):
+            import io
+
+            self.status = None
+            self.response_headers = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.response_headers.append((key, value))
+
+        def end_headers(self):
+            self.response_headers.append(("__end__", ""))
+
+    class _Session:
+        session_id = "sess-moa-gateway"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        profile = "default"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+
+    def start_run(*_args, **_kwargs):  # pragma: no cover - should fail before run start
+        raise AssertionError("gateway-backed /moa must fail closed before starting a run")
+
+    def resolve_moa_config():  # pragma: no cover - should fail before resolving MoA
+        raise AssertionError("gateway-backed /moa must fail before resolving MoA config")
+
+    monkeypatch.setattr(routes, "get_session", lambda _sid: _Session())
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    monkeypatch.setattr(routes, "get_config", lambda: {"chat_backend": "gateway"})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+    monkeypatch.setattr(commands, "resolve_moa_config", resolve_moa_config)
+
+    handler = _Handler()
+    routes._handle_chat_start(
+        handler,
+        {
+            "session_id": "sess-moa-gateway",
+            "message": "diagnose issue",
+            "workspace": str(tmp_path),
+            "moa_config": True,
+        },
+    )
+
+    body = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert handler.status == 409
+    assert body["error"] == "MoA override is unavailable on gateway-backed sessions"

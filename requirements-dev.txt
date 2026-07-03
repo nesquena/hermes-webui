@@ -9,3 +9,10 @@ pytest-asyncio
 pytest-shard
 ruff
 mcp
+# Optional Office parsers — runtime-optional (commented in requirements.txt), but
+# installed here so the workspace Office-preview tests (tests/test_issue540_*.py)
+# run under the documented ./scripts/test.sh entry point. These files
+# pytest.importorskip the parsers, so they skip cleanly if these are removed.
+python-docx
+openpyxl
+python-pptx

@@ -164,7 +164,7 @@ def test_chat_start_foreign_persisted_session_returns_404_before_start_run(monke
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "chat_foreign", "message": "hello"})
-    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid: persisted_foreign)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid, **_kwargs: persisted_foreign)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_start_run", lambda *_, **__: (_ for _ in ()).throw(AssertionError("_start_run should not run")))
 
@@ -185,10 +185,10 @@ def test_chat_start_body_profile_cannot_retag_visible_empty_session_without_acti
         "read_body",
         lambda _handler: {"session_id": "chat_empty", "message": "hello", "profile": "other"},
     )
-    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid: empty_visible)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid, **_kwargs: empty_visible)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *_args, **_kwargs: "/workspace")
-    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None, None))
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
@@ -463,25 +463,39 @@ def test_chat_stream_allows_unknown_dead_stream_fallback_replay_path(monkeypatch
     assert calls["replay"] == 0
 
 
-def test_session_new_blocks_prev_session_from_other_profile(monkeypatch):
+def test_session_new_skips_prev_session_commit_from_other_profile(monkeypatch):
+    """Cross-profile prev_session_id after a profile switch must not 404 (#5420)."""
     import api.session_lifecycle as session_lifecycle
     handler = _FakeHandler()
     foreign = _SimpleSession("foreign_session", profile="other")
     calls = {"commit": 0, "new": 0}
+
+    class _NewSession:
+        def __init__(self):
+            self.session_id = "new_session"
+            self.messages = []
+
+        def compact(self):
+            return {"session_id": self.session_id}
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"prev_session_id": "foreign_session"})
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
     monkeypatch.setattr(session_lifecycle, "commit_session_memory", lambda sid, agent=None: calls.__setitem__("commit", calls["commit"] + 1))
-    monkeypatch.setattr(routes, "new_session", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("new session should not be created")))
+    monkeypatch.setattr(
+        routes,
+        "new_session",
+        lambda **_kwargs: calls.__setitem__("new", calls["new"] + 1) or _NewSession(),
+    )
 
     cap = _capture(monkeypatch)
     routes.handle_post(handler, urlparse("/api/session/new"))
 
     assert calls["commit"] == 0
-    assert calls["new"] == 0
-    assert cap["bad"] == ("Session not found", 404)
+    assert calls["new"] == 1
+    assert "bad" not in cap
+    assert cap["ok"]["session"]["session_id"] == "new_session"
 
 
 def test_session_new_keeps_prev_session_commit_for_same_profile(monkeypatch):

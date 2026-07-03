@@ -12,6 +12,7 @@ const ICONS={
   edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
   spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
+  download:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10.5v2.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2.5"/><polyline points="4.5 7 8 10.5 11.5 7"/><line x1="8" y1="10.5" x2="8" y2="2"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -247,6 +248,43 @@ const SESSION_LONG_PRESS_DELAY_MS = 400;
 const SESSION_ARCHIVE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_DELETE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_SWIPE_CANCEL_RATIO = 0.75;
+
+function _manualTitleAuxConfigFromPayload(auxData){
+  if(!auxData||typeof auxData!=='object'||Array.isArray(auxData)) return null;
+  if(auxData.title_generation&&typeof auxData.title_generation==='object') return auxData;
+  const tasks=Array.isArray(auxData.tasks)?auxData.tasks:null;
+  if(!tasks) return null;
+  const taskMap={};
+  for(const task of tasks){
+    if(task&&typeof task==='object'&&typeof task.task==='string'&&task.task){
+      taskMap[task.task]=task;
+    }
+  }
+  if(!Object.keys(taskMap).length) return null;
+  return taskMap;
+}
+
+async function _loadManualTitleAuxConfig(){
+  try{
+    const auxData=await api('/api/model/auxiliary',{retries:0,timeoutToast:false});
+    return _manualTitleAuxConfigFromPayload(auxData);
+  }catch(_){
+    return null;
+  }
+}
+
+async function _manualTitleRegenerateTimeoutMs(){
+  let cfg=null;
+  try{
+    const auxConfig=await _loadManualTitleAuxConfig();
+    cfg=auxConfig&&auxConfig.title_generation;
+  }catch(_){
+    return null;
+  }
+  const timeoutSeconds=Number(cfg&&cfg.timeout);
+  if(!Number.isFinite(timeoutSeconds)||timeoutSeconds<=0) return null;
+  return Math.max(30000,Math.round((timeoutSeconds+5)*1000));
+}
 
 function _formatSessionModelWithGateway(s){
   if(!s||!s.model)return'';
@@ -934,7 +972,11 @@ async function newSession(flash, options={}){
     };
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
-    if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
+    if(Object.prototype.hasOwnProperty.call(options,'project_id')){
+      reqBody.project_id=options.project_id;
+    } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
+      reqBody.project_id=_activeProject;
+    }
     // Forward a pre-session toolset override only from the empty composer (#4490).
     if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
     const modelSelForNew=$('modelSelect');
@@ -1418,7 +1460,10 @@ async function loadSession(sid){
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
-  const activeStreamId=S.session.active_stream_id||null;
+  // `let` (not const): re-read below, after the awaited _ensureMessagesLoaded,
+  // so a server_turn_started that attaches a live stream MID-RELOAD is honored
+  // by the attach/idle decision instead of being clobbered by the stale snapshot.
+  let activeStreamId=S.session.active_stream_id||null;
   // If the server says the session is idle, reset browser-side streaming flags
   // NOW — before the async _ensureMessagesLoaded gap below. Without this,
   // S.busy can remain true from a still-running stream in the PREVIOUS session
@@ -1653,6 +1698,18 @@ async function loadSession(sid){
 
     // Attach pending user message if one is queued.
     _mergePendingSessionMessage(S.session,S.messages);
+
+    // Self-heal-vs-live-render race guard (maintainer/Codex-reproduced; verified
+    // in an isolated instance). `activeStreamId` was snapshotted BEFORE the
+    // awaited _ensureMessagesLoaded above. During a force reload (the
+    // `session-updated` self-heal or any keepStaleUntilLoaded recovery), a
+    // server-initiated turn can fire `server_turn_started` mid-await and set
+    // S.activeStreamId for THIS sid. Without re-reading, the idle branch below
+    // would clear S.activeStreamId/S.busy off the stale (null) snapshot and
+    // silently kill the live turn's render. Fold a concurrently-attached
+    // same-session stream into activeStreamId so the existing attach branch
+    // (and all its `attachLiveStream(sid, activeStreamId, ...)` calls) keeps it.
+    activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
 
     if(activeStreamId){
       S.busy=true;
@@ -3284,6 +3341,38 @@ function _sessionIdFromLocation(){
     return qs.get('session')||qs.get('session_id')||null;
   }catch(_e){return null;}
 }
+function _composerPrefillIntentFromLocation(){
+  const empty={hasParams:false,hasText:false,text:'',autoSend:false};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    const hasQ=qs.has('q');
+    const hasPrompt=qs.has('prompt');
+    const hasSend=qs.has('send');
+    if(!hasQ&&!hasPrompt&&!hasSend) return empty;
+    const text=hasQ?(qs.get('q')||''):(hasPrompt?(qs.get('prompt')||''):'');
+    return {
+      hasParams:true,
+      hasText:!!String(text).trim(),
+      text,
+      autoSend:false
+    };
+  }catch(_e){return empty;}
+}
+function _consumeComposerPrefillParamsFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('q');
+    current.searchParams.delete('prompt');
+    current.searchParams.delete('send');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _appRootPath(){
   try{
     const base = new URL(document.baseURI||window.location.origin+'/', window.location.origin);
@@ -3299,6 +3388,9 @@ function _sessionUrlForSid(sid){
     const current=new URL(window.location.href);
     current.searchParams.delete('session');
     current.searchParams.delete('session_id');
+    current.searchParams.delete('q');
+    current.searchParams.delete('prompt');
+    current.searchParams.delete('send');
     base.search=current.searchParams.toString();
     base.hash=current.hash;
   }catch(_e){}
@@ -3467,6 +3559,17 @@ function closeSessionActionMenu(){
     _sessionActionAnchor = null;
   }
   _sessionActionSessionId = null;
+}
+
+function _sessionActionMenuShouldIgnoreScrollTarget(target){
+  if(!target || typeof target.closest !== 'function') return false;
+  // #5347: active-chat auto-scroll / manual wheel must not dismiss the sidebar menu.
+  return Boolean(target.closest('#messages, #msgInner, .messages-inner'));
+}
+
+function _sessionActionMenuShouldRepositionOnScroll(target){
+  if(!target || typeof target.closest !== 'function') return false;
+  return Boolean(target.closest('#sessionList, .session-list'));
 }
 
 function _positionSessionActionMenu(anchorEl){
@@ -3695,6 +3798,25 @@ function _appendSessionDuplicateAction(menu, session){
   ));
 }
 
+function _appendSessionExportHtmlAction(menu, session){
+  // Per-conversation "Export as HTML" — the sidebar ⋮ menu is the app's uniform
+  // home for per-conversation actions (matches ChatGPT / Open WebUI). Operates
+  // on THIS row's session, not just the active one; the export endpoint accepts
+  // any session_id in the active profile and is non-mutating, so it's offered
+  // for read-only/imported sessions too. exportSessionHTML(session) is a global
+  // defined in boot.js (loaded after sessions.js under defer, so it's bound by
+  // the time this click can fire).
+  menu.appendChild(_buildSessionAction(
+    t('session_export_html'),
+    t('session_export_html_desc'),
+    ICONS.download,
+    ()=>{
+      closeSessionActionMenu();
+      if(typeof exportSessionHTML==='function') exportSessionHTML(session);
+    }
+  ));
+}
+
 function _playSessionActionMenuEntrance(menu){
   if(!menu) return;
   const reduce=_sessionPrefersReducedMotion();
@@ -3750,6 +3872,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.className='session-action-menu';
   _appendSessionCopyLinkAction(menu, session);
   if(isReadOnly){
+    _appendSessionExportHtmlAction(menu, session);
     _mountSessionActionMenu(menu, session, anchorEl);
     return;
   }
@@ -3841,6 +3964,7 @@ function _openSessionActionMenu(session, anchorEl){
   if(!isExternalSession){
     _appendSessionDuplicateAction(menu, session);
   }
+  _appendSessionExportHtmlAction(menu, session);
   if(session.active_stream_id){
     menu.appendChild(_buildSessionAction(
       t('session_stop_response'),
@@ -3863,7 +3987,10 @@ function _openSessionActionMenu(session, anchorEl){
       closeSessionActionMenu();
       try{
         if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
-        const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+        const requestOpts={method:'POST',body:JSON.stringify({session_id:session.session_id})};
+        const timeoutMs=await _manualTitleRegenerateTimeoutMs();
+        if(timeoutMs) requestOpts.timeoutMs=timeoutMs;
+        const response=await api('/api/session/title/regenerate',requestOpts);
         const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
         if(nextTitle){
           session.title=nextTitle;
@@ -3899,7 +4026,11 @@ function _openSessionActionMenu(session, anchorEl){
       ICONS.trash,
       async()=>{
         closeSessionActionMenu();
-        await deleteSession(session.session_id);
+        // Menu Delete has no swipe/removal animation to wait for. Pass an
+        // immediate beforeDelete hook so deleteSession() removes the sidebar row
+        // optimistically while slow backend cleanup (/api/session/delete,
+        // state.db/FTS/journal cleanup) continues.
+        await deleteSession(session.session_id,()=>Promise.resolve());
       },
       'danger'
     ));
@@ -3916,6 +4047,15 @@ document.addEventListener('click',e=>{
 document.addEventListener('scroll',e=>{
   if(!_sessionActionMenu) return;
   if(_sessionActionMenu.contains(e.target)) return;
+  if(_sessionActionMenuShouldIgnoreScrollTarget(e.target)) return;
+  if(_sessionActionMenuShouldRepositionOnScroll(e.target) && _sessionActionAnchor){
+    if(!_sessionActionAnchor.isConnected){
+      closeSessionActionMenu();
+      return;
+    }
+    _positionSessionActionMenu(_sessionActionAnchor);
+    return;
+  }
   closeSessionActionMenu();
 }, true);
 document.addEventListener('keydown',e=>{
@@ -4319,12 +4459,20 @@ async function _runRenderSessionListRefresh(opts, _gen){
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const sessionListQS = _sessionListQueryString();
-    const sessionRequestOpts={timeoutToast:false};
+    // #5394: the sidebar session-list GET is idempotent, so 502/503/504 retry
+    // must be unconditional. Previously retries/retryStatuses were boot-gated, so
+    // a transient 502 during an nginx->backend restart on a warm refresh (profile
+    // switch, focus/visible/reconnect) failed on the first attempt and left the
+    // sidebar stale until a hard reload. Boot still keeps the larger timeout +
+    // timeout retry; every refresh now retries the transient upstream statuses.
+    const sessionRequestOpts={
+      timeoutToast:false,
+      retries:1,
+      retryStatuses:[502,503,504],
+    };
     if(!_sessionListHasLoadedOnce){
       sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;
-      sessionRequestOpts.retries=1;
       sessionRequestOpts.retryTimeouts=true;
-      sessionRequestOpts.retryStatuses=[502,503,504];
     }
     const {sessData, projData}=await _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
     // Discard stale response — a newer renderSessionList() call superseded us.
@@ -5673,10 +5821,6 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
-    if(!isForkChild&&child._cross_surface_child_session){
-      if(childRenderable) orphans.push({...child,_orphan_child_session:true});
-      continue;
-    }
     const parentSid=child.parent_session_id;
     let parentRow=visibleBySid.get(parentSid);
     let parentSegment=null;
@@ -5695,6 +5839,25 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       hiddenArchivedChildTree.add(child.session_id);
       continue;
     }
+    // Cross-surface rows (for example a WebUI continuation from a Telegram
+    // conversation) should remain top-level when there is no WebUI-owned parent
+    // row to stack under.  But if the parent is visible in this same sidebar
+    // render, attach normally — delegated subagent rows are also cross-source
+    // relative to their WebUI parent and should not be forced into orphans.
+    const parentSourceMarker=String(parentRow&&(
+      parentRow.session_source||parentRow.raw_source||parentRow.source_tag||parentRow.source
+    )||'').toLowerCase();
+    const parentIsExternal=parentRow&&(
+      (typeof _isExternalSession==='function'&&_isExternalSession(parentRow))||
+      (typeof _isMessagingSession==='function'&&_isMessagingSession(parentRow))||
+      parentRow.is_cli_session===true||
+      parentRow.session_source==='messaging'||
+      (parentSourceMarker&&parentSourceMarker!=='webui'&&parentSourceMarker!=='subagent'&&parentSourceMarker!=='other'&&parentSourceMarker!=='fork')
+    );
+    if(parentRow&&child._cross_surface_child_session&&parentIsExternal){
+      if(childRenderable) orphans.push({...child,_orphan_child_session:true});
+      continue;
+    }
     if(parentRow){
       const childCopy={...child};
       if(parentSegment){
@@ -5709,6 +5872,19 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       bubbleSidebarState(parentRow, childCopy);
       visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
     } else if(childRenderable) {
+      // #5305: a delegated subagent child whose WebUI parent is NOT a visible
+      // row in this render (filtered out by the active project / profile / source
+      // scope, or otherwise absent) must NOT be promoted to a contextless
+      // top-level "Subagent Session" orphan — that is the confusing orphan #5244
+      // set out to remove for the common case. The parent still exists; it is
+      // simply out of the current view, so the child follows its parent's scope
+      // and is suppressed here (it re-stacks under the parent once that scope is
+      // active). This mirrors the archived-hidden-parent suppression above
+      // (hasHiddenArchivedAncestor / #4293), generalizing the "parent hidden"
+      // trigger from archived to filtered-out. A cross-surface WebUI child of a
+      // genuinely external (messaging/CLI) parent is handled by the parentIsExternal
+      // branch above and still orphans as before.
+      if(child&&child._cross_surface_child_session&&_isChildSession(child)) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
   }
@@ -6032,6 +6208,15 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     !!s.pending_user_message ||
     !!s.has_pending_user_message ||
     (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
+    // #5306: a linked delegate child of the currently-active/streaming parent
+    // must stay rendered for the duration of the parent's turn. A subagent child
+    // that transiently reports message_count===0 between /api/sessions polls would
+    // otherwise be dropped HERE (before _attachChildSessionsToSidebarRows ever sees
+    // it), so it never reaches sessionsRaw, vanishes from the sidebar, then
+    // reappears on the next refresh once its list metadata catches up — the flicker.
+    // Scoped to children of the ACTIVE parent, mirroring the active-session
+    // exception above, so unrelated truly-empty sessions are still hidden.
+    (activeSidForSidebar&&s.parent_session_id===activeSidForSidebar&&_isChildSession(s)) ||
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
@@ -6108,6 +6293,56 @@ function _scopedSidebarReferenceRows(isCli){
 function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
+}
+
+function _attachProjectQuickCreateButton(chip, project){
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.className='project-chip-quick-create';
+  btn.textContent='+';
+  btn.title='New conversation in this project';
+  btn.setAttribute('aria-label','New conversation in this project');
+  const stop=function(e){
+    if(!e) return;
+    if(typeof e.preventDefault==='function') e.preventDefault();
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    if(typeof e.stopImmediatePropagation==='function') e.stopImmediatePropagation();
+  };
+  const stopTouchBubble=function(e){
+    if(!e) return;
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    if(typeof e.stopImmediatePropagation==='function') e.stopImmediatePropagation();
+  };
+  btn.onclick=async(e)=>{
+    stop(e);
+    if(_newSessionInFlight){
+      // The initiating tap already owns the filter change and rollback path.
+      try{
+        await newSession(false,{project_id:project.project_id});
+      }catch(_){
+        // The initiating tap already owns the visible failure path.
+      }
+      return;
+    }
+    const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
+    _setActiveProjectFilter(project.project_id);
+    try{
+      await newSession(false,{project_id:project.project_id});
+      // newSession() does not repaint the sidebar (callers own that — see the
+      // newSession contract). Repaint from the post-create state so the new
+      // project-assigned session appears deterministically.
+      try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+      try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+    }catch(err){
+      _setActiveProjectFilter(previousProject);
+      if(typeof showToast==='function') showToast('New conversation failed: '+(err&&err.message||err));
+    }
+  };
+  btn.ondblclick=(e)=>{stop(e);};
+  btn.oncontextmenu=(e)=>{stop(e);};
+  btn.ontouchstart=(e)=>{stopTouchBubble(e);};
+  btn.ontouchend=(e)=>{stopTouchBubble(e);};
+  chip.appendChild(btn);
 }
 
 
@@ -6324,6 +6559,7 @@ function renderSessionListFromCache(){
         clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
         chip.classList.remove('long-pressing');
       },{passive:true});
+      if(window._projectQuickCreate) _attachProjectQuickCreateButton(chip,p);
       bar.appendChild(chip);
     }
     // Create button

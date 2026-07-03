@@ -255,6 +255,185 @@ assert.strictEqual(_programmaticScroll, false);
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
+def test_capture_snapshot_treats_recent_scroll_away_as_manual_reader():
+    """Manual live-Worklog browsing must not reuse a stale pinned snapshot.
+
+    A reader can be far from the live tail while scrolling down through a long
+    Compact Worklog. If a live activity rebuild captures that state while the
+    sticky globals still say pinned, restoring as a pinned follower preserves a
+    huge bottom gap and can keep yanking the viewport back toward the turn start.
+    Recent message-pane scroll intent makes the snapshot explicitly unpinned.
+    """
+
+    script = f"""
+const assert = require('assert');
+let _messageUserUnpinned = false;
+let _scrollPinned = true;
+let _lastMessageScrollIntentMs = 1000;
+const MESSAGE_WHEEL_INTENT_SUPPRESS_MS = 1200;
+const container = {{
+  scrollTop: 900,
+  scrollHeight: 5000,
+  clientHeight: 600,
+  getBoundingClientRect() {{ return {{ top: 0, bottom: 600 }}; }},
+  querySelectorAll() {{ return []; }},
+}};
+function $(id) {{ return id === 'messages' ? container : null; }}
+const performance = {{ now() {{ return 1500; }} }};
+function _captureMessageViewportAnchor() {{ return null; }}
+function _recentMessageTouchScrollIntent() {{ return false; }}
+function _recentMessageKeyScrollIntent() {{ return false; }}
+function _shouldFollowMessagesOnDomReplace() {{ return true; }}
+{_function_body(UI_JS, "_recentMessageScrollIntent")}
+{_function_body(UI_JS, "_captureMessageScrollSnapshot")}
+const snapshot = _captureMessageScrollSnapshot();
+assert.strictEqual(snapshot.bottom, 3500);
+assert.strictEqual(snapshot.pinned, false);
+assert.strictEqual(snapshot.userUnpinned, true);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_capture_snapshot_keeps_true_pinned_follower_pinned_despite_large_gap():
+    """Large bottom distance alone is not enough to unpin a follower.
+
+    During fast streaming, content can grow under a followed viewport before the
+    follow write lands. Without a recent user scroll intent or explicit unpin
+    state, the snapshot must stay pinned so the existing tail-relative restore
+    continues to protect pinned live followers. Raw touch/key recency is not
+    enough here because those helpers also track near-tail artifact-suppression
+    windows; only the guarded away-from-bottom intent stamp can classify a
+    snapshot as manual-reader state.
+    """
+
+    script = f"""
+const assert = require('assert');
+let _messageUserUnpinned = false;
+let _scrollPinned = true;
+let _lastMessageScrollIntentMs = -Infinity;
+const MESSAGE_WHEEL_INTENT_SUPPRESS_MS = 1200;
+const container = {{
+  scrollTop: 900,
+  scrollHeight: 5000,
+  clientHeight: 600,
+  getBoundingClientRect() {{ return {{ top: 0, bottom: 600 }}; }},
+  querySelectorAll() {{ return []; }},
+}};
+function $(id) {{ return id === 'messages' ? container : null; }}
+const performance = {{ now() {{ return 1500; }} }};
+function _captureMessageViewportAnchor() {{ return null; }}
+function _recentMessageTouchScrollIntent() {{ return true; }}
+function _recentMessageKeyScrollIntent() {{ return true; }}
+function _shouldFollowMessagesOnDomReplace() {{ return true; }}
+{_function_body(UI_JS, "_recentMessageScrollIntent")}
+{_function_body(UI_JS, "_captureMessageScrollSnapshot")}
+const snapshot = _captureMessageScrollSnapshot();
+assert.strictEqual(snapshot.bottom, 3500);
+assert.strictEqual(snapshot.pinned, true);
+assert.strictEqual(snapshot.userUnpinned, false);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_wheel_scroll_intent_only_records_when_reader_is_away_from_bottom():
+    """Downward wheel intent should protect manual reading, not bottom following."""
+
+    script = f"""
+const assert = require('assert');
+let _lastNonMessageScrollIntentMs = -Infinity;
+let _lastMessageWheelIntentMs = -Infinity;
+let _lastMessageScrollIntentMs = -Infinity;
+let _messageUserUnpinned = false;
+let _nearBottomCount = 2;
+let _scrollPinned = true;
+let _messageTouchScrollActive = false;
+let _lastMessageTouchScrollIntentMs = -Infinity;
+let _touchStartY = null;
+const child = {{}};
+const el = {{
+  scrollTop: 900,
+  scrollHeight: 5000,
+  clientHeight: 600,
+  contains(target) {{ return target === child; }},
+}};
+function _cancelBottomSettle() {{}}
+function _markMessageTouchScrollIntent(active) {{
+  _messageTouchScrollActive = !!active;
+  _lastMessageTouchScrollIntentMs = performance.now();
+}}
+const document = {{ getElementById(id) {{ return id === 'messages' ? el : null; }} }};
+const performance = {{ now() {{ return 1234; }} }};
+{_function_body(UI_JS, "_recordNonMessageScrollIntent")}
+_recordNonMessageScrollIntent({{ target: child, type: 'wheel', deltaY: 24 }});
+assert.strictEqual(_lastMessageScrollIntentMs, 1234);
+assert.strictEqual(_messageUserUnpinned, false);
+
+_lastMessageScrollIntentMs = -Infinity;
+el.scrollTop = 4400; // bottomDistance = 0
+_recordNonMessageScrollIntent({{ target: child, type: 'wheel', deltaY: 24 }});
+assert.strictEqual(_lastMessageScrollIntentMs, -Infinity);
+assert.strictEqual(_scrollPinned, true);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_manual_scroll_snapshot_intent_excludes_raw_touch_and_key_recency():
+    """Only bottom-guarded message scroll intent can drive snapshot unpinning."""
+
+    compact = _compact(_function_body(UI_JS, "_recentMessageScrollIntent"))
+
+    assert "_lastMessageScrollIntentMs" in compact
+    assert "_scrollbarDragActive" in compact
+    assert "_recentMessageTouchScrollIntent" not in compact
+    assert "_recentMessageKeyScrollIntent" not in compact
+    assert "_lastMessageKeyScrollIntentMs=now;" in _compact(UI_JS)
+    assert "if(bottomDistance>120)_lastMessageScrollIntentMs=now;" in _compact(UI_JS)
+
+
+def test_touch_scroll_intent_only_records_when_reader_is_away_from_bottom():
+    """Touch recency is broad, but snapshot intent is bottom-distance guarded."""
+
+    script = f"""
+const assert = require('assert');
+let _lastNonMessageScrollIntentMs = -Infinity;
+let _lastMessageWheelIntentMs = -Infinity;
+let _lastMessageScrollIntentMs = -Infinity;
+let _messageUserUnpinned = false;
+let _nearBottomCount = 2;
+let _scrollPinned = true;
+let _messageTouchScrollActive = false;
+let _lastMessageTouchScrollIntentMs = -Infinity;
+let _touchStartY = null;
+const child = {{}};
+const el = {{
+  scrollTop: 900,
+  scrollHeight: 5000,
+  clientHeight: 600,
+  contains(target) {{ return target === child; }},
+}};
+function _cancelBottomSettle() {{}}
+function _markMessageTouchScrollIntent(active) {{
+  _messageTouchScrollActive = !!active;
+  _lastMessageTouchScrollIntentMs = performance.now();
+}}
+const document = {{ getElementById(id) {{ return id === 'messages' ? el : null; }} }};
+const performance = {{ now() {{ return 1234; }} }};
+{_function_body(UI_JS, "_recordNonMessageScrollIntent")}
+_recordNonMessageScrollIntent({{ target: child, type: 'touchmove' }});
+assert.strictEqual(_lastMessageScrollIntentMs, 1234);
+assert.strictEqual(_lastMessageTouchScrollIntentMs, 1234);
+assert.strictEqual(_messageUserUnpinned, false);
+
+_lastMessageScrollIntentMs = -Infinity;
+el.scrollTop = 4400; // bottomDistance = 0
+_recordNonMessageScrollIntent({{ target: child, type: 'touchmove' }});
+assert.strictEqual(_lastMessageScrollIntentMs, -Infinity);
+assert.strictEqual(_lastMessageTouchScrollIntentMs, 1234);
+assert.strictEqual(_scrollPinned, true);
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
 def test_restore_message_scroll_snapshot_prefers_semantic_anchor_with_virtual_fallback():
     body = _function_body(UI_JS, "_restoreMessageScrollSnapshot")
     helper = _function_body(UI_JS, "_remountMessageViewportAnchor")

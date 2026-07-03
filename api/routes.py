@@ -6,6 +6,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 import html as _html
 import copy
 import hashlib
+import inspect
 import errno
 import io
 import gzip
@@ -25,10 +26,14 @@ import sys
 import threading
 import time
 import uuid
+import http.client
+import socket as _socket
 from collections import defaultdict
 from pathlib import Path
 from contextlib import closing
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urljoin, urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
@@ -139,8 +144,7 @@ def _persist_generated_session_title(
         with LOCK:
             SESSIONS[sid] = session
             SESSIONS.move_to_end(sid)
-            while len(SESSIONS) > SESSIONS_MAX:
-                SESSIONS.popitem(last=False)
+            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     _sync_session_title_to_insights(session)
     _publish_session_list_changed(
         event_reason,
@@ -262,6 +266,7 @@ _CLIENT_EVENT_RATE_LIMIT_LOCK = threading.Lock()
 _CLIENT_EVENT_RATE_LIMIT_WINDOW_SECONDS = 60
 _CLIENT_EVENT_RATE_LIMIT_MAX = 30
 _CLIENT_EVENT_MAX_BODY_BYTES = 4 * 1024
+_EXTENSION_SIDECAR_PROXY_MAX_RESPONSE_BYTES = 512 * 1024
 _CLIENT_EVENT_ALLOWED_FIELDS = {
     "event": 64,
     "source": 80,
@@ -451,10 +456,12 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
 from api.profiles import (  # noqa: F401, E402  (re-export)
     _profiles_match,
     _is_isolated_profile_mode,
+    _is_root_profile,
     _SKILLS_STATS_CACHE,
     get_active_profile_name,
     get_active_profile_name as _get_active_profile_name,
     get_active_hermes_home,
+    list_profiles_api,
 )
 
 
@@ -1413,10 +1420,84 @@ def _ensure_agent_cron_import_path() -> None:
             sys.path.append(agent_path)
         _AGENT_CRON_IMPORT_PATH_READY = agent_path
 
-        if cron_mod is not None and not cron_is_agent:
+        # Keep in-memory test doubles or namespace stubs intact; only evict a
+        # real on-disk shadow package so the agent's cron package can import.
+        if cron_mod is not None and cron_file and not cron_is_agent:
             for name in list(sys.modules):
                 if name == "cron" or name.startswith("cron."):
                     sys.modules.pop(name, None)
+
+
+def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict]]:
+    """Return active-profile rows plus foreign rows for the Tasks panel.
+
+    Row ownership is intentionally distinct from a cron job's persisted
+    ``profile`` field. The persisted field controls where the job executes;
+    ``owner_profile`` tells the UI which profile home the row came from.
+    """
+    from cron.jobs import list_jobs
+    from api.profiles import (
+        cron_profile_context_for_home,
+        get_hermes_home_for_profile,
+        list_profiles_api,
+    )
+
+    def _home_key(path: Path) -> str:
+        try:
+            return str(Path(path).expanduser().resolve(strict=False))
+        except Exception:
+            return str(Path(path).expanduser())
+
+    names: list[str] = []
+    seen_names: set[str] = set()
+
+    def _add_name(raw_name) -> None:
+        name = str(raw_name or "").strip()
+        if not name:
+            return
+        folded = name.casefold()
+        if folded in seen_names:
+            return
+        seen_names.add(folded)
+        names.append(name)
+
+    _add_name(active_profile)
+    for row in list_profiles_api():
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        if row.get("visible") is False and not _profiles_match(name, active_profile):
+            continue
+        _add_name(name)
+
+    active_jobs: list[dict] = []
+    other_jobs: list[dict] = []
+    seen_homes: set[str] = set()
+    for owner_profile in names:
+        home = Path(get_hermes_home_for_profile(owner_profile))
+        home_key = _home_key(home)
+        if home_key in seen_homes:
+            continue
+        seen_homes.add(home_key)
+        is_active = _profiles_match(owner_profile, active_profile)
+        try:
+            with cron_profile_context_for_home(home):
+                jobs = _cron_jobs_for_api(list_jobs(include_disabled=True))
+        except Exception:
+            if not is_active:
+                continue
+            raise
+        for job in jobs:
+            row = dict(job)
+            row["owner_profile"] = owner_profile
+            row["read_only"] = not is_active
+            if is_active:
+                active_jobs.append(row)
+            else:
+                other_jobs.append(row)
+    return active_jobs, other_jobs
 
 
 def _available_cron_profile_names() -> set[str]:
@@ -1766,7 +1847,7 @@ _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cach
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
-_session_list_cache_key = _route_session_list_cache._session_list_cache_key
+_route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
 _session_list_cache_path_stamp = _route_session_list_cache._session_list_cache_path_stamp
 _session_list_cache_profile_scope = _route_session_list_cache._session_list_cache_profile_scope
@@ -1779,6 +1860,52 @@ _session_list_cache_source_stamp = _route_session_list_cache._session_list_cache
 _session_list_cache_state_db_fingerprint = _route_session_list_cache._session_list_cache_state_db_fingerprint
 _session_list_cache_stale_reason = _route_session_list_cache._session_list_cache_stale_reason
 _session_list_cache_streaming_freeze_marker = _route_session_list_cache._session_list_cache_streaming_freeze_marker
+
+
+def _callable_accepts_kwarg(callable_obj, kwarg_name: str) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    if kwarg_name in signature.parameters:
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _session_list_cache_key(
+    active_profile: str | None,
+    all_profiles: bool,
+    show_cli_sessions: bool,
+    show_previous_messaging_sessions: bool,
+    show_cron_sessions: bool,
+    include_archived: bool = False,
+    exclude_hidden: bool = False,
+    visible_only: bool = False,
+    show_webhook_sessions: bool = False,
+    source_filter: str | None = None,
+    sidebar_source: str | None = None,
+    archived_limit: int | None = None,
+    archived_offset: int = 0,
+    show_claude_code_sessions: bool = True,
+) -> tuple:
+    return _route_session_list_cache_key(
+        active_profile=active_profile,
+        all_profiles=all_profiles,
+        show_cli_sessions=show_cli_sessions,
+        show_previous_messaging_sessions=show_previous_messaging_sessions,
+        show_cron_sessions=show_cron_sessions,
+        include_archived=include_archived,
+        exclude_hidden=exclude_hidden,
+        visible_only=visible_only,
+        show_webhook_sessions=show_webhook_sessions,
+        source_filter=source_filter,
+        sidebar_source=sidebar_source,
+        archived_limit=archived_limit,
+        archived_offset=archived_offset,
+    ) + (bool(show_claude_code_sessions),)
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -1793,15 +1920,232 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
+    """#4985 second-pass orphan prune for native-WebUI rows whose ``state.db.messages`` is empty.
+
+    Takes the post-``#3238`` ``webui_sessions`` list (i.e. rows that already
+    survived the #3238/#4591 CLI/API-server prune) and returns a NEW list with
+    any row whose backing ``state.db.messages`` table is empty removed.
+    Removed sids are also persisted to the tombstone via
+    ``_record_webui_zero_message_orphan_tombstone`` so
+    ``recover_missing_index_sidecars`` does not re-add them to the sidebar
+    index on the next poll (avoids the cache-thrash loop where every poll
+    does one fsync'd index write + one state.db probe per orphan, forever).
+
+    Invariants preserved:
+
+    - Rows with ``active_stream_id`` / ``has_pending_user_message`` /
+      ``worktree_path`` set are NEVER pruned — the inflight / worktree-bound
+      / pending safety contract from ``IC_kwDOR1LuPM8AAAABHrkF1Q``.
+    - Rows whose ``state.db.messages`` is empty AND that survived the
+      upstream ``all_sessions()`` ``#1171`` keep-filter (i.e. titled OR has
+      positive ``message_count``) ARE pruned — the post-#1171-survivor
+      shape #4985 actually describes (a row that lingers VISIBLY in the
+      sidebar because of a stale positive ``message_count`` or a title set
+      before the first turn committed).
+
+    This helper is intentionally extracted out of the ``if show_cli_sessions:``
+    branch so the prune fires in BOTH branches of
+    ``_build_session_list_cache_payload``. Established installs have
+    ``settings.show_cli_sessions`` pinned to ``False`` (per
+    ``api/config.py:7637-7648``) and those are exactly the long-time users
+    who have accumulated the #4985 404 orphans — without hoisting, the
+    ``else:`` branch silently skipped the prune and the sidebar kept
+    dangling rows that 404 on click (review
+    ``IC_kwDOR1LuPM8AAAABHsyFGg``).
+    """
+    if not rows:
+        return list(rows) if rows is not None else []
+    _diag = diag_stage if callable(diag_stage) else (lambda *_a, **_k: None)
+    # #4985 self-healing: the tombstone is NOT a blind-drop filter at the
+    # top of the helper. A row whose sid is in the tombstone is allowed
+    # into the gate predicate like any other row — and the post-probe
+    # logic below explicitly distinguishes four cases:
+    #
+    #   1. probe says NOT empty AND sid IS tombstoned → SELF-HEAL: the row
+    #      has actually gained messages, so clear the tombstone and keep
+    #      the row (do NOT add to missing_webui_orphan_ids). This is the
+    #      primary fix for review IC_kwDOR1LuPM8AAAABHvY-dw.
+    #   2. probe says empty AND sid IS tombstoned → tombstone persists
+    #      (orphan shape unchanged), but the row is excluded from the
+    #      returned list so the tombstone continues to suppress it on
+    #      this poll too. Do NOT redundantly prune+tombstone (would
+    #      cycle).
+    #   3. probe says empty AND sid is NOT tombstoned → new orphan: prune
+    #      from index, record tombstone, diag_stage.
+    #   4. probe says NOT empty AND sid is NOT tombstoned → row has
+    #      messages, retain (gate already passes anyway).
+    #
+    # A blind-drop at the top (the previous behavior) is strictly worse
+    # than the orphan it suppresses — it would silently swallow a
+    # legitimately-resurfaced row forever, even after the user actually
+    # sent messages. The self-healing case is what makes the tombstone a
+    # recoverable "this sid is currently empty" signal rather than a
+    # permanent hide-list.
+    if not rows:
+        return []
+    # Gate predicate mirrors the inline block that lived here before the
+    # helper extract. The (title!='Untitled' OR count>0) clause is what makes
+    # this gate actually reach a row #1171 kept — without it, the gate is a
+    # no-op because ``all_sessions()`` at ``api/models.py:3892-3898`` (and
+    # its full-scan fallback at 3946-3952) has already stripped every
+    # (Untitled ∧ count==0 ∧ ¬active_stream_id ∧ ¬has_pending_user_message ∧
+    # ¬worktree_path) row before our prune block runs.
+    _webui_orphan_probe_rows = [
+        s for s in rows
+        if _session_source_is_webui(s)
+        and not s.get("active_stream_id")
+        and not s.get("has_pending_user_message")
+        and not s.get("worktree_path")
+        and (
+            s.get("title", "Untitled") != "Untitled"
+            or _numeric_count(s.get("message_count")) > 0
+        )
+    ]
+    if not _webui_orphan_probe_rows:
+        return list(rows)
+    rows_by_profile_webui: dict[object, list[dict]] = defaultdict(list)
+    for row in _webui_orphan_probe_rows:
+        rows_by_profile_webui[row.get("profile")].append(row)
+    _tombstoned = _load_webui_zero_message_orphan_tombstone()
+    self_healed_ids: set[str] = set()
+    missing_webui_orphan_ids: set[str] = set()
+    still_hidden_ids: set[str] = set()
+    for profile_key, profile_rows in rows_by_profile_webui.items():
+        probe_ids = [
+            str(row.get("session_id")).strip()
+            for row in profile_rows
+            if str(row.get("session_id") or "").strip()
+        ]
+        zero_message_sids = agent_session_zero_message_sids(
+            probe_ids,
+            profile=profile_key if isinstance(profile_key, str) and profile_key else None,
+        )
+        # Iterate over the actual rows (not just probe_ids) so each sid
+        # decision can probe the sidecar for real ``messages``. The r5
+        # signal keyed off the row's cached ``message_count`` (which is
+        # stale-positive on the very phantom rows #4985 exists to prune:
+        # sidecar ``messages`` empty but cached count > 0), so the r5
+        # retain branch kept the phantom and re-opened the bug (maintainer
+        # review 4584722701, supersedes the r5 cached-count signal). The
+        # r6 signal probes ``Session.load(sid).messages`` directly — but
+        # ONLY for ``state.db``-empty candidates (the small set; the
+        # common live-row path takes the ``else`` branch and pays
+        # nothing). Full ``Session.load`` is intentional (vs
+        # ``load_metadata_only`` which zeroes the messages array at
+        # ``api/models.py:1210``).
+        for row in profile_rows:
+            sid = str(row.get("session_id") or "").strip()
+            if not sid:
+                continue
+            is_empty = sid in zero_message_sids
+            is_tombstoned = sid in _tombstoned
+            if is_empty:
+                # ``state.db.messages`` is empty. Probe the sidecar JSON
+                # for real messages — the cached ``message_count`` alone
+                # is stale-positive on phantom rows (sidecar ``messages``
+                # empty but cached count > 0) and would retain the very
+                # phantom this feature exists to prune (maintainer review
+                # 4584722701, supersedes the r5 cached-count signal).
+                # Full ``Session.load`` is intentional (vs
+                # ``load_metadata_only`` which zeros the messages array
+                # at ``api/models.py:1210``); the common live-row path
+                # pays nothing because it skips the load via the
+                # ``else`` branch below.
+                try:
+                    from api.models import Session as _Session
+                    _loaded = _Session.load(sid)
+                    sidecar_has_messages = bool(
+                        _loaded is not None and len(_loaded.messages or []) > 0
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to load sidecar for webui orphan decision %s; "
+                        "treating as empty for prune purposes",
+                        sid,
+                        exc_info=True,
+                    )
+                    sidecar_has_messages = False
+            else:
+                # ``state.db.messages`` is non-empty — the conversation is real.
+                sidecar_has_messages = True
+            if sidecar_has_messages:
+                # Real transcript (state.db OR loaded sidecar). Retain; if
+                # tombstoned, self-heal so it stops thrashing on recovery.
+                if is_tombstoned:
+                    self_healed_ids.add(sid)
+                continue
+            if not is_empty and is_tombstoned:
+                # Case 1: SELF-HEAL — clear tombstone, keep row.
+                self_healed_ids.add(sid)
+            elif is_empty and is_tombstoned:
+                # Case 2: still-empty tombstoned row stays hidden this
+                # poll (do not add to missing_webui_orphan_ids — would
+                # cycle through prune_session_from_index + record).
+                still_hidden_ids.add(sid)
+            elif is_empty and not is_tombstoned:
+                # Case 3: new orphan.
+                missing_webui_orphan_ids.add(sid)
+            # Case 4 (not empty + not tombstoned): row has messages, retain.
+    if self_healed_ids:
+        for _sid in self_healed_ids:
+            try:
+                _clear_webui_zero_message_orphan_tombstone(_sid)
+                logger.debug(
+                    "self-heal: cleared webui zero-message orphan tombstone "
+                    "for %s (state.db.messages now non-empty)",
+                    _sid,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to clear webui zero-message orphan tombstone for %s",
+                    _sid,
+                    exc_info=True,
+                )
+        _diag("self_heal_webui_zero_message_orphan")
+    if missing_webui_orphan_ids:
+        for _sid in missing_webui_orphan_ids:
+            try:
+                prune_session_from_index(_sid)
+                _diag("prune_orphaned_webui_zero_message")
+            except Exception:
+                logger.debug(
+                    "Failed to prune orphaned webui zero-message row %s",
+                    _sid,
+                    exc_info=True,
+                )
+            # Tombstone the sid in a SECOND step so a tombstone-write failure
+            # never blocks the prune itself (the prune still removes the row
+            # from the sidebar; only the re-prune avoidance would degrade).
+            try:
+                _record_webui_zero_message_orphan_tombstone(_sid)
+            except Exception:
+                logger.debug(
+                    "Failed to tombstone webui zero-message orphan %s",
+                    _sid,
+                    exc_info=True,
+                )
+    # Return rows excluding both the freshly-pruned orphans AND the
+    # tombstoned rows that the probe confirmed are still empty (case 2).
+    # Self-healed rows (case 1) and live rows (case 4) stay in the result.
+    _hidden = missing_webui_orphan_ids | still_hidden_ids
+    return [
+        s for s in rows
+        if str(s.get("session_id") or "").strip() not in _hidden
+    ]
+
+
 def _build_session_list_cache_payload(
     active_profile: str | None,
     all_profiles: bool,
     show_cli_sessions: bool,
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
+    show_claude_code_sessions: bool = True,
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
+    show_webhook_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
@@ -1836,18 +2180,11 @@ def _build_session_list_cache_payload(
         )
 
     def _all_sessions_for_sidebar():
-        try:
+        if _callable_accepts_kwarg(all_sessions, "include_lineage_metadata"):
             return all_sessions(diag=diag, include_lineage_metadata=False)
-        except TypeError as exc:
-            message = str(exc)
-            if (
-                "unexpected keyword argument" not in message
-                or "include_lineage_metadata" not in message
-            ):
-                raise
-            # Focused tests and third-party callers sometimes monkeypatch
-            # routes.all_sessions with the historical diag-only signature.
-            return all_sessions(diag=diag)
+        # Focused tests and third-party callers sometimes monkeypatch
+        # routes.all_sessions with the historical diag-only signature.
+        return all_sessions(diag=diag)
 
     diag_stage("all_sessions")
     webui_sessions = _all_sessions_for_sidebar()
@@ -1859,10 +2196,23 @@ def _build_session_list_cache_payload(
     show_cli_sessions = bool(show_cli_sessions)
     show_previous_messaging_sessions = bool(show_previous_messaging_sessions)
     show_cron_sessions = bool(show_cron_sessions)
+    show_webhook_sessions = bool(show_webhook_sessions)
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
-        cli = get_cli_sessions(source_filter=source_filter, all_profiles=all_profiles)
+        if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
+            cli = get_cli_sessions(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+                include_claude_code=show_claude_code_sessions,
+            )
+        else:
+            # Focused tests sometimes monkeypatch routes.get_cli_sessions with
+            # the historical two-keyword signature.
+            cli = get_cli_sessions(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+            )
         diag_stage("merge_cli_sessions")
         cli_by_id = {s["session_id"]: s for s in cli}
         # #3238/#4591: reconcile orphaned imported sidecars. When a CLI or
@@ -1877,7 +2227,17 @@ def _build_session_list_cache_payload(
         # CLI_VISIBLE_SESSION_LIMIT (20) — an existing session can fall
         # out of that window and look deleted. Native WebUI sessions
         # (source == "webui") that merely have a CLI ancestor are never
-        # pruned.
+        # pruned by this path.
+        #
+        # #4985: parallel pass for native-WebUI rows that have a backing
+        # agent row in state.db but zero messages (a `+`-click that opened a
+        # row but the first turn never committed, or a sidebar nav that
+        # opened then closed before any message landed). The same #3238
+        # helper doesn't catch these because source == "webui" is excluded
+        # above, and the WebUI delete affordance isn't exposed for them,
+        # so they would otherwise linger forever. Inflight first-turn
+        # safety is preserved by gating on `active_stream_id` (after
+        # _reconcile_stale_stream_state has cleared stale stream ids).
         _orphan_probe_rows = []
         _kept_after_orphan_prune = []
         for s in webui_sessions:
@@ -1924,7 +2284,41 @@ def _build_session_list_cache_payload(
                     diag_stage("prune_orphaned_agent_sidecar")
                     continue
                 _kept_after_orphan_prune.append(s)
-        webui_sessions = _kept_after_orphan_prune
+        # #4985 second pass — probe state.db.messages for native-WebUI rows
+        # that *survived* the upstream all_sessions() #1171 keep-filter (so
+        # the row is TITLED or has a POSITIVE message_count, meaning it IS
+        # shown in the sidebar — and the 404 click reported in #4985 happens),
+        # BUT whose actual state.db.messages table is empty (the ground-truth
+        # probe). This is the orphan shape #4985 actually describes: a row
+        # that lingers VISIBLY in the sidebar because of a stale positive
+        # message_count or a title set before the first turn committed.
+        #
+        # The (title!='Untitled' OR count>0) clause is the part that makes
+        # this gate actually reach a row #1171 kept. Without it, the gate is
+        # a no-op because all_sessions() at api/models.py:3892-3898 and
+        # 3946-3952 has already stripped every (Untitled ∧ count==0 ∧
+        # ¬active_stream_id ∧ ¬has_pending_user_message ∧ ¬worktree_path)
+        # row before this point — making the earlier 6-condition gate a
+        # no-op against the real pipeline (review IC_kwDOR1LuPM8AAAABHrkF1Q).
+        #
+        # Implementation lives in ``_prune_orphaned_webui_zero_message_sessions``
+        # above so the prune runs in BOTH branches of this function
+        # (``if show_cli_sessions:`` AND ``else:``). Established installs
+        # have ``settings.show_cli_sessions`` pinned to False (per
+        # api/config.py:7637-7648) and those are exactly the long-time
+        # users who accumulated the #4985 404 orphans — without hoisting,
+        # the ``else:`` branch silently skipped the prune
+        # (review IC_kwDOR1LuPM8AAAABHsyFGg).
+        #
+        # Inflight / worktree / pending safety: same as before — any row
+        # still carrying active_stream_id / has_pending_user_message /
+        # worktree_path is never pruned, even if its messages table is
+        # momentarily empty. _reconcile_stale_stream_state_for_session_rows
+        # at line 2224 has already cleared stale stream ids above this point.
+        webui_sessions = _prune_orphaned_webui_zero_message_sessions(
+            _kept_after_orphan_prune,
+            diag_stage=diag_stage,
+        )
         for s in webui_sessions:
             meta = cli_by_id.get(s.get("session_id"))
             if not meta:
@@ -1948,10 +2342,23 @@ def _build_session_list_cache_payload(
             cli,
             represented_webui_ids,
             show_cron_sessions=show_cron_sessions,
+            show_webhook_sessions=show_webhook_sessions,
         )
     else:
         diag_stage("filter_webui_sessions")
         webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+        # #4985 second pass — see _prune_orphaned_webui_zero_message_sessions
+        # for the gate predicate and the post-#1171-survivor rationale. The
+        # prune MUST run here too: established installs have
+        # ``settings.show_cli_sessions`` pinned to False
+        # (api/config.py:7637-7648) and those are exactly the long-time
+        # users who accumulated the 404 orphans — review
+        # IC_kwDOR1LuPM8AAAABHsyFGg. Without this call the else branch
+        # silently skipped the prune and the sidebar kept dangling rows.
+        webui_sessions = _prune_orphaned_webui_zero_message_sessions(
+            webui_sessions,
+            diag_stage=diag_stage,
+        )
         deduped_cli = []
     diag_stage("sort_sessions")
     merged = webui_sessions + deduped_cli
@@ -2056,6 +2463,32 @@ def _build_session_list_cache_payload(
         diag_stage("filter_archived_sessions")
     diag_stage("visible_lineage_metadata")
     _enrich_sidebar_lineage_metadata(scoped)
+    # Delegated subagent children (#5307) are view-only, owned by the delegate
+    # runner. Coerce their sidebar rows to read_only=True + is_cli_session=False
+    # so the UI never offers delete / edit / truncate / pin affordances on them
+    # (defense-in-depth is also enforced server-side on the mutation routes).
+    def _coerce_subagent_rows(_rows):
+        for _r in _rows:
+            if not isinstance(_r, dict):
+                continue
+            _src = (
+                str(_r.get("source_tag") or _r.get("raw_source")
+                    or _r.get("session_source") or _r.get("source") or "").strip().lower()
+            )
+            _is_sa = _src == "subagent"
+            # A stale index row can say webui/fork while state.db records the
+            # row as source='subagent' (the child shares the parent's lineage).
+            # For rows not already read-only, confirm via the state.db source so
+            # a delegated child can't surface as a writable/CLI sidebar row.
+            if not _is_sa and not _r.get("read_only"):
+                _sid = str(_r.get("session_id") or "").strip()
+                if _sid and _is_subagent_child_session_id(_sid):
+                    _is_sa = True
+            if _is_sa:
+                _r["read_only"] = True
+                _r["is_cli_session"] = False
+    _coerce_subagent_rows(scoped)
+    _coerce_subagent_rows(sidebar_reference_sessions)
     return {
         "sessions": [
             dict(s) if isinstance(s, dict) else {}
@@ -2081,6 +2514,8 @@ def _build_session_list_cache_payload(
             "show_cli_sessions": show_cli_sessions,
             "show_previous_messaging_sessions": show_previous_messaging_sessions,
             "show_cron_sessions": show_cron_sessions,
+            "show_claude_code_sessions": show_claude_code_sessions if show_cli_sessions else False,
+            "show_webhook_sessions": show_webhook_sessions,
         },
     }
 
@@ -2383,6 +2818,7 @@ from api.helpers import (
     j,
     t,
     read_body,
+    MAX_BODY_BYTES,
     _security_headers,
     _sanitize_error,
     redact_session_data,
@@ -3179,8 +3615,7 @@ def _ensure_full_session_before_mutation(sid: str, session):
     with LOCK:
         SESSIONS[sid] = full_session
         SESSIONS.move_to_end(sid)
-        while len(SESSIONS) > SESSIONS_MAX:
-            SESSIONS.popitem(last=False)
+        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     return full_session
 
 
@@ -4418,7 +4853,7 @@ def _handle_session_anchor_scene(handler, body):
     return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
 
 
-def _get_or_materialize_session(sid: str):
+def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
     """Get a session, materializing from CLI/agent metadata if not in WebUI store.
 
     Mirrors the fallback logic in /api/session/archive (routes.py:~8530).
@@ -4437,12 +4872,51 @@ def _get_or_materialize_session(sid: str):
         # below (and the heuristic record-check would mis-trip on mock sessions).
         if getattr(s, "read_only", False):
             raise PermissionError("read-only imported session")
+        # A previously-persisted subagent sidecar (#5307) is view-only and
+        # owned by the delegate runner — even if it was stored with
+        # read_only=False (e.g. materialized before this fix), it must not be
+        # mutated / used as a writable chat session. This mirrors the
+        # missing-sidecar subagent guard below on the happy path.
+        if (
+            (getattr(s, "source_tag", "") or getattr(s, "raw_source", "") or "").strip().lower() == "subagent"
+            or _is_subagent_child_session_id(sid)
+        ):
+            raise PermissionError("read-only subagent child session")
+        if refresh_cli_messages and getattr(s, "is_cli_session", False):
+            latest_messages = get_cli_session_messages(
+                sid,
+                profile=getattr(s, "profile", None),
+            )
+            current_messages = list(getattr(s, "messages", None) or [])
+            if (
+                latest_messages
+                and len(latest_messages) >= len(current_messages)
+                and _session_messages_have_prefix(latest_messages, current_messages)
+            ):
+                # Keep the stitched CLI transcript authoritative on the first
+                # WebUI continuation path without clobbering later divergent
+                # WebUI-owned turns.
+                s.messages = list(latest_messages)
         return s
     except KeyError:
         pass
 
     # Fallback: try to materialize from CLI/agent session metadata
     cli_meta = _lookup_cli_session_metadata(sid)
+
+    # Delegated subagent children (#5307) are view-only: their transcript lives
+    # in state.db and ownership belongs to the delegate runner, not WebUI. They
+    # must never be materialized as a writable sidecar here — this is the shared
+    # chokepoint reached by POST /api/chat/start (_get_or_materialize_session),
+    # so gating it closes the write path that bypasses the GET/import_cli guards.
+    # Checked via state.db source (independent of cli_meta, which is often empty
+    # for a server-side subagent child).
+    _mat_source_tag = (
+        (cli_meta or {}).get("source_tag") or (cli_meta or {}).get("raw_source") or ""
+    ).strip().lower()
+    if _mat_source_tag == "subagent" or _is_subagent_child_session_id(sid):
+        raise PermissionError("read-only subagent child session")
+
     if not cli_meta:
         raise KeyError(sid)
 
@@ -4601,6 +5075,57 @@ def _is_browser_unsafe_request(handler) -> bool:
     return bool(handler.headers.get("Origin") or handler.headers.get("Referer"))
 
 
+def _check_same_origin_browser_request(handler, *, require_provenance: bool = False) -> bool:
+    _clear_csrf_failure_reason(handler)
+    origin = handler.headers.get("Origin", "")
+    referer = handler.headers.get("Referer", "")
+    host = handler.headers.get("Host", "")
+    sec_fetch_site = handler.headers.get("Sec-Fetch-Site", "").strip().lower()
+    if not (origin or referer or sec_fetch_site):
+        return not require_provenance or _set_csrf_failure_reason(handler, "origin_mismatch")
+    if sec_fetch_site == "cross-site":
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
+    target = origin or referer
+    if not target:
+        if sec_fetch_site == "none":
+            return True
+        if sec_fetch_site == "same-origin":
+            return not require_provenance or _set_csrf_failure_reason(
+                handler, "origin_mismatch"
+            )
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
+    m = _re.match(r"^https?://([^/]+)", target)
+    if not m:
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
+    origin_host = m.group(1)
+    origin_scheme = m.group(0).split('://')[0].lower()
+    origin_name, origin_port = _normalize_host_port(origin_host)
+    origin_allowed = False
+    origin_value = m.group(0).rstrip('/').lower()
+    if origin_value in _allowed_public_origins():
+        origin_allowed = True
+    if not origin_allowed:
+        allowed_hosts = [h.strip() for h in [host] if h.strip()]
+        trust_forwarded_host = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "").strip().lower()
+        if trust_forwarded_host in ("1", "true", "yes", "on"):
+            allowed_hosts.extend(
+                h.strip()
+                for h in [
+                    handler.headers.get("X-Forwarded-Host", ""),
+                    handler.headers.get("X-Real-Host", ""),
+                ]
+                if h.strip()
+            )
+        for allowed in allowed_hosts:
+            allowed_name, allowed_port = _normalize_host_port(allowed)
+            if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
+                origin_allowed = True
+                break
+    if not origin_allowed:
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
+    return True
+
+
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
     return path in {
@@ -4641,50 +5166,10 @@ def _csrf_rejection_error(handler) -> str:
 
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
-    _clear_csrf_failure_reason(handler)
-    origin = handler.headers.get("Origin", "")
-    referer = handler.headers.get("Referer", "")
-    host = handler.headers.get("Host", "")
+    if not _check_same_origin_browser_request(handler):
+        return False
     if not _is_browser_unsafe_request(handler):
-        return True  # non-browser clients (curl, MCP, agent) have no Origin
-    target = origin or referer
-    # Extract host:port from origin/referer
-    m = _re.match(r"^https?://([^/]+)", target)
-    if not m:
-        return _set_csrf_failure_reason(handler, "origin_mismatch")
-    origin_host = m.group(1)
-    origin_scheme = m.group(0).split('://')[0].lower()  # 'http' or 'https'
-    origin_name, origin_port = _normalize_host_port(origin_host)
-    origin_allowed = False
-    # Check against explicitly allowed public origins (env var)
-    origin_value = m.group(0).rstrip('/').lower()
-    if origin_value in _allowed_public_origins():
-        origin_allowed = True
-    if not origin_allowed:
-        # Allow same-origin Host by default. Forwarded host headers are only
-        # trustworthy behind a proxy that strips untrusted inbound copies.
-        allowed_hosts = [
-            h.strip()
-            for h in [host]
-            if h.strip()
-        ]
-        trust_forwarded_host = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "").strip().lower()
-        if trust_forwarded_host in ("1", "true", "yes", "on"):
-            allowed_hosts.extend(
-                h.strip()
-                for h in [
-                    handler.headers.get("X-Forwarded-Host", ""),
-                    handler.headers.get("X-Real-Host", ""),
-                ]
-                if h.strip()
-            )
-        for allowed in allowed_hosts:
-            allowed_name, allowed_port = _normalize_host_port(allowed)
-            if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
-                origin_allowed = True
-                break
-    if not origin_allowed:
-        return _set_csrf_failure_reason(handler, "origin_mismatch")
+        return True  # non-browser clients (curl, MCP, agent) have no Origin/Referer
 
     from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
 
@@ -4695,6 +5180,235 @@ def _check_csrf(handler) -> bool:
     if verify_csrf_token(cookie_val or "", submitted or ""):
         return True
     return _set_csrf_failure_reason(handler, "token_mismatch")
+
+
+_EXTENSION_SIDECAR_PROXY_RE = _re.compile(
+    r"^/api/extensions/(?P<extension_id>[^/]+)/sidecar(?:/(?P<proxy_path>.*))?$"
+)
+_HOP_BY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+
+
+def _connection_bound_header_names(headers) -> set[str]:
+    names = set(_HOP_BY_HOP_HEADERS)
+    if not headers or not hasattr(headers, "items"):
+        return names
+    connection_values = []
+    if hasattr(headers, "get_all"):
+        connection_values.extend(headers.get_all("Connection", []))
+    else:
+        for name, value in headers.items():
+            if str(name).lower() == "connection":
+                connection_values.append(value)
+    for value in connection_values:
+        for token in str(value).split(","):
+            normalized = token.strip().lower()
+            if normalized:
+                names.add(normalized)
+    return names
+
+
+def _match_extension_sidecar_proxy_path(path: str) -> tuple[str, str] | None:
+    match = _EXTENSION_SIDECAR_PROXY_RE.match(path or "")
+    if not match:
+        return None
+    return match.group("extension_id"), match.group("proxy_path") or ""
+
+
+def _read_body_bytes(handler) -> bytes:
+    raw_length = handler.headers.get("Content-Length", 0)
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError):
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f"Invalid Content-Length: {raw_length!r}") from None
+    if length < 0:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f"Invalid Content-Length: {length}")
+    if length > MAX_BODY_BYTES:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f"Request body too large ({length} bytes, max {MAX_BODY_BYTES})")
+    return handler.rfile.read(length) if length else b""
+
+
+def _extension_sidecar_proxy_request_headers(handler) -> dict[str, str]:
+    headers = {}
+    raw_headers = getattr(handler, "headers", None)
+    if not raw_headers or not hasattr(raw_headers, "items"):
+        return headers
+    blocked_headers = _connection_bound_header_names(raw_headers)
+    for name, value in raw_headers.items():
+        lower = str(name).lower()
+        if (
+            lower in blocked_headers
+            or lower in {"authorization", "cookie", "content-length", "host", "origin", "referer"}
+            or lower.startswith("x-csrf")
+        ):
+            continue
+        headers[str(name)] = str(value)
+    return headers
+
+
+def _send_extension_sidecar_proxy_response(handler, status: int, body: bytes, headers) -> bool:
+    handler.send_response(status)
+    sent_content_type = False
+    blocked_headers = _connection_bound_header_names(headers)
+    if headers and hasattr(headers, "items"):
+        for name, value in headers.items():
+            lower = str(name).lower()
+            if lower in blocked_headers or lower in {"content-length", "set-cookie"}:
+                continue
+            if lower == "content-type":
+                sent_content_type = True
+            handler.send_header(str(name), str(value))
+    if not sent_content_type:
+        handler.send_header("Content-Type", "application/octet-stream")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
+    _security_headers(handler)
+    handler.end_headers()
+    handler.wfile.write(body)
+    return True
+
+
+def _read_extension_sidecar_proxy_body(stream) -> bytes:
+    body = stream.read(_EXTENSION_SIDECAR_PROXY_MAX_RESPONSE_BYTES + 1)
+    if len(body) > _EXTENSION_SIDECAR_PROXY_MAX_RESPONSE_BYTES:
+        raise ValueError("Extension sidecar response too large")
+    return body
+
+
+def _extension_sidecar_proxy_redirect_url(
+    allowed_origin: str,
+    request_url: str,
+    redirect_url: str,
+) -> str | None:
+    resolved = urljoin(request_url, redirect_url or "")
+    allowed = urlsplit(allowed_origin or "")
+    parts = urlsplit(resolved)
+    if not allowed.scheme or not allowed.netloc or not parts.scheme or not parts.netloc:
+        return None
+    allowed_scheme = allowed.scheme.lower()
+    redirect_scheme = parts.scheme.lower()
+    if redirect_scheme != allowed_scheme:
+        return None
+    allowed_name, allowed_port = _normalize_host_port(allowed.netloc)
+    redirect_name, redirect_port = _normalize_host_port(parts.netloc)
+    if redirect_name != allowed_name or not _ports_match(
+        allowed_scheme,
+        redirect_port,
+        allowed_port,
+    ):
+        return None
+    return resolved
+
+
+def _extension_sidecar_proxy_same_origin_opener(allowed_origin: str):
+    class _SameOriginRedirectHandler(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            resolved = _extension_sidecar_proxy_redirect_url(
+                allowed_origin,
+                req.full_url,
+                newurl,
+            )
+            if not resolved:
+                raise URLError("Extension sidecar redirect crossed declared origin")
+            return super().redirect_request(req, fp, code, msg, headers, resolved)
+
+    return build_opener(ProxyHandler({}), _SameOriginRedirectHandler)
+
+
+def _handle_extension_sidecar_proxy(
+    handler,
+    parsed,
+    method: str,
+    *,
+    read_request_body: bool = False,
+):
+    matched = _match_extension_sidecar_proxy_path(parsed.path)
+    if matched is None:
+        return False
+    # Require same-origin browser provenance on EVERY proxied method, not just
+    # GET. Browser extensions (the only legitimate caller) always send Origin/
+    # Referer/Sec-Fetch-Site, so this costs nothing on the real path while
+    # closing the GET-vs-unsafe-method asymmetry: without it, POST/PATCH/PUT/
+    # DELETE fell through the CSRF compatibility path that intentionally admits
+    # non-browser clients, giving unsafe methods weaker provenance than GET.
+    if not _check_same_origin_browser_request(handler, require_provenance=True):
+        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+    try:
+        request_body = _read_body_bytes(handler) if read_request_body else None
+    except ValueError as exc:
+        status = 413 if "too large" in str(exc).lower() else 400
+        return bad(handler, str(exc), status=status)
+    from api.extensions import (
+        ExtensionSidecarProxyError,
+        resolve_extension_sidecar_proxy_target,
+    )
+
+    extension_id, proxy_path = matched
+    try:
+        target = resolve_extension_sidecar_proxy_target(
+            extension_id,
+            proxy_path,
+            query=parsed.query,
+        )
+        request = Request(
+            target["upstream_url"],
+            data=request_body,
+            headers=_extension_sidecar_proxy_request_headers(handler),
+            method=method,
+        )
+        opener = _extension_sidecar_proxy_same_origin_opener(target["origin"])
+        with opener.open(request, timeout=10) as response:
+            body = _read_extension_sidecar_proxy_body(response)
+            return _send_extension_sidecar_proxy_response(
+                handler,
+                getattr(response, "status", 200),
+                body,
+                response.headers,
+            )
+    except ExtensionSidecarProxyError as exc:
+        return bad(handler, str(exc), status=exc.status)
+    except ValueError as exc:
+        return bad(handler, str(exc), status=502)
+    except HTTPError as exc:
+        try:
+            body = _read_extension_sidecar_proxy_body(exc)
+        except ValueError as read_exc:
+            return bad(handler, str(read_exc), status=502)
+        return _send_extension_sidecar_proxy_response(
+            handler,
+            exc.code,
+            body,
+            exc.headers,
+        )
+    except (TimeoutError, URLError, OSError):
+        logger.warning(
+            "extension sidecar proxy failed for %s %s",
+            method,
+            parsed.path,
+            exc_info=True,
+        )
+        return bad(handler, "Failed to reach extension sidecar", status=502)
 
 
 def _client_ip_for_rate_limit(handler) -> str:
@@ -4789,6 +5503,31 @@ def _onboarding_gate_allows(handler, auth_enabled: bool | None = None) -> bool:
     return _onboarding_request_is_local(handler)
 
 
+# Operator-facing copy reused by every embedded-terminal endpoint refusal.
+_EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE = (
+    "Embedded terminal is only available from local networks when authentication "
+    "is not configured. Configure a password/passkey, or set "
+    "HERMES_WEBUI_ONBOARDING_OPEN=1 to allow it on a deliberately-exposed server."
+)
+
+
+def _embedded_terminal_gate_allows(handler) -> bool:
+    """Local-origin gate for the embedded-terminal endpoints.
+
+    The embedded terminal spawns a PTY shell that runs arbitrary commands as the
+    server-process user, so admitting an unauthenticated remote caller is remote
+    code execution. When auth is enabled, ``check_auth()`` has already verified
+    the session cookie before the request reaches these handlers, so this returns
+    True. When auth is DISABLED (the default out-of-the-box state) ``check_auth()``
+    admits every caller unconditionally, so restrict the terminal to local/private
+    origins — the same trust model the onboarding/bootstrap endpoints use, ignoring
+    spoofable forwarded headers unless an operator has opted into trusting them.
+    A deliberately-exposed passwordless server (access secured at another layer)
+    opts out with ``HERMES_WEBUI_ONBOARDING_OPEN=1``.
+    """
+    return _onboarding_gate_allows(handler)
+
+
 def _csp_report_rate_limited(handler, *, now: float | None = None) -> bool:
     now = time.time() if now is None else now
     key = _client_ip_for_rate_limit(handler)
@@ -4833,7 +5572,7 @@ def _safe_content_length(handler, max_bytes: int) -> int:
             handler.close_connection = True
         except Exception:
             pass
-        raise ValueError(f"Invalid Content-Length: {raw_length!r}")
+        raise ValueError(f"Invalid Content-Length: {raw_length!r}") from None
     if length < 0:
         try:
             handler.close_connection = True
@@ -5068,6 +5807,66 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
         if provider and bare:
             return bare, provider
     return model, None
+
+
+def _validate_resolved_model(model: str, model_provider: str | None) -> str:
+    """Fall back to the provider's default model if the resolved model is unknown.
+
+    The fast path in _resolve_compatible_session_model_state passes bare model
+    ids through without checking them against the model catalog. A truncated or
+    stale id (e.g. "e2b" instead of "gemma4:e2b") would be sent to the upstream
+    API and cause a 404. This guard checks the resolved model against the **same
+    catalog the model picker uses** (config.yaml models + _PROVIDER_MODELS static
+    fallback + live-discovered ids). If not found, returns the provider's default.
+
+    Only validates configured providers that appear in the picker catalog.
+    Cloud providers (openai, anthropic, openrouter, ...) and anything not in
+    the catalog pass through untouched.
+    """
+    if not model:
+        return model
+    _requested = str(model_provider or "").strip().lower()
+    if not _requested:
+        return model
+    try:
+        from api.config import get_available_models
+        catalog = get_available_models(prefer_cache=True)
+    except Exception:
+        return model
+    if not isinstance(catalog, dict):
+        return model
+    groups = catalog.get("groups", [])
+    if not isinstance(groups, list):
+        return model
+    _normalized = str(model).strip().lower()
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        group_provider = str(group.get("provider_id") or "").strip().lower()
+        # Match by provider key — only validate local/custom providers
+        if group_provider != _requested:
+            continue
+        # Provider found in catalog — check if model is in its model list
+        for m in group.get("models", []):
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("id") or "").strip().lower()
+            # Direct match or @provider:model prefixed form
+            # (non-active provider IDs are rewritten by _apply_provider_prefix)
+            if mid == _normalized or mid == f"@{_requested}:{_normalized}":
+                return model  # model is valid — pass through
+        # Model not found — use this provider's first model as fallback
+        _models = group.get("models", [])
+        if _models and isinstance(_models[0], dict):
+            _fallback = _models[0].get("id", "")
+            if _fallback:
+                logger.warning(
+                    "Model %r not found for provider %r — falling back to %r",
+                    model, model_provider, _fallback,
+                )
+                return _fallback
+        break  # provider matched but empty catalog — don't fall through to global
+    return model
 
 
 def _model_matches_configured_default(
@@ -5470,14 +6269,16 @@ def _should_attach_codex_provider_context(model: str, raw_active_provider: str, 
         )
     return False
 
-
 def _read_profile_model_config(
-    session, requested_provider: str | None,
-) -> tuple[str | None, str | None]:
-    """Read model.provider and model.default from the session's profile config.
+    session,
+    requested_provider: str | None,
+) -> tuple[str | None, str | None, dict | None]:
+    """Read model.provider, model.default, and the full profile config dict.
 
-    Returns (profile_provider, profile_default_model). Both are None when the
-    session has no profile or the profile config is unreadable.
+    Returns (profile_provider, profile_default_model, profile_config_dict).
+    The first two are None when the session has no profile or the profile config
+    is unreadable; profile_config_dict is None in the same cases so callers only
+    pay for one YAML parse.
 
     When the session already has an explicit ``requested_provider``, the profile
     ``model.provider`` is not returned (first tuple element is None) so profile
@@ -5486,7 +6287,7 @@ def _read_profile_model_config(
     provider matches ``requested_provider`` after normalization.
     """
     if not getattr(session, "profile", None):
-        return None, None
+        return None, None, None
 
     try:
         from api.profiles import get_hermes_home_for_profile
@@ -5494,16 +6295,16 @@ def _read_profile_model_config(
         _profile_home = get_hermes_home_for_profile(session.profile)
         _profile_cfg_path = os.path.join(str(_profile_home), "config.yaml")
         if not os.path.isfile(_profile_cfg_path):
-            return None, None
+            return None, None, None
         import yaml
 
         with open(_profile_cfg_path, encoding="utf-8") as _f:
             _pcfg = yaml.safe_load(_f) or {}
         if not isinstance(_pcfg, dict):
-            return None, None
+            return None, None, None
         _model_cfg = _pcfg.get("model") or {}
         if not isinstance(_model_cfg, dict):
-            return None, None
+            return None, None, _pcfg
         _provider = (_model_cfg.get("provider") or "").strip() or None
         _default = (_model_cfg.get("default") or "").strip() or None
     except Exception:
@@ -5512,15 +6313,149 @@ def _read_profile_model_config(
             getattr(session, "profile", None),
             exc_info=True,
         )
-        return None, None
+        return None, None, None
 
     _requested = _clean_session_model_provider(requested_provider)
     if _requested:
         _profile_prov = _clean_session_model_provider(_provider)
         if _profile_prov != _requested:
-            return None, None
-        return None, _default
-    return _provider, _default
+            return None, None, _pcfg
+        return None, _default, _pcfg
+    return _provider, _default, _pcfg
+
+
+def _load_profile_config_dict(session) -> dict | None:
+    """Load the session profile's config.yaml as a dict, or None."""
+    if not getattr(session, "profile", None):
+        return None
+    try:
+        from api.profiles import get_hermes_home_for_profile
+
+        _profile_cfg_path = os.path.join(
+            str(get_hermes_home_for_profile(session.profile)),
+            "config.yaml",
+        )
+        if not os.path.isfile(_profile_cfg_path):
+            return None
+        import yaml
+
+        with open(_profile_cfg_path, encoding="utf-8") as _f:
+            _pcfg = yaml.safe_load(_f) or {}
+        return _pcfg if isinstance(_pcfg, dict) else None
+    except Exception:
+        logger.warning(
+            "profile config read failed for %r",
+            getattr(session, "profile", None),
+            exc_info=True,
+        )
+        return None
+
+
+def _ordered_custom_provider_model_ids(entry: dict) -> list[str]:
+    """Model ids from a custom_providers entry (default model + dict/list models)."""
+    ordered: list[str] = []
+    _cp_model = str(entry.get("model") or "").strip()
+    if _cp_model:
+        ordered.append(_cp_model)
+    _cp_models = entry.get("models")
+    if isinstance(_cp_models, dict):
+        for _key in _cp_models.keys():
+            if isinstance(_key, str):
+                _kid = _key.strip()
+                if _kid and _kid not in ordered:
+                    ordered.append(_kid)
+    elif isinstance(_cp_models, list):
+        for _item in _cp_models:
+            if isinstance(_item, str):
+                _mid = _item.strip()
+                if _mid and _mid not in ordered:
+                    ordered.append(_mid)
+            elif isinstance(_item, dict):
+                _mid = str(
+                    _item.get("id") or _item.get("model") or _item.get("name") or ""
+                ).strip()
+                if _mid and _mid not in ordered:
+                    ordered.append(_mid)
+    return ordered
+
+
+def _repair_bare_custom_provider_model(
+    bare_model: str,
+    provider: str | None,
+    *,
+    config_obj: dict | None = None,
+) -> str | None:
+    """Re-qualify a bare model ID using the named custom provider's config (#5314).
+
+    Returns the fully namespaced model id when ``bare_model`` matches the suffix
+    of a registered id on ``custom_providers``; otherwise None. Model ids are
+    scanned in config declaration order (default ``model`` first, then
+    ``models`` dict keys or list entries) so repair is deterministic when
+    suffixes collide.
+
+    When ``config_obj`` is set (typically the session profile's config.yaml),
+    only that object's ``custom_providers`` are scanned. Otherwise uses
+    ``get_config()`` for the active global config (not the raw ``cfg`` alias).
+    """
+    try:
+        model = str(bare_model or "").strip()
+        prov = _clean_session_model_provider(provider)
+        if not model or "/" in model or not prov:
+            return None
+        if prov != "custom" and not str(prov).startswith("custom:"):
+            return None
+        from api.config import (
+            _custom_provider_entries,
+            _custom_provider_slug_from_name,
+            get_config,
+        )
+
+        if isinstance(config_obj, dict):
+            _entries = _custom_provider_entries(config_obj)
+        else:
+            _cfg = get_config()
+            _entries = _custom_provider_entries(
+                _cfg if isinstance(_cfg, dict) else None
+            )
+        prov_norm = str(prov).strip().lower()
+        raw_suffix = prov_norm.removeprefix("custom:")
+        _matching_cp = None
+        for _entry in _entries:
+            entry_name = str(_entry.get("name") or "").strip().lower()
+            slug = _custom_provider_slug_from_name(_entry.get("name"))
+            if not slug:
+                continue
+            if (
+                prov_norm in {entry_name, slug}
+                or raw_suffix == slug.removeprefix("custom:")
+            ):
+                _matching_cp = _entry
+                break
+        if not _matching_cp:
+            return None
+        for _id in _ordered_custom_provider_model_ids(_matching_cp):
+            if "/" in _id and _id.rsplit("/", 1)[-1] == model:
+                return _id
+        return None
+    except Exception:
+        return None
+
+
+def _moa_fast_path_model_state(model: str) -> tuple[str, str, bool]:
+    """Strip an optional ``@moa:``/``moa/`` prefix from an MoA-routed model.
+
+    Split out of ``_resolve_compatible_session_model_state`` so the MoA
+    fast-path stays a single-line call in that function body (see
+    ``test_issue1855_resolve_model_provider_fast_path.py``, the fast-path/
+    catalog-call ordering check scans a bounded window of that function's
+    source, and inlining this here previously pushed the catalog call just
+    past that window).
+    """
+    if model.startswith("@moa:"):
+        return model.split(":", 1)[1].strip(), "moa", True
+    if model.lower().startswith("moa/"):
+        return model.split("/", 1)[1].strip(), "moa", True
+    return model, "moa", False
 
 
 def _resolve_compatible_session_model_state(
@@ -5529,6 +6464,7 @@ def _resolve_compatible_session_model_state(
     *,
     profile_provider: str | None = None,
     profile_default_model: str | None = None,
+    profile_config: dict | None = None,
     explicit_model_pick: bool = False,
     prefer_cached_catalog: bool = False,
 ) -> tuple[str, str | None, bool]:
@@ -5549,7 +6485,7 @@ def _resolve_compatible_session_model_state(
     after paying the full catalog-build cost. Avoiding the catalog here keeps
     ``POST /api/chat/start`` snappy even when the model catalog is cold and the
     rebuild has to make network calls (custom OpenAI-compat endpoints,
-    OpenRouter ``/models``, LM Studio ``/models``, credential pool refresh) —
+    OpenRouter ``/models``, LM Studio ``/models``, credential pool refresh),
     those used to wedge the handler for >100s and trigger 502s on default-60s
     reverse proxies, even though the WebUI itself eventually responded.
 
@@ -5557,7 +6493,7 @@ def _resolve_compatible_session_model_state(
     non-blocking: it resolves from the warm/disk cache or a network-free
     minimal catalog and NEVER triggers a live per-provider rebuild (the
     Copilot token-exchange HTTPS call that hangs a server-initiated wakeup
-    turn — see rebase report §1/§3/model-resolve-hang). Human-initiated
+    turn, see rebase report §1/§3/model-resolve-hang). Human-initiated
     chat/start leaves this False to keep full live discovery; a session that
     already has a persisted model still resolves correctly because the
     persisted model wins over the catalog and the catalog is only consulted
@@ -5565,6 +6501,8 @@ def _resolve_compatible_session_model_state(
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
+    if model and requested_provider == "moa":
+        return _moa_fast_path_model_state(model)
     if model and requested_provider and model.startswith(f"@{requested_provider}:"):
         try:
             from api.config import cfg as _active_cfg
@@ -5602,6 +6540,15 @@ def _resolve_compatible_session_model_state(
                 )
             ):
                 return _profile_default, requested_provider, True
+
+            _repaired_model = _repair_bare_custom_provider_model(
+                model,
+                requested_provider,
+                config_obj=profile_config,
+            )
+            if _repaired_model:
+                return _repaired_model, requested_provider, True
+
             return model, requested_provider, False
 
     # Default (human chat/start) path calls get_available_models() with NO
@@ -5700,6 +6647,14 @@ def _resolve_compatible_session_model_state(
             )
         ):
             return _profile_default, profile_provider, True
+
+        _repaired_model = _repair_bare_custom_provider_model(
+            model,
+            profile_provider,
+            config_obj=profile_config,
+        )
+        if _repaired_model:
+            return _repaired_model, profile_provider, True
 
         return model, profile_provider, False
 
@@ -5957,12 +6912,13 @@ def _resolve_effective_session_model_for_display(session) -> str:
     """
     original_model = getattr(session, "model", None) or ""
     requested_provider = getattr(session, "model_provider", None)
-    _pp_provider, _pp_default = _read_profile_model_config(session, requested_provider)
+    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(session, requested_provider)
     effective_model, _provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
         requested_provider,
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
+        profile_config=_pp_cfg,
         # GET /api/session is a hot, side-effect-free per-tab/per-poll path.
         # It must never pay the cold live provider-catalog rebuild (a
         # botocore IMDS probe that cannot resolve on a non-AWS / WSL / corp
@@ -5980,12 +6936,13 @@ def _resolve_effective_session_model_for_display(session) -> str:
 def _resolve_effective_session_model_provider_for_display(session) -> str | None:
     original_model = getattr(session, "model", None) or ""
     requested_provider = getattr(session, "model_provider", None)
-    _pp_provider, _pp_default = _read_profile_model_config(session, requested_provider)
+    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(session, requested_provider)
     _model, provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
         requested_provider,
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
+        profile_config=_pp_cfg,
         # See _resolve_effective_session_model_for_display: same hot
         # side-effect-free GET /api/session path; must not trigger the cold
         # live rebuild. prefer_cached_catalog resolves from warm/disk cache
@@ -6248,6 +7205,69 @@ def _session_index_marks_was_webui(sid: str) -> bool:
     return False
 
 
+def _state_db_session_source(sid: str) -> str:
+    """Return the lowercased ``sessions.source`` for ``sid`` from state.db.
+
+    Cheap single-row lookup used to distinguish delegated ``subagent`` children
+    (which have a recoverable state.db transcript) from genuinely-deleted WebUI
+    sessions.  Returns "" on any error / missing row so callers fall back to
+    their existing behaviour.
+    """
+    if not sid or not is_safe_session_id(sid):
+        return ""
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if not db_path or not Path(db_path).exists():
+            return ""
+        import sqlite3 as _sqlite
+        with closing(_sqlite.connect(str(db_path))) as _conn:
+            row = _conn.execute(
+                "SELECT source FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    return str(row[0] or "").strip().lower()
+
+
+def _is_subagent_child_session_id(sid: str) -> bool:
+    """Return True when ``sid`` is a delegated subagent child in state.db.
+
+    Delegated ``delegate_task`` children are recorded in Hermes state.db with
+    ``source='subagent'`` and a ``parent_session_id``. They frequently have no
+    WebUI sidecar (they ran server-side), so opening one from the sidebar must
+    recover the transcript from state.db rather than 404 as a deleted WebUI
+    session (#5307).
+    """
+    return _state_db_session_source(sid) == "subagent"
+
+
+def _session_is_subagent_view_only(sid: str) -> bool:
+    """Return True when ``sid`` is a delegated subagent child by ANY signal —
+    state.db source OR a persisted WebUI sidecar tagged subagent.
+
+    Delegated children are view-only and owned by the delegate runner. Direct
+    transcript/metadata mutation routes (delete / truncate / clear / pin /
+    rename / move) must refuse them so a stray WebUI action can't delete or
+    fork the child's state.db transcript (#5307). This is the shared
+    defense-in-depth guard for routes that bypass
+    ``_get_or_materialize_session()``.
+    """
+    if _is_subagent_child_session_id(sid):
+        return True
+    try:
+        s = get_session(sid)
+    except Exception:
+        return False
+    src = (
+        str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
+            or getattr(s, "session_source", "") or "").strip().lower()
+    )
+    return src == "subagent"
+
+
 def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple[bool, str]:
     """Decide whether a foreign-origin session is safe to claim writeable
     in WebUI. Returns ``(claimable, reason_if_not)``.
@@ -6290,7 +7310,7 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     # in a future log / user-visible diagnostic.
     cli_meta_source_tag = (cm.get("source_tag") or cm.get("raw_source") or "").strip().lower()
     if cli_meta_source_tag in {"claude_code", "cron", "external_agent",
-                                "gateway", "messaging", "unknown"}:
+                                "gateway", "messaging", "subagent", "unknown"}:
         # gateway/unknown are the platformless gateway fallbacks
         # (gateway/run.py, gateway/slash_commands.py) — they own the
         # conversation in the gateway, not in WebUI.
@@ -6309,7 +7329,7 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
     if not cli_meta_source_tag and state_db_source:
         state_db_source_tag = state_db_source.strip().lower()
         if state_db_source_tag in {"claude_code", "cron", "messaging",
-                                    "external_agent", "gateway", "unknown"}:
+                                    "external_agent", "gateway", "subagent", "unknown"}:
             return False, f"state_db_source={state_db_source_tag}"
     return True, ""
 
@@ -6386,7 +7406,7 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
                 workspace = "/"
         return workspace
 
-    def build_session(sid, cli_meta, msgs, read_only_flag):
+    def build_session(sid, cli_meta, msgs, read_only_flag, is_cli_flag=True):
         return Session(
             session_id=sid,
             title=(cli_meta or {}).get("title") or "CLI Session",
@@ -6397,7 +7417,13 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             created_at=(cli_meta or {}).get("created_at") or 0,
             updated_at=(cli_meta or {}).get("updated_at") or 0,
             profile=(cli_meta or {}).get("profile"),
-            is_cli_session=True,
+            # ``is_cli_flag`` is True for genuine CLI/TUI/Desktop sessions so the
+            # sidebar renders the source badge and the client's external-session
+            # gating applies. It is False for delegated subagent children (#5307):
+            # they are recovered read-only and must NOT be CLI-classified, or they
+            # would pass the frontend ``_isExternalSession`` poll-skip /
+            # active-refresh gates that #3603 keeps narrow.
+            is_cli_session=is_cli_flag,
             source_tag=(cli_meta or {}).get("source_tag"),
             raw_source=(cli_meta or {}).get("raw_source"),
             session_source=(cli_meta or {}).get("session_source"),
@@ -6413,7 +7439,13 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
 
     if not is_safe_session_id(sid):
         return None, "invalid_sid"
-    if _session_index_marks_was_webui(sid):
+    if _session_index_marks_was_webui(sid) and not _is_subagent_child_session_id(sid):
+        # A delegated subagent child (source='subagent' in state.db) can be
+        # registered in the WebUI index as a webui/fork/blank-source row (it
+        # shares the parent's lineage) yet have no WebUI sidecar of its own.
+        # Those must recover their transcript from state.db below rather than
+        # 404 as a genuinely-deleted WebUI session (#5307). Every other
+        # index-marked-WebUI id keeps the #2782 self-heal 404 contract.
         return None, "was_webui"
     if cli_meta is None:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
@@ -6493,7 +7525,19 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         # readonly=True so the GET stub keeps rendering the original
         # read-only badge, and return 'not_claimable' so the POST path
         # 403s instead of bare-404ing.
-        return build_session(sid, cli_meta, msgs, read_only_flag=True), "not_claimable"
+        #
+        # Delegated subagent children (#5307) additionally must NOT be
+        # CLI-classified: they are recovered read-only for viewing, but
+        # is_cli_session=True would let them pass the frontend
+        # _isExternalSession poll-skip / active-refresh gates that #3603
+        # keeps narrow. Every other non-claimable foreign source keeps the
+        # CLI classification so its source badge renders.
+        _sa_child = _is_subagent_child_session_id(sid)
+        return (
+            build_session(sid, cli_meta, msgs, read_only_flag=True,
+                          is_cli_flag=not _sa_child),
+            "not_claimable",
+        )
     return build_session(sid, cli_meta, msgs, read_only_flag=False), "materialized"
 
 
@@ -7374,16 +8418,22 @@ def _is_duplicate_webui_state_projection(session: dict, represented_webui_ids: s
     return bool(_session_lineage_ids(session) & represented_webui_ids)
 
 
-def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids: set[str], *, show_cron_sessions: bool = False) -> list[dict]:
-    """Return CLI/state sidebar rows while preserving project-hidden cron rows.
+def _dedupe_cli_sidebar_sessions_for_api(
+    cli: list[dict],
+    represented_webui_ids: set[str],
+    *,
+    show_cron_sessions: bool = False,
+    show_webhook_sessions: bool = False,
+) -> list[dict]:
+    """Return state sidebar rows while preserving project-hidden background rows.
 
-    Agent-side cron sessions come from state.db rather than the WebUI session
-    store. They should stay hidden from the default sidebar, but project-assigned
-    messageful rows must remain in the `/api/sessions` payload with
-    `default_hidden` so the matching project chip can reveal them (#3134).
+    Agent-side cron and webhook sessions come from state.db rather than the WebUI
+    session store. They should stay hidden from the default sidebar, but
+    project-assigned messageful rows must remain in the `/api/sessions` payload
+    with `default_hidden` so the matching project chip can reveal them (#3134).
     """
     from api.models import (
-        _hide_from_default_sidebar as _cron_hide,
+        _hide_from_default_sidebar as _hide_background,
         _include_project_hidden_background_sidebar_sessions,
     )
 
@@ -7393,7 +8443,14 @@ def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids:
         and not _is_duplicate_webui_state_projection(s, represented_webui_ids)
         and is_cli_session_row_visible(s)
     ]
-    visible = [s for s in candidates if not _cron_hide(s, show_cron=show_cron_sessions)]
+    visible = [
+        s for s in candidates
+        if not _hide_background(
+            s,
+            show_cron=show_cron_sessions,
+            show_webhook=show_webhook_sessions,
+        )
+    ]
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
 
 
@@ -7557,15 +8614,22 @@ from api.models import (
     merge_session_messages_append_only,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
+    _evict_sessions_over_cap,
     _merge_session_display_metadata,
     _session_message_merge_key,
+    _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
     agent_session_rows_existing,
+    agent_session_zero_message_sids,
+    _load_webui_zero_message_orphan_tombstone,
+    _record_webui_zero_message_orphan_tombstone,
+    _clear_webui_zero_message_orphan_tombstone,
     ensure_cron_project,
+    _profile_has_user_projects,
     is_cron_session,
     is_safe_session_id,
 )
@@ -8159,6 +9223,10 @@ button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(12
   border:1px solid rgba(124,185,255,.3);color:#7cb9ff;font-size:14px;font-weight:600;cursor:pointer;
   transition:all .15s}
 button:hover{background:rgba(124,185,255,.25)}
+.oidc-login{display:block;margin-top:10px;padding:10px;border-radius:10px;text-decoration:none;
+  background:rgba(255,255,255,.04);border:1px solid rgba(111,214,164,.35);color:#6fd6a4;
+  font-size:14px;font-weight:600;cursor:pointer;transition:all .15s}
+.oidc-login:hover{background:rgba(111,214,164,.12)}
 .passkey-login{margin-top:10px;background:rgba(255,255,255,.04);border-color:rgba(232,160,48,.35);color:#e8a030}
 .err{color:#e94560;font-size:12px;margin-top:10px;display:none}
 </style></head><body>
@@ -8170,12 +9238,53 @@ button:hover{background:rgba(124,185,255,.25)}
     <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
     <button type="submit">{{LOGIN_BTN}}</button>
     <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
+    {{OIDC_LOGIN_HTML}}
   </form>
   <div class="err" id="err"></div>
 </div>
 <!-- Keep login.js relative so subpath mounts load it under the current scope. -->
 <script src="static/login.js?v={{WEBUI_VERSION}}"></script>
 </body></html>"""
+
+
+def _safe_login_redirect_path(raw_path: str | None) -> str:
+    path = str(raw_path or "").strip()
+    if not path:
+        return "/"
+    if path[0] != "/":
+        return "/"
+    if path[1:2] in {"/", "\\"}:
+        return "/"
+    if re.search(r"[\x00-\x1f\x7f\s]", path):
+        return "/"
+    return path
+
+
+def _request_base_url(handler) -> str:
+    from api.auth import _is_secure_context
+
+    scheme = "https" if _is_secure_context(handler) else "http"
+    host = str(handler.headers.get("Host") or "").strip() or "127.0.0.1:8787"
+    return f"{scheme}://{host}"
+
+
+def _oidc_login_html(parsed) -> str:
+    try:
+        from api.auth_oidc import is_oidc_enabled
+    except Exception:
+        return ""
+    if not is_oidc_enabled():
+        return ""
+    next_path = _safe_login_redirect_path(
+        parse_qs(parsed.query or "").get("next", [""])[0]
+    )
+    href = "/api/auth/oidc/start"
+    if next_path != "/":
+        href += "?next=" + quote(next_path, safe="/")
+    return (
+        '<a id="oidc-login" class="oidc-login" '
+        f'href="{_html.escape(href, quote=True)}">Continue with SSO</a>'
+    )
 
 
 # ── Logs endpoint ─────────────────────────────────────────────────────────────
@@ -9980,6 +11089,9 @@ def _render_index_shell_base() -> str:
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
+    if proxy_result is not False:
+        return proxy_result
 
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
@@ -10051,15 +11163,73 @@ def handle_get(handler, parsed) -> bool:
             .replace(
                 "{{LOGIN_CONN_FAILED}}", _html.escape(_login_strings["conn_failed"])
             )
+            .replace("{{OIDC_LOGIN_HTML}}", _oidc_login_html(parsed))
         )
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
+    if parsed.path == "/api/auth/oidc/start":
+        from api.auth_oidc import OIDCAuthError, OIDCConfigError, build_authorization_redirect
+
+        next_path = _safe_login_redirect_path(
+            parse_qs(parsed.query or "").get("next", [""])[0]
+        )
+        try:
+            location = build_authorization_redirect(
+                _request_base_url(handler), next_path
+            )
+        except OIDCConfigError as exc:
+            return j(handler, {"error": str(exc)}, status=404)
+        except OIDCAuthError as exc:
+            return j(handler, {"error": str(exc)}, status=exc.status_code)
+        handler.send_response(302)
+        handler.send_header("Location", location)
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", "0")
+        _security_headers(handler)
+        handler.end_headers()
+        return True
+
+    if parsed.path == "/api/auth/oidc/callback":
+        from api.auth import create_session, set_auth_cookie
+        from api.auth_oidc import OIDCAuthError, OIDCConfigError, complete_authorization_code_flow
+
+        query = parse_qs(parsed.query or "")
+        error = str(query.get("error", [""])[0] or "").strip()
+        if error:
+            description = str(query.get("error_description", [""])[0] or "").strip()
+            return j(handler, {"error": description or error}, status=401)
+        state = str(query.get("state", [""])[0] or "").strip()
+        code = str(query.get("code", [""])[0] or "").strip()
+        if not state or not code:
+            return j(handler, {"error": "Missing OIDC callback state or code"}, status=400)
+        try:
+            result = complete_authorization_code_flow(
+                _request_base_url(handler), state, code
+            )
+        except OIDCConfigError as exc:
+            return j(handler, {"error": str(exc)}, status=404)
+        except OIDCAuthError as exc:
+            return j(handler, {"error": str(exc)}, status=exc.status_code)
+        cookie_val = create_session()
+        handler.send_response(302)
+        handler.send_header(
+            "Location",
+            _safe_login_redirect_path(result.get("next_path")),
+        )
+        handler.send_header("Cache-Control", "no-store")
+        _security_headers(handler)
+        set_auth_cookie(handler, cookie_val)
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+        return True
+
     if parsed.path == "/api/auth/status":
-        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, parse_cookie, verify_session
+        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, is_oidc_auth_enabled, parse_cookie, verify_session
         from api.passkeys import registered_credentials
 
         logged_in = False
         auth_enabled = is_auth_enabled()
+        oidc_enabled = is_oidc_auth_enabled()
         if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
@@ -10069,6 +11239,7 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
+            "oidc_enabled": oidc_enabled,
             "password_auth_enabled": password_auth_enabled,
             "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
             "passkeys_enabled": bool(passkeys),
@@ -10766,6 +11937,15 @@ def handle_get(handler, parsed) -> bool:
                 raw["model"] = effective_model
             if effective_provider:
                 raw["model_provider"] = effective_provider
+            # A subagent child (#5307) is view-only regardless of what a stale
+            # sidecar stored: coerce the serialized flags so the browser never
+            # treats an existing subagent sidecar as writable / CLI-classified.
+            if (
+                (str(raw.get("source_tag") or raw.get("raw_source") or raw.get("session_source") or "").strip().lower() == "subagent")
+                or _is_subagent_child_session_id(sid)
+            ):
+                raw["is_cli_session"] = False
+                raw["read_only"] = True
             redact = redact_session_data(raw)
             _t5 = _time.monotonic()
             resp = j(handler, {"session": redact})
@@ -10820,7 +12000,13 @@ def handle_get(handler, parsed) -> bool:
                 "archived": bool(getattr(synth, "archived", False)),
                 "project_id": getattr(synth, "project_id", None),
                 "profile": synth.profile,
-                "is_cli_session": True,
+                # Read is_cli_session from the synthesized Session, not a
+                # hardcoded True: delegated subagent children (#5307) are
+                # recovered read-only with is_cli_session=False so they don't
+                # pass the frontend _isExternalSession poll-skip / active-refresh
+                # gates (#3603). Every other synthesized foreign session keeps
+                # is_cli_session=True so its source badge renders.
+                "is_cli_session": bool(getattr(synth, "is_cli_session", False)),
                 "source_tag": synth.source_tag,
                 "raw_source": synth.raw_source,
                 "session_source": synth.session_source,
@@ -10893,16 +12079,19 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
         try:
-            from api.profiles import get_active_profile_name
+            from api import profiles as profiles_api
+
             diag.stage("load_settings")
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
+            show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
             show_previous_messaging_sessions = bool(
                 settings.get("show_previous_messaging_sessions")
             )
             show_cron_sessions = bool(settings.get("show_cron_sessions"))
+            show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
             agent_session_source_filter = settings.get("agent_session_source_filter")
-            active_profile = get_active_profile_name()
+            active_profile = profiles_api.get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
             include_archived = _query_flag(parsed, "include_archived")
             exclude_hidden = _query_flag(parsed, "exclude_hidden")
@@ -10917,11 +12106,13 @@ def handle_get(handler, parsed) -> bool:
                 active_profile=active_profile,
                 all_profiles=all_profiles,
                 show_cli_sessions=show_cli_sessions,
+                show_claude_code_sessions=show_claude_code_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
                 include_archived=include_archived,
                 exclude_hidden=exclude_hidden,
                 visible_only=True,
+                show_webhook_sessions=show_webhook_sessions,
                 source_filter=agent_session_source_filter,
                 sidebar_source=sidebar_source,
                 archived_limit=archived_limit,
@@ -10937,11 +12128,13 @@ def handle_get(handler, parsed) -> bool:
                     active_profile=active_profile,
                     all_profiles=all_profiles,
                     show_cli_sessions=show_cli_sessions,
+                    show_claude_code_sessions=show_claude_code_sessions,
                     show_previous_messaging_sessions=show_previous_messaging_sessions,
                     show_cron_sessions=show_cron_sessions,
                     include_archived=include_archived,
                     exclude_hidden=exclude_hidden,
                     visible_only=True,
+                    show_webhook_sessions=show_webhook_sessions,
                     source_filter=agent_session_source_filter,
                     sidebar_source=sidebar_source,
                     archived_limit=archived_limit,
@@ -10959,8 +12152,9 @@ def handle_get(handler, parsed) -> bool:
         # ── Profile scoping (#1614) ────────────────────────────────────────
         # Default: filter to the active profile. ?all_profiles=1 returns the
         # aggregate list so settings/admin UIs can still see everything.
-        from api.profiles import get_active_profile_name
-        active_profile = get_active_profile_name()
+        from api import profiles as profiles_api
+
+        active_profile = profiles_api.get_active_profile_name()
         all_projects = load_projects()
         isolated_profile_mode = _is_isolated_profile_mode()
         all_profiles = _all_profiles_enabled(parsed)
@@ -11229,9 +12423,9 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, str(e), 404)
 
     # ── Cron API (GET) ──
-    # All cron handlers touch cron.jobs which resolves HERMES_HOME from
-    # os.environ (process-global) at call time. Wrap in cron_profile_context
-    # so the TLS-active profile's jobs.json is read, not the process default.
+    # Cron reads are active-profile-scoped by default. The list route now
+    # aggregates per visible profile home so the UI can surface hidden-row
+    # counts and, when opted in, read-only foreign rows.
     if parsed.path == "/api/crons":
         # #4768: in split-container / minimal Docker deployments the WebUI image may
         # not ship the agent's `cron` package on its import path. Degrade gracefully
@@ -11240,16 +12434,22 @@ def handle_get(handler, parsed) -> bool:
         # ModuleNotFoundError whose missing module is an internal dependency of an
         # existing cron/jobs.py is a real bug and must still surface.
         _ensure_agent_cron_import_path()
+        active_profile = _get_active_profile_name() or "default"
         try:
-            from cron.jobs import list_jobs
+            active_jobs, other_jobs = _cron_jobs_cross_profile(active_profile)
         except ModuleNotFoundError as exc:
             if exc.name in ("cron", "cron.jobs"):
                 return j(handler, {"jobs": [], "cron_unavailable": True})
             raise
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
-            return j(handler, {"jobs": _cron_jobs_for_api(list_jobs(include_disabled=True))})
+        all_profiles = _all_profiles_enabled(parsed)
+        jobs = active_jobs + other_jobs if all_profiles else active_jobs
+        hidden_other_count = 0 if all_profiles else len(other_jobs)
+        return j(handler, {
+            "jobs": jobs,
+            "all_profiles": all_profiles,
+            "active_profile": active_profile,
+            "other_profile_count": hidden_other_count,
+        })
 
     if parsed.path == "/api/crons/output":
         from api.profiles import cron_profile_context
@@ -11375,28 +12575,21 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
-        from api.profiles import (
-            get_active_profile_name,
-            list_profiles_api,
-        )
+        from api import profiles as profiles_api
 
         return j(
             handler,
             {
-                "profiles": list_profiles_api(),
-                "active": get_active_profile_name(),
+                "profiles": profiles_api.list_profiles_api(),
+                "active": profiles_api.get_active_profile_name(),
                 "single_profile_mode": _is_isolated_profile_mode(),
             },
         )
 
     if parsed.path == "/api/profile/active":
-        from api.profiles import (
-            _is_root_profile,
-            get_active_hermes_home,
-            get_active_profile_name,
-        )
+        from api import profiles as profiles_api
 
-        active_profile_name = get_active_profile_name()
+        active_profile_name = profiles_api.get_active_profile_name()
         # Resolve the ACTIVE PROFILE's configured workspace so a cold boot with a
         # profile cookie shows the right composer workspace chip on a blank
         # new-chat page (#5169). Use get_profile_default_workspace() (NOT
@@ -11414,8 +12607,8 @@ def handle_get(handler, parsed) -> bool:
             handler,
             {
                 "name": active_profile_name,
-                "path": str(get_active_hermes_home()),
-                "is_default": _is_root_profile(active_profile_name),
+                "path": str(profiles_api.get_active_hermes_home()),
+                "is_default": profiles_api._is_root_profile(active_profile_name),
                 "default_workspace": _profile_default_workspace,
             },
         )
@@ -11681,6 +12874,16 @@ def handle_post(handler, parsed) -> bool:
         finally:
             if diag:
                 diag.finish()
+    proxy_result = _handle_extension_sidecar_proxy(
+        handler,
+        parsed,
+        "POST",
+        read_request_body=True,
+    )
+    if proxy_result is not False:
+        if diag:
+            diag.finish()
+        return proxy_result
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
@@ -11749,6 +12952,26 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(exc), status=exc.status)
         except Exception:
             logger.exception("extension toggle failed")
+            return bad(handler, "Failed to update extension state", status=500)
+
+    if parsed.path == "/api/extensions/sidecar-proxy-consent":
+        from api.extensions import (
+            ExtensionSidecarProxyError,
+            set_extension_sidecar_proxy_consent,
+        )
+
+        try:
+            return j(
+                handler,
+                set_extension_sidecar_proxy_consent(
+                    body.get("id"),
+                    body.get("approved"),
+                ),
+            )
+        except ExtensionSidecarProxyError as exc:
+            return bad(handler, str(exc), status=exc.status)
+        except Exception:
+            logger.exception("extension sidecar proxy consent update failed")
             return bad(handler, "Failed to update extension state", status=500)
 
     if parsed.path == "/api/extensions/install":
@@ -11854,19 +13077,29 @@ def handle_post(handler, parsed) -> bool:
         # ── Memory lifecycle: commit the previous session before starting a new one ──
         prev_session_id = body.get("prev_session_id")
         if prev_session_id:
-            if not _session_id_visible_to_request_profile(handler, prev_session_id):
-                return True
-            try:
-                from api.session_lifecycle import commit_session_memory
-                from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                prev_agent = None
-                with SESSION_AGENT_CACHE_LOCK:
-                    _cached = SESSION_AGENT_CACHE.get(prev_session_id)
-                    if _cached:
-                        prev_agent = _cached[0]
-                commit_session_memory(prev_session_id, agent=prev_agent)
-            except Exception:
-                logger.debug("Lifecycle commit for prev_session %s failed", prev_session_id, exc_info=True)
+            if not _session_id_visible_to_request_profile(
+                handler, prev_session_id, emit_error=False
+            ):
+                # Cross-profile hand-off after a profile switch: skip memory
+                # commit for the previous profile's session, but still create
+                # the new session (#5420).
+                prev_session_id = None
+            if prev_session_id:
+                try:
+                    from api.session_lifecycle import commit_session_memory
+                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                    prev_agent = None
+                    with SESSION_AGENT_CACHE_LOCK:
+                        _cached = SESSION_AGENT_CACHE.get(prev_session_id)
+                        if _cached:
+                            prev_agent = _cached[0]
+                    commit_session_memory(prev_session_id, agent=prev_agent)
+                except Exception:
+                    logger.debug(
+                        "Lifecycle commit for prev_session %s failed",
+                        prev_session_id,
+                        exc_info=True,
+                    )
         s = new_session(
             workspace=workspace,
             model=model,
@@ -11889,6 +13122,8 @@ def handle_post(handler, parsed) -> bool:
             sid = body.get("session_id")
             if not sid:
                 return bad(handler, "session_id is required")
+            if _session_is_subagent_view_only(sid):
+                return bad(handler, "Subagent sessions are view-only and cannot be duplicated from WebUI", 400)
 
             session = Session.load(sid)
             if not session:
@@ -11957,8 +13192,7 @@ def handle_post(handler, parsed) -> bool:
             with LOCK:
                 SESSIONS[copied_session.session_id] = copied_session
                 SESSIONS.move_to_end(copied_session.session_id)
-                while len(SESSIONS) > SESSIONS_MAX:
-                    SESSIONS.popitem(last=False)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
             # Persist immediately. The pre-PR flow (/api/session/new + /api/session/rename)
             # accidentally avoided this because `/api/session/rename` calls `s.save()`.
             # Without this explicit save, the duplicate is in-memory only — if the user
@@ -12028,6 +13262,13 @@ def handle_post(handler, parsed) -> bool:
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
+
+    if parsed.path == "/api/providers/self-hosted":
+        try:
+            from api.onboarding import apply_self_hosted_provider_setup
+            return j(handler, apply_self_hosted_provider_setup(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
 
     if parsed.path == "/api/models/refresh":
         provider_id = (body.get("provider") or "").strip().lower()
@@ -12152,6 +13393,8 @@ def handle_post(handler, parsed) -> bool:
         if "name" not in body:
             return bad(handler, "Missing required field: name")
         sid = body["session_id"]
+        if _session_is_subagent_view_only(sid):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
         name = body["name"].strip()
         try:
             s = get_session(sid)
@@ -12201,6 +13444,8 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        if _session_is_subagent_view_only(sid):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
         toolsets = body.get("toolsets")
         try:
             toolsets = _validate_session_toolsets_shape(toolsets)
@@ -12236,6 +13481,8 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        if _session_is_subagent_view_only(sid):
+            return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
         # Stage-326 hardening (per Opus advisor): size + type validation on
@@ -12364,6 +13611,11 @@ def handle_post(handler, parsed) -> bool:
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
+        # A delegated subagent child (#5307) is view-only and owned by the
+        # delegate runner. Deleting it here would call delete_cli_session() and
+        # erase the child's state.db transcript — refuse it.
+        if _session_is_subagent_view_only(sid):
+            return bad(handler, "Subagent sessions are view-only and cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
         worktree_retained = _worktree_retained_payload_for_session_id(sid)
         try:
@@ -12442,6 +13694,8 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
         try:
             s = get_session(body["session_id"])
         except KeyError:
@@ -12469,6 +13723,8 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
         if body.get("keep_count") is None:
             return bad(handler, "Missing required field(s): keep_count")
         try:
@@ -12519,6 +13775,8 @@ def handle_post(handler, parsed) -> bool:
         # (Opus pre-release follow-up.)
         if not isinstance(body["session_id"], str):
             return bad(handler, "session_id must be a string")
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be branched from WebUI", 400)
         try:
             source = get_session(body["session_id"])
         except KeyError:
@@ -12602,8 +13860,7 @@ def handle_post(handler, parsed) -> bool:
         with LOCK:
             SESSIONS[branch.session_id] = branch
             SESSIONS.move_to_end(branch.session_id)
-            while len(SESSIONS) > SESSIONS_MAX:
-                SESSIONS.popitem(last=False)
+            _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
 
         # Persist only if there are messages (matches new_session pattern)
         if forked_messages:
@@ -12637,6 +13894,8 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
         try:
             from api.session_ops import retry_last
             result = retry_last(body["session_id"])
@@ -12651,6 +13910,8 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
         try:
             from api.session_ops import undo_last
             result = undo_last(body["session_id"])
@@ -12812,6 +14073,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/file/save":
         return _handle_file_save(handler, body)
+
+    if parsed.path == "/api/file/office-save":
+        return _handle_office_file_save(handler, body)
 
     if parsed.path == "/api/file/create":
         return _handle_file_create(handler, body)
@@ -13123,7 +14387,9 @@ def handle_post(handler, parsed) -> bool:
             k in body
             for k in (
                 "show_cli_sessions",
+                "show_claude_code_sessions",
                 "show_cron_sessions",
+                "show_webhook_sessions",
                 "show_previous_messaging_sessions",
             )
         ):
@@ -13243,6 +14509,8 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
         try:
             s = get_session(body["session_id"])
             s = _ensure_full_session_before_mutation(body["session_id"], s)
@@ -13314,6 +14582,8 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        if _session_is_subagent_view_only(sid):
+            return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -13332,6 +14602,13 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Session not found", 404)
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
+            # Delegated subagent children (#5307) are view-only and owned by the
+            # delegate runner — never materialize one into a writable WebUI
+            # sidecar via the archive fallback (the 3rd of the shared
+            # import_cli_session write paths).
+            _arch_source_tag = (cli_meta.get("source_tag") or cli_meta.get("raw_source") or "").strip().lower()
+            if _arch_source_tag == "subagent" or _is_subagent_child_session_id(sid):
+                return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
             if _is_messaging_session_record(cli_meta):
                 s = Session(
                     session_id=sid,
@@ -13403,7 +14680,6 @@ def handle_post(handler, parsed) -> bool:
         # #1614: refuse moves into a project owned by another profile.
         target_pid = body.get("project_id") or None
         if target_pid:
-            from api.profiles import get_active_profile_name
             # Use the session's own profile for authorization, not the global
             # active profile. A session belongs to a specific profile set at
             # creation; projects from that profile should always be assignable,
@@ -13453,7 +14729,6 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         import re as _re
-        from api.profiles import get_active_profile_name
 
         name = body["name"].strip()[:128]
         if not name:
@@ -13488,7 +14763,6 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         import re as _re
-        from api.profiles import get_active_profile_name
 
         projects = load_projects()
         proj = next(
@@ -13514,7 +14788,6 @@ def handle_post(handler, parsed) -> bool:
             require(body, "project_id")
         except ValueError as e:
             return bad(handler, str(e))
-        from api.profiles import get_active_profile_name
         projects = load_projects()
         proj = next(
             (p for p in projects if p["project_id"] == body["project_id"]), None
@@ -13877,6 +15150,14 @@ def handle_patch(handler, parsed) -> bool:
     """Handle all PATCH routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+    proxy_result = _handle_extension_sidecar_proxy(
+        handler,
+        parsed,
+        "PATCH",
+        read_request_body=True,
+    )
+    if proxy_result is not False:
+        return proxy_result
     body = read_body(handler)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PATCH"):
         return True
@@ -13897,6 +15178,14 @@ def handle_delete(handler, parsed) -> bool:
     """Handle all DELETE routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+    proxy_result = _handle_extension_sidecar_proxy(
+        handler,
+        parsed,
+        "DELETE",
+        read_request_body=True,
+    )
+    if proxy_result is not False:
+        return proxy_result
     body = read_body(handler)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="DELETE"):
         return True
@@ -13925,6 +15214,14 @@ def handle_put(handler, parsed) -> bool:
     """Handle all PUT routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+    proxy_result = _handle_extension_sidecar_proxy(
+        handler,
+        parsed,
+        "PUT",
+        read_request_body=True,
+    )
+    if proxy_result is not False:
+        return proxy_result
     body = read_body(handler)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
         return True
@@ -14055,11 +15352,35 @@ def _handle_session_export(handler, parsed):
     if not _profiles_match(getattr(s, "profile", None), active_profile):
         return bad(handler, "Session not found", 404)
     safe = redact_session_data(s.__dict__)
-    payload = json.dumps(safe, ensure_ascii=False, indent=2)
+    qs = parse_qs(parsed.query)
+    fmt = qs.get("format", ["json"])[0].lower()
+    if fmt == "html":
+        from api.session_export_html import render_session_html
+        theme = qs.get("theme", ["dark"])[0].lower()
+        palette: dict | None = None
+        raw_palette = qs.get("palette", [""])[0]
+        if raw_palette:
+            try:
+                import base64 as _b64
+                decoded = _b64.b64decode(raw_palette, validate=False).decode("utf-8")
+                parsed_palette = json.loads(decoded)
+                if isinstance(parsed_palette, dict):
+                    # Cap payload so a hostile client can't blow up the response.
+                    if len(parsed_palette) <= 64:
+                        palette = parsed_palette
+            except Exception:
+                palette = None
+        payload = render_session_html(safe, theme=theme, palette=palette)
+        content_type = "text/html; charset=utf-8"
+        ext = "html"
+    else:
+        payload = json.dumps(safe, ensure_ascii=False, indent=2)
+        content_type = "application/json; charset=utf-8"
+        ext = "json"
     handler.send_response(200)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Type", content_type)
     handler.send_header(
-        "Content-Disposition", f'attachment; filename="hermes-{sid}.json"'
+        "Content-Disposition", f'attachment; filename="hermes-{sid}.{ext}"'
     )
     handler.send_header("Content-Length", str(len(payload.encode("utf-8"))))
     handler.send_header("Cache-Control", "no-store")
@@ -14307,6 +15628,10 @@ def _handle_escape_file_read(handler, parsed):
         return bad(handler, _sanitize_error(exc), 404)
     except EscapeAuthorizationExpiredError as exc:
         return bad(handler, _sanitize_error(exc), 403)
+    except ImportError as exc:
+        # Optional Office parsers absent on a lean install — mirror
+        # _handle_file_read: a 503 with the install hint, not a 500 traceback.
+        return bad(handler, _sanitize_error(exc), 503)
     except ValueError as exc:
         return bad(handler, _sanitize_error(exc), 404)
 
@@ -14640,6 +15965,8 @@ def _terminal_remote_backend_enabled() -> bool:
 
 def _handle_terminal_start(handler, body):
     try:
+        if not _embedded_terminal_gate_allows(handler):
+            return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
         sid, session = _terminal_session_lookup(body)
         if _terminal_remote_backend_enabled():
             return j(
@@ -14678,6 +16005,8 @@ def _handle_terminal_start(handler, body):
 
 def _handle_terminal_input(handler, body):
     try:
+        if not _embedded_terminal_gate_allows(handler):
+            return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
         require(body, "session_id")
         data = str(body.get("data", ""))
         if len(data) > 8192:
@@ -14695,6 +16024,8 @@ def _handle_terminal_input(handler, body):
 
 def _handle_terminal_resize(handler, body):
     try:
+        if not _embedded_terminal_gate_allows(handler):
+            return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
         require(body, "session_id")
         from api.terminal import resize_terminal
         resize_terminal(
@@ -14713,6 +16044,8 @@ def _handle_terminal_resize(handler, body):
 
 def _handle_terminal_close(handler, body):
     try:
+        if not _embedded_terminal_gate_allows(handler):
+            return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
         require(body, "session_id")
         from api.terminal import close_terminal
         closed = close_terminal(body["session_id"])
@@ -14722,6 +16055,8 @@ def _handle_terminal_close(handler, body):
 
 
 def _handle_terminal_output(handler, parsed):
+    if not _embedded_terminal_gate_allows(handler):
+        return bad(handler, _EMBEDDED_TERMINAL_GATE_DENIED_MESSAGE, 403)
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
     if not sid:
@@ -15029,8 +16364,230 @@ def _normalize_tts_prosody(value, *, unit: str) -> str | None:
     return None
 
 
+_TTS_PROXY_MAX_BYTES = 16 * 1024 * 1024
+_TTS_LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _tts_addr_is_blocked(ip_str: str) -> bool:
+    """Return True when IP is in a private or otherwise non-routable class.
+
+    The explicit flags below document the concrete SSRF-risk classes, but the
+    load-bearing rule is the ``not is_global`` backstop: it blocks every address
+    that is not globally routable — including ranges the named flags miss, most
+    notably ``100.64.0.0/10`` (RFC 6598 CGNAT, also Tailscale's default address
+    space), the ``198.18.0.0/15`` benchmarking range, and any future
+    non-global allocation — so a rebinding host cannot reach a victim's tailnet
+    or carrier-NAT peer.
+    """
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return (
+        not ip.is_global
+        or ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _tts_host_is_blocked_target(hostname: str) -> bool:
+    """True if the hostname resolves to (or literally is) a private / loopback /
+    link-local / reserved / multicast address — the SSRF-risk targets that an
+    OpenAI-compatible TTS base_url must not be allowed to reach. Public hosts
+    (a user's own hosted OpenAI-compatible server) are allowed; the explicit
+    localhost-over-http dev case is handled separately by the caller."""
+    import ipaddress
+    import socket
+
+    host = (hostname or "").strip().lower()
+    if not host:
+        return True
+
+    # Literal IP host?
+    try:
+        ipaddress.ip_address(host)
+        return _tts_addr_is_blocked(host)
+    except ValueError:
+        pass
+
+    # DNS host: resolve and block if ANY resolved address is a blocked target
+    # (defends against a hostname pointing at an internal/link-local address).
+    # A DNS-resolution failure is NOT treated as an SSRF block — an unresolvable
+    # host simply can't be reached (the outbound request fails naturally), and
+    # failing closed here would wrongly reject legitimate public hosts that don't
+    # resolve in a sandboxed/offline environment. Only a host that resolves to a
+    # blocked address is rejected.
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        if sockaddr and _tts_addr_is_blocked(str(sockaddr[0])):
+            return True
+    return False
+
+
+def _tts_resolve_pinned_addresses(hostname: str, port: int | None) -> list[str]:
+    """Resolve once, validate the RRset, and preserve candidate dial order."""
+    import socket
+
+    host = (hostname or "").strip().lower()
+    if not host:
+        raise ValueError("invalid OpenAI TTS base_url host")
+
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except Exception as exc:
+        raise ValueError("could not resolve OpenAI TTS base_url host") from exc
+    pinned_hosts = []
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        pinned_host = str(sockaddr[0])
+        if _tts_addr_is_blocked(pinned_host):
+            raise ValueError("resolved OpenAI TTS target is not allowed")
+        pinned_hosts.append(pinned_host)
+    if not pinned_hosts:
+        raise ValueError("could not resolve OpenAI TTS base_url host")
+    return pinned_hosts
+
+
+def _tts_resolve_pinned_address(hostname: str) -> str:
+    """Return the first vetted literal address for direct helper callers."""
+    return _tts_resolve_pinned_addresses(hostname, None)[0]
+
+
+def _normalized_openai_tts_base_url(base_url: str) -> str:
+    from urllib.parse import urlsplit, urlunsplit
+
+    raw = str(base_url or "").strip()
+    parsed = urlsplit(raw)
+    hostname = (parsed.hostname or "").strip().lower()
+    if parsed.username or parsed.password:
+        raise ValueError("invalid OpenAI base_url in config")
+    if not parsed.scheme or not parsed.netloc or parsed.query or parsed.fragment:
+        raise ValueError("invalid OpenAI base_url in config")
+    if parsed.scheme == "https":
+        # Public https hosts are allowed (a user's own OpenAI-compatible server),
+        # but reject private/loopback/link-local/reserved targets to close the
+        # SSRF surface (e.g. https://169.254.169.254, https://10.x internal).
+        if _tts_host_is_blocked_target(hostname):
+            raise ValueError("invalid OpenAI base_url in config")
+    elif parsed.scheme == "http" and hostname in _TTS_LOCALHOST_HOSTS:
+        # Explicit localhost-over-http dev/self-hosted case only.
+        pass
+    else:
+        raise ValueError("invalid OpenAI base_url in config")
+    path = parsed.path.rstrip("/") or ""
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _buffer_tts_audio_response(resp, *, max_bytes: int | None = None) -> bytes:
+    if max_bytes is None:
+        max_bytes = _TTS_PROXY_MAX_BYTES
+    headers = getattr(resp, "headers", None)
+    content_type = ""
+    if headers is not None:
+        try:
+            content_type = str(headers.get("Content-Type") or "")
+        except Exception:
+            content_type = ""
+    if not content_type:
+        try:
+            info = resp.info()
+            content_type = str(info.get("Content-Type") or "")
+        except Exception:
+            content_type = ""
+    # A present Content-Type that isn't audio/* is rejected. A MISSING
+    # Content-Type is tolerated: some OpenAI-compatible servers stream audio
+    # bytes without setting Content-Type, and the success path defaults the
+    # browser-facing type to audio/mpeg (encoded in the tests). The SSRF
+    # base-url guard is the primary defense against reaching a non-audio
+    # internal endpoint.
+    if content_type and not content_type.lower().startswith("audio/"):
+        raise ValueError("upstream returned non-audio content")
+    audio_data = bytearray()
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            break
+        audio_data.extend(chunk)
+        if len(audio_data) > max_bytes:
+            raise ValueError("upstream audio exceeded byte limit")
+    return bytes(audio_data)
+
+class _NoRedirectTtsHandler(HTTPRedirectHandler):
+    """Refuse to follow redirects on the TTS call.
+
+    A redirect is never a legitimate response to POST /audio/speech and can
+    carry the Authorization bearer to a target that bypasses the base_url check.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("OpenAI TTS upstream attempted a redirect")
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Connect to a pinned IP while keeping Host and TLS SNI on the hostname."""
+
+    def connect(self):
+        sys.audit("http.client.connect", self, self.host, self.port)
+        last_error = None
+        for pinned_host in _tts_resolve_pinned_addresses(self.host, self.port):
+            try:
+                self.sock = _socket.create_connection(
+                    (pinned_host, self.port), self.timeout, self.source_address
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+        else:
+            if last_error is not None:
+                raise last_error
+            raise OSError("could not connect to any pinned OpenAI TTS target")
+        try:
+            self.sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+        except OSError as exc:
+            if exc.errno != errno.ENOPROTOOPT:
+                raise
+
+        if self._tunnel_host:
+            self._tunnel()
+
+        server_hostname = self._tunnel_host or self.host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+
+
+class _PinnedHTTPSHandler(HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
+
+
+def _tts_open(req, *, timeout=30, opener_factory=None):
+    """Thin network seam for the TTS upstream fetch so tests can intercept it.
+
+    Defaults to a no-redirect opener (built by opener_factory) so an upstream
+    redirect can't carry the Authorization bearer to — or SSRF-bounce the
+    request into — a different/private target after base-url validation passed.
+    Tests monkeypatch this function (or urllib.request.urlopen) to inject a
+    stub response."""
+    if opener_factory is not None:
+        opener = opener_factory()
+        return opener.open(req, timeout=timeout)
+    from urllib.request import urlopen as _urlopen
+    return _urlopen(req, timeout=timeout)
+
+
 def _handle_tts(handler, parsed):
-    """Generate TTS audio via Edge TTS. POST JSON body only.
+    """Generate TTS audio via supported server TTS engines. POST JSON body only.
 
     Design note addressing deep review blocker #4 (synchronous I/O):
     The server uses ThreadingHTTPServer (see server.py:173), so each request
@@ -15050,7 +16607,7 @@ def _handle_tts(handler, parsed):
     voice = "zh-CN-XiaoxiaoNeural"
     rate_str = ""
     pitch_str = ""
-    engine = "edge"  # "edge" | "elevenlabs" | "browser" (browser is client-side only)
+    engine = "edge"  # "edge" | "elevenlabs" | "openai" | "browser" (browser is client-side only)
 
     if handler.command != "POST":
         from api.helpers import bad as _bad
@@ -15180,8 +16737,6 @@ def _handle_tts(handler, parsed):
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
         }).encode("utf-8")
 
-        from urllib.request import Request, urlopen as _urlopen
-
         req = Request(url, data=req_body, headers={
             "xi-api-key": api_key,
             "Content-Type": "application/json",
@@ -15191,21 +16746,99 @@ def _handle_tts(handler, parsed):
         # Buffer the full response before sending first byte.
         # The streaming endpoint is designed for chunked delivery, but urllib's
         # chunked-read path adds per-chunk overhead that dominates short TTS
-        # payloads. With the 5000-char cap enforced above the buffer is bounded
-        # (a few MB of mp3 worst case), so full-buffer-then-send is faster in
-        # practice and simpler to reason about.
-        audio_data = b""
+        # payloads. A hard cap keeps the buffered path bounded even if the
+        # upstream misbehaves.
         try:
-            with _urlopen(req, timeout=30) as resp:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    audio_data += chunk
+            with _tts_open(req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler())) as resp:
+                audio_data = _buffer_tts_audio_response(resp)
+        except ValueError:
+            logger.warning("ElevenLabs TTS rejected an invalid upstream response", exc_info=True)
+            from api.helpers import bad as _bad
+            return _bad(handler, "ElevenLabs TTS generation failed", 502)
         except Exception:
             logger.exception("ElevenLabs TTS generation failed")
             from api.helpers import bad as _bad
             return _bad(handler, "ElevenLabs TTS generation failed", 500)
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(audio_data)))
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return True
+
+    # ── OpenAI-compatible TTS ──────────────────────────────────────────
+    if engine == "openai":
+        api_key = os.getenv("VOICE_TOOLS_OPENAI_KEY", "").strip()
+        if not api_key:
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            try:
+                from api.onboarding import _load_env_file
+                from api.profiles import get_active_hermes_home
+                env_cfg = _load_env_file(get_active_hermes_home() / ".env")
+                api_key = env_cfg.get("VOICE_TOOLS_OPENAI_KEY", "") or env_cfg.get("OPENAI_API_KEY", "")
+            except Exception:
+                pass
+        if not api_key:
+            from api.helpers import bad as _bad
+            return _bad(handler, "OpenAI API key not configured", 503)
+
+        from urllib.parse import urlunsplit as _urlunsplit
+
+        base_url = _urlunsplit(("https", "api.openai.com", "/v1", "", ""))
+        model = "gpt-4o-mini-tts"
+        oai_voice = "alloy"
+        try:
+            from api.config import get_config
+            tts_cfg = (get_config() or {}).get("tts", {})
+            if isinstance(tts_cfg, dict):
+                oai_cfg = tts_cfg.get("openai", {})
+                if isinstance(oai_cfg, dict):
+                    base_url = _normalized_openai_tts_base_url(oai_cfg.get("base_url") or base_url)
+                    model = oai_cfg.get("model") or model
+                    oai_voice = oai_cfg.get("voice") or oai_voice
+                else:
+                    base_url = _normalized_openai_tts_base_url(base_url)
+            else:
+                base_url = _normalized_openai_tts_base_url(base_url)
+        except ValueError:
+            from api.helpers import bad as _bad
+            return _bad(handler, "invalid OpenAI base_url in config", 400)
+        except Exception:
+            pass
+
+        url = f"{base_url}/audio/speech"
+        req_body = json.dumps({
+            "model": model,
+            "input": text,
+            "voice": oai_voice,
+        }).encode("utf-8")
+
+        req = Request(url, data=req_body, headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        })
+
+        # Use a pinned HTTPS opener so the resolved address is the one that gets
+        # dialed. Keep the no-redirect handler in the same chain to block
+        # bearer leaks and SSRF bounce redirects after hostname validation.
+        try:
+            with _tts_open(req, timeout=30, opener_factory=lambda: build_opener(ProxyHandler({}), _NoRedirectTtsHandler(), _PinnedHTTPSHandler())) as resp:
+                audio_data = _buffer_tts_audio_response(resp)
+        except ValueError:
+            logger.warning("OpenAI TTS rejected an invalid upstream response", exc_info=True)
+            from api.helpers import bad as _bad
+            return _bad(handler, "OpenAI TTS generation failed", 502)
+        except Exception:
+            logger.exception("OpenAI TTS generation failed")
+            from api.helpers import bad as _bad
+            return _bad(handler, "OpenAI TTS generation failed", 500)
 
         handler.send_response(200)
         handler.send_header("Content-Type", "audio/mpeg")
@@ -15937,8 +17570,21 @@ def _handle_file_read(handler, parsed):
         return bad(handler, "path is required")
     try:
         return j(handler, read_file_content(Path(s.workspace), rel))
+    except ImportError as e:
+        return bad(handler, str(e), 503)
     except (FileNotFoundError, ValueError) as e:
         return bad(handler, _sanitize_error(e), 404)
+
+
+def _read_anchored_file_bytes(ws_root: Path, target: Path) -> bytes:
+    fd = open_anchored_fd(ws_root, target, want_dir=False)
+    with os.fdopen(fd, "rb", closefd=True) as fh:
+        st = os.fstat(fh.fileno())
+        if not _stat.S_ISREG(st.st_mode):
+            raise FileNotFoundError(f"Not a file: {target}")
+        if st.st_size > MAX_FILE_BYTES:
+            raise ValueError(f"File too large ({st.st_size} bytes, max {MAX_FILE_BYTES})")
+        return fh.read(MAX_FILE_BYTES + 1)
 
 
 def _handle_approval_pending(handler, parsed):
@@ -16150,9 +17796,22 @@ def _handle_session_sse_stream(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
 
+    # The (re)subscribing tab reports its last-known message_count via
+    # ?known_count=N so the on-subscribe self-heal can detect a server-initiated
+    # turn that started AND finished entirely inside this tab's SSE gap (see the
+    # "server-initiated turn finished during the gap" self-heal block below).
+    # Absent/blank/non-numeric => None ("tab didn't report", never triggers).
+    _known_count_raw = parse_qs(parsed.query).get("known_count", [""])[0]
+    try:
+        subscriber_known_count = int(_known_count_raw) if _known_count_raw != "" else None
+    except (TypeError, ValueError):
+        subscriber_known_count = None
+
     from api.background_process import (
         subscribe_to_session_channel,
         active_stream_id_for_session,
+        persisted_message_count_for_session,
+        should_emit_session_updated,
     )
 
     # Atomic get-or-create + subscribe under SESSION_CHANNELS_LOCK. Doing these
@@ -16237,6 +17896,35 @@ def _handle_session_sse_stream(handler, parsed):
                     "source": "subscribe_recovery",
                     "recovered": True,
                 })
+            else:
+                # ── Server-initiated turn that FINISHED during the SSE gap ──
+                # The block above only heals a turn that is live RIGHT NOW. But
+                # a server-initiated turn (self-wake / cron / restart hook) can
+                # start AND finish entirely inside the gap: the fire-and-forget
+                # `server_turn_started` reached no subscriber, and by the time
+                # this tab reconnects the run has already cleared from
+                # ACTIVE_RUNS — so active_stream_id_for_session returns None and
+                # nothing above replays. The turn IS persisted, but this tab's
+                # transcript stays stale until a hard refresh (the reported
+                # visible-tab defect). Detect it by comparing the persisted
+                # message_count against what this (re)subscribing tab last knew
+                # (?known_count). If the server is AHEAD, emit a lightweight
+                # `session-updated` frame so the tab does an INCREMENTAL,
+                # swap-in-place message sync (frontend reuses #5189's
+                # keepStaleUntilLoaded loadSession path — NO clear+refetch, so
+                # the #5177/#5189 blank-gap jump is not reintroduced). Carries
+                # only counts (no transcript) to stay cheap. Skipped
+                # entirely when the tab didn't report a count or the persisted
+                # count is unknown (legacy sidecar) → never a spurious reload.
+                if subscriber_known_count is not None:
+                    persisted_count = persisted_message_count_for_session(sid)
+                    if should_emit_session_updated(subscriber_known_count, persisted_count):
+                        _sse(handler, 'session-updated', {
+                            "session_id": sid,
+                            "message_count": persisted_count,
+                            "known_count": subscriber_known_count,
+                            "source": "subscribe_recovery",
+                        })
         except _CLIENT_DISCONNECT_ERRORS:
             # Client vanished mid-recovery — re-raise so the outer handler
             # treats it as a normal disconnect and the finally still cleans up.
@@ -17115,6 +18803,9 @@ def _handle_memory_read(handler, parsed=None):
 
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
+    phase1_removed_ids = set()
+
+    # Phase 1: Clean orphan session files (existing behavior).
     for p in SESSION_DIR.glob("*.json"):
         if p.name.startswith("_"):
             continue
@@ -17129,10 +18820,87 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                     SESSIONS.pop(p.stem, None)
                 p.unlink(missing_ok=True)
                 cleaned += 1
+                phase1_removed_ids.add(p.stem)
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
+
+    phase1_touched = bool(cleaned)
+    phase2_rewrote_index = False
+
+    # Phase 2: Index-only ghost sweep (#5331).
+    # Remove index entries that have no backing .json file and no
+    # in-memory session.  These are orphaned rows left by a write path that
+    # updated _index.json without writing the session sidecar.
+    #
+    # Title-agnostic (#5331): a session with no backing file has no real
+    # data regardless of its title, so even a non-"Untitled" stub in the
+    # index is a ghost.  A legitimate session always has a sidecar file.
+    #
+    # Holds _INDEX_WRITE_LOCK for the full read-modify-write cycle to
+    # prevent races with concurrent Session.save() / prune_session_from_index().
     if SESSION_INDEX_FILE.exists():
+        try:
+            from api.models import _INDEX_WRITE_LOCK, _safe_replace
+
+            with _INDEX_WRITE_LOCK:
+                index_file_data = json.loads(
+                    SESSION_INDEX_FILE.read_text(encoding="utf-8")
+                )
+                if isinstance(index_file_data, list):
+                    live_ids = {
+                        p.stem
+                        for p in SESSION_DIR.glob("*.json")
+                        if not p.name.startswith("_")
+                    }
+                    with LOCK:
+                        in_memory_ids = set(SESSIONS.keys())
+
+                    survivors = []
+                    for entry in index_file_data:
+                        sid = entry.get("session_id")
+                        if not sid or sid in live_ids or sid in in_memory_ids:
+                            survivors.append(entry)
+                            continue
+                        # Phase 1 already removed the backing file for this
+                        # sid, so the index entry is stale too.  Drop it
+                        # from the index without double-counting.
+                        if sid in phase1_removed_ids:
+                            continue
+                        # Index-only ghost — no backing file, not in memory.
+                        cleaned += 1
+                        # Ghost not added to survivors — removed from index.
+
+                    if cleaned > 0 and len(survivors) < len(index_file_data):
+                        _tmp = SESSION_INDEX_FILE.with_suffix(
+                            f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+                        )
+                        _payload = json.dumps(survivors, ensure_ascii=False, indent=2)
+                        try:
+                            with open(_tmp, "w", encoding="utf-8") as f:
+                                f.write(_payload)
+                                f.flush()
+                                os.fsync(f.fileno())
+                            _safe_replace(_tmp, SESSION_INDEX_FILE)
+                            phase2_rewrote_index = True
+                        except Exception:
+                            try:
+                                _tmp.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            raise
+        except Exception:
+            logger.debug(
+                "Failed to clean up index-only session entries", exc_info=True
+            )
+
+    # Post-cleanup index invalidation.
+    # When Phase 1 removed files and Phase 2 didn't already clean the
+    # index, delete the index to force a fresh rebuild from disk on the
+    # next sidebar poll.  When Phase 2 succeeded the index is already
+    # correct, so keep it (avoids a wasteful rebuild).
+    if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
+
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
@@ -17147,6 +18915,8 @@ def _handle_btw(handler, body):
         require(body, "question")
     except ValueError as e:
         return bad(handler, str(e))
+    if _session_is_subagent_view_only(str(body.get("session_id") or "")):
+        return bad(handler, "Subagent sessions are view-only and cannot be used for /btw from WebUI", 400)
     try:
         s = get_session(body["session_id"])
     except KeyError:
@@ -17854,14 +19624,16 @@ def start_session_turn(
     # background task before its first human turn has an empty s.model, and
     # without the profile defaults the resolver would fall back to the global
     # DEFAULT_MODEL instead of the profile's configured default (greptile flag).
-    _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
+    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
     model, model_provider, normalized_model = _resolve_compatible_session_model_state(
         requested_model,
         requested_provider,
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
+        profile_config=_pp_cfg,
         prefer_cached_catalog=True,
     )
+    model = _validate_resolved_model(model, model_provider)
     resp = _start_run(
         s,
         msg=msg,
@@ -17969,6 +19741,8 @@ def _handle_goal_command(handler, body):
         require(body, "session_id")
     except ValueError as e:
         return bad(handler, str(e))
+    if _session_is_subagent_view_only(str(body.get("session_id") or "")):
+        return bad(handler, "Subagent sessions are view-only and cannot run /goal from WebUI", 400)
     try:
         s = get_session(body["session_id"])
     except KeyError:
@@ -18029,13 +19803,15 @@ def _handle_goal_command(handler, body):
             if "model_provider" in body
             else getattr(s, "model_provider", None)
         )
-        _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
+        _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
             requested_provider,
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
+            profile_config=_pp_cfg,
         )
+        model = _validate_resolved_model(model, model_provider)
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
@@ -18080,13 +19856,15 @@ def _handle_goal_command(handler, body):
                 if "model_provider" in body
                 else getattr(s, "model_provider", None)
             )
-            _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
+            _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
             model, model_provider, normalized_model = _resolve_compatible_session_model_state(
                 requested_model,
                 requested_provider,
                 profile_provider=_pp_provider,
                 profile_default_model=_pp_default,
+                profile_config=_pp_cfg,
             )
+            model = _validate_resolved_model(model, model_provider)
         stream_response = _start_chat_stream_for_session(
             s,
             msg=kickoff_prompt,
@@ -18116,7 +19894,7 @@ def _handle_chat_start(handler, body, diag=None):
             return bad(handler, str(e))
         diag.stage("get_session") if diag else None
         try:
-            s = _get_or_materialize_session(body["session_id"])
+            s = _get_or_materialize_session(body["session_id"], refresh_cli_messages=True)
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -18225,11 +20003,12 @@ def _handle_chat_start(handler, body, diag=None):
             if "model_provider" in body
             else getattr(s, "model_provider", None)
         )
-        _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
+        _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
+        gateway_chat_enabled = webui_gateway_chat_enabled(get_config())
         if body.get("moa_config"):
-            if webui_gateway_chat_enabled(get_config()):
+            if gateway_chat_enabled:
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
             from api.commands import resolve_moa_config
 
@@ -18243,24 +20022,45 @@ def _handle_chat_start(handler, body, diag=None):
             requested_provider,
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
+            profile_config=_pp_cfg,
             explicit_model_pick=explicit_model_pick,
         )
+        # Validate the resolved model against configured providers. A truncated
+        # or malformed id (e.g. "e2b" from "gemma4:e2b" after a frontend ":"
+        # split) passes through _resolve_compatible_session_model_state's fast
+        # path without validation and would 404 at the upstream API. Fall back
+        # to the configured default when the model is not known.
+        model = _validate_resolved_model(model, model_provider)
+
+        if model_provider == "moa" and moa_config is None:
+            if webui_gateway_chat_enabled(get_config()):
+                return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
+            from api.commands import resolve_moa_config
+
+            try:
+                moa_config = resolve_moa_config(model)
+            except RuntimeError as e:
+                return bad(handler, str(e), 503)
         # NOTE: runtime-adapter selection is delegated to _start_run (shared
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
         # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
+        start_run_kwargs = {
+            "msg": msg,
+            "attachments": attachments,
+            "workspace": workspace,
+            "model": model,
+            "model_provider": model_provider,
+            "normalized_model": normalized_model,
+            "source": "webui",
+            "route": "/api/chat/start",
+            "diag": diag,
+        }
+        if not gateway_chat_enabled and moa_config is not None:
+            start_run_kwargs["moa_config"] = moa_config
         response = _start_run(
             s,
-            msg=msg,
-            attachments=attachments,
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            normalized_model=normalized_model,
-            source="webui",
-            route="/api/chat/start",
-            diag=diag,
-            moa_config=moa_config,
+            **start_run_kwargs,
         )
         # Map adapter-selection NotImplementedError (501) onto the legacy
         # bad-request response shape that this route exposed historically
@@ -18326,6 +20126,8 @@ def _normalize_chat_attachments(raw_attachments):
 
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
+    if _session_is_subagent_view_only(str(body.get("session_id") or "")):
+        return bad(handler, "Subagent sessions are view-only and cannot be written from WebUI", 400)
     s = get_session(body["session_id"])
     msg = str(body.get("message", "")).strip()
     if not msg:
@@ -18339,13 +20141,15 @@ def _handle_chat_sync(handler, body):
         _sync_requested_provider = (
             body.get("model_provider") if "model_provider" in body else getattr(s, "model_provider", None)
         )
-        _pp_provider, _pp_default = _read_profile_model_config(s, _sync_requested_provider)
+        _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, _sync_requested_provider)
         model, model_provider = _resolve_compatible_session_model_state(
             body.get("model") or s.model,
             _sync_requested_provider,
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
+            profile_config=_pp_cfg,
         )[:2]
+        model = _validate_resolved_model(model, model_provider)
         s.model = model
         s.model_provider = model_provider
     from api.streaming import _ENV_LOCK
@@ -18444,7 +20248,13 @@ def _handle_chat_sync(handler, body):
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=get_config()),
+                conversation_history=_sanitize_messages_for_api(
+                    _previous_context_messages,
+                    cfg=get_config(),
+                    effective_model=_model,
+                    effective_provider=_provider,
+                    effective_base_url=_base_url,
+                ),
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
@@ -19253,6 +21063,8 @@ def _handle_file_save(handler, body):
             return bad(handler, "File not found", 404)
         if target.is_dir():
             return bad(handler, "Cannot save: path is a directory")
+        if Path(str(body["path"])).suffix.lower() in {".docx", ".xlsx", ".pptx"}:
+            return bad(handler, "Use /api/file/office-save for Office documents")
         data = str(body.get("content", "")).encode("utf-8")
         fd = open_anchored_write_fd(ws_root, target)
         with os.fdopen(fd, "wb", closefd=True) as fh:
@@ -19260,6 +21072,41 @@ def _handle_file_save(handler, body):
         return j(
             handler, {"ok": True, "path": body["path"], "size": len(data)}
         )
+    except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+
+
+def _handle_office_file_save(handler, body):
+    try:
+        require(body, "session_id", "path")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session_for_file_ops(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    try:
+        ws_root = Path(s.workspace)
+        target = safe_resolve(ws_root, body["path"])
+        if (ws_root / body["path"]).is_symlink():
+            return bad(handler, "Cannot save to a symlinked entry")
+        if not target.exists():
+            return bad(handler, "File not found", 404)
+        if target.is_dir():
+            return bad(handler, "Cannot save: path is a directory")
+        if Path(str(body["path"])).suffix.lower() not in {".docx", ".xlsx", ".pptx"}:
+            return bad(handler, "Office save is only available for .docx, .xlsx, and .pptx files")
+        from api.office_documents import save_office_document
+
+        current_bytes = _read_anchored_file_bytes(ws_root, target)
+        preview, updated_bytes = save_office_document(body["path"], current_bytes, body.get("content", ""))
+        fd = open_anchored_write_fd(ws_root, target)
+        with os.fdopen(fd, "wb", closefd=True) as fh:
+            fh.write(updated_bytes)
+        preview.update({"ok": True, "path": body["path"], "size": len(updated_bytes)})
+        return j(handler, preview)
+    except ImportError as e:
+        return bad(handler, str(e), 503)
     except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 
@@ -20248,6 +22095,8 @@ def _handle_session_compress(handler, body):
     sid = str(body.get("session_id") or "").strip()
     if not sid:
         return bad(handler, "session_id is required")
+    if _session_is_subagent_view_only(sid):
+        return bad(handler, "Subagent sessions are view-only and cannot be compressed from WebUI", 400)
 
     # Cap focus_topic to 500 chars — matches the defensive input-size pattern
     # used elsewhere (session title :80, first-exchange snippets :500) and
@@ -20754,6 +22603,8 @@ def _handle_handoff_summary(handler, body):
 
     from api.models import get_cli_session_messages, count_conversation_rounds, CONVERSATION_ROUND_THRESHOLD
 
+    if _session_is_subagent_view_only(sid):
+        return bad(handler, "Subagent sessions are view-only and cannot be summarized from WebUI", 400)
     rounds = count_conversation_rounds(sid, since=since)
     if rounds < CONVERSATION_ROUND_THRESHOLD:
         return bad(handler, "Not enough conversation rounds to generate a summary.", 400)
@@ -21464,18 +23315,35 @@ def _handle_session_import_cli(handler, body):
             existing.messages = fresh_msgs
             changed = True
         if cli_meta:
+            # A subagent child must never be flipped to CLI-classified /
+            # writable on an existing-session refresh either (#5307).
+            _existing_is_sa = (
+                (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
+                or (cli_meta.get("source_tag") or cli_meta.get("raw_source") or "").strip().lower() == "subagent"
+                or _is_subagent_child_session_id(sid)
+            )
             updates = {
-                "is_cli_session": True,
+                "is_cli_session": (False if _existing_is_sa else True),
                 "source_tag": existing.source_tag or cli_meta.get("source_tag"),
                 "raw_source": existing.raw_source or cli_meta.get("raw_source") or cli_meta.get("source_tag"),
                 "session_source": existing.session_source or cli_meta.get("session_source"),
                 "source_label": existing.source_label or cli_meta.get("source_label"),
                 "parent_session_id": existing.parent_session_id or cli_meta.get("parent_session_id"),
             }
+            # A subagent child is view-only: also coerce read_only=True on the
+            # persisted sidecar so a stale writable (pre-fix) sidecar can't be
+            # used to start a WebUI turn (#5307).
+            if _existing_is_sa:
+                updates["read_only"] = True
             for attr, value in updates.items():
                 if getattr(existing, attr, None) != value:
                     setattr(existing, attr, value)
                     changed = True
+        else:
+            _existing_is_sa = (
+                (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
+                or _is_subagent_child_session_id(sid)
+            )
         if changed:
             existing.save(touch_updated_at=False)
             publish_session_list_changed(
@@ -21488,7 +23356,7 @@ def _handle_session_import_cli(handler, body):
                 "session": existing.compact()
                 | {
                     "messages": existing.messages,
-                    "is_cli_session": True,
+                    "is_cli_session": (False if _existing_is_sa else True),
                     # Greptile #4911 follow-up: read read_only from
                     # the persisted Session, NOT from cli_meta.  This
                     # refresh path is for an already-WebUI-owned
@@ -21530,16 +23398,31 @@ def _handle_session_import_cli(handler, body):
     cli_platform = cli_meta.get("platform") if cli_meta else None
     cli_parent_session_id = cli_meta.get("parent_session_id") if cli_meta else None
     cli_read_only = bool((cli_meta or {}).get("read_only"))
+    # Delegated subagent children (#5307) are recovered VIEW-ONLY: they must
+    # never be materialized as a writable WebUI sidecar via this endpoint, or a
+    # subsequent chat-start/composer write would take ownership of a session
+    # that belongs to the delegate runner. Treat them like an explicitly
+    # read-only source (return the read-only stub payload, do not import), and
+    # keep them out of the _isExternalSession frontend gates (is_cli_session=False).
+    _sa_child = _is_subagent_child_session_id(sid)
+    # Also treat a resolved-metadata subagent source as view-only: with
+    # all_profiles=true, cli_meta is resolved from the requested (possibly
+    # non-active) profile, so the active-profile state.db check (_sa_child)
+    # can miss it (#5307 cross-profile edge).
+    _cli_sa = (cli_source_tag or cli_raw_source or "").strip().lower() == "subagent"
+    _sa_child = _sa_child or _cli_sa
+    _read_only_view = cli_read_only or _sa_child
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")
 
-    # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079)
+    # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079),
+    # gated on whether this profile has opted into project organization (#5379)
     cron_project_id = None
     if is_cron_session(sid, cli_source_tag):
-        cron_project_id = ensure_cron_project()
+        cron_project_id = ensure_cron_project(create=_profile_has_user_projects())
 
-    if cli_read_only:
+    if _read_only_view:
         session_payload = {
             "session_id": sid,
             "title": title,
@@ -21553,7 +23436,10 @@ def _handle_session_import_cli(handler, body):
             "archived": False,
             "project_id": None,
             "profile": profile,
-            "is_cli_session": True,
+            # Subagent children (#5307) are recovered view-only and must NOT be
+            # CLI-classified (keeps them out of the frontend _isExternalSession
+            # gates); other explicitly-read-only sources keep is_cli_session=True.
+            "is_cli_session": (False if _sa_child else True),
             "source_tag": cli_source_tag,
             "raw_source": cli_raw_source or cli_source_tag,
             "session_source": cli_session_source,
@@ -21643,8 +23529,7 @@ def _handle_session_import(handler, body):
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
-        while len(SESSIONS) > SESSIONS_MAX:
-            SESSIONS.popitem(last=False)
+        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
     s.save()
     publish_session_list_changed("session_import")
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})

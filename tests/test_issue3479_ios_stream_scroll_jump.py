@@ -101,8 +101,8 @@ def test_same_frame_snapshot_preserves_bottom_distance_and_unpinned_state():
     wrapper = _function_body(UI_JS, "_renderMessagesWithScrollSnapshot")
 
     assert "bottom" in capture
-    assert "pinned:_shouldFollowMessagesOnDomReplace()" in _compact(capture)
-    assert "userUnpinned:_messageUserUnpinned" in _compact(capture)
+    assert "readerAwayFromBottom?false:_shouldFollowMessagesOnDomReplace()" in _compact(capture)
+    assert "readerAwayFromBottom?true:_messageUserUnpinned" in _compact(capture)
     assert "maxTop-Math.max(0,bottom)" in restore
     assert "_messageUserUnpinned=true" in restore
     assert "_scrollPinned=false" in restore
