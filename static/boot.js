@@ -2713,6 +2713,21 @@ function _applyComposerFooterVisibilitySettings(){
   if(hidden.hide_composer_reasoning&&typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(hidden.hide_composer_toolsets&&typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
   if(hidden.hide_composer_mobile_config&&typeof closeMobileComposerConfig==='function') closeMobileComposerConfig();
+
+  // Hide the divider when all left-group buttons before it are hidden
+  // Stops a lone vertical separator from appearing when attach/saved-prompts/mic/voice are all hidden.
+  const _divider=document.querySelector('.composer-divider');
+  if(_divider){
+    const _leftBtnSelectors=['#btnAttach','#btnSavedPrompts','#btnMic','#btnVoiceMode'];
+    const _allLeftHidden=_leftBtnSelectors.every(sel=>{
+      const el=document.querySelector(sel);
+      return !el||el.classList.contains('composer-control-hidden')||el.style.display==='none';
+    });
+    // Use classList.toggle directly instead of _setComposerControlHidden
+    // so we don't strip the intentional aria-hidden="true" on the decorative divider
+    // when buttons are visible (Greptile feedback).
+    _divider.classList.toggle('composer-control-hidden',_allLeftHidden);
+  }
 }
 window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
 
