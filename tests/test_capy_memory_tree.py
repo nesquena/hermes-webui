@@ -12320,7 +12320,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_deployment_statu
         ("non-string", {"url": "https://api.github.com/repos/capy/spaces/deployments/8801/statuses"}),
     ],
 )
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_deployment_statuses_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_deployment_statuses_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     case_id,
@@ -12379,7 +12379,16 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_deployment_statu
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("production", limit=5)
-    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5), "search": search}, sort_keys=True).lower()
+    relevant_memory = relevant_memory_for_space("deployment-status-drift-space", limit=5)
+    serialized = json.dumps(
+        {
+            "result": result,
+            "jobs": list_source_refresh_jobs(limit=5),
+            "search": search,
+            "relevant_memory": relevant_memory,
+        },
+        sort_keys=True,
+    ).lower()
 
     assert calls == [{"url": "https://api.github.com/repos/capy/spaces/deployments/8801/statuses", "timeout": 8}]
     assert read_calls == []
@@ -12388,6 +12397,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_deployment_statu
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert search["results"] == []
+    assert relevant_memory["results"] == []
     if isinstance(final_url, str):
         assert json.dumps(final_url.lower()) not in serialized
     for unsafe in (
