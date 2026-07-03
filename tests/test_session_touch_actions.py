@@ -79,10 +79,10 @@ def test_open_session_menu_consumes_next_row_activation():
     assert "if(_longPressMenuOpened){_gestureState='idle';return true;}" in SESSIONS_JS
     finish_idx = SESSIONS_JS.find("const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{")
     dismiss_idx = SESSIONS_JS.find("if(_sessionActionMenu&&!_sessionActionMenu.contains(target)){", finish_idx)
-    load_idx = SESSIONS_JS.find("await loadSession(s.session_id)", finish_idx)
+    open_idx = SESSIONS_JS.find("await _openSidebarSession(s)", finish_idx)
     pointerup_idx = SESSIONS_JS.find("el.onpointerup=(e)=>{")
-    assert finish_idx > 0 and load_idx > finish_idx
-    assert dismiss_idx > finish_idx and dismiss_idx < load_idx
+    assert finish_idx > 0 and open_idx > finish_idx
+    assert dismiss_idx > finish_idx and dismiss_idx < open_idx
     assert "if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();" in SESSIONS_JS[pointerup_idx:]
 
 

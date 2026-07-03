@@ -1854,6 +1854,37 @@ function _externalImportPayload(session) {
   return payload;
 }
 
+function _sidebarSessionProfileName(session){
+  const raw=session&&typeof session.profile==='string'?session.profile.trim():'';
+  return raw||'';
+}
+
+async function _ensureSidebarSessionProfile(session){
+  const targetProfile=_sidebarSessionProfileName(session);
+  if(!_showAllProfiles||!targetProfile) return false;
+  const activeProfile=S.activeProfile||'default';
+  if(_profileMatchesActiveProfile(targetProfile,activeProfile)) return false;
+  if(typeof switchToProfile!=='function') return false;
+  _profileSwitchOpeningExistingSession=true;
+  try{
+    await switchToProfile(targetProfile);
+  }finally{
+    _profileSwitchOpeningExistingSession=false;
+  }
+  return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
+}
+
+async function _openSidebarSession(session, loadOpts={}){
+  if(!session||!session.session_id) return;
+  if(_isExternalSession(session)){
+    try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
+    catch(_e){ /* import failed -- fall through to read-only view */ }
+  }
+  await _ensureSidebarSessionProfile(session);
+  await loadSession(session.session_id, loadOpts);
+  renderSessionListFromCache();
+}
+
 function _isReadOnlySession(session) {
   return !!(session && (session.read_only || session.is_read_only));
 }
@@ -3161,7 +3192,9 @@ let _allProjects = [];  // cached project list
 // double-underscore prefixes provide.
 const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
+const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
+let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
 let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested
@@ -3169,6 +3202,20 @@ let _archivedRowsLoadedLimit = SESSION_ARCHIVED_PAGE_SIZE;
 let _serverWebuiSessionCount = null;  // explicit server count for WebUI sessions
 let _serverCliSessionCount = null;    // explicit server count for CLI sessions
 let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
+
+function _restoreShowAllProfiles(){
+  try{
+    const raw=localStorage.getItem(SHOW_ALL_PROFILES_STORAGE_KEY);
+    _showAllProfiles = raw === '1' || raw === 'true';
+  }catch(_e){ _showAllProfiles = false; }
+}
+
+function _setShowAllProfiles(enabled){
+  _showAllProfiles=!!enabled;
+  try{ localStorage.setItem(SHOW_ALL_PROFILES_STORAGE_KEY,_showAllProfiles?'1':'0'); }catch(_e){}
+}
+
+_restoreShowAllProfiles();
 _restoreSessionSourceFilter();
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
@@ -6581,13 +6628,13 @@ function renderSessionListFromCache(){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     pfToggle.textContent='Show '+otherProfileCount+' from other profiles';
-    pfToggle.onclick=()=>{_showAllProfiles=true;renderSessionList();};
+    pfToggle.onclick=()=>{_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});};
     list.appendChild(pfToggle);
   } else if(_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     pfToggle.textContent='Show active profile only';
-    pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionList();};
+    pfToggle.onclick=()=>{_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});};
     list.appendChild(pfToggle);
   }
   // Show/hide archived toggle if there are archived sessions. Archived rows
@@ -7001,12 +7048,7 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(_isExternalSession(seg)){
-            try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(seg))});}
-            catch(_e){ /* read-only fallback */ }
-          }
-          await loadSession(seg.session_id, {skipLineageResolve:true});
-          renderSessionListFromCache();
+          await _openSidebarSession(seg, {skipLineageResolve:true});
         };
         lineageList.appendChild(row);
       }
@@ -7018,12 +7060,7 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
       const openChildSession=async(childSession)=>{
-        if(_isExternalSession(childSession)){
-          try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(childSession))});}
-          catch(_e){ /* read-only fallback */ }
-        }
-        await loadSession(childSession.session_id, {skipLineageResolve:true});
-        renderSessionListFromCache();
+        await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
         const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
@@ -7645,16 +7682,9 @@ function renderSessionListFromCache(){
         _tapTimer=null;
         _lastTapTime=0;
         if(_renamingSid) return;
-        // For external sessions (CLI, Discord, Telegram, Slack), import into
-        // WebUI store first so /api/chat/start finds a persisted session.
-        if(_isExternalSession(s)){
-          try{
-            await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(s))});
-          }catch(e){ /* import failed -- fall through to read-only view */ }
-        }
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          await loadSession(s.session_id);renderSessionListFromCache();
+          await _openSidebarSession(s);
           if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         }finally{
           el.classList.remove('loading');
@@ -7730,8 +7760,19 @@ async function _handleActiveSessionStorageEvent(e){
   if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
 }
 
+async function _handleShowAllProfilesStorageEvent(e){
+  if(!e || e.key !== SHOW_ALL_PROFILES_STORAGE_KEY) return;
+  const next=e.newValue==='1'||e.newValue==='true';
+  if(_showAllProfiles===next) return;
+  _showAllProfiles=next;
+  if(typeof renderSessionList==='function') await renderSessionList({deferWhileInteracting:false});
+}
+
 if(typeof window!=='undefined'){
-  window.addEventListener('storage', (e) => { void _handleActiveSessionStorageEvent(e); });
+  window.addEventListener('storage', (e) => {
+    void _handleActiveSessionStorageEvent(e);
+    void _handleShowAllProfilesStorageEvent(e);
+  });
   window.addEventListener('popstate', () => {
     const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
     if(!sid || (S.session && S.session.session_id===sid)) return;
