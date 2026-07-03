@@ -53,12 +53,17 @@ def test_helper_has_new_three_arg_signature_and_guards():
     assert "if(!restore&&!files.length) return false;" in body
     # Session-aware: never mutate a different session's visible composer.
     assert "const visibleSid=(S.session&&S.session.session_id)||null;" in body
-    assert "if(sid&&visibleSid&&sid!==visibleSid) return false;" in body
+    assert "const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);" in body
     # Never clobber a message the user began typing during the async window.
-    assert "if(String(inp.value||'').trim()) return false;" in body
+    assert "if(inp && !String(inp.value||'').trim()){" in body
     # Restores text and re-stages files.
     assert "inp.value=restore;" in body
     assert "S.pendingFiles=files;" in body
+    # The deferred persist is stale-aware: re-reads the LIVE composer when the
+    # failed session is still visible (Codex #5488 catch), rather than the
+    # captured snapshot.
+    assert "const stillVisible=(S.session&&S.session.session_id)===sid;" in body
+    assert "const liveText=inp?String(inp.value||''):restore;" in body
 
 
 def test_send_captures_immutable_snapshot_before_rewrites_and_upload():
@@ -274,3 +279,123 @@ def test_persist_still_fires_when_clear_promise_absent():
     out = _run_helper_in_node("no clear promise", [], "", visible_sid="sid-1")
     assert out["ret"] is True
     assert out["saved"] == {"sid": "sid-1", "text": "no clear promise", "files": []}
+
+
+def test_deferred_persist_captures_a_post_restore_edit_not_the_stale_snapshot():
+    """Codex #5488 regression: if the user edits the restored composer before the
+    deferred persist fires, the persist must save the EDITED text — not clobber it
+    with the original failed-send snapshot."""
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _helper_body()
+    harness = textwrap.dedent(
+        """
+        let saved = null;
+        const state = {input: {value: ""}, pendingFiles: []};
+        const $ = (id) => (id === 'msg' ? state.input : null);
+        const S = {pendingFiles: state.pendingFiles, session: {session_id: 'sid-1'}};
+        function autoResize(){}
+        function updateSendBtn(){}
+        function renderTray(){}
+        function _saveComposerDraftNow(sid, text, files){ saved = {sid, text}; }
+
+        %(helper)s
+
+        // Clear POST settles on a microtask; the deferred persist runs after it.
+        const clearPromise = Promise.resolve();
+        _restoreComposerDraftAfterFailedSend('original', [], 'sid-1', clearPromise);
+        // Synchronously the composer shows the restored text...
+        const afterRestore = state.input.value;
+        // ...then the user edits it BEFORE the deferred persist fires.
+        state.input.value = 'edited after restore';
+        Promise.resolve().then(() => Promise.resolve()).then(() => {
+          console.log(JSON.stringify({afterRestore, saved}));
+        });
+        """
+    ) % {"helper": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["afterRestore"] == "original", "composer should show the restored text synchronously"
+    assert out["saved"] == {"sid": "sid-1", "text": "edited after restore"}, (
+        f"deferred persist must save the LIVE edited text, not the stale snapshot; got {out['saved']}"
+    )
+
+
+def test_deferred_persist_skips_when_user_switched_away_after_restore():
+    """Codex #5488 regression: if we restored the visible session then the user
+    switched to a different session before the deferred persist fires, the stale
+    persist must be SKIPPED (the session-switch save path already saved it)."""
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _helper_body()
+    harness = textwrap.dedent(
+        """
+        let saveCalls = [];
+        const state = {input: {value: ""}, pendingFiles: []};
+        const $ = (id) => (id === 'msg' ? state.input : null);
+        const S = {pendingFiles: state.pendingFiles, session: {session_id: 'sid-1'}};
+        function autoResize(){}
+        function updateSendBtn(){}
+        function renderTray(){}
+        function _saveComposerDraftNow(sid, text, files){ saveCalls.push({sid, text}); }
+
+        %(helper)s
+
+        const clearPromise = Promise.resolve();
+        _restoreComposerDraftAfterFailedSend('original', [], 'sid-1', clearPromise);
+        // User switches to a different session before the deferred persist fires.
+        S.session = {session_id: 'sid-2'};
+        state.input.value = 'draft for sid-2';
+        Promise.resolve().then(() => Promise.resolve()).then(() => {
+          console.log(JSON.stringify({saveCalls}));
+        });
+        """
+    ) % {"helper": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    # No persist for sid-1 with the stale 'original' text, and crucially no write
+    # of sid-2's live composer under sid-1 (that would corrupt sid-1's draft).
+    assert out["saveCalls"] == [], (
+        f"deferred persist must skip entirely after a switch-away; got {out['saveCalls']}"
+    )
+
+
+def test_background_failure_persists_snapshot_since_no_live_composer():
+    """A failed send for a NON-visible session (background) has no live composer
+    to read, so the deferred persist saves the captured snapshot for that sid."""
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _helper_body()
+    harness = textwrap.dedent(
+        """
+        let saveCalls = [];
+        const state = {input: {value: "visible session draft"}, pendingFiles: []};
+        const $ = (id) => (id === 'msg' ? state.input : null);
+        // The visible session is sid-2; the failed send was for sid-1 (background).
+        const S = {pendingFiles: state.pendingFiles, session: {session_id: 'sid-2'}};
+        function autoResize(){}
+        function updateSendBtn(){}
+        function renderTray(){}
+        function _saveComposerDraftNow(sid, text, files){ saveCalls.push({sid, text}); }
+
+        %(helper)s
+
+        const ret = _restoreComposerDraftAfterFailedSend('bg failed msg', [], 'sid-1', null);
+        Promise.resolve().then(() => {
+          console.log(JSON.stringify({ret, saveCalls, visibleUntouched: state.input.value}));
+        });
+        """
+    ) % {"helper": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["ret"] is False, "a background (non-visible) failure must not report a visible restore"
+    assert out["visibleUntouched"] == "visible session draft", "the visible composer must be untouched"
+    assert out["saveCalls"] == [{"sid": "sid-1", "text": "bg failed msg"}], (
+        f"background failure must persist the snapshot for its own sid; got {out['saveCalls']}"
+    )
