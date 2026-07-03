@@ -7,8 +7,8 @@
 >
 > Keep this document updated as architecture changes are made.
 
-> Current shipped build: `v0.51.54` (May 13, 2026).
-> Automated coverage: 5303 tests via `pytest tests/ --collect-only -q`. CI runs on Python 3.11, 3.12, and 3.13 against every PR.
+> Current shipped build: `v0.51.191` (May 31, 2026).
+> Automated coverage: 7085 tests via `pytest tests/ --collect-only -q`. CI runs on Python 3.11, 3.12, and 3.13 against every PR.
 >
 > Notable architecture state as of v0.51.54: the bootstrap and first-run onboarding flow own setup discovery; the default WebUI state directory is `~/.hermes/webui`; `ctl.sh` provides a daemon wrapper for homelab installs; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping.
 
@@ -76,7 +76,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       boot.js              Event wiring, mobile sidebar/workspace nav, voice input, boot IIFE (~1607 lines)
     tests/
       conftest.py          Isolated test server/state fixtures (~644 lines)
-      488 test files       5303 tests collected via pytest
+      698 test files       7085 tests collected via pytest
       test_regressions.py  Permanent regression gate (~976 lines)
     CONTRIBUTING.md        Contributor workflow and PR expectations.
     ROADMAP.md             Feature and product roadmap document.
@@ -704,7 +704,7 @@ Current structure:
         ui.js, workspace.js, sessions.js, messages.js, panels.js, commands.js, boot.js
       tests/
         conftest.py           Isolated test server/state fixtures
-        488 test files        5303 tests collected
+        698 test files        7085 tests collected
         test_regressions.py   Permanent regression gate
 
 Route extraction to api/routes.py completed in Sprint 11. server.py remains a
@@ -804,7 +804,7 @@ Optional password gate for non-SSH-tunnel deployments.
 
 ### Phase I: Test Infrastructure -- COMPLETE
 
-5303 tests across 488 test files + regression gates. The pytest fixture derives
+7085 tests across 698 test files + regression gates. The pytest fixture derives
 an isolated port and state directory from the repo path unless
 `HERMES_WEBUI_TEST_PORT` / `HERMES_WEBUI_TEST_STATE_DIR` pin them explicitly.
 Production data never touched.

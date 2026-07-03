@@ -2,7 +2,7 @@
 
 > Web companion to the Hermes Agent CLI. Same workflows, browser-native.
 >
-> Last updated: v0.51.31 (May 9, 2026) — 5028 tests collected — Release H 12-PR contributor batch (image-mode fix + race fixes + composer drafts + locale parity + custom-provider dedup + TTL config + heartbeat polish)
+> Last updated: v0.51.191 (July 3, 2026 doc sync) — 7085 tests collected across 698 test files — Release FK (stage-batch3 — skills-detail markdown styling + launchd duplicate-start guard)
 > Test source: `pytest tests/ --collect-only -q`
 > Per-version detail: see [CHANGELOG.md](./CHANGELOG.md)
 
@@ -228,7 +228,7 @@ Remaining gaps and forward work live in [Forward Work](#forward-work) below.
 - [x] PWA installation (manifest + icons + Android support)
 
 ### Internationalization
-- [x] 9 locales — English, Japanese, Russian, Spanish, German, Chinese (zh + zh-Hant), Portuguese, Korean, French
+- [x] 12 locales — English, Italian, Japanese, Russian, Spanish, German, Chinese (zh + zh-Hant), Portuguese, Korean, French, Turkish
 - [x] Key-parity test ensures every locale has every key
 - [x] Right-to-left and CJK input (IME composition fixes)
 
@@ -260,26 +260,26 @@ Remaining gaps and forward work live in [Forward Work](#forward-work) below.
 
 | Theme | Tracking | Why |
 |---|---|---|
-| Persistent-host stability | #1458 | Bootstrap fork pattern crashes under launchd / systemd — partial fix shipped (foreground mode); state.db FD leak and HTTP-unhealthy wedge remain |
-| Free-tier OpenRouter variants visible | #1426 | `:free` tool-support filter currently hides them from the picker |
+| Persistent-host stability | #1458 | Bug #1 (bootstrap fork crash, #1483) and Bug #2 (state.db FD leak, #1494/#1495) are fixed; Bug #3 (HTTP-unhealthy wedge without FD exhaustion) remains open pending diagnostic data |
 | macOS scroll override regression | #1360 | Auto-scroll sometimes overrides user scroll on the desktop app |
 | GLM dual-use (main + auxiliary) | #1291 | Currently mutually exclusive; same provider can't serve both surfaces |
-| Auto-assign session to filtered project | #1468 | When user is filtering by project X, new session should default to project X |
-| Update banner "What's new?" link | #1512 | Surface release highlights from the update banner |
 | Sunset legacy `LMSTUDIO_API_KEY` env var | #1502 | Tracking issue — alias stays for one minor cycle, then removed |
 | Hermes Agent dashboard cross-link | #1459 | Detect a running Hermes Agent and surface link in nav |
-| Gateway status card in Settings | #1457 | Current gateway-status dots only on profile picker |
 | Insights — daily token chart + per-model breakdown | #1456 | Existing usage badge is per-message; need rollup view |
 | Logs tab — view agent / errors / gateway logs | #1455 | Currently requires terminal access to log files |
 | Model picker collision handling | #1425 | Same-name models from different providers aren't disambiguated in dropdown |
-| "Reveal in Finder" right-click on workspace | #1424 | macOS desktop app convenience |
 | Configurable session persistence timing | #1406 | Currently every checkpoint, want operator control |
-| Silent credential self-heal on 401 | #1401 | Gateway auth.json drift should resolve without user re-auth |
 | LLM Wiki status panel | #1257 | On / off toggle for Wiki integration |
 | Lightweight in-app Canvas editing | #1255 | Text canvas for prompt drafting / shared notes |
 | Provider / Model source-of-truth alignment | #1240 | Reconcile WebUI vs CLI vs Gateway provider resolution |
 | Built-in SearXNG web search | #1037 | Lightweight search tool with on / off toggle |
 | Subagent session relationship view | #1004 | Show subagent hierarchy in sidebar with expand / collapse |
+
+Shipped from this list (v0.50.283 full-sweep batch, 2026-05-03 — see CHANGELOG):
+free-tier OpenRouter variants (#1426), auto-assign session to filtered project
+(#1468), update-banner "What's new?" link (#1512, PR #1549), gateway status card
+in Settings (#1457, PR #1552), "Reveal in Finder" (#1424), and silent credential
+self-heal on 401 (#1401, PR #1553).
 
 ### Backlog (deferred, listed for visibility)
 

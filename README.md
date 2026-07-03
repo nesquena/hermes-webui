@@ -480,7 +480,7 @@ Or using the agent venv explicitly:
 
 Tests run against an isolated server with a separate state directory.
 Production data and real cron jobs are never touched. Current snapshot:
-**5303 tests collected** across **488 test files**.
+**7085 tests collected** across **698 test files**.
 
 ---
 
@@ -634,7 +634,7 @@ static/
   boot.js               Mobile nav, voice input, boot IIFE (~1607 lines)
 tests/
   conftest.py           Isolated test server/state fixtures
-  488 test files         5303 tests collected
+  698 test files         7085 tests collected
 Dockerfile              python:3.12-slim container image
 docker-compose.yml      Compose with named volume and optional auth
 .github/workflows/      CI: multi-arch Docker build + GitHub Release on tag
