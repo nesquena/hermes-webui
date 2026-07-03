@@ -11548,7 +11548,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_deployments_fina
         ("non-string", {"url": "https://api.github.com/repos/capy/spaces/deployments"}),
     ],
 )
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_deployments_final_url_drift_variants_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_deployments_final_url_drift_variants_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     variant,
@@ -11610,8 +11610,12 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_deployments_fina
 
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
-    search = search_memory(body_sentinel, limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search_results": search["results"]}, sort_keys=True).lower()
+    search = search_memory("deployments drift safety", limit=5)
+    relevant = relevant_memory_for_space("space-deployments-final-url-drift", limit=5)
+    serialized = json.dumps(
+        {"result": result, "jobs": jobs, "search": search, "relevant": relevant},
+        sort_keys=True,
+    ).lower()
 
     assert calls == [{"url": "https://api.github.com/repos/capy/spaces/deployments", "timeout": 8}]
     assert read_calls == []
@@ -11620,6 +11624,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_deployments_fina
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / f"{source_id}.md").exists()
     if isinstance(final_url, str):
         assert f'"{final_url.lower()}"' not in serialized
