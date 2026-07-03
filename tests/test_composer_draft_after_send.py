@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
+COMMANDS_JS = ROOT.joinpath("static", "commands.js").read_text(encoding="utf-8")
 
 
 def _block(source: str, start_marker: str, end_marker: str) -> str:
@@ -53,7 +54,11 @@ def test_busy_send_paths_clear_persisted_composer_draft():
     busy_body = _block(MESSAGES_JS, "if(S.busy||compressionRunning){", "  if(S.session&&(S.session.read_only||S.session.is_read_only))")
     assert "_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);" in busy_body
     assert busy_body.count("_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);") >= 2
-    assert "_clearComposerDraft(S.session.session_id,text,_steerDraftFiles)" in busy_body, "delivered steer must clear persisted draft with the submitted payload signature"
+    assert "_clearComposerDraft(S.session.session_id,text" not in busy_body
+    try_steer_body = _block(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
+    assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_steer_body, (
+        "delivered steer must clear the captured owner draft with the submitted payload signature"
+    )
 
 
 def test_file_signature_survives_server_draft_round_trip():

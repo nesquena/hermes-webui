@@ -1336,7 +1336,8 @@ async function cmdInterrupt(args){
  */
 async function cmdSteer(args){
   const msg=(args||'').trim();
-  if(!msg){showToast(t('cmd_steer_no_msg'));return;}
+  const hasPendingFiles=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length>0;
+  if(!msg&&!hasPendingFiles){showToast(t('cmd_steer_no_msg'));return;}
   // If nothing is running, /steer <msg> just sends like a normal message
   if(!S.busy||!S.activeStreamId){
     const inp=$('msg');
@@ -1417,38 +1418,125 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
  * @returns {Promise<boolean>} true when the steer was delivered, false when the
  *   draft was restored and the active stream was left untouched.
  */
+function _steerUploadedAttachmentPaths(uploaded){
+  if(!Array.isArray(uploaded))return[];
+  return uploaded.map(u=>{
+    if(!u)return'';
+    if(typeof u==='string')return u;
+    return u.path||u.name||u.filename||'';
+  }).map(v=>String(v||'').trim()).filter(Boolean);
+}
+
+function _steerOwnerIsCurrent(ownerSid){
+  return !!(ownerSid&&typeof S!=='undefined'&&S.session&&S.session.session_id===ownerSid);
+}
+
+function _steerRestoreText(originalMsg, explicitSteer){
+  return explicitSteer?`/steer ${originalMsg}`:originalMsg;
+}
+
+async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){
+  if(!ownerSid||typeof _saveComposerDraftNow!=='function')return;
+  await _saveComposerDraftNow(ownerSid,_steerRestoreText(originalMsg,explicitSteer),filesSnapshot);
+}
+
+async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
+  const base=String(msg||'').trim();
+  const pendingFiles=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
+  if(!pendingFiles.length)return base;
+  if(typeof uploadPendingFiles!=='function')return base;
+  if(typeof setComposerStatus==='function')setComposerStatus(t('uploading')||'Uploading…');
+  let uploaded=[];
+  try{
+    // Keep File objects staged until /api/chat/steer confirms acceptance. If
+    // steer falls back, the draft and chips stay available for Queue/Interrupt.
+    uploaded=await uploadPendingFiles({clearPending:false,sessionId:ownerSid,files:pendingFiles});
+  }finally{
+    if(typeof setComposerStatus==='function')setComposerStatus('');
+  }
+  const paths=_steerUploadedAttachmentPaths(uploaded);
+  if(!paths.length)return base;
+  const note=`[Attached files for this steer: ${paths.join(', ')}]\nUse the file tools/read_file to inspect these documents if needed.`;
+  return base?`${base}\n\n${note}`:note;
+}
+
 async function _trySteer(msg, explicitSteer){
   let result=null;
+  const originalMsg=String(msg||'').trim();
+  const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
+  const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  if(!ownerSid){showToast(t('no_active_session'));return false;}
+  let steerText=originalMsg;
+  try{
+    steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot);
+  }catch(e){
+    if(_steerOwnerIsCurrent(ownerSid)){
+      const inp=$('msg');
+      if(inp){
+        inp.value=_steerRestoreText(originalMsg,explicitSteer);
+        if(typeof autoResize==='function')autoResize();
+      }
+      if(typeof renderTray==='function')renderTray();
+    }else{
+      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+    }
+    if(typeof setComposerStatus==='function')setComposerStatus('');
+    showToast(`${t('upload_failed')}${e&&e.message?e.message:e}`,3500);
+    return false;
+  }
+  if(!steerText){
+    if(_steerOwnerIsCurrent(ownerSid)){
+      const inp=$('msg');
+      if(inp){
+        inp.value=_steerRestoreText(originalMsg,explicitSteer);
+        if(typeof autoResize==='function')autoResize();
+      }
+      if(typeof renderTray==='function')renderTray();
+    }else{
+      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+    }
+    showToast(t('cmd_steer_no_msg'));
+    return false;
+  }
   try{
     result=await api('/api/chat/steer',{
       method:'POST',
-      body:JSON.stringify({session_id:S.session.session_id,text:msg}),
+      body:JSON.stringify({session_id:ownerSid,text:steerText}),
     });
   }catch(e){
     // Network or server error — keep the active stream running and restore the draft.
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
+    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
     // Show a transient steer indicator in the chat (NOT in S.messages — it must
     // survive the done event's S.messages=d.session.messages replacement).
     // The indicator self-removes when the turn completes (done/cancel/error
-    // all call renderMessages which rebuilds msgInner).
-    _showSteerIndicator(msg);
+    // all call renderMessages which rebuilds msgInner). Only mutate the visible
+    // tray/DOM if the user is still looking at the owning session.
+    if(_steerOwnerIsCurrent(ownerSid)){
+      if(typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length){S.pendingFiles=[];if(typeof renderTray==='function')renderTray();}
+      _showSteerIndicator(steerText);
+    }
     showToast(t('cmd_steer_delivered'),2500);
     return true;
   }
   // Do not fall back to interrupt: Steer failure is not permission to cancel
   // the active run. Restore the draft so the user can explicitly Queue or
   // Interrupt if that is what they want next. Pending files remain staged.
-  const inp=$('msg');
-  if(inp){
-    inp.value=explicitSteer?`/steer ${msg}`:msg;
-    if(typeof autoResize==='function')autoResize();
+  if(_steerOwnerIsCurrent(ownerSid)){
+    const inp=$('msg');
+    if(inp){
+      inp.value=_steerRestoreText(originalMsg,explicitSteer);
+      if(typeof autoResize==='function')autoResize();
+    }
+    if(typeof renderTray==='function')renderTray();
+  }else{
+    await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
   }
-  if(typeof renderTray==='function')renderTray();
   const fallbackCode = result && result.fallback;
   showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
-  _showSteerRecovery(msg, explicitSteer, fallbackCode);
+  if(_steerOwnerIsCurrent(ownerSid)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode);
   return false;
 }
 
