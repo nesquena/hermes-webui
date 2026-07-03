@@ -52824,7 +52824,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_dependabot_publi
         ),
     ],
 )
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_public_key_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_public_key_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, final_url_case, hostile_final_url
 ):
     root = tmp_path / "capy-memory"
