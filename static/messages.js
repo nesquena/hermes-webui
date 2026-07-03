@@ -1217,28 +1217,46 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 }
 
 // #5472: when a provider/background error aborts a send, send() has already
-// cleared the composer (`$('msg').value=''`) and the persisted draft
-// (`_clearComposerDraft`) before the turn was durably accepted server-side.
-// That turns a failed send into a dead-end retype (and, since /api/chat/start
-// never persisted pending state on a throw, the optimistic bubble can also be
-// lost on reload). Restore the user's typed text and keep staged files so the
-// user can re-send with one key press. Mirrors the draft-restore idiom already
-// used by _trySteer (commands.js) and _stashClarifyDraft.
-function _restoreComposerDraftAfterFailedSend(draftText, sid){
+// cleared the composer (`$('msg').value=''`), the persisted draft
+// (`_clearComposerDraft`), and the staged files (uploadPendingFiles() sets
+// `S.pendingFiles=[]`) before the turn was durably accepted server-side. On a
+// start-time throw the turn is never persisted, so the user loses the entire
+// typed message + attachments and must retype. Restore the ORIGINAL captured
+// draft text + staged files so the user can re-send with one key press.
+// Mirrors the draft-restore idiom already used by _trySteer (commands.js) and
+// _stashClarifyDraft.
+//
+// `draftText` and `filesSnapshot` are immutable snapshots captured in send()
+// BEFORE slash rewrites (/moa, bundles) mutate the payload and BEFORE
+// uploadPendingFiles() drains S.pendingFiles — so we restore what the user
+// actually typed, not the transformed send payload.
+function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid){
+  const restore=String(draftText||'');
+  const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
+  if(!restore&&!files.length) return false;
+  // Persist the draft for the failed send's own session so it survives a reload
+  // regardless of which session is currently visible. Files staged in the
+  // composer are File objects (not serializable), so only text is persisted;
+  // the in-memory S.pendingFiles restore below covers the immediate re-send.
+  if(sid&&typeof _saveComposerDraftNow==='function'){
+    try{ _saveComposerDraftNow(sid, restore, []); }catch(_){ }
+  }
+  // Only mutate the VISIBLE composer / staged tray when the failed send belongs
+  // to the session the user is currently looking at — otherwise a background
+  // send failure would pollute another session's composer. (Codex #5484 catch.)
+  const visibleSid=(S.session&&S.session.session_id)||null;
+  if(sid&&visibleSid&&sid!==visibleSid) return false;
   const inp=$('msg');
   if(!inp) return false;
-  const restore=String(draftText||'');
-  const hasFiles=!!(S.pendingFiles&&S.pendingFiles.length);
-  if(!restore&&!hasFiles) return false;
   // Do not clobber a new message the user began typing during the async window.
   if(String(inp.value||'').trim()) return false;
   inp.value=restore;
   if(typeof autoResize==='function') autoResize();
   if(typeof updateSendBtn==='function') updateSendBtn();
-  // Re-persist so the restored draft also survives a reload (send() cleared the
-  // server-side draft at start). Files are already staged in S.pendingFiles.
-  if(sid&&typeof _saveComposerDraftNow==='function'){
-    try{ _saveComposerDraftNow(sid, restore, S.pendingFiles?[...S.pendingFiles]:[]); }catch(_){ }
+  // Re-stage the originally attached files so a one-key resend keeps them.
+  if(files.length){
+    S.pendingFiles=files;
+    if(typeof renderTray==='function') renderTray();
   }
   return true;
 }
@@ -1274,6 +1292,15 @@ async function send(){
   _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+
+  // #5472: snapshot the ORIGINAL user-typed composer state now — before slash
+  // rewrites (/moa, bundles) mutate `text` and before uploadPendingFiles()
+  // clears S.pendingFiles. If /api/chat/start throws (turn never durably
+  // started), _restoreComposerDraftAfterFailedSend() puts this exact text +
+  // staged files back so the user can re-send without retyping. Captured as an
+  // immutable snapshot so later reassignments to `text` don't leak into it.
+  const _failedSendDraftText=text;
+  const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
@@ -1705,10 +1732,10 @@ async function send(){
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
     _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
     // #5472: the send was rejected before the turn was durably started, so the
-    // composer text (cleared at send time) would otherwise be lost. Put it back
-    // and re-persist the draft so the user can re-send without retyping. Staged
-    // files remain in S.pendingFiles.
-    _restoreComposerDraftAfterFailedSend(text, activeSid);
+    // composer text + attachments (cleared at send time) would otherwise be
+    // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
+    // payload) and re-stage files so the user can re-send without retyping.
+    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
