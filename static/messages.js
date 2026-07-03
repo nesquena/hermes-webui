@@ -1216,6 +1216,33 @@ function applySessionTitleUpdate(sid, titleText, options={}){
   return true;
 }
 
+// #5472: when a provider/background error aborts a send, send() has already
+// cleared the composer (`$('msg').value=''`) and the persisted draft
+// (`_clearComposerDraft`) before the turn was durably accepted server-side.
+// That turns a failed send into a dead-end retype (and, since /api/chat/start
+// never persisted pending state on a throw, the optimistic bubble can also be
+// lost on reload). Restore the user's typed text and keep staged files so the
+// user can re-send with one key press. Mirrors the draft-restore idiom already
+// used by _trySteer (commands.js) and _stashClarifyDraft.
+function _restoreComposerDraftAfterFailedSend(draftText, sid){
+  const inp=$('msg');
+  if(!inp) return false;
+  const restore=String(draftText||'');
+  const hasFiles=!!(S.pendingFiles&&S.pendingFiles.length);
+  if(!restore&&!hasFiles) return false;
+  // Do not clobber a new message the user began typing during the async window.
+  if(String(inp.value||'').trim()) return false;
+  inp.value=restore;
+  if(typeof autoResize==='function') autoResize();
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  // Re-persist so the restored draft also survives a reload (send() cleared the
+  // server-side draft at start). Files are already staged in S.pendingFiles.
+  if(sid&&typeof _saveComposerDraftNow==='function'){
+    try{ _saveComposerDraftNow(sid, restore, S.pendingFiles?[...S.pendingFiles]:[]); }catch(_){ }
+  }
+  return true;
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1677,6 +1704,11 @@ async function send(){
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
     _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    // #5472: the send was rejected before the turn was durably started, so the
+    // composer text (cleared at send time) would otherwise be lost. Put it back
+    // and re-persist the draft so the user can re-send without retyping. Staged
+    // files remain in S.pendingFiles.
+    _restoreComposerDraftAfterFailedSend(text, activeSid);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
