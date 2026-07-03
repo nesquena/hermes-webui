@@ -76010,7 +76010,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_actions_caches_m
     "https://api.github.com/repos/evil/spaces/actions/caches",
     "https://api.github.com/repos/capy/spaces/actions/caches/extra",
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_caches_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_caches_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, drifted_final_url
 ):
     root = tmp_path / "capy-memory"
