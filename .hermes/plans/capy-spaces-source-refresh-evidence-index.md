@@ -1,7 +1,7 @@
 # Capy Spaces Source-Refresh Evidence Index
 
 Created: 2026-06-30 21:01 CDT
-Last count refresh: 2026-07-03 01:23 CDT
+Last count refresh: 2026-07-03 02:28 CDT
 Branch: `feat/capy-spaces-foundation`
 
 ## Purpose
@@ -27,13 +27,13 @@ The index is intentionally docs-only. It does not change the Memory Tree impleme
 
 ## Evidence snapshot
 
-Snapshot generated from the checked-out `tests/test_capy_memory_tree.py` on 2026-07-03 01:23 CDT:
+Snapshot generated from the checked-out `tests/test_capy_memory_tree.py` on 2026-07-03 02:28 CDT:
 
 | Search/count | Count | Meaning |
 | --- | ---: | --- |
 | `def test_.*github.*(?:final_url|redirect).*drift` | 134 | GitHub source-refresh drift regressions across route families. |
 | `def test_.*before_body_read` | 121 | Regressions that explicitly name no-body-read behavior. |
-| `def test_.*relevant_memory_empty` | 63 | Regressions that also prove Spaces relevant-memory remains empty after hostile drift. |
+| `def test_.*relevant_memory_empty` | 64 | Regressions that also prove Spaces relevant-memory remains empty after hostile drift. |
 | `def test_.*ingests_github.*metadata_only` | 154 | Positive metadata-only GitHub ingestion regressions. |
 
 ### Regeneration recipe

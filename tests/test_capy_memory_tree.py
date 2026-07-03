@@ -70373,7 +70373,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_l
     "https://api.github.com/repos/capy/spaces/actions/runners/102/labels",
     "https://api.github.com/repos/capy/spaces/actions/runners/101/labels/extra",
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_labels_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_labels_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, final_url
 ):
     root = tmp_path / "capy-memory"
