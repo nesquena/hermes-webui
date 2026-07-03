@@ -65746,7 +65746,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_deploy_keys_meta
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_deploy_keys_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_deploy_keys_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     query_drift = "access_" + "token=redacted"
     fragment_drift = "raw-" + "prompt"
     userinfo_drift = "ghp_" + "redacted"
