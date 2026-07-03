@@ -35,6 +35,7 @@ import api.paths as _paths
 from api.plugin_providers import (
     effective_provider_display_name as _effective_provider_display_name,
     is_plugin_model_provider as _is_plugin_model_provider,
+    plugin_model_provider_profiles as _plugin_model_provider_profiles,
 )
 
 HOME = _paths.HOME
@@ -4488,6 +4489,23 @@ def _static_models_catalog_without_live_probes() -> dict:
             if canonical and _provider_has_key(canonical):
                 detected_providers.add(canonical)
 
+        # Plugin-only providers (e.g. 9router) are not in the static
+        # _PROVIDER_MODELS / _PROVIDER_DISPLAY tables and are detected above
+        # only when the user puts them in `providers.<slug>`.  Plugins ship
+        # with their own env-var wiring, so an installed-and-keyed plugin
+        # provider should also enter the static catalog even without a
+        # `providers:` block — otherwise the picker silently drops the
+        # group when the live-rebuild cache is cold.
+        try:
+            for _plugin_pid in list(_plugin_model_provider_profiles().keys()):
+                if not _plugin_pid or not _provider_has_key(_plugin_pid):
+                    continue
+                _canonical = _canonicalise_provider_id(_plugin_pid) or _plugin_pid
+                if _canonical:
+                    detected_providers.add(_canonical)
+        except Exception:
+            logger.debug("Plugin provider detection failed in static catalog", exc_info=True)
+
         fallback_cfg = cfg.get("fallback_providers", []) if isinstance(cfg, dict) else []
         if isinstance(fallback_cfg, list):
             for entry in fallback_cfg:
@@ -4621,12 +4639,32 @@ def _static_models_catalog_without_live_probes() -> dict:
                             raw_models.append({"id": item, "label": item})
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
+            # Plugin-only providers (e.g. 9router) are not in _PROVIDER_MODELS
+            # and rarely ship a `models:` allowlist in providers.<slug>, so
+            # the static catalog above would render them as empty groups that
+            # the picker filters out. Fall back to the plugin's own
+            # ProviderProfile.fallback_models so the provider surfaces a
+            # curated, network-free subset on the cold path. The live
+            # rebuild (_build_available_models_uncached) does a full
+            # /v1/models fetch and supersedes this view on the next call.
+            if not raw_models and _is_plugin_model_provider(pid):
+                _plugin_profile = _plugin_model_provider_profiles().get(
+                    (pid or "").strip().lower()
+                )
+                if _plugin_profile is not None:
+                    _fallback = getattr(_plugin_profile, "fallback_models", ()) or ()
+                    raw_models = [{"id": str(mid), "label": str(mid)} for mid in _fallback]
             for model_id in configured_model_ids.get(pid, []):
                 if model_id and not any(m.get("id") == model_id for m in raw_models):
                     raw_models.append(
                         {"id": model_id, "label": _get_label_for_model(model_id, groups)}
                     )
-            if raw_models:
+            # Plugin-only providers (e.g. 9router) must enter `groups` even
+            # when `raw_models` is empty so the post-loop filter sees them.
+            # Without this, the earlier plugin-fallback pass only seeds
+            # `raw_models` when `fallback_models` is non-empty; the cold-cache
+            # picker still silently drops a keyed plugin with no models yet.
+            if raw_models or _is_plugin_model_provider(pid):
                 groups.append(
                     {
                         "provider": provider_name,
@@ -4662,7 +4700,14 @@ def _static_models_catalog_without_live_probes() -> dict:
         groups = [
             group
             for group in groups
-            if group.get("models") or str(group.get("provider_id") or "").startswith("custom:")
+            if group.get("models")
+            or str(group.get("provider_id") or "").startswith("custom:")
+            # Keep plugin-only providers visible even when no models surfaced
+            # yet (e.g. plugin's fallback_models is empty and live rebuild
+            # hasn't completed). Otherwise they silently drop from the
+            # picker and look "not installed" — the same 9router-empty-group
+            # regression this branch was added to fix.
+            or _is_plugin_model_provider(str(group.get("provider_id") or ""))
         ]
 
         providers_with_keys: set[str] = set()

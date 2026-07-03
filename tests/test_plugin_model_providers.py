@@ -223,3 +223,156 @@ class TestPluginModelProvidersPicker:
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
             config.invalidate_models_cache()
+
+
+class TestPluginFallbackModelsInStaticCatalog:
+    """Regression tests for the network-free /api/models catalog path.
+
+    ``_static_models_catalog_without_live_probes()`` is used for ``prefer_cache``
+    lookups and as the warm-cache payload.  Plugin-only providers (e.g. 9router)
+    are not in ``_PROVIDER_MODELS`` and rarely ship a ``models:`` allowlist in
+    ``providers.<slug>``, so without a fallback the static catalog would render
+    them as empty groups that the picker filters out.  The fix is to surface
+    the ``ProviderProfile.fallback_models`` declared by the plugin itself on
+    this cold path.
+    """
+
+    def test_static_catalog_surfaces_plugin_fallback_models(
+        self, monkeypatch, tmp_path
+    ):
+        _install_fake_yandex_plugin(monkeypatch)
+        _install_fake_hermes_cli(monkeypatch, authenticated=True, model_ids=[])
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        # _provider_has_key reads the env var directly, not the .env file.
+        # Set it so the static catalog's plugin-detection branch fires.
+        monkeypatch.setenv("YANDEX_API_KEY", "test-y...n")
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("YANDEX_API_KEY=test-y...n", encoding="utf-8")
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        # No `providers.yandex.models:` allowlist, no `models:` in cfg at all.
+        # Active provider set to something else so yandex only enters via the
+        # plugin discovery path.
+        config.cfg["model"] = {"provider": "gemini", "default": "gemini-2.5-flash"}
+        config.cfg["providers"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        config.invalidate_models_cache()
+        try:
+            catalog = config._static_models_catalog_without_live_probes()
+            yandex_group = next(
+                (
+                    g
+                    for g in catalog.get("groups", [])
+                    if g.get("provider_id") == "yandex"
+                ),
+                None,
+            )
+            assert yandex_group is not None, (
+                "plugin provider must appear in network-free static catalog "
+                "even without providers.<slug>.models allowlist"
+            )
+            # yandex fake plugin declares no fallback_models in this test's
+            # profile, so the group is allowed to be empty — but the provider
+            # itself must be present (not filtered out as an empty group).
+            assert yandex_group.get("models") == [] or yandex_group.get("models")
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+            config.invalidate_models_cache()
+
+    def test_static_catalog_uses_provider_fallback_models_when_declared(
+        self, monkeypatch, tmp_path
+    ):
+        """When the plugin declares ``fallback_models``, the static catalog
+        surfaces them as the group's model list."""
+        fallback = (
+            "gh/claude-sonnet-4.5",
+            "ag/claude-sonnet-4-6",
+            "ds/deepseek-chat",
+        )
+        profile = SimpleNamespace(
+            name="myplugin",
+            display_name="My Plugin",
+            env_vars=("MYPLUGIN_API_KEY",),
+            auth_type="api_key",
+            aliases=(),
+            fallback_models=fallback,
+        )
+
+        def _fake_list_providers():
+            return [profile]
+
+        fake_providers = types.ModuleType("providers")
+        fake_providers.list_providers = _fake_list_providers
+        monkeypatch.setitem(sys.modules, "providers", fake_providers)
+
+        from api.plugin_providers import invalidate_plugin_model_provider_cache
+
+        invalidate_plugin_model_provider_cache()
+
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        # _provider_has_key reads the env var directly.
+        monkeypatch.setenv("MYPLUGIN_API_KEY", "test-m...n")
+        (tmp_path / ".env").write_text(
+            "MYPLUGIN_API_KEY=test-m...n", encoding="utf-8"
+        )
+
+        # Mock the plugin provider's API key as authenticated via hermes_cli.auth
+        fake_pkg = types.ModuleType("hermes_cli")
+        fake_pkg.__path__ = []
+        fake_models = types.ModuleType("hermes_cli.models")
+        fake_models.list_available_providers = lambda: []
+        fake_models.provider_model_ids = lambda pid: []
+        fake_auth = types.ModuleType("hermes_cli.auth")
+        fake_auth.get_auth_status = lambda pid: (
+            {"logged_in": True, "configured": True, "key_source": "env_file"}
+            if pid == "myplugin"
+            else {}
+        )
+        monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+        monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+        monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {"provider": "gemini", "default": "gemini-2.5-flash"}
+        config.cfg["providers"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        config.invalidate_models_cache()
+        try:
+            catalog = config._static_models_catalog_without_live_probes()
+            myplugin_group = next(
+                (
+                    g
+                    for g in catalog.get("groups", [])
+                    if g.get("provider_id") == "myplugin"
+                ),
+                None,
+            )
+            assert myplugin_group is not None, (
+                "plugin provider with fallback_models must appear in static catalog"
+            )
+            model_ids = [m.get("id") for m in myplugin_group.get("models", [])]
+            assert model_ids == list(fallback), (
+                f"static catalog should use plugin's fallback_models, got {model_ids}"
+            )
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+            config.invalidate_models_cache()
