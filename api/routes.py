@@ -1414,46 +1414,63 @@ def _csrf_rejection_error(handler) -> str:
     return "Cross-origin request rejected"
 
 
+def _origin_target_allowed(handler, target: str) -> bool:
+    """Return True when an Origin/Referer value is same-origin or allowlisted.
+
+    Same-origin means the origin's host:port matches Host, X-Forwarded-Host
+    (reverse proxy), or X-Real-Host. Explicit public origins come from the
+    HERMES_WEBUI_ALLOWED_ORIGINS env var. Shared by the CSRF gate and the
+    CORS preflight handler so both enforce the same policy.
+    """
+    m = _re.match(r"^https?://([^/]+)", target)
+    if not m:
+        return False
+    origin_host = m.group(1)
+    origin_scheme = m.group(0).split('://')[0].lower()  # 'http' or 'https'
+    origin_name, origin_port = _normalize_host_port(origin_host)
+    # Check against explicitly allowed public origins (env var)
+    if m.group(0).rstrip('/').lower() in _allowed_public_origins():
+        return True
+    # Allow same-origin: check Host, X-Forwarded-Host (reverse proxy), and
+    # X-Real-Host against the origin. Reverse proxies (Caddy, nginx) set
+    # X-Forwarded-Host to the client's original Host header.
+    allowed_hosts = [
+        h.strip()
+        for h in [
+            handler.headers.get("Host", ""),
+            handler.headers.get("X-Forwarded-Host", ""),
+            handler.headers.get("X-Real-Host", ""),
+        ]
+        if h.strip()
+    ]
+    for allowed in allowed_hosts:
+        allowed_name, allowed_port = _normalize_host_port(allowed)
+        if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
+            return True
+    return False
+
+
+def preflight_allow_origin(handler) -> str:
+    """CORS preflight: return the Origin value to echo back, or '' to omit.
+
+    Echoes the request Origin only when it is same-origin or explicitly
+    allowlisted via HERMES_WEBUI_ALLOWED_ORIGINS — the preflight must not
+    advertise wider access (`*`) than the CSRF gate actually permits.
+    """
+    origin = handler.headers.get("Origin", "").strip()
+    if not origin:
+        return ""
+    return origin if _origin_target_allowed(handler, origin) else ""
+
+
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
     _clear_csrf_failure_reason(handler)
     origin = handler.headers.get("Origin", "")
     referer = handler.headers.get("Referer", "")
-    host = handler.headers.get("Host", "")
     if not _is_browser_unsafe_request(handler):
         return True  # non-browser clients (curl, MCP, agent) have no Origin
-    target = origin or referer
-    # Extract host:port from origin/referer
-    m = _re.match(r"^https?://([^/]+)", target)
-    if not m:
-        return _set_csrf_failure_reason(handler, "origin_mismatch")
-    origin_host = m.group(1)
-    origin_scheme = m.group(0).split('://')[0].lower()  # 'http' or 'https'
-    origin_name, origin_port = _normalize_host_port(origin_host)
-    origin_allowed = False
-    # Check against explicitly allowed public origins (env var)
-    origin_value = m.group(0).rstrip('/').lower()
-    if origin_value in _allowed_public_origins():
-        origin_allowed = True
-    if not origin_allowed:
-        # Allow same-origin: check Host, X-Forwarded-Host (reverse proxy), and
-        # X-Real-Host against the origin. Reverse proxies (Caddy, nginx) set
-        # X-Forwarded-Host to the client's original Host header.
-        allowed_hosts = [
-            h.strip()
-            for h in [
-                host,
-                handler.headers.get("X-Forwarded-Host", ""),
-                handler.headers.get("X-Real-Host", ""),
-            ]
-            if h.strip()
-        ]
-        for allowed in allowed_hosts:
-            allowed_name, allowed_port = _normalize_host_port(allowed)
-            if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
-                origin_allowed = True
-                break
-    if not origin_allowed:
+    if not _origin_target_allowed(handler, origin or referer):
         return _set_csrf_failure_reason(handler, "origin_mismatch")
 
     from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
