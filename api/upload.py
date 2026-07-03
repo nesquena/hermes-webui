@@ -144,7 +144,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     Returns a dict with ``extracted`` (int), ``files`` (list[str]).
     Raises ValueError on zip-slip or unsupported format.
     """
-    import zipfile, tarfile, io, os, shutil
+    import zipfile, tarfile, io, os, shutil, stat
 
     name = Path(filename).name
     stem = Path(filename).stem  # strip .zip / .tar.gz etc.
@@ -176,6 +176,12 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                     # Skip directories
                     if member.is_dir():
                         continue
+                    # Skip symlink members — never materialize them (neither as
+                    # links nor as files holding the link-target text). The tar
+                    # branch gets this for free from member.isfile().
+                    unix_mode = member.external_attr >> 16
+                    if unix_mode and stat.S_ISLNK(unix_mode):
+                        continue
                     # Zip-slip protection
                     member_path = (dest_dir / member.filename).resolve()
                     if not member_path.is_relative_to(dest_dir.resolve()):
@@ -202,7 +208,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                                     f'Possible zip bomb.'
                                 )
                             dst.write(chunk)
-                    extracted_files.append(str(member_path.relative_to(workspace.resolve())))
+                    extracted_files.append(member_path.relative_to(workspace.resolve()).as_posix())
 
         elif _mode == 'tar':
             with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
@@ -237,7 +243,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                                         f'Possible zip bomb.'
                                     )
                                 dst.write(chunk)
-                    extracted_files.append(str(member_path.relative_to(workspace.resolve())))
+                    extracted_files.append(member_path.relative_to(workspace.resolve()).as_posix())
     except Exception:
         # Clean up partially-extracted directory to avoid orphaned folders
         try:
