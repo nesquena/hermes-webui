@@ -4632,9 +4632,19 @@ def test_space_tool_adapter_supports_source_current_reload_widget_alias_metadata
     assert reloaded["progress_event"]["run_id"].startswith("widget-event:")
     assert reloaded["progress_event"]["space_id"] == created["space_id"]
     assert reloaded["progress_event"]["redaction_status"] == "metadata_only"
+    assert reloaded["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert reloaded["output_compaction"]["command"] == "space.current.reloadwidget"
+    assert reloaded["output_compaction"]["metadata_only"] is True
+    assert reloaded["output_compaction"]["redaction_status"] == "metadata_only"
+    assert "widget_event_status: queued" in reloaded["output_compaction"]["text"]
+    assert "prompt_preflight_status: pass" in reloaded["output_compaction"]["text"]
+    assert f"progress_run_id: {reloaded['progress_event']['run_id']}" in reloaded["output_compaction"]["text"]
+    _assert_server_memory_advisory_receipt(reloaded)
     assert events[0]["event_name"] == "widget.refresh"
     assert events[0]["payload_summary"] == {"action": "reload", "reason": "refresh visible metadata"}
     assert events[0]["prompt_preview"] == "[REDACTED]"
+    assert events[0]["memory_advisory"] == reloaded["memory_advisory"]
+    assert events[0]["output_compaction"]["metadata_only"] is True
     assert "refresh the weather" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
@@ -4673,9 +4683,19 @@ def test_space_tool_adapter_reload_widget_alias_without_prompt_returns_required_
     assert reloaded["autonomy_policy"]["metadata_only"] is True
     assert reloaded["progress_event"]["event_type"] == "tool.completed"
     assert reloaded["progress_event"]["run_id"].startswith("widget-event:")
+    assert reloaded["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert reloaded["output_compaction"]["command"] == "space.current.reloadwidget"
+    assert reloaded["output_compaction"]["metadata_only"] is True
+    assert reloaded["output_compaction"]["redaction_status"] == "metadata_only"
+    assert "widget_event_status: queued" in reloaded["output_compaction"]["text"]
+    assert "prompt_preflight_status: required" in reloaded["output_compaction"]["text"]
+    assert f"progress_run_id: {reloaded['progress_event']['run_id']}" in reloaded["output_compaction"]["text"]
+    _assert_server_memory_advisory_receipt(reloaded)
     assert events[0]["prompt_preflight"]["status"] == "required"
     assert events[0]["autonomy_policy"]["prompt_preflight_status"] == "required"
     assert events[0]["payload_summary"] == {"action": "reload"}
+    assert events[0]["memory_advisory"] == reloaded["memory_advisory"]
+    assert events[0]["output_compaction"]["metadata_only"] is True
     assert "secret_value_do_not_leak" not in serialized
     assert "secret...leak" not in serialized
     assert "secret" not in serialized
