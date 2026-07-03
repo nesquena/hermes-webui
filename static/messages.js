@@ -1230,7 +1230,7 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 // BEFORE slash rewrites (/moa, bundles) mutate the payload and BEFORE
 // uploadPendingFiles() drains S.pendingFiles — so we restore what the user
 // actually typed, not the transformed send payload.
-function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid){
+function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   if(!restore&&!files.length) return false;
@@ -1238,8 +1238,15 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid){
   // regardless of which session is currently visible. Files staged in the
   // composer are File objects (not serializable), so only text is persisted;
   // the in-memory S.pendingFiles restore below covers the immediate re-send.
+  //
+  // Chain the persist AFTER the send-time _clearComposerDraft POST (text:'')
+  // resolves, so the two same-origin writes can't be reordered under HTTP/2
+  // multiplexing and leave the server draft empty after a reload. If the clear
+  // promise is unavailable or rejects, fall back to persisting immediately.
   if(sid&&typeof _saveComposerDraftNow==='function'){
-    try{ _saveComposerDraftNow(sid, restore, []); }catch(_){ }
+    const _persist=()=>{ try{ _saveComposerDraftNow(sid, restore, []); }catch(_){ } };
+    if(clearPromise&&typeof clearPromise.then==='function') clearPromise.then(_persist,_persist);
+    else _persist();
   }
   // Only mutate the VISIBLE composer / staged tray when the failed send belongs
   // to the session the user is currently looking at — otherwise a background
@@ -1550,8 +1557,13 @@ async function send(){
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
   $('msg').value='';autoResize();
-  // Clear persisted composer draft since message was sent.
-  if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
+  // Clear persisted composer draft since message was sent. Capture the promise
+  // so the #5472 failed-send restore can chain its re-persist AFTER this clear
+  // resolves — otherwise the two same-origin POSTs (clear text:'' then restore
+  // text:<draft>) can be reordered under HTTP/2 multiplexing and leave the
+  // server draft empty after a reload. (Opus #5484 NIT.)
+  let _composerDraftClearPromise=null;
+  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid);
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
@@ -1735,7 +1747,7 @@ async function send(){
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
     // payload) and re-stage files so the user can re-send without retyping.
-    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid);
+    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();

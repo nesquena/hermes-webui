@@ -48,7 +48,7 @@ def _helper_body() -> str:
 
 def test_helper_has_new_three_arg_signature_and_guards():
     body = _helper_body()
-    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid)" in body
+    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise)" in body
     # No-op when there is nothing to restore (no text AND no staged files).
     assert "if(!restore&&!files.length) return false;" in body
     # Session-aware: never mutate a different session's visible composer.
@@ -80,16 +80,46 @@ def test_send_captures_immutable_snapshot_before_rewrites_and_upload():
 def test_error_branch_restores_original_snapshot_not_mutated_payload():
     start = MESSAGES_JS.find("S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});")
     assert start != -1, "the /api/chat/start error branch must still push an Error turn"
-    window = MESSAGES_JS[start:start + 900]
+    window = MESSAGES_JS[start:start + 1100]
     assert (
-        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid);"
+        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
         in window
     ), "the send-error path must restore the ORIGINAL captured snapshot (not `text`)"
 
 
 def test_send_still_clears_composer_on_the_happy_path():
-    assert "$('msg').value='';autoResize();" in MESSAGES_JS
-    assert "if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);" in MESSAGES_JS
+    # Anchor to the MAIN-path clear specifically (the send-time composer wipe +
+    # persisted-draft clear), not a bare `$('msg').value=''` string that also
+    # appears at ~13 other sites (slash returns, bundle-error paths). This
+    # assertion must actually guard the main send path's clear. (Opus #5484 NIT.)
+    main_clear = (
+        "if (activeSid && typeof _clearComposerDraft === 'function') "
+        "_composerDraftClearPromise=_clearComposerDraft(activeSid);"
+    )
+    assert main_clear in MESSAGES_JS, "main send path must clear the persisted draft at send time"
+    # The composer textarea wipe must sit immediately above that clear.
+    clear_idx = MESSAGES_JS.find(main_clear)
+    window_before = MESSAGES_JS[clear_idx - 700:clear_idx]
+    assert "$('msg').value='';autoResize();" in window_before, (
+        "the main-path composer wipe must precede the persisted-draft clear"
+    )
+
+
+def test_restore_persist_chains_after_the_clear_promise():
+    # NIT 1: the restore's re-persist must be ordered AFTER the send-time clear
+    # POST resolves (avoids an HTTP/2 reorder leaving the server draft empty).
+    body = _helper_body()
+    assert "clearPromise" in body, "helper must accept the clear promise for ordering"
+    assert "clearPromise.then(_persist,_persist)" in body, (
+        "re-persist must chain off the clear promise (both fulfill and reject → persist)"
+    )
+    # And send() must pass the captured clear promise into the restore call.
+    assert "let _composerDraftClearPromise=null;" in MESSAGES_JS
+    call = (
+        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, "
+        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
+    )
+    assert call in MESSAGES_JS, "send() must pass the clear promise into the restore helper"
 
 
 # ---------------------------------------------------------------------------
@@ -197,4 +227,50 @@ def test_does_not_pollute_a_different_visible_session():
 def test_noop_when_nothing_to_restore():
     out = _run_helper_in_node("", [], "", visible_sid="sid-1")
     assert out["ret"] is False
-    assert out["saved"] is None
+
+
+def test_persist_is_ordered_after_the_clear_promise():
+    """Behavioral: the re-persist must run AFTER the clear promise resolves.
+
+    Simulates the send-time clear POST as a promise that records the persist
+    order. The re-persist must observe that the clear has already resolved.
+    """
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    body = _helper_body()
+    harness = textwrap.dedent(
+        """
+        const order = [];
+        const state = {input: {value: ""}, pendingFiles: []};
+        const $ = (id) => (id === 'msg' ? state.input : null);
+        const S = {pendingFiles: state.pendingFiles, session: {session_id: 'sid-1'}};
+        function autoResize(){}
+        function updateSendBtn(){}
+        function renderTray(){}
+        function _saveComposerDraftNow(sid, text, files){ order.push('persist:' + text); }
+
+        %(helper)s
+
+        // Clear POST resolves on a microtask; record its completion first.
+        const clearPromise = Promise.resolve().then(() => { order.push('clear'); });
+        _restoreComposerDraftAfterFailedSend('hello', [], 'sid-1', clearPromise);
+        // Flush microtasks, then report ordering.
+        Promise.resolve().then(() => Promise.resolve()).then(() => {
+          console.log(JSON.stringify({order}));
+        });
+        """
+    ) % {"helper": body}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip())
+    assert out["order"] == ["clear", "persist:hello"], (
+        f"persist must run after the clear resolves, got {out['order']}"
+    )
+
+
+def test_persist_still_fires_when_clear_promise_absent():
+    """Fallback: with no clear promise, the persist happens immediately (sync)."""
+    out = _run_helper_in_node("no clear promise", [], "", visible_sid="sid-1")
+    assert out["ret"] is True
+    assert out["saved"] == {"sid": "sid-1", "text": "no clear promise", "files": []}
