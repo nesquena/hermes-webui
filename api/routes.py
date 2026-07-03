@@ -17315,6 +17315,7 @@ def start_session_turn(
         profile_default_model=_pp_default,
         prefer_cached_catalog=True,
     )
+    model = _validate_resolved_model(model, model_provider)
     resp = _start_run(
         s,
         msg=msg,
@@ -17489,6 +17490,7 @@ def _handle_goal_command(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
         )
+        model = _validate_resolved_model(model, model_provider)
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
@@ -17540,6 +17542,7 @@ def _handle_goal_command(handler, body):
                 profile_provider=_pp_provider,
                 profile_default_model=_pp_default,
             )
+            model = _validate_resolved_model(model, model_provider)
         stream_response = _start_chat_stream_for_session(
             s,
             msg=kickoff_prompt,
@@ -17740,6 +17743,7 @@ def _handle_chat_sync(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
         )[:2]
+        model = _validate_resolved_model(model, model_provider)
         s.model = model
         s.model_provider = model_provider
     from api.streaming import _ENV_LOCK
