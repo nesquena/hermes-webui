@@ -227,6 +227,11 @@ function toggleOutlinePanel() {
 
 // Jump target exposed on window so inline onclick handlers can reach it.
 window._outlineJump = _jumpToMessage;
+// Also expose under its own name so OTHER scripts (e.g. sessions.js's
+// search-result click handler, #4159) can reuse the jump-and-flash helper
+// across the <script> boundary — _jumpToMessage is otherwise trapped inside
+// this IIFE and unreachable from sessions.js.
+window._jumpToMessage = _jumpToMessage;
 window.applyConversationOutlinePreference = applyConversationOutlinePreference;
 
 // Re-render after renderMessages() if the panel is open and the session
