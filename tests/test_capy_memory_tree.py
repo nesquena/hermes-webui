@@ -50021,7 +50021,7 @@ def _run_github_dependabot_single_alert_refresh_payload(tmp_path, monkeypatch, p
     "https://api.github.com/repos/capy/other/dependabot/alerts/17",
     "https://api.github.com/repos/capy/spaces/dependabot/alerts/18",
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_single_alert_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_single_alert_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     drifted_final_url,
