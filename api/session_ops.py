@@ -67,6 +67,46 @@ def _truncation_watermark_for(messages):
         return 0.0
 
 
+def truncate_context_for_display_keep(
+    context_messages: list | None,
+    full_messages: list | None,
+    keep: int,
+) -> list:
+    """Align model context with display prefix ``full_messages[:keep]``."""
+    if keep <= 0:
+        return []
+    ctx = context_messages if isinstance(context_messages, list) else []
+    msgs = full_messages if isinstance(full_messages, list) else []
+    if not ctx:
+        return []
+    if len(ctx) == len(msgs):
+        return ctx[:keep]
+    if len(msgs) == 0:
+        return []
+    # Context tail aligns with full display transcript; preserve leading-only rows.
+    prefix_len = max(0, len(ctx) - len(msgs))
+    prefix = ctx[:prefix_len]
+    suffix = ctx[prefix_len:]
+    return prefix + suffix[:keep]
+
+
+def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
+    """Truncate display + context; set watermark/boundary. Returns old counts."""
+    full_messages = list(session.messages or [])
+    old_msg_count = len(full_messages)
+    old_ctx_count = len(getattr(session, 'context_messages', None) or [])
+    session.messages = full_messages[:keep]
+    if isinstance(getattr(session, 'context_messages', None), list):
+        session.context_messages = truncate_context_for_display_keep(
+            session.context_messages,
+            full_messages,
+            keep,
+        )
+    session.truncation_watermark = _truncation_watermark_for(session.messages)
+    session.truncation_boundary = session.truncation_watermark
+    return old_msg_count, old_ctx_count
+
+
 def retry_last(session_id: str) -> dict[str, Any]:
     """Truncate the session to before the last user message, return its text.
 

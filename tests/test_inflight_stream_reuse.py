@@ -290,13 +290,15 @@ def test_load_session_attaches_sse_before_auxiliary_work():
     # appendThinking, and renderMessages now takes a preserveScroll arg — so the
     # old contiguous "syncTopbar();renderMessages();appendThinking();loadDir('.');"
     # literal no longer exists. Assert each auxiliary call individually; all must
-    # still run AFTER attachLiveStream (the invariant this test protects).
+    # still run AFTER attachLiveStream (the invariant this test protects). The
+    # workspace refresh is now scheduled through a first-paint deferral helper
+    # rather than calling loadDir('.') inline.
     for marker in (
         "updateSendBtn();",
         "syncTopbar();",
         "renderMessages(",
         "appendThinking();",
-        "loadDir('.');",
+        "_deferWorkspaceRefreshForSession(sid);",
         "updateQueueBadge(sid);",
         "startApprovalPolling(sid)",
     ):
@@ -876,7 +878,9 @@ def test_load_session_restores_worklog_shell_before_reattach_replay():
     body = _function_body(SESSIONS_JS, "loadSession")
     fallback_pos = body.find("if(!restoredLiveTurn){")
     assert fallback_pos != -1, "loadSession must have a live-turn fallback branch"
-    fallback_block = body[fallback_pos:body.find("loadDir('.')", fallback_pos)]
+    refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid);", fallback_pos)
+    assert refresh_pos != -1, "fallback path should still schedule workspace refresh after first paint"
+    fallback_block = body[fallback_pos:refresh_pos]
     clear_pos = fallback_block.find("clearLiveToolCards();")
     shell_pos = fallback_block.find("ensureLiveWorklogShell()")
     legacy_pos = fallback_block.find("else appendThinking();")
@@ -939,7 +943,9 @@ def test_restore_succeeded_reconnect_skips_unkeyed_restored_tool_duplicates():
     assert "hasRestoredLiveToolRows&&!liveToolReplayId(tc)" in helper_block
     restore_block = body[restore_replay_pos:fallback_pos]
     assert "replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});" in restore_block
-    assert "replayPersistedLiveToolCards();" in body[fallback_pos:body.find("loadDir('.')", fallback_pos)]
+    refresh_pos = body.find("_deferWorkspaceRefreshForSession(sid);", fallback_pos)
+    assert refresh_pos != -1, "fallback path should still schedule workspace refresh after first paint"
+    assert "replayPersistedLiveToolCards();" in body[fallback_pos:refresh_pos]
 
 
 def test_merge_inflight_tail_preserves_all_segmented_live_progress():

@@ -295,6 +295,24 @@ activity order for Compact Worklog and Transparent Stream renderers. The
 Transparent Stream raw `content[]` helper remains a fallback for settled
 messages that do not yet carry `_anchor_activity_scene`.
 
+### Settled Fallback Ownership Matrix
+
+After the mixed `content[]` bridge, `_anchor_activity_scene` is the semantic
+owner for settled assistant activity whenever it is present. Legacy raw-message
+paths stay as compatibility fallbacks for older or non-anchor transcripts; they
+must not compete with an anchor-owned turn.
+
+| Surface | Anchor-present owner | Compatibility fallback | Fallback exit |
+| --- | --- | --- | --- |
+| Settled Compact Worklog activity | `_renderSettledAnchorSceneForMessage()` renders `activity_scene_v1` rows before the final answer. | Legacy `S.toolCalls`, `tool_calls`, `_partial_tool_calls`, and raw `content[].tool_use` rebuilds. | `anchorOwnedAssistantRawIdxs` excludes the anchor-owned turn from message metadata scans, fallback source collection, tool buckets, thinking buckets, and worklog-source mirroring. |
+| Settled Transparent Stream activity | `_renderSettledAnchorSceneTransparentForMessage()` renders the same scene rows as transparent event rows or inline prose before the final answer segment. | `_transparentStreamOrderedParts()` rebuilds raw `content[]` order for historical messages without an anchor scene. | `_transparentStreamOrderedParts()` returns `null` when `message._anchor_activity_scene` exists, leaving the dedicated anchor renderer in charge. |
+| Historical / non-anchor transcripts | No anchor owner is available. | Raw `content[]`, persisted `session.tool_calls`, role=`tool` rows, and partial tool-call snapshots continue to recover visible tool/prose history. | None. These paths remain until replay/runtime-journal coverage proves the same transcript shapes hydrate through anchors. |
+| Live reattach / session switch | `renderLiveAnchorActivityScene()` consumes the projected live scene, and session switch first attempts runtime-journal anchor scene restore. | Saved live DOM snapshots and `INFLIGHT` tool replay. | Snapshot fallback only runs when no usable live anchor scene can be rendered. |
+
+This matrix is an audit baseline, not permission to delete fallbacks. Fallback
+removal should wait for replay/runtime-journal parity tests that prove all
+supported settled transcript sources hydrate through anchors.
+
 ## Source Event Classification
 
 Phase 0 classifies current sources before changing render behavior:

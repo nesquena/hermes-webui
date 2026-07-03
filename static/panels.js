@@ -3159,7 +3159,7 @@ function loadTodos() {
 
   if (!todos.length) {
     if (typeof _todosLastRenderedHash !== 'undefined' && _todosLastRenderedHash === '__empty__') return;
-    panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 0">${esc(t('todos_no_active'))}</div>`;
+    panel.innerHTML = renderTodoEmptyState();
     if (typeof _todosLastRenderedHash !== 'undefined') _todosLastRenderedHash = '__empty__';
     return;
   }
@@ -3170,18 +3170,9 @@ function loadTodos() {
     _todosLastRenderedHash = hash;
   }
 
-  const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14)};
-  const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)'};
   // Single innerHTML join is the cheapest correct way to materialize
   // ~10–50 leaf nodes.  All user-controlled content goes through esc().
-  panel.innerHTML = todos.map(td => `
-    <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[td.status]||'var(--muted)'}">${statusIcon[td.status]||li('square',14)}</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;color:${td.status==='completed'?'var(--muted)':td.status==='in_progress'?'var(--text)':'var(--text)'};${td.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(td.content)}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(td.status)}</div>
-      </div>
-    </div>`).join('');
+  panel.innerHTML = renderTodoRows(todos, {metadata:true});
 }
 
 // Legacy fallback: reverse-scan settled tool messages for the most
@@ -3982,6 +3973,7 @@ function _bucketDailyTokensForChart(rows) {
     const slice = rows.slice(i, i + bucketSize);
     const input_tokens = slice.reduce((s, r) => s + Number(r.input_tokens || 0), 0);
     const output_tokens = slice.reduce((s, r) => s + Number(r.output_tokens || 0), 0);
+    const cache_read_tokens = slice.reduce((s, r) => s + Number(r.cache_read_tokens || 0), 0);
     const sessions = slice.reduce((s, r) => s + Number(r.sessions || 0), 0);
     const cost = slice.reduce((s, r) => s + Number(r.cost || 0), 0);
 
@@ -3999,6 +3991,7 @@ function _bucketDailyTokensForChart(rows) {
       date: firstDate,
       input_tokens,
       output_tokens,
+      cache_read_tokens,
       sessions,
       cost,
     });
@@ -4059,7 +4052,13 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
         const outputPct = Math.max((output / maxDailyTokens) * 100, output ? 2 : 0).toFixed(1);
         const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
         const titleDate = r.title || r.date;
-        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
+        const cacheRead = Number(r.cache_read_tokens || 0);
+        // Bounded daily cache hit rate: reads / (input + reads), 0-100%.
+        const cacheDenom = input + cacheRead;
+        const cacheStr = (cacheRead > 0 && cacheDenom > 0)
+          ? ` · ${Math.min(100, Math.round((cacheRead / cacheDenom) * 100))}% ${t('insights_model_cache')}`
+          : '';
+        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')}${cacheStr} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
         const labelText = r.label !== undefined ? r.label : String(r.date).slice(5);
         return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(labelText) : ''}</span></div>`;
       }).join('') +
@@ -4071,11 +4070,15 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   // Models table
   let modelsHtml = '';
   if (d.models && d.models.length) {
-    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
+    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span title="${esc(t('insights_cache_hit'))}">${esc(t('insights_model_cache'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
       d.models.map(m => {
         const share = Number(m.cost_share || m.token_share || m.session_share || 0);
         const title = `${m.model} · ${fmtTokens(m.input_tokens)} ${t('insights_input_tokens')} · ${fmtTokens(m.output_tokens)} ${t('insights_output_tokens')}`;
-        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span><span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
+        const cachePct = (m.cache_hit_percent === null || m.cache_hit_percent === undefined) ? null : Number(m.cache_hit_percent);
+        const cacheCell = cachePct === null
+          ? '<span class="insights-model-cache insights-model-cache-empty">—</span>'
+          : `<span class="insights-model-cache" title="${esc(t('insights_cache_hit'))}: ${fmtTokens(m.cache_read_tokens || 0)}">${cachePct}%</span>`;
+        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span>${cacheCell}<span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
       }).join('') +
       `</div></div>`;
   } else {
@@ -5184,7 +5187,7 @@ function toggleWsDropdown(){
   else{
     closeProfileDropdown(); // close profile dropdown if open
     loadWorkspaceList().then(data=>{
-      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
+      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
       dd.classList.add('open');
     });
   }
@@ -5204,7 +5207,7 @@ function toggleComposerWsDropdown(){
     if(typeof closeModelDropdown==='function') closeModelDropdown();
     if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
     loadWorkspaceList().then(data=>{
-      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
+      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
       dd.classList.add('open');
       _positionComposerWsDropdown();
       if(chip) chip.classList.add('active');
@@ -6941,7 +6944,14 @@ async function _buildSettingsIndex() {
         if (!labelEl) return;
         const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
         const label = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
-        if (label) index.push({ label, sectionKey, i18nKey, el: field });
+        if (label) {
+          const searchBlob = [label, field.textContent, field.dataset ? field.dataset.settingsSearch : '']
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          index.push({ label, searchBlob, sectionKey, i18nKey, el: field });
+        }
       });
       if (sectionKey === 'providers') {
         pane.querySelectorAll('.provider-card').forEach(card => {
@@ -6989,7 +6999,7 @@ async function filterSettings(query) {
     help: t('settings_tab_help') || 'Help',
   };
   const matches = (_settingsIndex || []).filter(entry =>
-    entry.label.toLowerCase().includes(q)
+    (entry.searchBlob || entry.label).toLowerCase().includes(q)
   );
   if (!matches.length) {
     resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
@@ -7938,6 +7948,18 @@ async function loadSettingsPanel(){
     // TTS engine selector
     const ttsEngineSel=$('settingsTtsEngine');
     if(ttsEngineSel){
+      // Re-add any extension-registered TTS engines (window.registerHermesTtsEngine)
+      // as options — the <select> markup only hardcodes the built-ins, and this
+      // settings panel can render after an extension registered its engine.
+      if(typeof window._hermesTtsEngineOptions==='function'){
+        window._hermesTtsEngineOptions().forEach(function(e){
+          if(!ttsEngineSel.querySelector('option[value="'+e.id+'"]')){
+            var opt=document.createElement('option');
+            opt.value=e.id; opt.textContent=e.label;
+            ttsEngineSel.appendChild(opt);
+          }
+        });
+      }
       const saved=localStorage.getItem('hermes-tts-engine')||'browser';
       ttsEngineSel.value=saved;
       ttsEngineSel.onchange=function(){
@@ -8144,6 +8166,67 @@ function _extensionEntryBadge(entry){
   return `<span class="extension-status-badge ${cls}">${esc(_extensionEntryStatusLabel(entry))}</span>`;
 }
 
+function _configureExtensionSettingsFromStatus(data){
+  if(!window.HermesExtensionSettings||!data||!Array.isArray(data.extensions)) return;
+  window.HermesExtensionSettings.primeFromStatus({extensions:data.extensions});
+}
+
+function _extensionSettingsFieldHtml(field,value){
+  const key=String(field&&field.key||'');
+  const type=String(field&&field.type||'');
+  const label=String(field&&field.label||key);
+  const desc=String(field&&field.description||'');
+  const dataAttrs=`data-extension-setting-input="${esc(key)}" data-extension-setting-type="${esc(type)}"`;
+  let control='';
+  if(type==='boolean'){
+    control=`<label class="extension-setting-check"><input type="checkbox" ${dataAttrs}${value?' checked':''}> <span>${esc(label)}</span></label>`;
+  }else if(type==='number'||type==='integer'){
+    const step=type==='integer'?'1':'any';
+    control=`<label><span>${esc(label)}</span><input type="number" step="${step}" ${dataAttrs} value="${esc(String(value??''))}"></label>`;
+  }else if(type==='enum'){
+    const options=Array.isArray(field.options)?field.options:[];
+    control=`<label><span>${esc(label)}</span><select ${dataAttrs}>${options.map(option=>{
+      const optionValue=String(option&&option.value||'');
+      const optionLabel=String(option&&option.label||optionValue);
+      return `<option value="${esc(optionValue)}"${optionValue===value?' selected':''}>${esc(optionLabel)}</option>`;
+    }).join('')}</select></label>`;
+  }else{
+    control=`<label><span>${esc(label)}</span><input type="text" ${dataAttrs} value="${esc(String(value??''))}"></label>`;
+  }
+  return `<div class="extension-setting-field">${control}${desc?`<div class="extension-setting-desc">${esc(desc)}</div>`:''}</div>`;
+}
+
+function _extensionSettingsControls(entry){
+  const id=(entry&&entry.id)||'';
+  const storageOwned=!!(entry&&entry.storage_owned);
+  if(!storageOwned){
+    return '<div class="extension-settings-empty">No extension-owned browser storage permission.</div>';
+  }
+  const settingsApi=window.HermesExtensionSettings&&id?window.HermesExtensionSettings.settingsForExtension(id):null;
+  if(!settingsApi||!settingsApi.trusted){
+    return '<div class="extension-settings-empty">Reload WebUI after enabling or installing this extension to edit browser-local settings.</div>';
+  }
+  const schema=Array.isArray(settingsApi&&settingsApi.schema)?settingsApi.schema:[];
+  const values=settingsApi?settingsApi.values:{};
+  const fields=schema.length
+    ? schema.map(field=>_extensionSettingsFieldHtml(field,values[field.key])).join('')
+    : '<div class="extension-settings-empty">No configurable settings declared.</div>';
+  return `<div class="extension-settings-box">
+    <div class="extension-settings-head">
+      <div>
+        <div class="extension-settings-title">Browser-local extension settings</div>
+        <div class="extension-settings-note">Settings and extension-owned storage stay in this browser. Do not store secrets here.</div>
+      </div>
+    </div>
+    <div class="extension-settings-fields">${fields}</div>
+    <div class="extension-settings-actions">
+      <button class="sm-btn" type="button" data-extension-settings-save="${esc(id)}"${schema.length?'':' disabled aria-disabled="true"'}>Save settings</button>
+      <button class="sm-btn" type="button" data-extension-settings-reset="${esc(id)}"${schema.length?'':' disabled aria-disabled="true"'}>Reset settings</button>
+      <button class="sm-btn" type="button" data-extension-storage-clear="${esc(id)}">Clear extension storage</button>
+    </div>
+  </div>`;
+}
+
 function _extensionInstalledList(extensions,extensionDirConfigured){
   const list=Array.isArray(extensions)?extensions:[];
   if(!list.length){
@@ -8168,6 +8251,7 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
           ${_extensionEntryBadge(entry)}
         </div>
         <div class="extension-installed-meta"><code>${esc(id)}</code><span>${esc(note)}</span></div>
+        ${_extensionSettingsControls(entry)}
       </div>
       <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
     </div>`;
@@ -8350,6 +8434,7 @@ function _renderExtensionsPanel(data,seq){
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
   _extensionsStatusData=data||null;
+  _configureExtensionSettingsFromStatus(data);
   if(copyBtn) copyBtn.disabled=!data;
   const manifest=(data&&data.manifest)||{};
   const counts=(data&&data.counts)||{};
@@ -8430,6 +8515,7 @@ function _renderExtensionsPanel(data,seq){
     </div>
   `;
   _bindExtensionToggleButtons(target);
+  _bindExtensionSettingsButtons(target);
   _monitorExtensionSidecars(sidecars,seq);
 }
 
@@ -8457,6 +8543,75 @@ async function handleExtensionToggle(btn){
     btn.textContent=previousText;
     showToast('Failed to update extension: '+(e&&e.message?e.message:String(e)));
   }
+}
+
+function _readExtensionSettingsForm(row){
+  const values={};
+  row.querySelectorAll('[data-extension-setting-input]').forEach(input=>{
+    const key=input.dataset.extensionSettingInput||'';
+    const type=input.dataset.extensionSettingType||'';
+    if(!key) return;
+    if(type==='boolean') values[key]=!!input.checked;
+    else if(type==='integer') values[key]=Number.parseInt(input.value,10);
+    else if(type==='number') values[key]=Number.parseFloat(input.value);
+    else values[key]=input.value;
+  });
+  return values;
+}
+
+function _fillExtensionSettingsForm(row,id){
+  if(!window.HermesExtensionSettings) return;
+  const values=window.HermesExtensionSettings.settingsForExtension(id).values;
+  row.querySelectorAll('[data-extension-setting-input]').forEach(input=>{
+    const key=input.dataset.extensionSettingInput||'';
+    const type=input.dataset.extensionSettingType||'';
+    const value=values[key];
+    if(type==='boolean') input.checked=!!value;
+    else input.value=value??'';
+  });
+}
+
+function _bindExtensionSettingsButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-settings-save]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionSettingsSave(btn));
+  });
+  root.querySelectorAll('[data-extension-settings-reset]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionSettingsReset(btn));
+  });
+  root.querySelectorAll('[data-extension-storage-clear]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionStorageClear(btn));
+  });
+}
+
+function handleExtensionSettingsSave(btn){
+  const id=btn&&btn.dataset.extensionSettingsSave;
+  const row=btn&&btn.closest('[data-extension-id]');
+  if(!id||!row||!window.HermesExtensionSettings) return;
+  const api=window.HermesExtensionSettings.settingsForExtension(id);
+  const result=api.setAll(_readExtensionSettingsForm(row));
+  if(!result.ok){
+    showToast('Extension settings contain invalid values.');
+    return;
+  }
+  _fillExtensionSettingsForm(row,id);
+  showToast('Extension settings saved in this browser.');
+}
+
+function handleExtensionSettingsReset(btn){
+  const id=btn&&btn.dataset.extensionSettingsReset;
+  const row=btn&&btn.closest('[data-extension-id]');
+  if(!id||!row||!window.HermesExtensionSettings) return;
+  window.HermesExtensionSettings.settingsForExtension(id).reset();
+  _fillExtensionSettingsForm(row,id);
+  showToast('Extension settings reset in this browser.');
+}
+
+function handleExtensionStorageClear(btn){
+  const id=btn&&btn.dataset.extensionStorageClear;
+  if(!id||!window.HermesExtensionSettings) return;
+  window.HermesExtensionSettings.storageForExtension(id).clear();
+  showToast('Extension storage cleared in this browser.');
 }
 
 async function loadExtensionsPanel(opts){
@@ -8510,6 +8665,117 @@ function _extensionSafeHttpUrl(value){
   }catch(_){
     return '';
   }
+}
+
+function _extensionRegistrySourceUrl(entryPath){
+  const raw=String(entryPath||'').trim();
+  if(!raw||raw.startsWith('/')||raw.includes('\\')||raw.includes('\0')) return '';
+  const parts=raw.split('/').filter(Boolean);
+  if(parts.length===0||parts.some(part=>part==='.'||part==='..')) return '';
+  const folder=parts.length>1?parts.slice(0,-1):parts;
+  return 'https://github.com/hermes-webui/hermes-webui-extensions/tree/main/'+folder.map(encodeURIComponent).join('/');
+}
+
+function _extensionSourceUrl(entry){
+  if(!entry||typeof entry!=='object') return '';
+  const candidates=[
+    entry.homepage,
+    entry.repository_url,
+    entry.repo_url,
+    entry.source_url,
+    entry.source,
+  ];
+  const repository=entry.repository;
+  if(typeof repository==='string'){
+    candidates.push(repository);
+  }else if(repository&&typeof repository==='object'){
+    candidates.push(repository.url,repository.html_url);
+  }
+  for(const candidate of candidates){
+    const safe=_extensionSafeHttpUrl(candidate);
+    if(safe) return safe;
+  }
+  return _extensionSafeHttpUrl(_extensionRegistrySourceUrl(entry.entry_path||entry.runtime_manifest_path));
+}
+
+function _extensionSourceLink(entry){
+  const url=_extensionSourceUrl(entry);
+  if(!url) return '';
+  return `<a class="extension-gallery-source-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Source</a>`;
+}
+
+function _extensionPermissionList(value){
+  if(!Array.isArray(value)) return '';
+  const items=value
+    .map(item=>String(item||'').trim())
+    .filter(Boolean);
+  return items.length?items.join(', '):'';
+}
+
+function _extensionPermissionRows(perms){
+  if(!perms||typeof perms!=='object') return [];
+  const rows=[];
+  const api=(perms.webui_api&&typeof perms.webui_api==='object')?perms.webui_api:{};
+  const apiRead=_extensionPermissionList(api.read);
+  const apiWrite=_extensionPermissionList(api.write);
+  if(apiRead) rows.push(['WebUI API reads',apiRead]);
+  if(apiWrite) rows.push(['WebUI API writes',apiWrite]);
+  if(perms.webui_navigation===true) rows.push(['Navigation','Can open or switch WebUI views']);
+
+  const sidecarCommands=(perms.sidecar_commands&&typeof perms.sidecar_commands==='object')?perms.sidecar_commands:{};
+  const commandLabels=[
+    ['from_loopback','accepts loopback commands'],
+    ['can_switch_sessions','switch sessions'],
+    ['can_write_drafts','write drafts'],
+    ['can_autosend','auto-send drafts'],
+    ['can_respond_approval','respond to approvals'],
+    ['can_respond_clarify','respond to clarifications'],
+  ];
+  const commands=commandLabels
+    .filter(([key])=>sidecarCommands[key]===true)
+    .map(([,label])=>label);
+  if(commands.length) rows.push(['Sidecar commands',commands.join(', ')]);
+
+  const dom=(perms.dom&&typeof perms.dom==='object')?perms.dom:{};
+  const domItems=[];
+  if(dom.owned===true) domItems.push('renders extension-owned UI');
+  if(dom.mutates_core_views===true) domItems.push('can alter core WebUI views');
+  if(domItems.length) rows.push(['DOM access',domItems.join(', ')]);
+
+  const storage=(perms.storage&&typeof perms.storage==='object')?perms.storage:{};
+  const ownedStorage=_extensionPermissionList(storage.owned||storage.owned_keys);
+  const sharedStorage=_extensionPermissionList(storage.shared_webui_keys);
+  if(ownedStorage) rows.push(['Owned storage keys',ownedStorage]);
+  if(sharedStorage) rows.push(['Shared WebUI storage',sharedStorage]);
+
+  if(perms.loopback_sidecar===true) rows.push(['Loopback sidecar','Can contact a declared local loopback helper']);
+  if(perms.native_host===true) rows.push(['Native host','Requires a local native host or desktop app']);
+
+  const filesystem=(perms.filesystem&&typeof perms.filesystem==='object')?perms.filesystem:{};
+  if(filesystem.arbitrary===true){
+    rows.push(['Filesystem','Can access arbitrary filesystem paths']);
+  }else if(filesystem.serves_bundled_assets===true){
+    rows.push(['Filesystem','Serves bundled extension assets only']);
+  }
+  if(perms.network_external===true||perms.external_network===true){
+    rows.push(['External network','Can contact external network origins']);
+  }
+  return rows;
+}
+
+function _extensionPermissionSummary(perms){
+  const rows=_extensionPermissionRows(perms);
+  const body=rows.length
+    ? '<div class="extension-gallery-permission-list">'+rows.map(([label,value])=>`
+      <div class="extension-gallery-permission-row">
+        <span class="extension-gallery-permission-label">${esc(label)}</span>
+        <span class="extension-gallery-permission-value">${esc(value)}</span>
+      </div>`).join('')+'</div>'
+    : `<div class="extension-gallery-permission-empty">${esc(t('ext_gallery_permissions_empty'))}</div>`;
+  return `<details class="extension-gallery-perms">
+    <summary>${esc(t('ext_gallery_permissions_show'))}</summary>
+    ${body}
+  </details>`;
 }
 
 function _extensionPostInstallNote(entry,isInstalled){
@@ -8567,6 +8833,7 @@ async function loadExtensionsGallery(){
 function _renderExtensionsGallery(entries,statusData){
   const galleryEl=$('extensionsGallery');
   const installedEl=$('extensionsInstalled');
+  _configureExtensionSettingsFromStatus(statusData);
   const installedIds=new Set();
   if(statusData&&statusData.gallery_installed){
     Object.keys(statusData.gallery_installed).forEach(id=>installedIds.add(id));
@@ -8576,11 +8843,14 @@ function _renderExtensionsGallery(entries,statusData){
   }
   if(!Array.isArray(entries)||entries.length===0){
     if(galleryEl) galleryEl.innerHTML='<div class="extensions-empty">No extensions found in the registry.</div>';
-    if(installedEl) installedEl.innerHTML='<div class="extensions-empty">No extensions installed from the gallery.</div>';
+    if(installedEl){
+      installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
+      _bindExtensionToggleButtons(installedEl);
+      _bindExtensionSettingsButtons(installedEl);
+    }
     return;
   }
   const galleryCards=[];
-  const installedCards=[];
   for(const entry of entries){
     const id=esc(String(entry.id||''));
     const name=esc(String(entry.name||entry.id||''));
@@ -8592,7 +8862,14 @@ function _renderExtensionsGallery(entries,statusData){
     const isInstalled=installedIds.has(String(entry.id||''));
     const restartRequired=!!(entry.lifecycle&&(entry.lifecycle.restart_required||entry.lifecycle.webui_restart_required));
     const badgesHtml=caps.map(c=>`<span class="extension-gallery-badge">${esc(String(c))}</span>`).join('');
-    const permsHtml=perms?`<details class="extension-gallery-perms"><summary data-i18n="ext_gallery_permissions_show">Permissions</summary><pre>${esc(JSON.stringify(perms,null,2))}</pre></details>`:'';
+    const metaBits=[];
+    if(author) metaBits.push('by '+author);
+    if(version) metaBits.push('v'+version);
+    const sourceLinkHtml=_extensionSourceLink(entry);
+    const metaHtml=(metaBits.length||sourceLinkHtml)
+      ? `<div class="extension-gallery-meta">${metaBits.length?`<span>${metaBits.join(' · ')}</span>`:''}${sourceLinkHtml}</div>`
+      : '';
+    const permsHtml=perms?_extensionPermissionSummary(perms):'';
     const postInstallHtml=_extensionPostInstallNote(entry,isInstalled);
     const actionBtn=isInstalled
       ?`<button class="extension-gallery-uninstall-btn" data-ext-uninstall-id="${id}" type="button" data-i18n="ext_gallery_uninstall">Uninstall</button>`
@@ -8602,7 +8879,7 @@ function _renderExtensionsGallery(entries,statusData){
       <div class="extension-gallery-head">
         <div class="extension-gallery-info">
           <div class="extension-gallery-name">${name}${installedBadge}</div>
-          <div class="extension-gallery-meta">${author?'by '+author:''}${version?' · v'+version:''}</div>
+          ${metaHtml}
         </div>
       </div>
       <div class="extension-gallery-desc">${desc}</div>
@@ -8612,10 +8889,13 @@ function _renderExtensionsGallery(entries,statusData){
       <div class="extension-gallery-actions">${actionBtn}</div>
     </div>`;
     galleryCards.push(card);
-    if(isInstalled) installedCards.push(card);
   }
   if(galleryEl) galleryEl.innerHTML=galleryCards.length?galleryCards.join(''):'<div class="extensions-empty">No extensions found.</div>';
-  if(installedEl) installedEl.innerHTML=installedCards.length?installedCards.join(''):'<div class="extensions-empty">No extensions installed from the gallery.</div>';
+  if(installedEl){
+    installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
+    _bindExtensionToggleButtons(installedEl);
+    _bindExtensionSettingsButtons(installedEl);
+  }
   _bindExtensionGalleryButtons(entries);
 }
 

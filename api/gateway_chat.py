@@ -20,6 +20,7 @@ from api.config import (
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
     coerce_reasoning_effort_for_model,
+    gateway_approval_unavailable_reason,
     gateway_supports_approval,
     register_active_run,
     unregister_active_run,
@@ -477,6 +478,21 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.save()
 
 
+def _cleanup_gateway_pending_mirror(session_id: str) -> None:
+    try:
+        from api.route_approvals import (
+            _approval_sse_notify_locked,
+            _lock as _approval_lock,
+            reconcile_gateway_pending_mirror_locked,
+        )
+
+        with _approval_lock:
+            head, total, _ = reconcile_gateway_pending_mirror_locked(session_id)
+            _approval_sse_notify_locked(session_id, head, total)
+    except Exception:
+        logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -638,13 +654,19 @@ def _run_gateway_chat_streaming(
         else:
             # Legacy gateway path: emit unsupported approval notice once per session,
             # but only when the gateway genuinely lacks approval capability.
-            if not gateway_supports_approval(base_url, api_key):
+            approval_reason = gateway_approval_unavailable_reason(base_url, api_key)
+            if approval_reason is not None:
                 if not hasattr(s, "_approval_notice_emitted"):
                     s._approval_notice_emitted = False
                 if not s._approval_notice_emitted:
+                    approval_message = "Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this."
+                    approval_type = "approval_gateway_unsupported"
+                    if approval_reason == "unreachable":
+                        approval_type = "approval_gateway_offline"
+                        approval_message = "Gateway connection failed. Check that the connected Hermes gateway is running and reachable."
                     put_gateway_event("warning", {
-                        "type": "approval_gateway_unsupported",
-                        "message": "Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.",
+                        "type": approval_type,
+                        "message": approval_message,
                     })
                     s._approval_notice_emitted = True
 
@@ -888,6 +910,7 @@ def _run_gateway_chat_streaming(
                     _clear_gateway_pending_state(get_session(session_id), stream_id)
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
+            _cleanup_gateway_pending_mirror(session_id)
         with STREAMS_LOCK:
             CANCEL_FLAGS.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)

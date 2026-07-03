@@ -156,6 +156,49 @@ def test_sidebar_source_webui_excludes_cli_rows(monkeypatch):
     assert set(enriched[0]) == expected
 
 
+def test_sidebar_source_webui_includes_hidden_archived_parent_reference(monkeypatch):
+    rows = [
+        {
+            "session_id": "webui-parent",
+            "title": "Archived parent",
+            "profile": "default",
+            "archived": True,
+            "message_count": 10,
+            "updated_at": 1000,
+            "last_message_at": 1000,
+            "source": "webui",
+            "raw_source": "webui",
+            "session_source": "webui",
+            "source_tag": "webui",
+        },
+        {
+            "session_id": "webui-child",
+            "title": "Subagent Session",
+            "profile": "default",
+            "archived": False,
+            "message_count": 4,
+            "updated_at": 1100,
+            "last_message_at": 1100,
+            "source": "subagent",
+            "raw_source": "subagent",
+            "session_source": "other",
+            "source_tag": "subagent",
+            "parent_session_id": "webui-parent",
+            "relationship_type": "child_session",
+        },
+    ]
+    _install_common_monkeypatches(monkeypatch, rows)
+
+    handler = _handle_sessions("http://example.com/api/sessions?sidebar_source=webui&exclude_hidden=1")
+
+    body = handler.json_body()
+    assert handler.status == 200
+    assert [row["session_id"] for row in body["sessions"]] == ["webui-child"]
+    assert [row["session_id"] for row in body["sidebar_reference_sessions"]] == ["webui-parent"]
+    assert body["sidebar_reference_sessions"][0]["archived"] is True
+    assert body["sidebar_reference_sessions"][0]["_sidebar_reference_only"] is True
+
+
 def test_sidebar_source_cli_excludes_webui_rows(monkeypatch):
     rows = _session_rows(webui_count=30, cli_count=20)
     _install_common_monkeypatches(monkeypatch, rows)

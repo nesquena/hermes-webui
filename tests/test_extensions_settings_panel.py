@@ -9,6 +9,7 @@ PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 DOCS_EXTENSIONS = (ROOT / "docs" / "EXTENSIONS.md").read_text(encoding="utf-8")
+ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
 
 def _function_block(name: str, *, extra: int = 2200) -> str:
@@ -64,6 +65,7 @@ def test_extensions_panel_warns_about_trust_model_and_stays_install_free():
     pane = INDEX_HTML[pane_start:pane_end]
 
     assert "Extensions run in the WebUI browser origin" in pane
+    assert "Settings and extension-owned storage are browser-local and not for secrets" in pane
     assert "Only load trusted local extension directories" in pane
     assert "takes effect after reload" in pane
     assert "copyExtensionsDiagnostics()" in pane
@@ -71,6 +73,8 @@ def test_extensions_panel_warns_about_trust_model_and_stays_install_free():
     assert "api('/api/settings'" not in pane
     assert "type=\"checkbox\"" not in pane
     assert "marketplace" not in pane.lower()
+    assert "static/extension_settings.js" in INDEX_HTML
+    assert INDEX_HTML.index("static/extension_settings.js") < INDEX_HTML.index("static/panels.js")
 
 
 def test_switch_settings_section_supports_extensions_lazy_load():
@@ -100,6 +104,13 @@ def test_extensions_panel_fetches_status_endpoint_without_mutating_settings():
     assert "api('/api/settings'" not in load_block
     assert not _contains_post_method(load_block)
     assert "extensions-error" in load_block
+
+
+def test_extensions_do_not_add_generic_backend_settings_write_route():
+    assert "/api/extensions/settings" not in ROUTES_PY
+    assert "/api/extensions/storage" not in ROUTES_PY
+    assert "set_extension_settings" not in ROUTES_PY
+    assert "write_extension_settings" not in ROUTES_PY
 
 
 def test_extensions_diagnostics_tab_refreshes_runtime_status():
@@ -213,6 +224,32 @@ def test_extensions_panel_toggle_uses_dedicated_endpoint_without_settings_or_ins
     assert "marketplace" not in combined.lower()
 
 
+def test_extensions_installed_settings_route_through_shared_accessor():
+    installed_block = _between("function _extensionInstalledList", "function _extensionSidecarHealthBadge")
+    settings_block = _between("function _configureExtensionSettingsFromStatus", "function _extensionInstalledList")
+    bind_block = _between("function _bindExtensionSettingsButtons", "async function loadExtensionsPanel")
+    gallery_block = _between("function _renderExtensionsGallery", "function _bindExtensionGalleryButtons")
+
+    assert "entry&&entry.storage_owned" in settings_block
+    assert "window.HermesExtensionSettings.settingsForExtension(id)" in settings_block
+    assert "settingsApi&&settingsApi.schema" in settings_block
+    assert "settingsApi||!settingsApi.trusted" in settings_block
+    assert "data-extension-settings-save" in settings_block
+    assert "data-extension-settings-reset" in settings_block
+    assert "data-extension-storage-clear" in settings_block
+    assert "Browser-local extension settings" in settings_block
+    assert "Do not store secrets here" in settings_block
+    assert "Reload WebUI after enabling or installing this extension to edit browser-local settings." in settings_block
+    assert "_extensionSettingsControls(entry)" in installed_block
+    assert "window.HermesExtensionSettings.settingsForExtension(id).reset()" in bind_block
+    assert "window.HermesExtensionSettings.storageForExtension(id).clear()" in bind_block
+    assert "api('/api/extensions/status')" not in bind_block
+    assert "api('/api/settings'" not in bind_block
+    assert "localStorage" not in bind_block
+    assert "_extensionInstalledList(statusData&&statusData.extensions" in gallery_block
+    assert "_bindExtensionSettingsButtons(installedEl)" in gallery_block
+
+
 def test_extensions_gallery_renders_post_install_guidance():
     url_block = _between("function _extensionSafeHttpUrl", "function _extensionPostInstallNote")
     gallery_block = _between("function _extensionPostInstallNote", "async function loadExtensionsGallery")
@@ -247,6 +284,33 @@ def test_extensions_gallery_renders_post_install_guidance():
     assert "webui_restart_required" in install_block
 
 
+def test_extensions_gallery_links_sources_and_humanizes_permissions():
+    helper_block = _between("function _extensionRegistrySourceUrl", "function _extensionPostInstallNote")
+    render_block = _between("function _renderExtensionsGallery", "function _bindExtensionGalleryButtons")
+
+    assert "entry.homepage" in helper_block
+    assert "entry.repository_url" in helper_block
+    assert "entry.entry_path||entry.runtime_manifest_path" in helper_block
+    assert "hermes-webui/hermes-webui-extensions/tree/main" in helper_block
+    assert "encodeURIComponent" in helper_block
+    assert "extension-gallery-source-link" in helper_block
+    assert "target=\"_blank\"" in helper_block
+    assert "rel=\"noopener noreferrer\"" in helper_block
+    assert "t('ext_gallery_permissions_empty')" in helper_block
+    assert "webui_api" in helper_block
+    assert "sidecar_commands" in helper_block
+    assert "dom.mutates_core_views" in helper_block
+    assert "storage.shared_webui_keys" in helper_block
+    assert "loopback_sidecar" in helper_block
+    assert "native_host" in helper_block
+    assert "network_external" in helper_block
+    assert "extension-gallery-permission-row" in helper_block
+    assert "_extensionSourceLink(entry)" in render_block
+    assert "_extensionPermissionSummary(perms)" in render_block
+    assert "JSON.stringify(perms" not in render_block
+    assert "<pre>" not in render_block
+
+
 def test_copy_extensions_diagnostics_copies_current_sanitized_payload():
     copy_block = _between("function copyExtensionsDiagnostics", "// ── Plugins panel")
 
@@ -265,11 +329,16 @@ def test_extensions_styles_are_scoped_to_extensions_panel():
     assert ".extension-url-list" in STYLE_CSS
     assert ".extension-installed-list" in STYLE_CSS
     assert ".extension-toggle-btn" in STYLE_CSS
+    assert ".extension-settings-box" in STYLE_CSS
+    assert ".extension-settings-actions" in STYLE_CSS
     assert ".extension-sidecar-list" in STYLE_CSS
     assert ".extension-sidecar-runtime" in STYLE_CSS
     assert ".extension-sidecar-status-badge" in STYLE_CSS
+    assert ".extension-gallery-source-link" in STYLE_CSS
     assert ".extension-gallery-next-step" in STYLE_CSS
     assert ".extension-gallery-next-link" in STYLE_CSS
+    assert ".extension-gallery-permission-list" in STYLE_CSS
+    assert ".extension-gallery-permission-row" in STYLE_CSS
 
 
 def test_extensions_i18n_keys_exist_for_all_locales():
@@ -280,6 +349,7 @@ def test_extensions_i18n_keys_exist_for_all_locales():
         "settings_tab_extensions",
         "ext_gallery_next_step",
         "ext_gallery_after_install",
+        "ext_gallery_permissions_empty",
         "ext_gallery_local_component_required",
         "ext_gallery_local_app_label",
         "ext_gallery_required_suffix",
@@ -352,6 +422,10 @@ def test_extensions_docs_mentions_settings_panel_without_install_or_proxy_claims
     assert "does **not** proxy sidecar requests" in diagnostics_section
     assert "optional top-level `runtime` object" in diagnostics_section
     assert "allowlisted scalar fields" in diagnostics_section
+    assert "browser-local controls" in diagnostics_section
+    assert "`window.HermesExtensionSettings`" in DOCS_EXTENSIONS
+    assert "does not store extension settings or expose a generic settings write route" in DOCS_EXTENSIONS
+    assert "Settings persist only non-default overrides" in DOCS_EXTENSIONS
     assert "do **not**" in diagnostics_section
     assert "return `HERMES_WEBUI_EXTENSION_DIR`" in diagnostics_section
     assert "override state-file path" in diagnostics_section

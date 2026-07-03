@@ -133,11 +133,75 @@ def test_gallery_installed_extension_becomes_runtime_manifest(monkeypatch, tmp_p
         "enabled": True,
         "script_urls": ["/extensions/my-ext/assets/app.js"],
         "stylesheet_urls": ["/extensions/my-ext/assets/app.css"],
+        "extensions": [
+            {
+                "id": "my-ext",
+                "name": "My Extension",
+                "storage_owned": False,
+                "settings_schema": [],
+            }
+        ],
     }
     status = ext_mod.get_extension_status()
     assert status["manifest"]["status"] == "gallery_installed"
     assert status["counts"]["manifest_extensions"] == 1
     assert status["extensions"][0]["id"] == "my-ext"
+
+
+def test_gallery_installed_settings_only_manifest_becomes_runtime_entry(monkeypatch, tmp_path):
+    """Settings-only gallery installs still surface in status and runtime config."""
+    ext_dir, state_dir = _setup_ext_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_MANIFEST", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", raising=False)
+    import api.extensions as ext_mod
+
+    files = {
+        "my-ext/manifest.json": json.dumps(
+            {
+                "name": "Settings Only",
+                "version": "1.0.0",
+                "permissions": {"storage": {"owned": True}},
+                "settings_schema": [
+                    {"key": "flag", "type": "boolean", "default": True},
+                ],
+            }
+        ),
+    }
+    zip_bytes = _make_zip(files)
+    sha = hashlib.sha256(zip_bytes).hexdigest()
+
+    monkeypatch.setattr(ext_mod, "_safe_download", lambda *a, **kw: zip_bytes)
+
+    ext_mod.install_extension(
+        "my-ext",
+        "https://hermes-webui.github.io/exts/my-ext.zip",
+        sha,
+    )
+
+    assert ext_mod.get_extension_config() == {
+        "enabled": True,
+        "script_urls": [],
+        "stylesheet_urls": [],
+        "extensions": [
+            {
+                "id": "my-ext",
+                "name": "Settings Only",
+                "storage_owned": True,
+                "settings_schema": [
+                    {"key": "flag", "type": "boolean", "label": "flag", "description": "", "default": True},
+                ],
+            }
+        ],
+    }
+    status = ext_mod.get_extension_status()
+    assert status["manifest"]["status"] == "gallery_installed"
+    assert status["counts"]["manifest_extensions"] == 1
+    assert status["extensions"][0]["id"] == "my-ext"
+    assert status["extensions"][0]["storage_owned"] is True
+    assert status["extensions"][0]["settings_schema"] == [
+        {"key": "flag", "type": "boolean", "label": "flag", "description": "", "default": True},
+    ]
 
 
 def test_install_bootstraps_managed_default_root_without_env(monkeypatch, tmp_path):
@@ -203,6 +267,14 @@ def test_install_bootstraps_managed_default_root_without_env(monkeypatch, tmp_pa
         "enabled": True,
         "script_urls": ["/extensions/plug-ext/app.js"],
         "stylesheet_urls": [],
+        "extensions": [
+            {
+                "id": "plug-ext",
+                "name": "Plug And Play",
+                "storage_owned": False,
+                "settings_schema": [],
+            }
+        ],
     }
     status = ext_mod.get_extension_status()
     assert status["enabled"] is True

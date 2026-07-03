@@ -3,7 +3,7 @@
 The chip must:
   * Be hidden by default (CSS base rule).
   * Be shown only at wide composer-footer widths (>= 1100px container query).
-  * Stay hidden on mobile (@media max-width:640px and @container 520px).
+  * Stay hidden on mobile (@media max-width:640px and the .cf-burger stage).
   * Have its visibility controlled by CSS, NOT by JS (single source of truth).
   * Continue to track state through _applyToolsetsChip() so /api/session/toolsets
     keeps working for scripted callers regardless of UI visibility.
@@ -12,7 +12,7 @@ import re
 
 
 def _src(name: str) -> str:
-    with open(f"static/{name}") as f:
+    with open(f"static/{name}", encoding="utf-8") as f:
         return f.read()
 
 
@@ -47,16 +47,15 @@ class TestToolsetsChipResponsiveCSS:
             "that shows .composer-toolsets-wrap with display:block or display:flex"
         )
 
-    def test_narrow_container_query_keeps_hiding(self):
-        """The existing @container (max-width: 520px) rule must still hide the chip."""
+    def test_burger_stage_keeps_hiding(self):
+        """The fit-engine hamburger stage must still hide the chip."""
         css = _src("style.css")
-        # Look for the existing 520px rule that already hid composer-toolsets-wrap
         m = re.search(
-            r'@container\s+composer-footer\s*\(\s*max-width:\s*520px\s*\).*?\.composer-toolsets-wrap\s*\{\s*display:\s*none\s*!important',
+            r'\.composer-footer\.cf-burger\b.*?\.composer-toolsets-wrap\s*\{\s*display:\s*none\s*!important',
             css, re.DOTALL,
         )
         assert m, (
-            "@container composer-footer (max-width: 520px) must continue to "
+            ".composer-footer.cf-burger must continue to "
             "hide .composer-toolsets-wrap with !important"
         )
 
@@ -143,7 +142,7 @@ class TestToolsetsAPIStillWorks:
         """The api/session/toolsets endpoint must still be registered."""
         # Check api/routes.py for the endpoint
         try:
-            with open("api/routes.py") as f:
+            with open("api/routes.py", encoding="utf-8") as f:
                 src = f.read()
         except FileNotFoundError:
             # If routes.py is named differently, search

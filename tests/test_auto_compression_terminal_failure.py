@@ -177,9 +177,10 @@ def test_terminal_failure_gates_shape_check_to_no_streamed_text():
     block = src[start:end]
 
     assert "_agent_result_terminal_failure(result)" in block
-    assert "not _token_sent" in block
-    assert "_session_lacks_final_assistant_answer(_all_result_messages)" in block
-    assert "not _assistant_added" not in block
+    assert "_saved_transcript_lacks_final_answer" in block
+    assert "_classification['type'] not in {'cancelled', 'interrupted'}" in block
+    assert "not _token_sent" not in block
+    assert "_session_lacks_final_assistant_answer(_all_result_messages)" not in block
 
 
 def test_completed_tool_tail_without_final_assistant_is_not_successful_done():

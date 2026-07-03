@@ -222,8 +222,12 @@ def test_reattach_path_uses_replay_when_status_reports_journal():
 
 
 def test_error_reconnect_path_can_restore_from_journal():
-    reconnect_pos = MESSAGES_SRC.index("setComposerStatus('Reconnecting")
-    block = MESSAGES_SRC[reconnect_pos : reconnect_pos + 900]
+    # Anchor on the reconnect block's stable entry point rather than the exact
+    # composer-status string: the first status was changed to a template literal
+    # `Reconnecting… (1/${_retryDelays.length})` (staged-probe counter), so the
+    # old single-quoted "setComposerStatus('Reconnecting" anchor no longer exists.
+    reconnect_pos = MESSAGES_SRC.index("_reconnectAttempted=true;")
+    block = MESSAGES_SRC[reconnect_pos : reconnect_pos + 1100]
 
     assert "st.active" in block
     assert "st.replay_available" in block
@@ -319,7 +323,8 @@ def test_server_runtime_journal_snapshot_restores_structured_inflight_state():
     helper_pos = SESSIONS_SRC.index("function _serverLiveSnapshotToolId")
     helper_block = SESSIONS_SRC[helper_pos : helper_pos + 3600]
     load_pos = SESSIONS_SRC.index("async function loadSession")
-    load_block = SESSIONS_SRC[load_pos : load_pos + 20000]
+    load_end = SESSIONS_SRC.index("// ── Handoff hint logic", load_pos)
+    load_block = SESSIONS_SRC[load_pos:load_end]
 
     assert "runtime_journal_snapshot" in load_block
     assert "_serverLiveSnapshotInflight(S.session.runtime_journal_snapshot" in load_block
