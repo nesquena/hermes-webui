@@ -2793,6 +2793,7 @@ from api.config import (
     SESSION_AGENT_LOCKS_LOCK,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
+    persisted_speech_settings_keys,
     save_settings,
     SETTINGS_FILE,
     set_hermes_default_model,
@@ -7503,6 +7504,21 @@ def _normalize_import_profile_value(value):
     return profile
 
 
+def _load_branch_source_or_refuse(handler, sid: str):
+    if _session_is_subagent_view_only(sid):
+        bad(handler, "Subagent sessions are view-only and cannot be branched from WebUI", 400)
+        return None
+    try:
+        return get_session(sid)
+    except KeyError:
+        _foreign_session, _reason = _claim_or_synthesize_cli_session(sid)
+        if _reason == "not_claimable":
+            bad(handler, "Read-only sessions cannot be branched from WebUI", 403)
+            return None
+        bad(handler, "Session not found", 404)
+        return None
+
+
 def _resolve_cli_import_metadata(session_id: str, *, requested_profile=None, allow_all_profiles: bool = False) -> dict:
     cli_meta = _lookup_cli_session_metadata(session_id)
     if cli_meta and (not requested_profile or _profiles_match(cli_meta.get("profile"), requested_profile)):
@@ -11431,6 +11447,7 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/settings":
         settings = load_settings()
+        settings["persisted_speech_keys"] = persisted_speech_settings_keys()
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
         settings.setdefault("max_tokens", None)
@@ -13715,12 +13732,9 @@ def handle_post(handler, parsed) -> bool:
         # (Opus pre-release follow-up.)
         if not isinstance(body["session_id"], str):
             return bad(handler, "session_id must be a string")
-        if _session_is_subagent_view_only(body["session_id"]):
-            return bad(handler, "Subagent sessions are view-only and cannot be branched from WebUI", 400)
-        try:
-            source = get_session(body["session_id"])
-        except KeyError:
-            return bad(handler, "Session not found", 404)
+        source = _load_branch_source_or_refuse(handler, body["session_id"])
+        if source is None:
+            return True
 
         keep_count = body.get("keep_count")
         if keep_count is not None:
@@ -14309,6 +14323,7 @@ def handle_post(handler, parsed) -> bool:
         from api.config import get_max_tokens_status, set_max_tokens
 
         saved = save_settings(body)
+        saved["persisted_speech_keys"] = persisted_speech_settings_keys()
         if max_tokens_provided:
             max_tokens_status = set_max_tokens(max_tokens_value)
         saved.pop("password_hash", None)  # never expose hash to client

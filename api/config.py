@@ -8007,6 +8007,16 @@ _SETTINGS_DEFAULTS = {
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
     "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
+    "tts_enabled": False,
+    "tts_auto_read": False,
+    "tts_engine": "browser",
+    "tts_voice": "",
+    "tts_rate": 1.0,
+    "tts_pitch": 1.0,
+    "voice_mode_button": False,
+    "voice_continuous": False,
+    "voice_silence_ms": 1800,
+    "raw_audio_mode": False,
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | graphite | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
@@ -8065,6 +8075,19 @@ _SETTINGS_DEFAULTS = {
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
     "provider_cost_budget": None,
 }
+_SETTINGS_SPEECH_KEYS = {
+    "tts_enabled",
+    "tts_auto_read",
+    "tts_engine",
+    "tts_voice",
+    "tts_rate",
+    "tts_pitch",
+    "voice_mode_button",
+    "voice_continuous",
+    "voice_silence_ms",
+    "raw_audio_mode",
+}
+_SETTINGS_PERSISTED_SPEECH_KEYS_FIELD = "persisted_speech_keys"
 _SETTINGS_LEGACY_DROP_KEYS = {
     "assistant_language",
     "bubble_layout",
@@ -8142,75 +8165,104 @@ def _normalize_appearance(theme, skin) -> tuple[str, str]:
     return next_theme, next_skin
 
 
+def _read_raw_settings_file() -> dict:
+    """Read settings.json without applying defaults."""
+    try:
+        if not SETTINGS_FILE.exists():
+            return {}
+    except OSError:
+        # PermissionError or other OS-level error (e.g. UID mismatch in Docker)
+        # Treat as missing rather than failing startup.
+        logger.debug("Cannot stat settings file %s (inaccessible?)", SETTINGS_FILE)
+        return {}
+
+    try:
+        loaded = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("Failed to load settings from %s", SETTINGS_FILE)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _extract_persisted_speech_keys(stored: dict) -> set[str]:
+    if not isinstance(stored, dict):
+        return set()
+    return {key for key in _SETTINGS_SPEECH_KEYS if key in stored}
+
+
+def persisted_speech_settings_keys() -> list[str]:
+    return sorted(_extract_persisted_speech_keys(_read_raw_settings_file()))
+
+
+def _settings_payload_for_write(settings: dict, persisted_speech_keys: set[str]) -> dict:
+    persisted = {
+        k: v
+        for k, v in settings.items()
+        if k not in {"default_model", _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD}
+    }
+    for speech_key in _SETTINGS_SPEECH_KEYS:
+        if speech_key not in persisted_speech_keys:
+            persisted.pop(speech_key, None)
+    return persisted
+
+
 def load_settings() -> dict:
     """Load settings from disk, merging with defaults for any missing keys."""
     settings = dict(_SETTINGS_DEFAULTS)
-    stored = None
-    try:
-        settings_exists = SETTINGS_FILE.exists()
-    except OSError:
-        # PermissionError or other OS-level error (e.g. UID mismatch in Docker)
-        # Treat as missing — start with defaults rather than crashing.
-        logger.debug("Cannot stat settings file %s (inaccessible?)", SETTINGS_FILE)
-        settings_exists = False
-    if settings_exists:
-        try:
-            stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            if isinstance(stored, dict):
-                if (
-                    "worklog_details_expanded_default" not in stored
-                    and "activity_feed_expanded_default" in stored
-                ):
-                    settings["worklog_details_expanded_default"] = bool(
-                        stored.get("activity_feed_expanded_default")
-                    )
-                settings.update(
-                    {
-                        k: v
-                        for k, v in stored.items()
-                        if k not in _SETTINGS_LEGACY_DROP_KEYS
-                    }
-                )
-                if (
-                    "default_message_mode" not in stored
-                    and "busy_input_mode" in stored
-                ):
-                    settings["default_message_mode"] = stored.get("busy_input_mode")
-                settings.pop("busy_input_mode", None)
-                # Grandfather established installs OFF for show_cli_sessions (#3988).
-                # The default flipped True so NEW users see CLI/TUI/messaging
-                # sessions without hunting for the toggle — but an existing user
-                # who never opted in should not have their sidebar silently change.
-                # Treat the install as established (and pin the old False default)
-                # when show_cli_sessions is absent AND the file already carries
-                # real user state — either onboarding was completed, or some
-                # setting OTHER than a not-yet-completed onboarding flag has been
-                # persisted. Keying on "has saved user state" (not just
-                # onboarding_completed) also covers a CLI-configured user who
-                # tweaked a WebUI setting before running the wizard. A genuinely
-                # new / still-mid-onboarding file falls through to the True default.
-                _established_keys = [
-                    k for k in stored
-                    if k not in ("show_cli_sessions", "onboarding_completed")
-                ]
-                if "show_cli_sessions" not in stored and (
-                    bool(stored.get("onboarding_completed")) or _established_keys
-                ):
-                    settings["show_cli_sessions"] = False
-                # Force-off-for-everyone migration for virtualize_transcript (#4343).
-                # The feature shipped opt-OUT/default-on in #4325, then proved to
-                # cause scroll-up flicker on long sessions (variable-height anchor
-                # oscillation). It is now EXPERIMENTAL/opt-IN (default off). Any
-                # stored virtualize_transcript=True from the #4325 window is a stale
-                # pre-flip value and must be reset to off, so 100% of existing users
-                # land on off — re-enabling requires an explicit opt-in made AFTER
-                # the flip, which writes virtualize_transcript_optin=True alongside.
-                # Honor a stored True only when that marker is present.
-                if not bool(stored.get("virtualize_transcript_optin")):
-                    settings["virtualize_transcript"] = False
-
-        except Exception:
-            logger.debug("Failed to load settings from %s", SETTINGS_FILE)
+    stored = _read_raw_settings_file()
+    if isinstance(stored, dict):
+        if (
+            "worklog_details_expanded_default" not in stored
+            and "activity_feed_expanded_default" in stored
+        ):
+            settings["worklog_details_expanded_default"] = bool(
+                stored.get("activity_feed_expanded_default")
+            )
+        settings.update(
+            {
+                k: v
+                for k, v in stored.items()
+                if k not in _SETTINGS_LEGACY_DROP_KEYS
+                and k != _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD
+            }
+        )
+        if (
+            "default_message_mode" not in stored
+            and "busy_input_mode" in stored
+        ):
+            settings["default_message_mode"] = stored.get("busy_input_mode")
+        settings.pop("busy_input_mode", None)
+        # Grandfather established installs OFF for show_cli_sessions (#3988).
+        # The default flipped True so NEW users see CLI/TUI/messaging
+        # sessions without hunting for the toggle — but an existing user
+        # who never opted in should not have their sidebar silently change.
+        # Treat the install as established (and pin the old False default)
+        # when show_cli_sessions is absent AND the file already carries
+        # real user state — either onboarding was completed, or some
+        # setting OTHER than a not-yet-completed onboarding flag has been
+        # persisted. Keying on "has saved user state" (not just
+        # onboarding_completed) also covers a CLI-configured user who
+        # tweaked a WebUI setting before running the wizard. A genuinely
+        # new / still-mid-onboarding file falls through to the True default.
+        _established_keys = [
+            k for k in stored
+            if k not in ("show_cli_sessions", "onboarding_completed")
+        ]
+        if "show_cli_sessions" not in stored and (
+            bool(stored.get("onboarding_completed")) or _established_keys
+        ):
+            settings["show_cli_sessions"] = False
+        # Force-off-for-everyone migration for virtualize_transcript (#4343).
+        # The feature shipped opt-OUT/default-on in #4325, then proved to
+        # cause scroll-up flicker on long sessions (variable-height anchor
+        # oscillation). It is now EXPERIMENTAL/opt-IN (default off). Any
+        # stored virtualize_transcript=True from the #4325 window is a stale
+        # pre-flip value and must be reset to off, so 100% of existing users
+        # land on off — re-enabling requires an explicit opt-in made AFTER
+        # the flip, which writes virtualize_transcript_optin=True alongside.
+        # Honor a stored True only when that marker is present.
+        if not bool(stored.get("virtualize_transcript_optin")):
+            settings["virtualize_transcript"] = False
     settings["theme"], settings["skin"] = _normalize_appearance(
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
@@ -8247,6 +8299,11 @@ _SETTINGS_INT_RANGES = {
     "inflight_state_max_string_chars": (1000, 500000),
     "inflight_state_max_json_chars": (100000, 4000000),
     "structured_code_auto_tree_lines": (1, 1000),
+    "voice_silence_ms": (200, 60000),
+}
+_SETTINGS_FLOAT_RANGES = {
+    "tts_rate": (0.5, 2.0),
+    "tts_pitch": (0.0, 2.0),
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
@@ -8268,6 +8325,11 @@ _SETTINGS_BOOL_KEYS = {
     "check_for_updates",
     "ignore_agent_updates",
     "whats_new_summary_enabled",
+    "tts_enabled",
+    "tts_auto_read",
+    "voice_mode_button",
+    "voice_continuous",
+    "raw_audio_mode",
     "sound_enabled",
     "rtl",
     "notifications_enabled",
@@ -8302,6 +8364,7 @@ _SETTINGS_BOOL_KEYS = {
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
+_SETTINGS_TTS_ENGINE_RE = __import__("re").compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").Lock()
@@ -8320,7 +8383,10 @@ def _coerce_provider_cost_budget(value: Any) -> float | None:
 
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
+    raw_settings = _read_raw_settings_file()
+    persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)
     current = load_settings()
+    applied_speech_keys: set[str] = set()
     if (
         "worklog_details_expanded_default" not in settings
         and "activity_feed_expanded_default" in settings
@@ -8363,6 +8429,7 @@ def save_settings(settings: dict) -> dict:
             current_dash.update({k: bool(v) for k, v in _dashboard_plugins.items() if isinstance(k, str)})
             current["dashboard_plugins"] = current_dash
     for k, v in settings.items():
+        key_is_speech = k in _SETTINGS_SPEECH_KEYS
         # dashboard_plugins is deep-merged above (not a flat allowlisted scalar).
         if k == "dashboard_plugins":
             continue
@@ -8388,6 +8455,23 @@ def save_settings(settings: dict) -> dict:
                     continue
                 min_value, max_value = _SETTINGS_INT_RANGES[k]
                 if v < min_value or v > max_value:
+                    continue
+            if k in _SETTINGS_FLOAT_RANGES:
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+                min_value, max_value = _SETTINGS_FLOAT_RANGES[k]
+                if not math.isfinite(v) or v < min_value or v > max_value:
+                    continue
+            if k == "tts_engine":
+                if not isinstance(v, str):
+                    continue
+                v = v.strip()
+                if not _SETTINGS_TTS_ENGINE_RE.match(v):
+                    continue
+            if k == "tts_voice":
+                if not isinstance(v, str) or len(v) > 200 or "\x00" in v:
                     continue
             # Validate language codes (BCP-47-like: 'en', 'zh', 'fr', 'zh-CN')
             if k == "language" and (
@@ -8428,6 +8512,8 @@ def save_settings(settings: dict) -> dict:
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)
             current[k] = v
+            if key_is_speech:
+                applied_speech_keys.add(k)
     theme_value = pending_theme
     skin_value = pending_skin
     if theme_was_explicit and not skin_was_explicit:
@@ -8439,7 +8525,9 @@ def save_settings(settings: dict) -> dict:
     current["default_workspace"] = str(
         resolve_default_workspace(current.get("default_workspace"))
     )
-    persisted = {k: v for k, v in current.items() if k != "default_model"}
+    effective_persisted_speech_keys = set(persisted_speech_keys)
+    effective_persisted_speech_keys.update(applied_speech_keys)
+    persisted = _settings_payload_for_write(current, effective_persisted_speech_keys)
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(
         json.dumps(persisted, ensure_ascii=False, indent=2),
@@ -8481,8 +8569,17 @@ if _settings_file_exists:
     if _startup_settings.get("default_workspace") != str(DEFAULT_WORKSPACE):
         _startup_settings["default_workspace"] = str(DEFAULT_WORKSPACE)
         try:
+            startup_persisted_speech_keys = _extract_persisted_speech_keys(
+                _read_raw_settings_file()
+            )
             SETTINGS_FILE.write_text(
-                json.dumps(_startup_settings, ensure_ascii=False, indent=2),
+                json.dumps(
+                    _settings_payload_for_write(
+                        _startup_settings, startup_persisted_speech_keys
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
                 encoding="utf-8",
             )
         except Exception:

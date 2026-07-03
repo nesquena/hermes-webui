@@ -10,15 +10,142 @@ Verifies:
   7. i18n keys exist for all branch-related strings
   8. git-branch icon exists in icons.js
 """
+import json
+import io
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
+
+import api.routes as routes
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+COMMANDS_JS = ROOT / "static" / "commands.js"
+NODE = shutil.which("node")
 
 
 def _read(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def _extract_async_function(source: str, name: str) -> str:
+    start = source.find(f"async function {name}(")
+    assert start != -1, f"Could not find async function {name}"
+    brace = source.find("{", start)
+    assert brace != -1, f"Could not find opening brace for {name}"
+    depth = 0
+    for idx in range(brace, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:idx + 1]
+    pytest.fail(f"Could not extract complete function body for {name}")
+
+
+def _run_node(script: str) -> str:
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+        handle.write(script)
+        script_path = handle.name
+    try:
+        proc = subprocess.run(
+            [NODE, script_path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return proc.stdout.strip()
+    finally:
+        Path(script_path).unlink(missing_ok=True)
+
+
+def _commands_harness(body: str) -> str:
+    source = COMMANDS_JS.read_text(encoding="utf-8")
+    cmd_branch = _extract_async_function(source, "cmdBranch")
+    fork_from = _extract_async_function(source, "forkFromMessage")
+    return _run_node(
+        "\n".join([
+            "const calls = [];",
+            "const toasts = [];",
+            "let ensureCalls = 0;",
+            "let loadedSessions = [];",
+            "let renderCalls = 0;",
+            "let _oldestIdx = 0;",
+            "let S = { session: null, busy: false };",
+            "const t = (key) => ({",
+            "  no_active_session: 'No active session',",
+            "  branch_forked: 'Forked into new session',",
+            "  branch_failed: 'Fork failed: ',",
+            "}[key] || key);",
+            "const showToast = (...args) => { toasts.push(args); };",
+            "const api = async (url, opts) => {",
+            "  calls.push({ url, body: JSON.parse(opts.body) });",
+            "  return { session_id: 'forked-session' };",
+            "};",
+            "const loadSession = async (sid) => { loadedSessions.push(sid); };",
+            "const renderSessionList = async () => { renderCalls += 1; };",
+            "const _ensureAllMessagesLoaded = async () => { ensureCalls += 1; };",
+            "function _isReadOnlySession(session) {",
+            "  return !!(session && (session.read_only || session.is_read_only));",
+            "}",
+            cmd_branch,
+            fork_from,
+            "(async () => {",
+            body,
+            "})().catch((err) => {",
+            "  console.error(err && err.stack ? err.stack : String(err));",
+            "  process.exit(1);",
+            "});",
+        ])
+    )
+
+
 # ── Backend ────────────────────────────────────────────────────────────────────
+
+
+class _FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {"Content-Type": "application/json", "Content-Length": "1"}
+        self.rfile = io.BytesIO(b"")
+        self.wfile = io.BytesIO()
+        self.command = "POST"
+        self.path = "/api/session/branch"
+        self.client_address = ("127.0.0.1", 12345)
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.headers[key] = value
+
+    def end_headers(self):
+        pass
+
+
+def _capture_route(monkeypatch):
+    cap = {}
+
+    def _bad(_handler, msg, code=400):
+        cap["bad"] = (msg, code)
+        return True
+
+    def _j(_handler, obj, *_, **kwargs):
+        cap["ok"] = obj
+        cap["status"] = kwargs.get("status", 200)
+        return True
+
+    monkeypatch.setattr(routes, "bad", _bad)
+    monkeypatch.setattr(routes, "j", _j)
+    return cap
 
 def test_branch_endpoint_exists():
     """Verify the POST /api/session/branch route handler exists."""
@@ -39,6 +166,41 @@ def test_branch_endpoint_validates_session_id():
     block = branch_match.group(1)
     assert 'require(body, "session_id")' in block, \
         "Branch handler should validate session_id"
+
+
+def test_branch_endpoint_consults_foreign_session_guard_on_missing_sidecar():
+    """Missing sidecars should classify foreign read-only sessions before 404ing.
+
+    The classification logic was extracted from the inline handler into the
+    ``_load_branch_source_or_refuse`` helper (#5449). Assert the handler
+    delegates to it, and that the helper carries the real not_claimable→403
+    provenance logic — not a stale inline copy.
+    """
+    src = _read('api/routes.py')
+    branch_match = re.search(
+        r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
+        src, re.DOTALL
+    )
+    assert branch_match, "Could not find /api/session/branch handler block"
+    block = branch_match.group(1)
+    assert '_load_branch_source_or_refuse(handler, body["session_id"])' in block, \
+        "Branch handler should delegate source-load/refusal to the shared helper"
+
+    # The helper itself must carry the foreign-session classification + 403.
+    helper_match = re.search(
+        r'def _load_branch_source_or_refuse\(.*?\)(.*?)(?=\ndef )',
+        src, re.DOTALL
+    )
+    assert helper_match, "Could not find _load_branch_source_or_refuse helper"
+    helper = helper_match.group(1)
+    assert '_claim_or_synthesize_cli_session(sid)' in helper, \
+        "Helper should classify missing-sidecar foreign sessions before returning"
+    assert 'if _reason == "not_claimable":' in helper, \
+        "Helper should branch on not_claimable foreign ownership"
+    assert 'return bad(handler, "Read-only sessions cannot be branched from WebUI", 403)' in helper \
+        or ('bad(handler, "Read-only sessions cannot be branched from WebUI", 403)' in helper
+            and 'return None' in helper), \
+        "Helper should return a provenance-correct 403 for read-only foreign sessions"
 
 
 def test_branch_endpoint_returns_new_session_id():
@@ -171,6 +333,46 @@ def test_branch_auto_title():
     assert '(fork)' in block, "Branch handler should auto-title as '(fork)'"
 
 
+def test_branch_route_rejects_not_claimable_foreign_sessions_with_403(monkeypatch):
+    """Direct or stale branch POSTs for read-only foreign sessions must refuse clearly."""
+    handler = _FakeHandler()
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "cron-1"})
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid, metadata_only=False: (_ for _ in ()).throw(KeyError("Session not found")),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_claim_or_synthesize_cli_session",
+        lambda _sid: (object(), "not_claimable"),
+    )
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/branch"))
+    assert cap["bad"] == ("Read-only sessions cannot be branched from WebUI", 403)
+
+
+def test_branch_route_keeps_404_for_truly_missing_sessions(monkeypatch):
+    """Only real foreign read-only sessions should switch from 404 to 400."""
+    handler = _FakeHandler()
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "ghost-1"})
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda _sid, metadata_only=False: (_ for _ in ()).throw(KeyError("Session not found")),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_claim_or_synthesize_cli_session",
+        lambda _sid: (None, "no_foreign_state"),
+    )
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(handler, urlparse("/api/session/branch"))
+    assert cap["bad"] == ("Session not found", 404)
+
+
 # ── Session model ──────────────────────────────────────────────────────────────
 
 def test_session_model_parent_session_id():
@@ -280,6 +482,66 @@ def test_fork_button_in_message_actions():
     # The footHtml template should include forkBtn
     assert '${forkBtn}' in src, \
         "forkBtn should be included in message actions template"
+
+
+def test_fork_button_is_hidden_for_read_only_sessions():
+    """Read-only sessions should not render the message-level fork affordance."""
+    src = _read('static/ui.js')
+    assert "const readOnlySession=typeof _isReadOnlySession==='function'" in src, \
+        "ui.js should derive a read-only session flag from the shared helper"
+    assert "const forkBtn  = readOnlySession ? '' :" in src, \
+        "fork button should be suppressed when the active session is read-only"
+
+
+def test_cmdBranch_rejects_read_only_sessions_without_posting():
+    """The /branch command must not POST for read-only sessions."""
+    result = _commands_harness(
+        "S.session = { session_id: 'cron-1', read_only: true };\n"
+        "await cmdBranch('');\n"
+        "console.log(JSON.stringify({ calls, toasts, ensureCalls, loadedSessions, renderCalls }));"
+    )
+    payload = json.loads(result)
+    assert payload["calls"] == [], "read-only /branch should not POST /api/session/branch"
+    assert payload["ensureCalls"] == 0, "cmdBranch should not trigger message loading"
+    assert payload["loadedSessions"] == [], "read-only /branch should not switch sessions"
+    assert payload["renderCalls"] == 0, "read-only /branch should not refresh the session list"
+    assert payload["toasts"], "read-only /branch should surface a toast"
+    assert payload["toasts"][0][0] == "Read-only sessions cannot be forked."
+
+
+def test_forkFromMessage_rejects_read_only_sessions_without_loading_or_posting():
+    """Read-only message forks must stop before the load/post path."""
+    result = _commands_harness(
+        "S.session = { session_id: 'cron-1', read_only: true };\n"
+        "await forkFromMessage(1);\n"
+        "console.log(JSON.stringify({ calls, toasts, ensureCalls, loadedSessions, renderCalls }));"
+    )
+    payload = json.loads(result)
+    assert payload["calls"] == [], "read-only forkFromMessage should not POST /api/session/branch"
+    assert payload["ensureCalls"] == 0, "read-only forkFromMessage should return before loading messages"
+    assert payload["loadedSessions"] == [], "read-only forkFromMessage should not switch sessions"
+    assert payload["renderCalls"] == 0, "read-only forkFromMessage should not refresh the session list"
+    assert payload["toasts"], "read-only forkFromMessage should surface a toast"
+    assert payload["toasts"][0][0] == "Read-only sessions cannot be forked."
+
+
+def test_forkFromMessage_preserves_absolute_keep_count_for_writable_sessions():
+    """The read-only guard must not break the existing absolute keep_count fix."""
+    result = _commands_harness(
+        "S.session = { session_id: 'webui-1', read_only: false };\n"
+        "_oldestIdx = 5;\n"
+        "await forkFromMessage(3);\n"
+        "console.log(JSON.stringify({ calls, toasts, ensureCalls, loadedSessions, renderCalls }));"
+    )
+    payload = json.loads(result)
+    assert len(payload["calls"]) == 1, "writable forkFromMessage should still POST once"
+    call = payload["calls"][0]
+    assert call["url"] == "/api/session/branch"
+    assert call["body"]["session_id"] == "webui-1"
+    assert call["body"]["keep_count"] == 8, "keep_count should remain absolute across the guard"
+    assert payload["ensureCalls"] == 2, "writable forkFromMessage should preserve both message-load calls"
+    assert payload["loadedSessions"] == ["forked-session"]
+    assert payload["renderCalls"] == 1
 
 
 # ── Frontend: sidebar parent indicator ────────────────────────────────────────

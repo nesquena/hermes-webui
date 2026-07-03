@@ -4594,6 +4594,8 @@ const _sessionTimeRefreshMs = 60000;
 const _activeSessionExternalRefreshMs = 30000;
 let _streamingPollTimer = null;
 let _sessionTimeRefreshTimer = null;
+let _streamingPollVisibilityHandler = null;
+let _sessionTimeRefreshVisibilityHandler = null;
 let _activeSessionExternalRefreshTimer = null;
 let _activeSessionExternalRefreshInFlight = false;
 let _deferredActiveSessionExternalRefreshReason = '';
@@ -4617,11 +4619,26 @@ let _sessionListRefreshPendingReason = '';
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
   _streamingPollTimer = setInterval(() => {
+    // Skip while the tab is hidden: this poll fetches /api/sessions and rebuilds
+    // the sidebar, work the user cannot see. The visibilitychange handler below
+    // brings the list current the moment the tab is shown again, so no update is
+    // lost — the background tab just stops burning network + DOM churn.
+    if(typeof document !== 'undefined' && document.hidden) return;
     void renderSessionList({deferWhileInteracting:true});
   }, _streamingPollMs);
+  if(typeof document !== 'undefined' && !_streamingPollVisibilityHandler){
+    _streamingPollVisibilityHandler = () => {
+      if(!document.hidden) void renderSessionList({deferWhileInteracting:true});
+    };
+    document.addEventListener('visibilitychange', _streamingPollVisibilityHandler);
+  }
 }
 
 function stopStreamingPoll(){
+  if(_streamingPollVisibilityHandler && typeof document !== 'undefined'){
+    document.removeEventListener('visibilitychange', _streamingPollVisibilityHandler);
+    _streamingPollVisibilityHandler = null;
+  }
   if(!_streamingPollTimer) return;
   clearInterval(_streamingPollTimer);
   _streamingPollTimer = null;
@@ -4630,8 +4647,17 @@ function stopStreamingPoll(){
 function ensureSessionTimeRefreshPoll(){
   if(_sessionTimeRefreshTimer) return;
   _sessionTimeRefreshTimer = setInterval(() => {
+    // Relative-time labels only matter when visible; the visibilitychange
+    // handler below refreshes timestamps immediately when the tab is shown.
+    if(typeof document !== 'undefined' && document.hidden) return;
     renderSessionListFromCache();
   }, _sessionTimeRefreshMs);
+  if(typeof document !== 'undefined' && !_sessionTimeRefreshVisibilityHandler){
+    _sessionTimeRefreshVisibilityHandler = () => {
+      if(!document.hidden) renderSessionListFromCache();
+    };
+    document.addEventListener('visibilitychange', _sessionTimeRefreshVisibilityHandler);
+  }
 }
 
 function _deferActiveSessionExternalRefresh(reason){

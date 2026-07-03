@@ -79,6 +79,17 @@ def test_active_session_external_refresh_has_focus_and_visibility_hooks():
     assert "ensureActiveSessionExternalRefreshPoll();" in SESSIONS_JS
 
 
+def test_session_time_refresh_has_own_visibility_hook():
+    """Skipped hidden-tab timestamp ticks must refresh immediately on return."""
+    start = SESSIONS_JS.find("function ensureSessionTimeRefreshPoll()")
+    assert start != -1
+    block = SESSIONS_JS[start:start + 900]
+    assert "_sessionTimeRefreshVisibilityHandler" in SESSIONS_JS
+    assert "document.addEventListener('visibilitychange', _sessionTimeRefreshVisibilityHandler);" in block
+    assert "if(!document.hidden) renderSessionListFromCache();" in block
+    assert "startStreamingPoll re-renders the list" not in block
+
+
 def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     """New sessions should refresh the sidebar from server invalidation events."""
     assert "async function refreshSessionList(reason='manual', opts={})" in SESSIONS_JS
