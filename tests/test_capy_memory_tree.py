@@ -77526,7 +77526,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_interaction_limi
     "https://user:pass@api.github.com/repos/capy/spaces/interaction-limits",
     "https://api.github.com/repos/capy/spaces/interaction-limits/extra",
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_interaction_limits_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_interaction_limits_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, final_url
 ):
     root = tmp_path / "capy-memory"
