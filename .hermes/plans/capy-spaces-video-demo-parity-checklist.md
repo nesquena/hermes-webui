@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- GitHub Contents source-refresh now has explicit final-URL before-body-read + relevant-memory-empty evidence: exact `/repos/{owner}/{repo}/contents/{path}` jobs reject repository drift before body reads, vault persistence, search indexing, or Spaces relevant-memory output, leaving no vault/search/relevant-memory artifact and no public leakage of raw final URLs, content/download/html/git links, raw content bodies, raw prompts, renderer/source/html/script/data/API-auth fields, credentials, tokens/access-token markers, or secret-looking fixture values.
+
 - GitHub deployment-statuses source-refresh now has explicit final-URL before-body-read + relevant-memory-empty evidence: exact `/repos/{owner}/{repo}/deployments/{deployment_id}/statuses` drift fails before body read and leaves no vault/search/relevant-memory artifact; public envelopes omit raw final URLs, hostile rows, prompts, renderer/source/html/script/data/API-auth, credentials, tokens, and secret-looking values.
 
 - GitHub deployments source-refresh now has strengthened final-URL before-body-read + relevant-memory-empty evidence: exact `/repos/{owner}/{repo}/deployments` jobs reject query/fragment/userinfo auth, repository/path/tail drift, lookalike authority, HTTP scheme drift, and non-string final URLs before body reads, vault persistence, search indexing, or Spaces relevant-memory output, leaving no vault/search/relevant-memory artifact and no public leakage of raw final URLs, deployment rows, raw prompts, renderer/source/html/script/data/API-auth fields, credentials, tokens/access-token markers, or secret-looking fixture values.
