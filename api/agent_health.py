@@ -348,7 +348,26 @@ def _remote_gateway_base_url() -> str | None:
     return None
 
 
-def _http_probe(url: str, timeout_s: float) -> tuple[bool, int | None, str | None, bytes | None]:
+def _remote_gateway_api_key() -> str:
+    """Return the Bearer token for authenticated gateway health probes.
+
+    Mirrors ``api.gateway_chat._gateway_api_key``: WebUI containers in
+    multi-service deployments must present the same key the agent's API server
+    expects on ``/health/detailed`` (#5418).
+    """
+    return str(
+        os.environ.get("HERMES_WEBUI_GATEWAY_API_KEY")
+        or os.environ.get("API_SERVER_KEY")
+        or ""
+    ).strip()
+
+
+def _http_probe(
+    url: str,
+    timeout_s: float,
+    *,
+    api_key: str | None = None,
+) -> tuple[bool, int | None, str | None, bytes | None]:
     """GET ``url`` and return (ok, status_code, error_name, body).
 
     ``ok`` is True only for a 2xx response. 5xx and network errors are not OK.
@@ -356,7 +375,10 @@ def _http_probe(url: str, timeout_s: float) -> tuple[bool, int | None, str | Non
     on this particular path) so the caller can move on to the next path.
     ``body`` is the raw response bytes for 2xx responses, None otherwise.
     """
-    req = urllib_request.Request(url, method="GET")
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib_request.Request(url, method="GET", headers=headers)
     try:
         with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - trusted env var URL
             status = getattr(resp, "status", None) or resp.getcode()
@@ -392,8 +414,14 @@ def _probe_remote_gateway(base_url: str, *, now: float | None = None) -> dict[st
 
     last_status: int | None = None
     last_error: str | None = None
+    gateway_api_key = _remote_gateway_api_key()
     for path in _REMOTE_PROBE_PATHS:
-        ok, status, err, body = _http_probe(base_url + path, _REMOTE_PROBE_TIMEOUT_S)
+        probe_key = gateway_api_key if path == "/health/detailed" else None
+        ok, status, err, body = _http_probe(
+            base_url + path,
+            _REMOTE_PROBE_TIMEOUT_S,
+            api_key=probe_key,
+        )
         if ok:
             details: dict[str, Any] = {
                 "state": "alive",

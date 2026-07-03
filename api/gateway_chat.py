@@ -12,6 +12,8 @@ from typing import Any
 
 from api.config import (
     CANCEL_FLAGS,
+    PENDING_GOAL_CONTINUATION,
+    STREAM_GOAL_RELATED,
     STREAMS,
     STREAMS_LOCK,
     STREAM_LAST_EVENT_ID,
@@ -24,6 +26,7 @@ from api.config import (
     gateway_supports_approval,
     register_active_run,
     unregister_active_run,
+    unregister_stream_owner,
     update_active_run,
 )
 from api.helpers import _redact_text, redact_session_data
@@ -502,6 +505,7 @@ def _run_gateway_chat_streaming(
     attachments=None,
     *,
     model_provider=None,
+    goal_related=False,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -513,6 +517,9 @@ def _run_gateway_chat_streaming(
     """
     q = STREAMS.get(stream_id)
     if q is None:
+        # Cancelled before the worker started; release the owner entry the route
+        # layer registered so STREAM_SESSION_OWNERS does not leak (no teardown finally runs).
+        unregister_stream_owner(stream_id)
         return
     register_active_run(
         stream_id,
@@ -882,6 +889,55 @@ def _run_gateway_chat_streaming(
             s.model = model
             s.model_provider = model_provider
             s.save()
+        try:
+            from api.goals import evaluate_goal_after_turn, has_active_goal
+            from api.profiles import get_hermes_home_for_profile
+
+            profile_home = get_hermes_home_for_profile(getattr(s, "profile", None))
+            if goal_related and has_active_goal(session_id, profile_home=profile_home):
+                put_gateway_event("goal", {
+                    "session_id": session_id,
+                    "state": "evaluating",
+                    "message": "Evaluating goal progress…",
+                    "message_key": "goal_evaluating_progress",
+                })
+                decision = evaluate_goal_after_turn(
+                    session_id,
+                    assistant_text,
+                    user_initiated=True,
+                    profile_home=profile_home,
+                ) or {}
+                goal_message = str(decision.get("message") or "").strip()
+                if goal_message:
+                    put_gateway_event("goal", {
+                        "session_id": session_id,
+                        "state": "continuing" if decision.get("should_continue") else "idle",
+                        "message": goal_message,
+                        "message_key": decision.get("message_key") or (
+                            "goal_continuing" if goal_message else ""
+                        ),
+                        "message_args": decision.get("message_args") or [],
+                        "decision": decision,
+                    })
+                if decision.get("should_continue"):
+                    continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
+                    if continuation_prompt:
+                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        put_gateway_event("goal_continue", {
+                            "session_id": session_id,
+                            "continuation_prompt": continuation_prompt,
+                            "text": continuation_prompt,
+                            "message": goal_message,
+                            "message_key": decision.get("message_key") or "goal_continuing",
+                            "message_args": decision.get("message_args") or [],
+                            "decision": decision,
+                        })
+        except Exception as goal_exc:
+            logger.debug(
+                "Gateway goal continuation hook failed for session %s: %s",
+                session_id,
+                goal_exc,
+            )
         from api.streaming import _session_payload_with_full_messages
         gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
@@ -913,6 +969,7 @@ def _run_gateway_chat_streaming(
             _cleanup_gateway_pending_mirror(session_id)
         with STREAMS_LOCK:
             CANCEL_FLAGS.pop(stream_id, None)
+            STREAM_GOAL_RELATED.pop(stream_id, None)
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
             STREAM_REASONING_TEXT.pop(stream_id, None)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)

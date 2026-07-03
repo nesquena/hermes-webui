@@ -304,6 +304,7 @@ def test_session_list_query_string_respects_sidebar_source_and_flags():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
+    archive_filter_fn = _extract_function(src, "_sessionArchivePagingFilterActive")
     query_fn = _extract_function(src, "_sessionListQueryString")
     script = f"""
 global.window = {{ _showCliSessions: true }};
@@ -311,25 +312,95 @@ global._activeProject = null;
 global._sessionSourceFilter = 'cli';
 global._showAllProfiles = true;
 global._showArchived = false;
+global.SESSION_ARCHIVED_PAGE_SIZE = 100;
+global.SESSION_ARCHIVED_MAX_LOADED_LIMIT = 2000;
+global._archivedRowsLoadedLimit = 100;
+global.NO_PROJECT_FILTER = '__none__';
+let searchValue = '';
+global.$ = (id) => id === 'sessionSearch' ? {{ value: searchValue }} : null;
 {requested_source_fn}
 {exclude_hidden_fn}
+{archive_filter_fn}
 {query_fn}
 const first = _sessionListQueryString();
 window._showCliSessions = false;
 global._showArchived = true;
 const second = _sessionListQueryString();
+searchValue = 'old archived title';
+const searchFiltered = _sessionListQueryString();
+searchValue = '';
+global._activeProject = 'project-1';
+const projectFiltered = _sessionListQueryString();
+global._activeProject = null;
+global._archivedRowsLoadedLimit = 2500;
+const capped = _sessionListQueryString();
 global._activeProject = '__none__';
-global.NO_PROJECT_FILTER = '__none__';
 global._showAllProfiles = false;
 global._showArchived = false;
 const third = _sessionListQueryString();
-console.log(JSON.stringify({{ first, second, third }}));
+console.log(JSON.stringify({{ first, second, searchFiltered, projectFiltered, capped, third }}));
 """
     body = _run_node(script)
 
     assert body["first"] == "?sidebar_source=cli&exclude_hidden=1&all_profiles=1"
-    assert body["second"] == "?sidebar_source=webui&exclude_hidden=1&all_profiles=1&include_archived=1"
+    assert body["second"] == "?sidebar_source=webui&exclude_hidden=1&all_profiles=1&include_archived=1&archived_limit=100"
+    assert body["searchFiltered"] == "?sidebar_source=webui&exclude_hidden=1&all_profiles=1&include_archived=1"
+    assert body["projectFiltered"] == "?sidebar_source=webui&all_profiles=1&include_archived=1"
+    assert body["capped"] == "?sidebar_source=webui&exclude_hidden=1&all_profiles=1&include_archived=1&archived_limit=2000"
     assert body["third"] == "?sidebar_source=webui&exclude_hidden=1"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_archived_search_input_refetches_uncapped_then_restores_paging():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
+    exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
+    archive_filter_fn = _extract_function(src, "_sessionArchivePagingFilterActive")
+    query_fn = _extract_function(src, "_sessionListQueryString")
+    sync_archive_fn = _extract_function(src, "_syncArchivedSearchPagingRefresh")
+    filter_fn = _extract_function(src, "filterSessions")
+    script = f"""
+global.window = {{ _showCliSessions: false }};
+global._activeProject = null;
+global.NO_PROJECT_FILTER = '__none__';
+global._sessionSourceFilter = 'webui';
+global._showAllProfiles = false;
+global._showArchived = true;
+global.SESSION_ARCHIVED_PAGE_SIZE = 100;
+global.SESSION_ARCHIVED_MAX_LOADED_LIMIT = 2000;
+global._archivedRowsLoadedLimit = 100;
+global._archivedSearchPagingQueryActive = false;
+global._lastSessionSearchQuery = '';
+global._hideSearchPreviewsAfterSelect = false;
+global._contentSearchResults = [];
+global._searchDebounceTimer = null;
+const calls = [];
+let searchValue = '';
+global.$ = (id) => id === 'sessionSearch' ? {{ value: searchValue }} : null;
+global.syncSessionSearchClear = () => {{}};
+global.renderSessionList = () => {{ calls.push(_sessionListQueryString()); return Promise.resolve(); }};
+global.renderSessionListFromCache = () => {{}};
+global.clearTimeout = () => {{}};
+global.setTimeout = () => 1;
+global.api = () => Promise.resolve({{ sessions: [] }});
+{requested_source_fn}
+{exclude_hidden_fn}
+{archive_filter_fn}
+{query_fn}
+{sync_archive_fn}
+{filter_fn}
+searchValue = 'page two title';
+filterSessions();
+searchValue = '';
+filterSessions();
+console.log(JSON.stringify({{ calls }}));
+"""
+    body = _run_node(script)
+
+    assert body["calls"] == [
+        "?sidebar_source=webui&exclude_hidden=1&include_archived=1",
+        "?sidebar_source=webui&exclude_hidden=1&include_archived=1&archived_limit=100",
+    ]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

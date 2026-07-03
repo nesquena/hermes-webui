@@ -81,6 +81,37 @@ def _stub_pycache_purge(monkeypatch):
     monkeypatch.setattr(upd, "_purge_agent_pycache", lambda *a, **k: None)
 
 
+def _extract_summary_cache_js():
+    src = read('static/ui.js')
+    function_names = [
+        '_summaryStorageByteLength',
+        '_summaryCacheEntriesSortedByRecency',
+        '_loadStoredUpdateSummaries',
+        '_persistGeneratedSummaries',
+        '_rememberGeneratedSummary',
+    ]
+    declarations = [
+        line.strip()
+        for line in src.splitlines()
+        if line.startswith('const WHATS_NEW_SUMMARY_STORAGE_KEY')
+        or line.startswith('const WHATS_NEW_SUMMARY_STORAGE_MAX_BYTES')
+    ]
+    functions = [extract_js_function(src, name) for name in function_names]
+    return '\n'.join(declarations + functions)
+
+
+def _parse_byte_expr(expr):
+    expr = expr.strip()
+    if re.fullmatch(r"\d+", expr):
+        return int(expr)
+    if re.fullmatch(r"(?:\d+\s*\*\s*)+\d+", expr):
+        result = 1
+        for piece in re.split(r"\s*\*\s*", expr):
+            result *= int(piece)
+        return result
+    return None
+
+
 # ── api/updates.py ────────────────────────────────────────────────────────────
 
 class TestUpdateChecker:
@@ -1967,6 +1998,183 @@ class TestWhatsNewSummaryToggle:
         assert '_renderUpdateWhatsNewLinks(data,{mode' in src
         assert 'window._whatsNewSummaryEnabled' in src
 
+    def test_update_banner_summary_cache_has_byte_cap_constant_within_bounds(self):
+        src = read('static/ui.js')
+        assert "const WHATS_NEW_SUMMARY_STORAGE_KEY='hermes-whats-new-generated-summaries';" in src
+        cap_match = re.search(r"const WHATS_NEW_SUMMARY_STORAGE_MAX_BYTES\s*=\s*([^;\n]+)", src)
+        assert cap_match, "cap constant should be declared in static/ui.js"
+        key_index = src.find("const WHATS_NEW_SUMMARY_STORAGE_KEY='hermes-whats-new-generated-summaries';")
+        cap_index = src.find("const WHATS_NEW_SUMMARY_STORAGE_MAX_BYTES", key_index)
+        assert cap_index != -1 and cap_index > key_index and cap_index - key_index < 200
+        cap_value = _parse_byte_expr(cap_match.group(1))
+        assert cap_value is not None
+        assert 200 * 1024 <= cap_value <= 256 * 1024
+
+    def test_summary_storage_byte_length_fallback_counts_utf8_bytes(self):
+        runtime = _extract_summary_cache_js()
+        script = f"""
+{runtime}
+global.TextEncoder = undefined;
+if(_summaryStorageByteLength('abc') !== 3) throw new Error('ASCII byte count should match length');
+if(_summaryStorageByteLength('é') !== 2) throw new Error('Latin-1 should count as two UTF-8 bytes');
+if(_summaryStorageByteLength('漢') !== 3) throw new Error('BMP CJK should count as three UTF-8 bytes');
+if(_summaryStorageByteLength('😀') !== 4) throw new Error('astral symbols should count as four UTF-8 bytes');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_summary_cache_recency_sort_does_not_mutate_input_entries(self):
+        runtime = _extract_summary_cache_js()
+        script = f"""
+{runtime}
+const entries = [
+  ['zeta', {{ updatedAt: 1 }}],
+  ['webui', {{}}],
+  ['agent', {{}}],
+];
+const sorted = _summaryCacheEntriesSortedByRecency(entries);
+if(entries[0][0] !== 'zeta' || entries[1][0] !== 'webui' || entries[2][0] !== 'agent') throw new Error('sort helper must not mutate caller entries');
+if(sorted[0][0] !== 'zeta') throw new Error('updated entries should sort before legacy fallback entries');
+if(sorted[1][0] !== 'webui' || sorted[2][0] !== 'agent') throw new Error('legacy fallback order should prefer webui then agent');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_persist_generated_summaries_bounds_aggregate_cache_size(self):
+        runtime = _extract_summary_cache_js()
+        script = f"""
+const store = {{}};
+{runtime}
+global.window = {{}};
+global.sessionStorage = {{
+  getItem: (key) => {{
+    return Object.prototype.hasOwnProperty.call(store,key)?store[key]:null;
+  }},
+  setItem: (key, value) => {{
+    store[key] = value;
+  }},
+  removeItem: (key) => {{
+    delete store[key];
+  }},
+}};
+const summarySize = Math.floor(WHATS_NEW_SUMMARY_STORAGE_MAX_BYTES * 0.5);
+window._whatsNewGeneratedSummaries = {{
+  webui: {{
+    signature: 'abc|def|1|https://example.test/webui',
+    payload: {{ summary: 'w'.repeat(summarySize) }},
+    updatedAt: 200,
+  }},
+  agent: {{
+    signature: 'abc|def|1|https://example.test/agent',
+    payload: {{ summary: 'a'.repeat(summarySize) }},
+    updatedAt: 100,
+  }},
+}};
+_persistGeneratedSummaries();
+const stored = sessionStorage.getItem(WHATS_NEW_SUMMARY_STORAGE_KEY);
+if(!stored) throw new Error('expected persisted summary cache');
+if(_summaryStorageByteLength(stored) > WHATS_NEW_SUMMARY_STORAGE_MAX_BYTES) throw new Error('summary cache exceeds max bytes');
+const parsed = JSON.parse(stored);
+if(!parsed.webui) throw new Error('expected most recent summary to persist');
+if(Object.keys(parsed).length !== 1) throw new Error('expected cap-pruned aggregate cache to retain one entry');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_persist_generated_summaries_skips_single_oversized_summary(self):
+        runtime = _extract_summary_cache_js()
+        script = f"""
+const store = {{}};
+{runtime}
+global.window = {{}};
+global.sessionStorage = {{
+  getItem: (key) => {{
+    return Object.prototype.hasOwnProperty.call(store,key)?store[key]:null;
+  }},
+  setItem: (key, value) => {{
+    store[key] = value;
+  }},
+  removeItem: (key) => {{
+    delete store[key];
+  }},
+}};
+window._whatsNewGeneratedSummaries = {{
+  webui: {{
+    signature: 'abc|def|1|https://example.test/webui',
+    payload: {{ summary: 'z'.repeat(WHATS_NEW_SUMMARY_STORAGE_MAX_BYTES + 1000) }},
+    updatedAt: 200,
+  }},
+}};
+_persistGeneratedSummaries();
+const stored = sessionStorage.getItem(WHATS_NEW_SUMMARY_STORAGE_KEY);
+if(stored === null) throw new Error('expected persist to run');
+const parsed = JSON.parse(stored);
+if(parsed && Object.keys(parsed).length) throw new Error('expected oversized entry to be skipped');
+if(window._whatsNewGeneratedSummaries && Object.keys(window._whatsNewGeneratedSummaries).length) throw new Error('expected oversized entry removed from memory');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_persist_generated_summaries_keeps_small_webui_and_agent_summaries(self):
+        runtime = _extract_summary_cache_js()
+        script = f"""
+const store = {{}};
+{runtime}
+global.window = {{}};
+global.sessionStorage = {{
+  getItem: (key) => {{
+    return Object.prototype.hasOwnProperty.call(store,key)?store[key]:null;
+  }},
+  setItem: (key, value) => {{
+    store[key] = value;
+  }},
+  removeItem: (key) => {{
+    delete store[key];
+  }},
+}};
+window._whatsNewGeneratedSummaries = {{
+  webui: {{
+    signature: 'abc|def|1|https://example.test/webui',
+    payload: {{ summary: 'webui summary' }},
+    updatedAt: 300,
+  }},
+  agent: {{
+    signature: 'abc|def|1|https://example.test/agent',
+    payload: {{ summary: 'agent summary' }},
+    updatedAt: 200,
+  }},
+}};
+_persistGeneratedSummaries();
+const loaded = _loadStoredUpdateSummaries();
+if(!loaded.webui || !loaded.agent) throw new Error('expected both small summaries');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_persist_generated_summaries_tolerates_setitem_failure(self):
+        runtime = _extract_summary_cache_js()
+        script = f"""
+const store = {{}};
+{runtime}
+global.window = {{}};
+global.sessionStorage = {{
+  getItem: (key) => {{
+    return Object.prototype.hasOwnProperty.call(store,key)?store[key]:null;
+  }},
+  setItem: () => {{
+    throw new Error('quota exceeded');
+  }},
+  removeItem: (key) => {{
+    delete store[key];
+  }},
+}};
+window._whatsNewGeneratedSummaries = {{
+  webui: {{
+    signature: 'abc|def|1|https://example.test/webui',
+    payload: {{ summary: 'ok' }},
+    updatedAt: 100,
+  }},
+}};
+_persistGeneratedSummaries();
+if(!window._whatsNewGeneratedSummaries || !window._whatsNewGeneratedSummaries.webui) throw new Error('expected in-memory cache to remain after storage failure');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
     def test_summary_endpoint_and_prompt_are_human_readable_not_technical(self):
         routes = read('api/routes.py')
         updates = read('api/updates.py')
@@ -2120,7 +2328,8 @@ class TestWhatsNewSummaryToggle:
     def test_update_summary_panel_is_scrollable_for_long_summaries(self):
         style = read('static/style.css')
 
-        assert '#updateSummaryPanel{max-height:min(34vh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:var(--accent) transparent;}' in style
+        assert '#updateSummaryScroll{max-height:min(34vh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:var(--accent) transparent;}' in style
+        assert '#updateSummaryPanel.update-summary-expanded #updateSummaryScroll{max-height:min(75vh,560px);}' in style
 
     def test_update_summary_many_updates_caps_commit_input_and_discloses_scope(self, monkeypatch):
         import api.updates as upd

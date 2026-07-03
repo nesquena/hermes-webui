@@ -344,7 +344,7 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+1800]
+            delete_block = text[delete_idx:delete_idx+2400]
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -359,7 +359,7 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+1800]
+    delete_block = routes_src[delete_idx:delete_idx+2400]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
@@ -642,8 +642,11 @@ def test_reload_path_restores_pending_message_and_reattaches_live_stream(cleanup
     assert 'pending_user_message' in ui_src
     assert 'function attachLiveStream' in messages_src
     assert 'const pendingMsg=typeof getPendingSessionMessage' in sessions_src
-    assert ('const activeStreamId=data.session.active_stream_id||null;' in sessions_src or
-            'const activeStreamId=S.session.active_stream_id||null;' in sessions_src)
+    # `activeStreamId` declaration was widened const → let (#5248 race-guard
+    # re-reads it after the awaited message load). Accept either keyword via a
+    # prefix anchor that omits const/let.
+    assert ('activeStreamId=data.session.active_stream_id||null;' in sessions_src or
+            'activeStreamId=S.session.active_stream_id||null;' in sessions_src)
     assert 'attachLiveStream(sid, activeStreamId' in sessions_src
     assert 'if (S.activeStreamId && S.activeStreamId === streamId) return;' in ui_src
     active_branch_start = sessions_src.index("if(activeStreamId){\n      S.busy=true;")
@@ -748,7 +751,7 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+1200]
 
-    assert "await _ensureMessagesLoaded(sid);" in inflight_block, (
+    assert "await _ensureMessagesLoaded(sid" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
     )
     assert "_mergeInflightTailMessages(S.messages,inflightMessages)" in inflight_block, (

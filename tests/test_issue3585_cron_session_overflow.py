@@ -136,9 +136,11 @@ def test_cron_sessions_recovered_by_second_pass(tmp_path):
 
     cron_sessions = [s for s in result if s["source_tag"] == "cron"]
     assert len(cron_sessions) > 0, "Cron sessions should be recovered by the second pass"
-    assert len(read_rows.call_args_list) == 2
+    assert len(read_rows.call_args_list) == 3
     assert read_rows.call_args_list[1].kwargs["exclude_sources"] is None
     assert read_rows.call_args_list[1].kwargs["include_sources"] == ("cron",)
+    assert read_rows.call_args_list[2].kwargs["exclude_sources"] is None
+    assert read_rows.call_args_list[2].kwargs["include_sources"] == ("webhook",)
 
 
 def test_webui_sidecarless_sessions_not_excluded(tmp_path):

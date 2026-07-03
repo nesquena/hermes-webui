@@ -778,7 +778,7 @@ const MD_PREVIEW_RICH_RENDER_MAX_BYTES = 256 * 1024;
 const MD_PREVIEW_RICH_RENDER_MAX_LINES = 5000;
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
-  '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
+  '.doc','.xls','.ppt','.odt','.ods','.odp',
   '.zip','.tar','.gz','.bz2','.7z','.rar',
   '.exe','.dmg','.pkg','.deb','.rpm',
   '.woff','.woff2','.ttf','.otf','.eot',
@@ -882,6 +882,10 @@ function forceRenderMarkdownPreview(){
 let _previewCurrentPath = '';  // relative path of currently previewed file
 let _previewCurrentMode = '';  // 'code' | 'csv' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
+let _previewServerEditable = null;  // backend editability metadata when available
+let _previewSaveRoute = '/api/file/save';  // current save adapter for the open preview
+let _previewOfficeFormat = '';  // current claimed Office format, if any
+let _previewPreviewKind = '';  // preview family returned by the backend
 
 function showPreview(mode){
   // mode: 'code' | 'csv' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
@@ -908,7 +912,9 @@ function updateEditBtn(){
   const btn=$('btnEditFile');
   if(!btn)return;
   const editable = !_workspacePathIsReadOnly(_previewCurrentPath)
-    && (_previewCurrentMode==='code'||_previewCurrentMode==='md'||_previewCurrentMode==='csv');
+    && (_previewServerEditable===null
+      ? (_previewCurrentMode==='code'||_previewCurrentMode==='md'||_previewCurrentMode==='csv')
+      : !!_previewServerEditable);
   btn.style.display = editable?'':'none';
   const editing = $('previewEditArea').style.display!=='none';
   btn.innerHTML = editing ? `&#128190; ${t('save')}` : `&#9998; ${t('edit')}`;
@@ -923,23 +929,34 @@ async function toggleEditMode(){
     showToast(t('external_link_read_only'), 2000);
     return;
   }
+  if(!editing && _previewServerEditable===false){
+    showToast('This Office document is preview-only.', 3000, 'error');
+    return;
+  }
   if(editing){
     // Save
     if(!S.session||!_previewCurrentPath)return;
     const content=$('previewEditArea').value;
     try{
-      await api('/api/file/save',{method:'POST',body:JSON.stringify({
+      const saved=await api(_previewSaveRoute||'/api/file/save',{method:'POST',body:JSON.stringify({
         session_id:S.session.session_id, path:_previewCurrentPath, content
       })});
+      const savedContent=saved&&typeof saved.content==='string'?saved.content:content;
+      if(saved && typeof saved.editable==='boolean') _previewServerEditable = saved.editable;
+      if(saved && saved.preview_kind) _previewPreviewKind = saved.preview_kind;
+      if(saved && saved.office_format) _previewOfficeFormat = saved.office_format;
+      if(saved && saved.preview_kind==='office' && saved.office_format==='docx'){
+        _previewSaveRoute = '/api/file/office-save';
+      }
       _previewDirty=false;
       // Update read-only views AND the cached raw content so a later
       // "Render as markdown anyway" force-render reflects the just-saved text
       // (not the stale pre-edit fetch). #3378 review (Codex).
-      _previewRawContent = content;
+      _previewRawContent = savedContent;
       _previewRawContentPath = _previewCurrentPath;
-      if(_previewCurrentMode==='code') $('previewCode').textContent=content;
-      else if(_previewCurrentMode==='csv') renderCsvPreviewContent(_previewCurrentPath, content);
-      else renderMarkdownPreviewContent({content});
+      if(_previewCurrentMode==='code') $('previewCode').textContent=savedContent;
+      else if(_previewCurrentMode==='csv') renderCsvPreviewContent(_previewCurrentPath, savedContent);
+      else renderMarkdownPreviewContent({content:savedContent});
       $('previewEditArea').style.display='none';
       if(_previewCurrentMode==='code') $('previewCode').style.display='';
       else $('previewMd').style.display='';
@@ -1021,6 +1038,11 @@ async function openFile(path, opts={}){
     downloadFile(path);
     return;
   }
+
+  _previewServerEditable = null;
+  _previewSaveRoute = '/api/file/save';
+  _previewOfficeFormat = '';
+  _previewPreviewKind = '';
 
   $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
@@ -1113,6 +1135,14 @@ async function openFile(path, opts={}){
         // Server flagged this as binary content
         downloadFile(path);
         return;
+      }
+      if(data.preview_kind==='office'){
+        _previewRawContent = data.content || '';
+        _previewRawContentPath = path;
+        _previewServerEditable = typeof data.editable === 'boolean' ? data.editable : null;
+        _previewPreviewKind = data.preview_kind || '';
+        _previewOfficeFormat = data.office_format || '';
+        _previewSaveRoute = data.preview_kind==='office' ? '/api/file/office-save' : '/api/file/save';
       }
       renderCodePreviewContent(path, data.content);
   }catch(e){

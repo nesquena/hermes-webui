@@ -138,7 +138,11 @@ def test_attach_live_stream_different_stream_still_reopens_transport():
 def test_load_session_reattach_path_uses_attach_live_stream_for_running_sessions():
     """The session switch-back path should still route through attachLiveStream()."""
     body = _function_body(SESSIONS_JS, "loadSession")
-    active_pos = body.find("const activeStreamId=S.session.active_stream_id||null")
+    # Anchor without the `const`/`let` keyword: the declaration was widened to
+    # `let` so the race-guard can re-read activeStreamId after the awaited
+    # message load (#5248). The invariant this test pins — the snapshot is taken
+    # before, and used by, the attachLiveStream reattach — is unchanged.
+    active_pos = body.find("activeStreamId=S.session.active_stream_id||null")
     reattach_pos = body.find("attachLiveStream(sid, activeStreamId")
     assert active_pos != -1
     assert reattach_pos != -1

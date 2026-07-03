@@ -7,7 +7,7 @@ UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 
 _FUNC_MARKER = "window._fixMobileScrollJank=function _fixMobileScrollJank(){"
-_RAF_MARKER = "requestAnimationFrame(()=>{"
+_RAF_MARKER = "setTimeout(()=>{"
 
 
 def _extract_fix_mobile_scroll_jank(src: str) -> str:
@@ -25,8 +25,11 @@ def _extract_fix_mobile_scroll_jank(src: str) -> str:
 
 
 def _extract_raf_body(fn_src: str) -> str:
+    # The deferred-release cleanup now lives inside the final setTimeout callback
+    # (see the two-rAF-hop + settle-timeout structure), not a bare rAF. Extract
+    # that callback body so the cleanup-check assertions below still apply.
     idx = fn_src.find(_RAF_MARKER)
-    assert idx != -1, "requestAnimationFrame callback not found in function"
+    assert idx != -1, "deferred-release setTimeout callback not found in function"
     depth = 0
     for i, ch in enumerate(fn_src[idx:], idx):
         if ch == "{":
@@ -35,7 +38,7 @@ def _extract_raf_body(fn_src: str) -> str:
             depth -= 1
             if depth == 0:
                 return fn_src[idx : i + 1]
-    raise AssertionError("Could not extract rAF body")
+    raise AssertionError("Could not extract deferred-release cleanup body")
 
 
 def test_fix_sets_none_not_auto():
@@ -54,16 +57,23 @@ def test_fix_sets_none_not_auto():
 
 
 def test_raf_cleanup_checks_none():
-    # The rAF guard must check for 'none' so it only clears the inline style
-    # it set; checking 'auto' was always false and left the inline style on.
-    fn = _extract_fix_mobile_scroll_jank(UI_JS)
-    raf = _extract_raf_body(fn)
-    assert "overflowAnchor==='none'" in raf, (
-        "The rAF cleanup in _fixMobileScrollJank() must check for 'none' so it "
-        "clears the inline style after the synchronous scrollTop write lands."
+    # The release cleanup must check for 'none' so it only clears the inline
+    # style it set; checking 'auto' was always false and left the inline style
+    # on. The cleanup now lives in the shared _liftMobileAnchorSuppression()
+    # helper (called by every release path: base settle, transition settle, and
+    # the independent hard cap), so assert the invariant there.
+    lift_idx = UI_JS.find("function _liftMobileAnchorSuppression(")
+    assert lift_idx != -1, (
+        "_liftMobileAnchorSuppression() must exist as the single cleanup path "
+        "shared by the base-settle, transition-settle, and hard-cap releases."
     )
-    assert "overflowAnchor==='auto'" not in raf, (
-        "The rAF cleanup must not check for 'auto'; that check was always false."
+    lift = _balanced_block(UI_JS, UI_JS.index("{", lift_idx))
+    assert "overflowAnchor==='none'" in lift, (
+        "The cleanup in _liftMobileAnchorSuppression() must check for 'none' so "
+        "it clears only the inline style it set, not a legitimately re-armed one."
+    )
+    assert "overflowAnchor==='auto'" not in lift, (
+        "The cleanup must not check for 'auto'; that check was always false."
     )
 
 
@@ -420,9 +430,13 @@ def test_keyboard_scroll_intent_tracked_and_gated():
     assert "let _lastMessageKeyScrollIntentMs=-Infinity" in UI_JS
     assert "function _recentMessageKeyScrollIntent" in UI_JS
     # A keydown listener must stamp the intent for the pane scroll keys.
-    assert "_lastMessageKeyScrollIntentMs=performance.now()" in UI_JS, (
+    assert "_lastMessageKeyScrollIntentMs=now;" in UI_JS, (
         "a keydown handler must stamp _lastMessageKeyScrollIntentMs when the "
         "reader uses the keyboard to scroll the message pane."
+    )
+    assert "if(bottomDistance>120) _lastMessageScrollIntentMs=now;" in UI_JS, (
+        "keyboard-driven manual-reader snapshot intent must be guarded by "
+        "distance from the live tail."
     )
     assert "'PageUp'" in UI_JS and "'PageDown'" in UI_JS
     # The suppression branch must consult it.
@@ -510,3 +524,292 @@ def test_streaming_tick_calls_fix_before_dom_writes():
     assert guard_idx < render_idx, (
         "The mobile scroll-jank guard must run before streaming DOM work begins."
     )
+
+
+def test_post_process_runs_under_overflow_anchor_suppression():
+    """#5338 follow-up: the async post-render settle window must stay suppressed.
+
+    Root cause of the residual mobile "往回大跳": postProcessRenderedMessages()
+    is scheduled a FRAME LATER via requestAnimationFrame(), after the synchronous
+    _fixMobileScrollJank()/_suppressBrowserOverflowAnchor() guards have already
+    released. It runs highlightCode()/load*Inline()/katex/mermaid, all of which
+    can change the height of rows ABOVE the viewport. On mobile (overflow-anchor:
+    auto) the browser's native anchor engine then compensates scrollTop a SECOND
+    time in that unguarded frame, yanking an unpinned reader to another turn.
+
+    The fix wraps every deferred post-process in _postProcessWithAnchorSuppression()
+    so the browser layer stays suppressed across the post-process + one media-reflow
+    frame. Desktop rests at overflow-anchor:none so the wrapper is a no-op there.
+    """
+    # The wrapper exists and engages the shared suppression helper.
+    wrapper_idx = UI_JS.find("function _postProcessWithAnchorSuppression(")
+    assert wrapper_idx != -1, (
+        "_postProcessWithAnchorSuppression() wrapper must exist to keep the "
+        "browser overflow-anchor layer suppressed across the deferred post-render "
+        "settle window (#5338 mobile 往回大跳 follow-up)."
+    )
+    wrapper = UI_JS[wrapper_idx: wrapper_idx + 900]
+    assert "_suppressBrowserOverflowAnchor(scroller)" in wrapper, (
+        "_postProcessWithAnchorSuppression() must route through the shared "
+        "_suppressBrowserOverflowAnchor() helper so desktop stays a verified no-op."
+    )
+    assert "postProcessRenderedMessages(container)" in wrapper, (
+        "_postProcessWithAnchorSuppression() must still call the real "
+        "postProcessRenderedMessages() inside the suppression window."
+    )
+    # Suppression is held across ONE extra frame so late media/layout reflow
+    # cannot re-anchor either.
+    assert "requestAnimationFrame(release)" in wrapper, (
+        "_postProcessWithAnchorSuppression() must defer the suppression release "
+        "by one frame so image-decode / katex / mermaid reflow is also covered."
+    )
+
+    # EVERY deferred post-process dispatch must go through the wrapper — a raw
+    # requestAnimationFrame(()=>postProcessRenderedMessages(...)) would leave that
+    # path unguarded and re-open the jump.
+    raw_dispatch = "requestAnimationFrame(()=>postProcessRenderedMessages("
+    assert raw_dispatch not in UI_JS, (
+        "All deferred postProcessRenderedMessages() dispatches must go through "
+        "_postProcessWithAnchorSuppression(); a raw rAF dispatch re-opens the "
+        "unguarded async settle window on mobile (#5338)."
+    )
+    wrapped_dispatch = "requestAnimationFrame(()=>_postProcessWithAnchorSuppression("
+    assert UI_JS.count(wrapped_dispatch) >= 3, (
+        "All three post-render paths (fast-path cache branch, main render tail, "
+        "live-tool remount) must dispatch post-process through the suppression "
+        "wrapper; found fewer than 3."
+    )
+
+
+def test_fix_mobile_scroll_jank_defers_release_across_height_churn():
+    """Root-cause fix: the anchor suppression must span the WHOLE height-churn
+    window, not just one frame.
+
+    Real mobile flight-recorder data proved the jump-back is the browser's own
+    overflow-anchor engine re-compensating scrollTop in the LAYOUT phase when
+    above-viewport content changes height (virtual-scroll topPad recompute,
+    worklog live->settled collapse, STREAM_DONE multi-render, media/katex
+    reflow). That compensation is independent of which frame our JS wrote
+    scrollTop, so the previous single-rAF restore released too early -- the
+    collapse/reflow lands a frame or two later, after suppression lifted.
+
+    The fix DEFERS release: each call re-arms and cancels any pending release so
+    a burst of renders shares one suppression window that only lifts after the
+    layout has been quiet for two animation frames + a settle timeout. These
+    source invariants encode that behavior (base-fails on the old single-rAF
+    body / head-passes on the deferred-release body).
+    """
+    fn = _extract_fix_mobile_scroll_jank(UI_JS)
+    # Re-arm must cancel a pending release so consecutive renders EXTEND, not
+    # restart-and-shorten, the window.
+    assert "clearTimeout(" in fn, (
+        "_fixMobileScrollJank() must clearTimeout() any pending release on "
+        "re-arm so a burst of renders shares one suppression window."
+    )
+    assert "cancelAnimationFrame(" in fn, (
+        "_fixMobileScrollJank() must cancelAnimationFrame() any pending release "
+        "hop on re-arm so consecutive renders extend the suppression window."
+    )
+    # Release must be deferred past the render frame: a settle timeout gated
+    # behind animation-frame hops (not a bare single rAF).
+    assert "setTimeout(" in fn, (
+        "_fixMobileScrollJank() must defer the anchor restore behind a settle "
+        "timeout so late layout reflow after the render cannot re-anchor."
+    )
+    # The module-level re-arm state the deferred release needs.
+    assert "_mobileAnchorSuppressReleaseTimer" in UI_JS, (
+        "The deferred-release timer handle must be tracked module-level so "
+        "successive _fixMobileScrollJank() calls can cancel and re-arm it."
+    )
+    # Guard against regressing to the old immediate single-rAF restore: the
+    # function body must NOT restore overflowAnchor inside a bare
+    # requestAnimationFrame(()=>{...}) with no intervening defer.
+    assert "requestAnimationFrame(()=>{\n    if(el.style.overflowAnchor==='none')" not in fn, (
+        "_fixMobileScrollJank() must not restore overflow-anchor in a single "
+        "immediate rAF; that released before the height-churn window closed "
+        "(the residual mobile scroll jump-back this fix addresses)."
+    )
+
+
+def test_fix_mobile_scroll_jank_tracks_css_max_height_animations():
+    """The deferred window must EXTEND across CSS max-height animations.
+
+    A fixed rAF+timeout window (~150ms) under-covers the real churn: the
+    dominant above-viewport height change during streaming is CSS max-height
+    collapse/expand animations on worklog rows -- `.activity-body`
+    (transition: max-height .34s), `.tool-group-body` (.3s),
+    `.tool-card-detail` (.26s). Those run 260-340ms, LONGER than a fixed window,
+    so overflow-anchor:none lifts mid-animation and the remaining frames of the
+    animation still jump (the residual on-device report captured mid-stream).
+
+    Fix: bind transitionrun/transitionend for `max-height` on #messages so an
+    animation start HOLDS suppression (cancels the pending release) and an
+    animation end schedules a short settle after the last one, bounded by a hard
+    cap. This test locks in that the guard listens for the animation lifecycle.
+    """
+    assert "_bindMobileAnchorTransitionExtender" in UI_JS, (
+        "A transition extender must exist so the suppression window tracks CSS "
+        "max-height animations that outlast the fixed deferred window."
+    )
+    # It must listen for the START of an animation (hold) and the END (settle).
+    assert "'transitionrun'" in UI_JS or '"transitionrun"' in UI_JS, (
+        "The extender must listen for transitionrun so an animation beginning "
+        "AFTER the base window started counting down still holds suppression."
+    )
+    assert "'transitionend'" in UI_JS or '"transitionend"' in UI_JS, (
+        "The extender must listen for transitionend so suppression settles only "
+        "after the animation actually finishes."
+    )
+    # It must gate on the height property, not every transition (opacity etc.).
+    assert "propertyName!=='max-height'" in UI_JS or 'propertyName!=="max-height"' in UI_JS, (
+        "The extender must act only on max-height transitions -- those are the "
+        "ones that change above-viewport height and drive the anchor jump."
+    )
+    # A hard cap must exist so a looping/pathological transition can't pin
+    # overflow-anchor:none forever.
+    assert "_MOBILE_ANCHOR_MAX_HOLD_MS" in UI_JS, (
+        "A max-hold cap must bound the transition-extended suppression so a "
+        "looping transition cannot pin overflow-anchor:none indefinitely."
+    )
+
+
+# ── Behavioral harness: execute the REAL _fixMobileScrollJank against a mock
+# #messages element + fake timers, so we test BEHAVIOR (does re-arm push the
+# release out? does the hard cap fire when transitionend is missed?) instead of
+# source strings. These two behaviors were the gate-cert defects on #5392:
+#   1. re-arm was DEAD CODE — the computed-value predicate short-circuited the
+#      2nd..Nth call of a burst because our own inline overflow-anchor:none had
+#      already flipped computed to 'none', so consecutive renders never extended
+#      the window (collapsed to a single first-call window).
+#   2. the "hard cap" was only a guard clause inside onRun, not an independent
+#      release timer — so a MISSED transitionend (interrupted animation, detached
+#      element) pinned overflow-anchor:none forever, violating the #5338 contract
+#      that mobile rests at 'auto'.
+# Both assertions are mutation-verified: reverting either fix flips the matching
+# test to FAIL (proven at authoring time by reverting each hunk).
+_ANCHOR_BLOCK_START = "const _MOBILE_ANCHOR_BASE_SETTLE_MS"
+
+
+def _extract_anchor_block(src: str) -> str:
+    start = src.find(_ANCHOR_BLOCK_START)
+    assert start != -1, "anchor suppression block not found in ui.js"
+    fn_mark = src.find("window._fixMobileScrollJank=function", start)
+    assert fn_mark != -1, "_fixMobileScrollJank not found"
+    brace_open = src.index("{", src.index("(){", fn_mark))
+    depth = 0
+    end = -1
+    for i in range(brace_open, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    assert end != -1, "could not balance _fixMobileScrollJank braces"
+    return src[start : src.index(";", end) + 1]
+
+
+_ANCHOR_HARNESS = r"""
+const block = %s;
+function makeSandbox() {
+  let now = 0; const timers = []; let nextId = 1;
+  const schedule = (cb, delay) => { const id = nextId++; timers.push({ id, at: now + (delay||0), cb }); return id; };
+  const cancel = (id) => { const i = timers.findIndex(t => t.id === id); if (i >= 0) timers.splice(i, 1); };
+  const advance = (ms) => { const target = now + ms;
+    for (;;) { const due = timers.filter(t => t.at <= target).sort((a,b)=>a.at-b.at);
+      if (!due.length) break; const t = due[0]; timers.splice(timers.indexOf(t),1); now = t.at; t.cb(); }
+    now = target; };
+  const setTimeout = (cb,d)=>schedule(cb,d); const clearTimeout = (id)=>cancel(id);
+  const requestAnimationFrame = (cb)=>schedule(cb,16); const cancelAnimationFrame = (id)=>cancel(id);
+  const performance = { now: () => now };
+  const listeners = {};
+  const el = { style:{overflowAnchor:'auto'},
+    addEventListener:(t,f)=>{(listeners[t]=listeners[t]||[]).push(f);},
+    _fire:(t,e)=>{(listeners[t]||[]).forEach(f=>f(e));} };
+  const _browserOverflowAnchorActive = (e)=>e.style.overflowAnchor==='auto';
+  const document = { getElementById:(id)=>id==='messages'?el:null }; const win = {};
+  new Function('setTimeout','clearTimeout','requestAnimationFrame','cancelAnimationFrame',
+    'performance','document','window','_browserOverflowAnchorActive', block
+  )(setTimeout,clearTimeout,requestAnimationFrame,cancelAnimationFrame,
+    performance,document,win,_browserOverflowAnchorActive);
+  return { fix: win._fixMobileScrollJank, el, advance };
+}
+const out = {};
+// TEST 1: re-arm extends the window across consecutive calls.
+{ const s = makeSandbox();
+  s.fix(); const armed1 = s.el.style.overflowAnchor;
+  s.advance(200); const midStill = s.el.style.overflowAnchor;
+  s.fix(); s.advance(300); const afterFirstWouldRelease = s.el.style.overflowAnchor;
+  s.advance(400); const afterSecond = s.el.style.overflowAnchor;
+  out.rearm = { armed1, midStill, afterFirstWouldRelease, afterSecond }; }
+// TEST 2: hard cap releases when transitionend is missed.
+{ const s = makeSandbox();
+  s.fix(); s.el._fire('transitionrun', { propertyName:'max-height' });
+  s.advance(500); const heldMid = s.el.style.overflowAnchor;
+  s.advance(1000); const afterCap = s.el.style.overflowAnchor;
+  out.hardcap = { heldMid, afterCap }; }
+console.log(JSON.stringify(out));
+"""
+
+
+def _run_anchor_harness() -> dict:
+    block = _extract_anchor_block(UI_JS)
+    script = _ANCHOR_HARNESS % json.dumps(block)
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    return json.loads(result.stdout.strip())
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_behavioral_rearm_extends_suppression_window():
+    """Consecutive _fixMobileScrollJank() calls must EXTEND the window.
+
+    Gate-cert defect: the computed-value predicate short-circuited the 2nd call
+    (our inline 'none' made computed 'none' -> predicate false -> early return),
+    so re-arm never ran. Behaviorally: with the bug, the release stays anchored
+    to call #1 and fires ~432ms in, so at t=500 (after a 2nd call at t=200) the
+    anchor is already restored. With the fix, the 2nd call re-arms and the anchor
+    is STILL 'none' at t=500. Mutation-verified: reverting the `alreadySuppressed`
+    guard flips `afterFirstWouldRelease` from 'none' to ''.
+    """
+    r = _run_anchor_harness()["rearm"]
+    assert r["armed1"] == "none", "first call must engage suppression"
+    assert r["midStill"] == "none", "suppression must hold within the first window"
+    assert r["afterFirstWouldRelease"] == "none", (
+        "the 2nd _fixMobileScrollJank() call must RE-ARM and extend the window; "
+        "if suppression released here, re-arm is dead code (the computed-value "
+        "predicate short-circuited the 2nd call)."
+    )
+    assert r["afterSecond"] == "", (
+        "suppression must eventually release to the mobile resting 'auto' after "
+        "the (extended) window elapses."
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_behavioral_hard_cap_releases_when_transitionend_missed():
+    """A missed transitionend must NOT pin overflow-anchor:none forever.
+
+    Gate-cert defect: the 'hard cap' was only a guard clause inside onRun, not an
+    independent release timer. If a max-height animation STARTS (transitionrun
+    holds suppression) but its transitionend never fires (interrupted / element
+    detached), nothing restored 'auto' -> stuck 'none', violating the #5338
+    resting-value contract. With the fix, an independent max-hold timer restores
+    'auto' by _MOBILE_ANCHOR_MAX_HOLD_MS. Mutation-verified: removing the
+    independent timer leaves `afterCap` stuck at 'none'.
+    """
+    r = _run_anchor_harness()["hardcap"]
+    assert r["heldMid"] == "none", (
+        "transitionrun must HOLD suppression across the animation (the settle "
+        "release is cancelled while animating)."
+    )
+    assert r["afterCap"] == "", (
+        "when transitionend is missed, the independent hard-cap timer MUST still "
+        "restore the mobile resting 'auto'; a guard-clause-only cap pins 'none' "
+        "forever."
+    )
+
+
+

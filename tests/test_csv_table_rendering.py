@@ -112,7 +112,16 @@ def test_csv_loadCsvInline_called_after_render():
     """Verify loadCsvInline is called by the consolidated post-render pass."""
     with open('static/ui.js') as f:
         src = f.read()
-    assert 'requestAnimationFrame(()=>postProcessRenderedMessages(inner))' in src
+    # Behavior assertion (not a brittle rAF-literal match): the post-render pass
+    # is scheduled a frame later, now routed through _postProcessWithAnchorSuppression
+    # (which holds overflow-anchor suppression across the media/layout reflow, then
+    # calls postProcessRenderedMessages). Assert the behavior chain, so a future
+    # wrapper rename doesn't re-orphan this test. (#5338)
+    assert 'requestAnimationFrame(()=>_postProcessWithAnchorSuppression(' in src
+    wrap_idx = src.find('function _postProcessWithAnchorSuppression')
+    assert wrap_idx != -1, "post-render should be wrapped by _postProcessWithAnchorSuppression"
+    assert 'postProcessRenderedMessages(container)' in src[wrap_idx:wrap_idx + 500], \
+        "the wrapper must still invoke postProcessRenderedMessages"
     idx = src.find('function postProcessRenderedMessages')
     body = src[idx:idx + 500]
     assert 'loadCsvInline(container)' in body, "post-process should call loadCsvInline once per render"
@@ -189,6 +198,6 @@ def test_csv_preview_preserves_edit_flow():
     assert '_previewRawContent = content' in csv_render or '_previewRawContent=content' in csv_render, \
         "renderCsvPreviewContent must cache raw CSV content for the edit flow"
     # save path re-renders the CSV table for csv mode
-    save_section = src[src.find('async function toggleEditMode'):src.find('async function toggleEditMode') + 1200]
-    assert "renderCsvPreviewContent(_previewCurrentPath, content)" in save_section, \
+    save_section = src[src.find('async function toggleEditMode'):src.find('async function toggleEditMode') + 2200]
+    assert "renderCsvPreviewContent(_previewCurrentPath, savedContent)" in save_section, \
         "saving an edited CSV must re-render the table, not markdown"

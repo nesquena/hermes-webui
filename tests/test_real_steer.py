@@ -278,7 +278,7 @@ class TestFrontendWiring:
 
     def test_send_busy_steer_uses_try_steer(self):
         # send() in messages.js: when busyMode === 'steer', should call _trySteer
-        idx = self.msgs.find("busyMode==='steer'")
+        idx = self.msgs.find("defaultMessageMode==='steer'")
         assert idx >= 0
         block = self.msgs[idx:idx + 800]
         assert "_trySteer" in block, "send()'s steer branch must delegate to _trySteer"

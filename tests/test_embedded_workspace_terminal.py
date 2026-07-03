@@ -268,6 +268,11 @@ def test_terminal_button_and_start_path_respect_remote_backend_guard():
 class _RouteHandler:
     def __init__(self):
         self.headers = {}
+        # Real terminal requests come from a same-host browser; present as a
+        # genuine loopback client so the embedded-terminal local-origin gate
+        # (CVD #3 / test_cvd3_terminal_local_origin_gate.py) admits the request
+        # and these tests exercise the terminal logic they target.
+        self.client_address = ("127.0.0.1", 12345)
         self.wfile = io.BytesIO()
         self.responses = []
 

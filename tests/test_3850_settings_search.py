@@ -6,6 +6,7 @@ users to find settings across all tabs without having to click through each sect
 Issue: #3850 (Add search input at top of Settings panel)
 """
 from pathlib import Path
+import re
 
 INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
@@ -49,6 +50,15 @@ class TestSettingsSearch:
         assert "searchBlob" in body, (
             "_buildSettingsIndex must store a searchBlob for settings fields"
         )
+        assert "titleText" in body, (
+            "_buildSettingsIndex must store title bucket text"
+        )
+        assert "valueText" in body, (
+            "_buildSettingsIndex must store value bucket text"
+        )
+        assert "descriptionText" in body, (
+            "_buildSettingsIndex must store description bucket text"
+        )
 
     def test_panels_js_has_filter_settings_function(self):
         """panels.js must contain filterSettings function."""
@@ -56,11 +66,14 @@ class TestSettingsSearch:
             "panels.js must contain filterSettings(query) function"
         )
         body = PANELS_JS[PANELS_JS.find("function filterSettings(query)"):]
-        assert "(entry.searchBlob || entry.label).toLowerCase().includes(q)" in body, (
-            "filterSettings must do case-insensitive substring matching over the search blob"
+        assert "_scoreSettingsSearchMatch" in body, (
+            "filterSettings must call _scoreSettingsSearchMatch for ranking"
         )
         assert "esc(m.label)" in body, (
             "filterSettings must keep rendering the visible label text"
+        )
+        assert ".sort(" in body, (
+            "filterSettings must order matches deterministically"
         )
 
     def test_panels_js_has_navigate_to_field_function(self):
@@ -135,6 +148,34 @@ class TestSettingsSearch:
             "style.css must make .settings-search-results absolutely positioned"
         )
 
+    def test_settings_menu_layout_ownership_contract(self):
+        """Settings search should be anchored in the menu while scrolling is owned by the button list."""
+        assert 'class="settings-menu-items"' in INDEX_HTML, (
+            "index.html must keep the section buttons inside .settings-menu-items"
+        )
+
+        menu_match = re.search(
+            r"(^|\n)\s*#settingsMenu\s*\{[^}]*\}",
+            STYLE_CSS,
+            re.MULTILINE,
+        )
+        assert menu_match is not None, "style.css must have a #settingsMenu rule"
+        menu_rules = menu_match.group(0)
+        assert "overflow: visible" in menu_rules, (
+            "settings menu must not own vertical clipping overflow"
+        )
+
+        items_match = re.search(
+            r"(^|\n)\s*#settingsMenu\s+\.settings-menu-items\s*\{[^}]*\}",
+            STYLE_CSS,
+            re.MULTILINE,
+        )
+        assert items_match is not None, "style.css must have a .settings-menu-items rule"
+        items_rules = items_match.group(0)
+        assert "overflow-y: auto" in items_rules, (
+            "settings menu items wrapper must own vertical scrolling"
+        )
+
     def test_panels_js_handles_providers_pane(self):
         """panels.js must handle the Providers pane in index building."""
         idx = PANELS_JS.find("function _buildSettingsIndex()")
@@ -169,7 +210,11 @@ class TestSettingsSearch:
         """Plugins pane entries must index plugin cards by plugin name."""
         idx = PANELS_JS.find("function _buildSettingsIndex()")
         assert idx >= 0, "_buildSettingsIndex not found"
-        body = PANELS_JS[idx:idx + 3500]
+        end = PANELS_JS.find("function _resolveSettingsField(entry)", idx)
+        body = PANELS_JS[idx:end]
+        assert "if (sectionKey === 'plugins')" in body, (
+            "_buildSettingsIndex should include a plugins section branch"
+        )
         assert "pane.querySelectorAll('.plugin-card')" in body, (
             "_buildSettingsIndex must scan plugin cards so Plugins search is not empty"
         )
@@ -214,8 +259,11 @@ class TestSettingsSearchReviewFixes:
         label[data-i18n]. Otherwise most checkbox settings are unsearchable."""
         idx = PANELS_JS.find("function _buildSettingsIndex")
         assert idx >= 0, "_buildSettingsIndex not found"
-        body = PANELS_JS[idx:idx + 1600]
-        assert "label[data-i18n], label [data-i18n], label" in body, (
+        body = PANELS_JS[idx:idx + 2600]
+        assert "field.querySelector(" in body, (
+            "field index query should run a querySelector against field"
+        )
+        assert "label[data-i18n]" in body, (
             "field index query must include 'label [data-i18n]' (span-in-label) "
             "and plain 'label' so toggle settings are searchable"
         )

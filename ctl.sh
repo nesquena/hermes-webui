@@ -29,6 +29,60 @@ ensure_home() {
   mkdir -p "${HERMES_HOME}" "${DEFAULT_STATE_DIR}"
 }
 
+_apply_env_file_safely() {
+  local env_file="$1"
+  local line key value
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line#${line%%[![:space:]]*}}"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    if [[ "${line}" =~ ^export[[:space:]]+(.+)$ ]]; then
+      line="${BASH_REMATCH[1]}"
+      line="${line#${line%%[![:space:]]*}}"
+    fi
+    [[ "${line}" == *=* ]] || continue
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key//[[:space:]]/}"
+    [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    case "${key}" in
+      UID | GID | EUID | EGID | PPID) continue ;;
+    esac
+
+    value="${value#${value%%[![:space:]]*}}"
+    if [[ "${value}" =~ ^\"(([^\"\\]|\\.)*)\"([[:space:]]*\#.*)?[[:space:]]*$ ]]; then
+      value="${BASH_REMATCH[1]}"
+      value="$(printf '%s' "$value" | awk '{
+        i = 1
+        len = length($0)
+        while (i <= len) {
+          c = substr($0, i, 1)
+          if (c == "\\" && i < len) {
+            nc = substr($0, i+1, 1)
+            if (nc == "n") printf "\n"
+            else if (nc == "r") printf "\r"
+            else if (nc == "t") printf "\t"
+            else if (nc == "\"") printf "\""
+            else if (nc == "\\") printf "\\"
+            else { printf "\\%s", nc }
+            i += 2
+          } else {
+            printf "%s", c
+            i++
+          }
+        }
+      }')"
+    elif [[ "${value}" =~ ^\'([^\']*)\'([[:space:]]*\#.*)?[[:space:]]*$ ]]; then
+      value="${BASH_REMATCH[1]}"
+    else
+      value="${value%%[[:space:]]\#*}"
+      value="${value%${value##*[![:space:]]}}"
+    fi
+
+    export "${key}=${value}"
+  done < "${env_file}"
+}
+
 _load_repo_dotenv_preserving_env() {
   [[ "${HERMES_WEBUI_NO_DOTENV:-0}" == "1" ]] && return 0
   local env_file="${REPO_ROOT}/.env"
@@ -40,7 +94,9 @@ _load_repo_dotenv_preserving_env() {
     line="${line#${line%%[![:space:]]*}}"
     [[ -z "${line}" || "${line}" == \#* || "${line}" != *=* ]] && continue
     key="${line%%=*}"
-    key="${key#export }"
+    if [[ "${key}" =~ ^export[[:space:]]+(.+)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+    fi
     key="${key//[[:space:]]/}"
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     # Skip shell-readonly names (UID/GID/EUID/EGID/PPID); re-exporting them
@@ -54,21 +110,50 @@ _load_repo_dotenv_preserving_env() {
     fi
   done < "${env_file}"
 
-  set -a
-  # Filter out shell-readonly vars (UID, GID, EUID, EGID, PPID) before
-  # sourcing.  docker-compose.yml's macOS instructions document
-  # `echo "UID=$(id -u)" >> .env`; under `set -euo pipefail` a raw
-  # `source .env` then aborts with "UID: readonly variable" before
-  # `ctl.sh status` can print anything.  Mirrors the guard start.sh uses.
-  local _ctl_env_filtered
-  _ctl_env_filtered="$(mktemp "${TMPDIR:-/tmp}/hermes-webui-ctl-env.XXXXXX")"
-  # shellcheck disable=SC2064
-  trap "rm -f '${_ctl_env_filtered}'" RETURN
-  grep -vE '^[[:space:]]*(export[[:space:]]+)?(UID|GID|EUID|EGID|PPID)=' "${env_file}" > "${_ctl_env_filtered}" || true
-  # shellcheck source=/dev/null
-  source "${_ctl_env_filtered}"
-  rm -f "${_ctl_env_filtered}"
-  set +a
+  _apply_env_file_safely "${env_file}"
+
+  local assignment
+  if [[ ${#preserved[@]} -gt 0 ]]; then
+    for assignment in "${preserved[@]}"; do
+      export "${assignment}"
+    done
+  fi
+}
+
+_load_hermes_dotenv() {
+  # Also load ~/.hermes/.env so that ${VAR} references in config.yaml can
+  # resolve against provider credentials defined in the Hermes env file.
+  # Repo .env takes precedence (loaded above); variables already exported
+  # into the shell environment (including those just set by repo .env) are
+  # captured in preserved[] before _apply_env_file_safely runs and are
+  # restored afterwards, so this acts as a fallback source for vars the
+  # repo .env did not define.
+  [[ "${HERMES_WEBUI_NO_DOTENV:-0}" == "1" ]] && return 0
+  local hermes_home="${HERMES_HOME:-${HOME}/.hermes}"
+  local hermes_env="${hermes_home}/.env"
+  [[ -f "${hermes_env}" ]] || return 0
+
+  local -a preserved=()
+  local line key value
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line#${line%%[![:space:]]*}}"
+    [[ -z "${line}" || "${line}" == \#* || "${line}" != *=* ]] && continue
+    key="${line%%=*}"
+    if [[ "${key}" =~ ^export[[:space:]]+(.+)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+    fi
+    key="${key//[[:space:]]/}"
+    [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    case "${key}" in
+      UID | GID | EUID | EGID | PPID) continue ;;
+    esac
+    if [[ -n "${!key+x}" ]]; then
+      value="${!key}"
+      preserved+=("${key}=${value}")
+    fi
+  done < "${hermes_env}"
+
+  _apply_env_file_safely "${hermes_env}"
 
   local assignment
   if [[ ${#preserved[@]} -gt 0 ]]; then
@@ -342,6 +427,7 @@ _launchd_webui_pid() {
 start_cmd() {
   ensure_home
   _load_repo_dotenv_preserving_env
+  _load_hermes_dotenv
   export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${DEFAULT_STATE_DIR}}"
   mkdir -p "${HERMES_WEBUI_STATE_DIR}"
   _parse_launch_binding "$@"
@@ -447,6 +533,7 @@ except Exception:
 status_cmd() {
   ensure_home
   _load_repo_dotenv_preserving_env
+  _load_hermes_dotenv
   _load_state_if_present
   local host="${HOST:-${HERMES_WEBUI_HOST:-127.0.0.1}}"
   local port="${PORT:-${HERMES_WEBUI_PORT:-8787}}"

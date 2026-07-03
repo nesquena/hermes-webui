@@ -155,6 +155,88 @@ def test_sidebar_state_db_overlay_preserves_numeric_actual_count():
     assert sessions[0]["actual_message_count"] == 5
 
 
+def test_sidebar_state_db_overlay_counts_subagent_child_5308():
+    """#5308: a delegated subagent child whose stale sidecar reports
+    message_count == 0 must receive its real state.db message count so the
+    front-end sidebar visibility predicate does not drop the row (the subagent
+    session vanishing regression). The overlay applies to source == 'subagent'
+    just like 'webui', while the subagent source classification is preserved.
+    """
+    import api.models as models
+
+    sid = "subagent_child_5308"
+    sessions = [
+        {
+            "session_id": sid,
+            "source_tag": "subagent",
+            "raw_source": "subagent",
+            "session_source": "other",
+            "relationship_type": "child_session",
+            "parent_session_id": "parent_abc",
+            "message_count": 0,
+            "actual_message_count": 0,
+            "last_message_at": 0,
+            "updated_at": 0,
+        }
+    ]
+
+    models._apply_sidebar_state_db_override_metadata(
+        sessions,
+        {
+            sid: {
+                "_state_db_source": "subagent",
+                "_state_db_message_count": 6,
+                "_state_db_last_message_at": 2002.0,
+            }
+        },
+    )
+
+    # Real state.db count is now overlaid (was 0) -> row survives the sidebar
+    # visibility predicate instead of vanishing.
+    assert sessions[0]["message_count"] == 6
+    assert sessions[0]["actual_message_count"] == 6
+    assert sessions[0]["last_message_at"] == 2002.0
+    # Subagent classification is preserved (source-tag reassignment stays
+    # WebUI-only) — the child does not get re-tagged as a webui session.
+    assert sessions[0]["source_tag"] == "subagent"
+    assert sessions[0].get("is_cli_session") is not False
+
+
+def test_sidebar_state_db_overlay_does_not_count_foreign_cli_source_5308():
+    """Guard the #5308 overlay scope: a non-webui, non-subagent foreign source
+    (e.g. a messaging/cron/tui CLI row) must NOT get the count overlay — only
+    WebUI-owned rows and delegated subagent children do.
+    """
+    import api.models as models
+
+    sid = "cron_row_5308"
+    sessions = [
+        {
+            "session_id": sid,
+            "source_tag": "cron",
+            "message_count": 0,
+            "actual_message_count": 0,
+            "last_message_at": 0,
+            "updated_at": 0,
+        }
+    ]
+
+    models._apply_sidebar_state_db_override_metadata(
+        sessions,
+        {
+            sid: {
+                "_state_db_source": "cron",
+                "_state_db_message_count": 9,
+                "_state_db_last_message_at": 3003.0,
+            }
+        },
+    )
+
+    # cron is neither webui nor subagent -> count overlay must NOT apply.
+    assert sessions[0]["message_count"] == 0
+    assert sessions[0]["actual_message_count"] == 0
+
+
 def test_tail_cancelled_partial_blocks_state_db_replay():
     from api.models import merge_session_messages_append_only
 

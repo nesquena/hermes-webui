@@ -417,6 +417,39 @@ def test_provider_catalog_preserves_dict_shaped_raw_key_lookup(monkeypatch):
     assert "another-model" in model_ids
 
 
+def test_provider_catalog_rejects_non_active_models_only_custom_provider(monkeypatch):
+    """A models-only custom provider config must NOT render when it is not the
+    active/configured provider (#5301 review finding: admitting any
+    models-only config re-opens the copilot-2 duplicate-alias regression)."""
+    _stub_hermes_cli(monkeypatch)
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
+
+    with _RestoreCfg():
+        _set_cfg({
+            "model": {
+                "default": "my-model",
+                "provider": "CLIPpoxy",
+            },
+            "providers": {
+                "CLIPpoxy": {
+                    "models": ["my-model"],
+                },
+                "OtherCustom": {
+                    "models": ["unrelated-model"],
+                },
+            },
+        })
+        config.invalidate_models_cache()
+
+        result = config.get_available_models()
+
+    groups = _groups_by_provider_id(result)
+    assert "clippoxy" in groups, f"Active models-only provider should render, got: {list(groups)}"
+    assert "othercustom" not in groups, (
+        f"Non-active models-only provider must not render as a phantom group, got: {list(groups)}"
+    )
+
+
 def test_provider_catalog_treats_malformed_provider_entry_as_unconfigured(monkeypatch):
     """Provider catalog raw-key lookup must ignore truth-y non-dict entries."""
     _stub_hermes_cli(monkeypatch)

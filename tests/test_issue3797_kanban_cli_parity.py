@@ -90,8 +90,9 @@ class TestWorkspacePathValidation:
         """Modal must disable workspace fields when editing to prevent confusion."""
         # The _kanbanSetTaskModalLabels function must disable fields during edit
         assert "_kanbanSetTaskModalLabels" in PANELS_JS
-        assert "workspaceKindEl.disabled = true" in PANELS_JS
-        assert "workspacePathEl.disabled = true" in PANELS_JS
+        assert "kanbanTaskModalWorkspaceKind" in PANELS_JS
+        assert "kanbanTaskModalWorkspacePath" in PANELS_JS
+        assert "el.disabled = disabled" in PANELS_JS
 
 
 class TestDependencyControls:

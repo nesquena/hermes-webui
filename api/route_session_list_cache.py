@@ -125,9 +125,22 @@ def _session_list_cache_key(
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
+    show_webhook_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
+    archived_limit: int | None = None,
+    archived_offset: int = 0,
 ) -> tuple:
+    normalized_archived_limit = None
+    if archived_limit is not None:
+        try:
+            normalized_archived_limit = max(0, int(archived_limit))
+        except (TypeError, ValueError):
+            normalized_archived_limit = None
+    try:
+        normalized_archived_offset = max(0, int(archived_offset or 0))
+    except (TypeError, ValueError):
+        normalized_archived_offset = 0
     return (
         _session_list_cache_profile_scope(active_profile),
         bool(all_profiles),
@@ -137,8 +150,11 @@ def _session_list_cache_key(
         bool(include_archived),
         bool(exclude_hidden),
         bool(visible_only),
+        bool(show_webhook_sessions),
         source_filter,
         sidebar_source,
+        normalized_archived_limit,
+        normalized_archived_offset,
     )
 
 
@@ -173,6 +189,25 @@ def _session_list_cache_get(
             return copy.deepcopy(payload), False
         _SESSIONS_CACHE.pop(key, None)
         return None, False
+
+
+def _session_list_cache_stale_reason(key: tuple) -> str | None:
+    """Return why an existing cache entry is stale, if it is stale."""
+    now = time.monotonic()
+    current_stamp = _session_list_cache_resolved_source_stamp(key)
+    with _SESSIONS_CACHE_LOCK:
+        entry = _SESSIONS_CACHE.get(key)
+        if not entry:
+            return None
+        ts, stamp, _payload = entry
+        if stamp != current_stamp:
+            return "source"
+        ttl = _SESSIONS_CACHE_TTL_SECONDS
+        if _session_list_cache_streaming_freeze_marker() is not None:
+            ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
+        if (now - ts) >= ttl:
+            return "age"
+        return None
 
 
 def _session_list_cache_set(key: tuple, payload: dict) -> None:

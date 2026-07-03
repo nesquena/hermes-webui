@@ -2,6 +2,7 @@
 
 import io
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -374,6 +375,62 @@ def test_routes_register_goal_endpoint_and_kickoff_stream():
     assert "goal_command_payload" in ROUTES_PY
     assert "kickoff_prompt" in ROUTES_PY
     assert "_start_chat_stream_for_session" in ROUTES_PY
+
+
+def test_chat_start_forwards_goal_related_to_gateway_worker(monkeypatch, tmp_path):
+    from api import routes
+    import api.turn_journal as turn_journal
+
+    class FakeSession:
+        session_id = "sid-goal-related-gateway"
+        active_stream_id = None
+        pending_started_at = 0.0
+        title = "Goal Chat"
+        profile = "default"
+
+    captured = {}
+
+    class FakeThread:
+        def __init__(self, *, target, args, kwargs, daemon):
+            captured["target"] = target
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            captured["daemon"] = daemon
+
+        def start(self):
+            captured["started"] = True
+
+    def fake_prepare(session, **kwargs):
+        session.pending_started_at = 123.0
+        session.title = "Goal Chat"
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda *args, **kwargs: threading.Lock())
+    monkeypatch.setattr(routes, "_active_stream_blocks_chat_start", lambda *args, **kwargs: False)
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", fake_prepare)
+    monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda *args, **kwargs: False)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *args, **kwargs: None)
+    monkeypatch.setattr(turn_journal, "append_turn_journal_event", lambda *args, **kwargs: {})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *args, **kwargs: True)
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+    monkeypatch.setattr(routes.uuid, "uuid4", lambda: SimpleNamespace(hex="goal-stream-id"))
+
+    response = routes._start_chat_stream_for_session(
+        FakeSession(),
+        msg="continue the goal",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="gpt-5.5",
+        model_provider="openai-codex",
+        goal_related=True,
+    )
+
+    assert response["stream_id"] == "goal-stream-id"
+    assert captured["target"] is routes._run_gateway_chat_streaming
+    assert captured["kwargs"]["goal_related"] is True
+    assert captured["kwargs"]["model_provider"] == "openai-codex"
+    assert captured["started"] is True
 
 
 def test_streaming_post_turn_goal_hook_surfaces_and_continues():

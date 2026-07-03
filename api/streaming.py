@@ -32,6 +32,7 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
+    unregister_stream_owner,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
@@ -50,6 +51,7 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
+    _evict_sessions_over_cap,
     get_state_db_session_messages,
     reconciled_state_db_messages_for_session,
 )
@@ -1307,6 +1309,43 @@ def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = 
         msg
         for msg in list(messages or [])
         if not _is_synthetic_max_iteration_summary_request(msg)
+    ]
+
+
+# Structured markers the Hermes Agent stamps on synthetic scaffolding turns that
+# drive its internal verify-before-finish loop. The agent appends BOTH a
+# synthetic assistant "premature done" answer AND a synthetic ``user`` nudge
+# (e.g. "[System: You edited code in this turn, but the workspace does not have
+# fresh passing verification evidence yet...]") to preserve role alternation for
+# the next API turn, and flags each with one of these keys. They exist only to
+# run the loop; they must never surface as visible user/assistant turns in the
+# WebUI transcript. This mirrors ``run_agent._EPHEMERAL_SCAFFOLDING_FLAGS`` on
+# the agent side (which keeps them out of the durable session store); WebUI
+# honors the same markers when building the visible transcript. Keep roughly in
+# sync with the agent set. (#5334; same class as #3320/#3821/#4373/#4875)
+_SYNTHETIC_CONTROL_MESSAGE_FLAGS = (
+    "_verification_stop_synthetic",
+    "_pre_verify_synthetic",
+)
+
+
+def _is_synthetic_control_message(message) -> bool:
+    """Return True for an Agent-internal synthetic scaffolding turn flagged by marker."""
+    return isinstance(message, dict) and any(
+        message.get(flag) for flag in _SYNTHETIC_CONTROL_MESSAGE_FLAGS
+    )
+
+
+def _drop_synthetic_control_messages(messages):
+    """Remove Agent-internal synthetic scaffolding turns from the WebUI transcript.
+
+    Honors the structured ``_verification_stop_synthetic`` / ``_pre_verify_synthetic``
+    markers the agent already sets, rather than string-matching the nudge copy.
+    """
+    return [
+        msg
+        for msg in list(messages or [])
+        if not _is_synthetic_control_message(msg)
     ]
 
 
@@ -3738,7 +3777,136 @@ def _is_reasoning_only_assistant_message(msg) -> bool:
     return _content_has_reasoning_only_parts(content)
 
 
-def _sanitize_messages_for_api(messages, *, cfg: dict = None):
+def _is_local_reasoning_replay_base_url(base_url: str | None) -> bool:
+    """Return True when a custom provider base URL confidently points at localhost."""
+    if not base_url:
+        return False
+    try:
+        from urllib.parse import urlsplit
+
+        raw = str(base_url or '').strip()
+        if not raw:
+            return False
+        parsed = urlsplit(raw)
+        if not parsed.hostname and '://' not in raw:
+            parsed = urlsplit(f"http://{raw}")
+        host = (parsed.hostname or '').strip().lower()
+    except Exception:
+        return False
+    return host in {'localhost', '127.0.0.1', '::1', 'localhost.localdomain'}
+
+
+def _should_strip_reasoning_content(
+    cfg: dict | None,
+    *,
+    mode: str | None = None,
+    effective_model: str | None = None,
+    effective_provider: str | None = None,
+    effective_base_url: str | None = None,
+) -> bool:
+    """Decide whether historical assistant reasoning_content should be stripped from model-facing history.
+
+    This is a provider/protocol decision, not a model-capability heuristic.
+    Local/generic backends (LM Studio, llama.cpp, Ollama, and custom localhost
+    OpenAI-compatible endpoints) do not require historical reasoning replay and
+    receive stale content when it's preserved. Unknown providers preserve by
+    default so replay does not break providers that require reasoning/tool-call
+    continuity.
+
+    Args:
+        cfg: Config dict from get_config(), expected to contain webui.reasoning_content_replay.
+        mode: Explicit override mode ("strip", "preserve", "auto"). If provided, bypasses config lookup.
+        effective_model: Runtime-resolved model for the current session/request.
+        effective_provider: Runtime-resolved provider for the current session/request.
+        effective_base_url: Runtime-resolved base URL for custom providers.
+
+    Returns:
+        True if reasoning_content should be stripped from sanitized output.
+        False if it should be preserved in sanitized output.
+    """
+    # Explicit mode override takes priority
+    if mode is not None:
+        return mode == "strip"
+
+    # Config lookup. Missing/invalid config preserves shipped behavior: do not
+    # strip reasoning_content unless config explicitly requests it or auto can
+    # identify a local/generic effective backend.
+    if cfg is None:
+        return False
+
+    webui_cfg = cfg.get("webui", {}) or {}
+    if not isinstance(webui_cfg, dict):
+        return False
+
+    replay_mode = webui_cfg.get("reasoning_content_replay")
+    if not isinstance(replay_mode, str):
+        return False
+
+    normalized = replay_mode.strip().lower()
+
+    if normalized == "preserve":
+        return False
+    if normalized == "strip":
+        return True
+    if normalized == "auto":
+        # Auto mode: prefer runtime-resolved provider/model because profile
+        # defaults may differ from a per-session/request override.
+        model_cfg = cfg.get("model", {}) or {}
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
+
+        provider_id = str(effective_provider or model_cfg.get("provider", "") or "").strip().lower()
+        model_id = str(
+            effective_model or model_cfg.get("default") or model_cfg.get("name") or ""
+        ).strip().lower()
+        base_url = effective_base_url or model_cfg.get("base_url")
+
+        if not provider_id:
+            return False
+
+        # Known providers that require historical reasoning_content replay:
+        # - DeepSeek thinking mode distinguishes normal history from tool-call reasoning chains
+        # - Anthropic Claude 4+/3.7+ uses structured reasoning in tool-use contexts
+        # - OpenAI GPT-5+/o-series requires reasoning replay for tool-use continuity
+        if provider_id == "deepseek":
+            return False  # preserve for DeepSeek
+
+        if provider_id == "anthropic" and model_id.startswith("claude"):
+            return False  # preserve for Claude models
+
+        if provider_id == "openai":
+            # Preserve for GPT-5+ and o-series (not GPT-4o, etc.)
+            # Use exact match + dash-prefixed suffix to avoid broad substring matches.
+            _is_reasoning_model = (
+                model_id == "gpt-5"
+                or model_id.startswith("gpt-5-")
+                or model_id in {"o1", "o3", "o4"}
+                or model_id.startswith(("o1-", "o3-", "o4-"))
+            )
+            if _is_reasoning_model:
+                return False  # preserve for reasoning-capable OpenAI models
+
+        if provider_id in {"lmstudio", "ollama", "llamacpp", "llama.cpp"}:
+            return True
+
+        if provider_id == "custom" or provider_id.startswith("custom:"):
+            return _is_local_reasoning_replay_base_url(base_url)
+
+        # Unknown/cloud providers preserve by default.
+        return False
+
+    # Unknown mode -- preserve default behavior.
+    return False
+
+
+def _sanitize_messages_for_api(
+    messages,
+    *,
+    cfg: dict = None,
+    effective_model: str | None = None,
+    effective_provider: str | None = None,
+    effective_base_url: str | None = None,
+):
     """Return a deep copy of messages with only API-safe fields.
 
     The webui stores extra metadata on messages (attachments, timestamp, _ts)
@@ -3804,6 +3972,18 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        # Provider-aware reasoning_content stripping from model-facing history.
+        # Historical assistant reasoning_content is stripped only when the user
+        # explicitly requests strip mode or auto mode identifies a local/generic
+        # effective backend.
+        if msg.get('role') == 'assistant' and 'reasoning_content' in sanitized:
+            if _should_strip_reasoning_content(
+                cfg,
+                effective_model=effective_model,
+                effective_provider=effective_provider,
+                effective_base_url=effective_base_url,
+            ):
+                del sanitized['reasoning_content']
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
         if 'content' in sanitized:
@@ -4799,6 +4979,15 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         m for m in list(previous_display or [])
         if not _is_context_compression_marker(m)
     ]
+    # Drop Hermes Agent internal verify-loop scaffolding (synthetic "premature
+    # done" answer + the "[System: ...verification evidence...]" nudge) before
+    # it can become a visible user/assistant turn. The agent flags these with
+    # structured markers (_verification_stop_synthetic / _pre_verify_synthetic)
+    # and already keeps them out of its own durable store; honor the same
+    # markers here so they never leak into the WebUI transcript. Filter all
+    # three inputs consistently so prefix/delta detection below stays aligned.
+    # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
+    previous_display = _drop_synthetic_control_messages(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -4825,6 +5014,11 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     previous_display = _deduped
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
+    # Same marker filter for the model-history inputs: the synthetic verify-loop
+    # answer/nudge live in the agent's returned messages and prior context, and
+    # would otherwise slip into the merged transcript as a real delta. (#5334)
+    previous_context = _drop_synthetic_control_messages(previous_context)
+    result_messages = _drop_synthetic_control_messages(result_messages)
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
@@ -5120,23 +5314,16 @@ def _session_lacks_final_assistant_answer(messages) -> bool:
     return True
 
 
-def _merged_transcript_lacks_final_assistant_answer(
+def _turn_transcript_lacks_final_assistant_answer(
+    merged_messages,
     previous_display,
-    previous_context,
-    result_messages,
     msg_text,
     source: str = "webui",
     drop_replayed_assistant: bool = False,
 ) -> bool:
-    """Return True when the current turn still lacks a final assistant answer."""
+    """Return True when an already-merged transcript still lacks a final assistant answer."""
+    merged_messages = list(merged_messages or [])
     previous_display = list(previous_display or [])
-    merged_messages = _merge_display_messages_after_agent_result(
-        previous_display,
-        previous_context,
-        _restore_reasoning_metadata(previous_display, result_messages),
-        msg_text,
-        source=source,
-    )
     current_user_idx = _find_current_user_turn(merged_messages, msg_text)
     if current_user_idx is None or current_user_idx < len(previous_display):
         # The active turn lives after the durable transcript boundary. If the
@@ -5176,6 +5363,32 @@ def _merged_transcript_lacks_final_assistant_answer(
             if _message_identity(msg) != current_user_key or msg is merged_messages[current_user_idx]
         ]
     return _session_lacks_final_assistant_answer(filtered_messages)
+
+
+def _merged_transcript_lacks_final_assistant_answer(
+    previous_display,
+    previous_context,
+    result_messages,
+    msg_text,
+    source: str = "webui",
+    drop_replayed_assistant: bool = False,
+) -> bool:
+    """Return True when the current turn still lacks a final assistant answer."""
+    previous_display = list(previous_display or [])
+    merged_messages = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        _restore_reasoning_metadata(previous_display, result_messages),
+        msg_text,
+        source=source,
+    )
+    return _turn_transcript_lacks_final_assistant_answer(
+        merged_messages,
+        previous_display,
+        msg_text,
+        source=source,
+        drop_replayed_assistant=drop_replayed_assistant,
+    )
 
 
 def _agent_result_terminal_failure(result) -> bool:
@@ -6056,6 +6269,10 @@ def _run_agent_streaming(
     """
     q = STREAMS.get(stream_id)
     if q is None:
+        # The stream was cancelled before the worker started; the route layer
+        # already registered the stream owner, so release it here to avoid
+        # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
+        unregister_stream_owner(stream_id)
         return
     register_active_run(
         stream_id,
@@ -6477,15 +6694,35 @@ def _run_agent_streaming(
         s = get_session(session_id)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
-        s.model = model
+        _last_persisted_model = None
+        _last_persisted_provider = None
+        _turn_owns_persisted_model = False
         provider_context = (
             str(model_provider).strip().lower()
             if model_provider is not None
             else getattr(s, "model_provider", None)
         )
-        s.model_provider = provider_context or None
-
+        provider_context = str(provider_context).strip().lower() if provider_context else None
         _agent_lock = _get_session_agent_lock(session_id)
+        # #4251: the route layer already persisted this turn's model under the
+        # session lock before dispatch, so a mismatch here means a newer picker
+        # write won the race and must not be clobbered by the worker thread.
+        with _agent_lock:
+            _last_persisted_model = getattr(s, "model", None)
+            _last_persisted_provider = getattr(s, "model_provider", None)
+            if _last_persisted_provider is not None:
+                _last_persisted_provider = str(_last_persisted_provider).strip().lower() or None
+            _persisted_model_is_empty = _last_persisted_model in (None, "")
+            _provider_matches = _last_persisted_provider in (None, provider_context)
+            if _persisted_model_is_empty or (
+                _last_persisted_model == model and _provider_matches
+            ):
+                s.model = model
+                s.model_provider = provider_context
+                _last_persisted_model = model
+                _last_persisted_provider = provider_context
+                _turn_owns_persisted_model = True
+
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
@@ -6525,9 +6762,21 @@ def _run_agent_streaming(
             profile_home=_profile_home,
             has_profile=bool(getattr(s, "profile", None)),
         )
-        s.model_provider = provider_context
-        if _repaired and model != (s.model or ""):
-            s.model = model
+        # #4251: only apply the profile-repair persistence if this turn still
+        # owns the session model/provider pair it last wrote.
+        provider_context = str(provider_context).strip().lower() if provider_context else None
+        with _agent_lock:
+            _current_provider = getattr(s, "model_provider", None)
+            if _current_provider is not None:
+                _current_provider = str(_current_provider).strip().lower() or None
+            if (
+                _turn_owns_persisted_model
+                and getattr(s, "model", None) == _last_persisted_model
+                and _current_provider == _last_persisted_provider
+            ):
+                s.model_provider = provider_context
+                if _repaired and model != (s.model or ""):
+                    s.model = model
 
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
@@ -7800,7 +8049,13 @@ def _run_agent_streaming(
             _run_conversation_kwargs = dict(
                 user_message=user_message,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                conversation_history=_sanitize_messages_for_api(
+                    _previous_context_messages,
+                    cfg=_cfg,
+                    effective_model=resolved_model,
+                    effective_provider=resolved_provider,
+                    effective_base_url=resolved_base_url,
+                ),
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
@@ -8044,8 +8299,7 @@ def _run_agent_streaming(
                                 )
                         SESSIONS[new_sid] = s
                         SESSIONS.move_to_end(new_sid)
-                        while len(SESSIONS) > SESSIONS_MAX:
-                            SESSIONS.popitem(last=False)
+                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
                     # Migrate the per-session lock: alias new_sid to the held
                     # _agent_lock reference directly (not via old_sid lookup),
                     # then remove the old_sid entry to prevent a leak.
@@ -8195,7 +8449,13 @@ def _run_agent_streaming(
                                 _heal_kwargs = dict(
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
-                                    conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                                    conversation_history=_sanitize_messages_for_api(
+                                        _previous_context_messages,
+                                        cfg=_cfg,
+                                        effective_model=resolved_model,
+                                        effective_provider=resolved_provider,
+                                        effective_base_url=resolved_base_url,
+                                    ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                 )
@@ -9254,7 +9514,13 @@ def _run_agent_streaming(
                         _heal_kwargs2 = dict(
                             user_message=user_message,
                             system_message=workspace_system_msg,
-                            conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                            conversation_history=_sanitize_messages_for_api(
+                                _previous_context_messages,
+                                cfg=_cfg,
+                                effective_model=resolved_model,
+                                effective_provider=resolved_provider,
+                                effective_base_url=resolved_base_url,
+                            ),
                             task_id=session_id,
                             persist_user_message=msg_text,
                         )

@@ -253,6 +253,16 @@ def test_docker_init_excludes_egg_info_during_staging():
         "rsync staging must --exclude='__pycache__' to keep the copy minimal."
     )
 
+    assert "--exclude='.playwright'" in stage_block, (
+        "rsync staging must --exclude='.playwright' so unreadable Playwright "
+        "browser dependency files (e.g. deb.deps, rpm.deps) don't cause "
+        "rsync error code 23 and kill container startup."
+    )
+    assert ".playwright" in stage_block, (
+        "Both rsync (--exclude) and cp-fallback (rm -rf) must handle "
+        ".playwright so the build doesn't choke on unreadable browser files."
+    )
+
 
 def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
     """Regression test for the docker-init "could not create hermes_agent.egg-info:

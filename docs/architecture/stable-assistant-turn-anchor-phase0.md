@@ -309,9 +309,13 @@ must not compete with an anchor-owned turn.
 | Historical / non-anchor transcripts | No anchor owner is available. | Raw `content[]`, persisted `session.tool_calls`, role=`tool` rows, and partial tool-call snapshots continue to recover visible tool/prose history. | None. These paths remain until replay/runtime-journal coverage proves the same transcript shapes hydrate through anchors. |
 | Live reattach / session switch | `renderLiveAnchorActivityScene()` consumes the projected live scene, and session switch first attempts runtime-journal anchor scene restore. | Saved live DOM snapshots and `INFLIGHT` tool replay. | Snapshot fallback only runs when no usable live anchor scene can be rendered. |
 
-This matrix is an audit baseline, not permission to delete fallbacks. Fallback
-removal should wait for replay/runtime-journal parity tests that prove all
-supported settled transcript sources hydrate through anchors.
+This matrix is the current settled-render contract, backed by runtime-journal
+hydration parity and behavior-level renderer ownership coverage. Fallback paths
+are compatibility-only rebuilds for historical or genuinely non-anchor
+transcripts, and the renderer must gate them by explicit raw transcript indexes
+so object identity or duplicate message references cannot let fallback rows
+compete with an anchor-owned turn. Removing a compatibility path still requires
+new evidence that the supported transcript shape hydrates through anchors.
 
 ## Source Event Classification
 

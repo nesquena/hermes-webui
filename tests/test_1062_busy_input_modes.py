@@ -1,10 +1,10 @@
-"""Regression tests for busy_input_mode (PR #1062, closes #720).
+"""Regression tests for default_message_mode (PR #1062, closes #720).
 
 Pins the wiring for the three modes (queue / interrupt / steer):
 - The setting key + default + enum validation in api/config.py
 - Three slash commands registered in static/commands.js
-- send()'s busy branch reads window._busyInputMode and dispatches
-- Boot initializes window._busyInputMode from settings
+- send()'s busy branch reads window._defaultMessageMode and dispatches
+- Boot initializes window._defaultMessageMode from settings
 - 17 new i18n keys present in all 6 locale blocks
 
 Issue: #720 (configurable busy-input behaviour)
@@ -27,20 +27,20 @@ I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 class TestBusyInputModeSetting:
     """The new setting key must be registered with a default and enum validator."""
 
-    def test_default_is_queue(self):
-        """Default value preserves existing queue behaviour for users who don't touch the setting."""
-        assert '"busy_input_mode": "queue"' in CONFIG_PY, (
-            "_DEFAULT_SETTINGS must include busy_input_mode='queue' so existing users see no change"
+    def test_default_is_steer(self):
+        """Default value resolves to steer for users who don't touch the setting."""
+        assert '"default_message_mode": "steer"' in CONFIG_PY, (
+            "_DEFAULT_SETTINGS must include default_message_mode='steer' so new users see the steer default"
         )
 
     def test_enum_validator_present(self):
-        """_SETTINGS_ENUM_KEYS must validate busy_input_mode against {queue, interrupt, steer}."""
+        """_SETTINGS_ENUM_KEYS must validate default_message_mode against {queue, interrupt, steer}."""
         # Find the entry inside the enum dict (a set literal as the value)
-        idx = CONFIG_PY.find('"busy_input_mode": {')
-        assert idx >= 0, "busy_input_mode entry missing from _SETTINGS_ENUM_KEYS"
+        idx = CONFIG_PY.find('"default_message_mode": {')
+        assert idx >= 0, "default_message_mode entry missing from _SETTINGS_ENUM_KEYS"
         block = CONFIG_PY[idx:idx + 200]
         assert '"queue"' in block and '"interrupt"' in block and '"steer"' in block, (
-            "busy_input_mode enum must contain {queue, interrupt, steer}"
+            "default_message_mode enum must contain {queue, interrupt, steer}"
         )
 
 
@@ -164,7 +164,7 @@ class TestBusySendButton:
             "the single primary button should remain visible while busy; it becomes Stop when there is no draft"
         )
 
-    def test_composer_primary_action_accounts_for_all_busy_input_modes(self):
+    def test_composer_primary_action_accounts_for_all_default_message_modes(self):
         idx = UI_JS.find("function getComposerPrimaryAction()")
         assert idx >= 0, "getComposerPrimaryAction() not found"
         body = UI_JS[idx:UI_JS.find("function _setComposerPrimaryButtonIcon", idx)]
@@ -172,9 +172,9 @@ class TestBusySendButton:
         assert "return 'queue'" in body, "queue mode and unavailable steer/interrupt fallbacks must map to queue"
         assert "return 'interrupt'" in body, "interrupt mode with an active stream must map to interrupt"
         assert "return 'steer'" in body, "steer mode with active stream support must map to steer"
-        assert "window._busyInputMode||'queue'" in body, "helper must respect the Busy input mode setting"
+        assert "window._defaultMessageMode||'steer'" in body, "helper must respect the Default message mode setting"
         assert "_getExplicitBusyCommandAction(msg&&msg.value)" in body, (
-            "explicit /queue, /interrupt, and /steer drafts must override the Busy input mode for button visuals"
+            "explicit /queue, /interrupt, and /steer drafts must override the Default message mode for button visuals"
         )
 
     def test_explicit_busy_commands_override_button_visual_action(self):
@@ -263,16 +263,16 @@ class TestBusySendButton:
 
 
 class TestSendBusyBranchDispatch:
-    """send()'s busy block must read window._busyInputMode and branch accordingly."""
+    """send()'s busy block must read window._defaultMessageMode and branch accordingly."""
 
-    def test_send_reads_busy_input_mode(self):
-        # The send() function should read window._busyInputMode in the busy block
+    def test_send_reads_default_message_mode(self):
+        # The send() function should read window._defaultMessageMode in the busy block
         send_idx = MESSAGES_JS.find("async function send(")
         assert send_idx >= 0
         # Look in the first ~3000 chars of send() for the busy mode read
         send_body = MESSAGES_JS[send_idx:send_idx + 3000]
-        assert "_busyInputMode" in send_body, (
-            "send() must read window._busyInputMode in the S.busy branch"
+        assert "_defaultMessageMode" in send_body, (
+            "send() must read window._defaultMessageMode in the S.busy branch"
         )
 
     def test_send_calls_cancel_stream_on_interrupt(self):
@@ -300,7 +300,7 @@ class TestSendBusyBranchDispatch:
         """
         send_idx = MESSAGES_JS.find("async function send(")
         assert send_idx >= 0, "send() not found"
-        steer_idx = MESSAGES_JS.find("busyMode==='steer'", send_idx)
+        steer_idx = MESSAGES_JS.find("defaultMessageMode==='steer'", send_idx)
         assert steer_idx >= 0, "busy steer branch not found"
         branch = MESSAGES_JS[steer_idx:steer_idx + 900]
         assert "const _steerDelivered=await _trySteer" in branch
@@ -324,7 +324,7 @@ class TestSendBusyBranchDispatch:
         assert busy_start >= 0, "busy block not found"
         # The intercept must appear BEFORE the busyMode assignment
         intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
-        busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
+        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         assert intercept_idx >= 0, (
             "send() must intercept /steer /interrupt /queue /terminal /goal /yolo before the busyMode "
             "routing block — otherwise they queue instead of executing immediately"
@@ -345,7 +345,7 @@ class TestSendBusyBranchDispatch:
         intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
         assert intercept_idx >= 0
         # Get the intercept block (up to the next busyMode assignment)
-        busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
+        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
         assert "_bc.fn(_pc.args)" in intercept_block, (
             "The intercept must call the command handler directly via _bc.fn(_pc.args)"
@@ -365,7 +365,7 @@ class TestSendBusyBranchDispatch:
         send_idx = MESSAGES_JS.find("async function send(")
         busy_start = MESSAGES_JS.find("S.busy||compressionRunning", send_idx)
         intercept_idx = MESSAGES_JS.find("'steer','interrupt','queue','terminal','goal','yolo'", busy_start)
-        busymode_idx = MESSAGES_JS.find("_busyInputMode||'queue'", busy_start)
+        busymode_idx = MESSAGES_JS.find("_defaultMessageMode||'steer'", busy_start)
         intercept_block = MESSAGES_JS[intercept_idx:busymode_idx]
         clear_idx = intercept_block.find("$('msg').value=''")
         await_idx = intercept_block.find("await _bc.fn")
@@ -384,23 +384,36 @@ class TestSendBusyBranchDispatch:
 
 class TestBootAndPanelsWiring:
     def test_boot_init_default_path(self):
-        """Boot success path initialises window._busyInputMode from settings."""
-        assert "window._busyInputMode=(s.busy_input_mode||'queue')" in BOOT_JS
+        """Boot success path initialises window._defaultMessageMode from settings.
+
+        #5167/#5170: the assignment routes through _persistDefaultMessageMode()
+        so the resolved value is mirrored into localStorage (the synchronous
+        source the eager default reads) while still being the single source of
+        truth once /api/settings resolves. #5145 renamed the setting and reads
+        the legacy busy_input_mode key as a back-compat fallback.
+        """
+        assert "window._defaultMessageMode=_persistDefaultMessageMode(s.default_message_mode||s.busy_input_mode)" in BOOT_JS
 
     def test_boot_init_fallback_path(self):
-        """Boot fallback path (settings load failed) initialises to safe default."""
-        # The fallback should set window._busyInputMode='queue'
-        assert "window._busyInputMode='queue'" in BOOT_JS
+        """Boot fallback path (settings load failed) keeps the persisted preference.
+
+        #5167/#5170: instead of hard-clobbering to a default, the catch path
+        re-reads the persisted mirror so a saved 'steer'/'interrupt'/'queue'
+        still applies when the server is unreachable. This must NOT regress to
+        a hardcoded default that ignores the saved choice.
+        """
+        assert "window._defaultMessageMode=_readPersistedDefaultMessageMode()" in BOOT_JS
 
     def test_panels_load_save_apply(self):
-        assert "settingsBusyInputMode" in PANELS_JS, "panels.js must load the setting"
-        assert "body.busy_input_mode" in PANELS_JS, "saveSettings must include busy_input_mode in body"
-        assert "window._busyInputMode=body.busy_input_mode" in PANELS_JS, (
-            "_applySavedSettingsUi must propagate busy_input_mode to the global"
+        assert "settingsDefaultMessageMode" in PANELS_JS, "panels.js must load the setting"
+        assert "body.default_message_mode" in PANELS_JS, "saveSettings must include default_message_mode in body"
+        assert "_persistDefaultMessageMode(body.default_message_mode||body.busy_input_mode)" in PANELS_JS, (
+            "_applySavedSettingsUi must propagate default_message_mode to the global "
+            "and persist it (so the next reload's eager default honors the save) (#5167/#5170)"
         )
 
     def test_index_html_dropdown_has_three_options(self):
-        idx = INDEX_HTML.find('id="settingsBusyInputMode"')
+        idx = INDEX_HTML.find('id="settingsDefaultMessageMode"')
         assert idx >= 0
         block = INDEX_HTML[idx:idx + 800]
         assert 'value="queue"' in block
@@ -426,11 +439,11 @@ class TestI18nKeys:
         "cmd_steer_fallback",
         "busy_steer_fallback",
         "busy_interrupt_confirm",
-        "settings_label_busy_input_mode",
-        "settings_desc_busy_input_mode",
-        "settings_busy_input_mode_queue",
-        "settings_busy_input_mode_interrupt",
-        "settings_busy_input_mode_steer",
+        "settings_label_default_message_mode",
+        "settings_desc_default_message_mode",
+        "settings_default_message_mode_queue",
+        "settings_default_message_mode_interrupt",
+        "settings_default_message_mode_steer",
     ]
 
     def test_each_key_appears_at_least_six_times(self):

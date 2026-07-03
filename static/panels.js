@@ -22,8 +22,11 @@ let _kanbanEventSourceFailures = 0;
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
+let _currentCronDetailKey = '';
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _showAllCronProfiles = false;
+let _cronOtherProfileCount = 0;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -59,7 +62,7 @@ function syncAppTitlebar() {
   if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
     mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
     const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
-    if (typeof t === 'function') subText = t('n_messages', vis.length);
+    subText = String(vis.length);
     sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
     // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
     if (/^webui$/i.test(sourceLabel)) sourceLabel = '';
@@ -152,6 +155,102 @@ function syncAppTitlebar() {
       inp.focus();
       inp.select();
     };
+  }
+
+  // Dismiss stale popover on session/panel switch
+  const _existingPop = document.querySelector('.app-titlebar-title-popover');
+  if (_existingPop) {
+    _existingPop.remove(); titleEl._titlePopover = null;
+    if (titleEl._popoverOutsideHandler) {
+      document.removeEventListener('click', titleEl._popoverOutsideHandler, true);
+      titleEl._popoverOutsideHandler = null;
+    }
+  }
+
+  // Mobile touch interactions
+  if ('ontouchstart' in window) {
+    // Tap-to-reveal full title popover — wired once per element lifetime
+    if (!titleEl._mobileTouchWired) {
+      titleEl._mobileTouchWired = true;
+      titleEl._titlePopover = null;
+      const _dismissTitlePopover = () => {
+        if (titleEl._titlePopover) { titleEl._titlePopover.remove(); titleEl._titlePopover = null; }
+        if (titleEl._popoverOutsideHandler) {
+          document.removeEventListener('click', titleEl._popoverOutsideHandler, true);
+          titleEl._popoverOutsideHandler = null;
+        }
+      };
+      titleEl.addEventListener('click', function _onTitleClick(e) {
+        if (_renamingAppTitlebar) return;
+        if (titleEl._titlePopover) {
+          _dismissTitlePopover();
+          return;
+        }
+        e.stopPropagation();
+        const pop = document.createElement('div');
+        pop.className = 'app-titlebar-title-popover';
+        pop.textContent = (S && S.session && S.session.title) ||
+          (typeof t === 'function' ? t('untitled') : 'Untitled');
+        document.body.appendChild(pop);
+        const rect = titleEl.getBoundingClientRect();
+        pop.style.top = (rect.bottom + 6) + 'px';
+        pop.style.left = Math.max(8, rect.left) + 'px';
+        pop.style.maxWidth = (window.innerWidth - 16) + 'px';
+        titleEl._titlePopover = pop;
+        const _outside = titleEl._popoverOutsideHandler = (ev) => {
+          if (!pop.contains(ev.target) && ev.target !== titleEl) {
+            _dismissTitlePopover();
+            document.removeEventListener('click', _outside, true);
+            titleEl._popoverOutsideHandler = null;
+          }
+        };
+        setTimeout(() => document.addEventListener('click', _outside, true), 0);
+      }, { passive: true });
+    }
+
+    // Long-press → session action menu (re-evaluated each sync so late-arriving sessions attach)
+    if (!titleEl._mobileLpWired && panel === 'chat' && S && S.session &&
+        !S.session.read_only && !S.session.is_read_only &&
+        typeof _openSessionActionMenu === 'function') {
+      titleEl._mobileLpWired = true;
+      let _lpTimer = null;
+      let _lpHandled = false;
+      let _lpStartX = 0, _lpStartY = 0;
+      const _lpDelay = typeof SESSION_LONG_PRESS_DELAY_MS !== 'undefined' ?
+        SESSION_LONG_PRESS_DELAY_MS : 400;
+      titleEl.addEventListener('touchstart', (e) => {
+        const touch = e.changedTouches && e.changedTouches[0];
+        if (!touch) return;
+        if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; }
+        _lpHandled = false; _lpStartX = touch.clientX; _lpStartY = touch.clientY;
+        titleEl.classList.add('long-pressing');
+        _lpTimer = setTimeout(() => {
+          _lpTimer = null;
+          if (_lpHandled) return;
+          _lpHandled = true;
+          titleEl.classList.remove('long-pressing');
+          _openSessionActionMenu(S.session, titleEl);
+        }, _lpDelay);
+      }, { passive: true });
+      titleEl.addEventListener('touchmove', (e) => {
+        if (!_lpTimer) return;
+        const touch = e.changedTouches && e.changedTouches[0];
+        if (!touch) return;
+        if (Math.abs(touch.clientX - _lpStartX) > 10 || Math.abs(touch.clientY - _lpStartY) > 10) {
+          clearTimeout(_lpTimer); _lpTimer = null;
+          titleEl.classList.remove('long-pressing');
+        }
+      }, { passive: true });
+      titleEl.addEventListener('touchend', (e) => {
+        clearTimeout(_lpTimer); _lpTimer = null;
+        titleEl.classList.remove('long-pressing');
+        if (_lpHandled) { e.preventDefault(); e.stopPropagation(); }
+      }, { passive: false });
+      titleEl.addEventListener('touchcancel', () => {
+        clearTimeout(_lpTimer); _lpTimer = null; _lpHandled = false;
+        titleEl.classList.remove('long-pressing');
+      }, { passive: true });
+    }
   }
 }
 
@@ -440,6 +539,57 @@ function _cronProfileTitle(profile){
   return t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time';
 }
 
+function _cronOwnerProfileName(job){
+  return _cronProfileName(job && (job.owner_profile ?? job.profile));
+}
+
+function _cronJobKey(job){
+  return `${_cronOwnerProfileName(job)}\u0000${String(job && job.id || '')}`;
+}
+
+function _cronItemId(job){
+  return 'cron-' + encodeURIComponent(_cronJobKey(job));
+}
+
+function _cronDetailMatches(jobId, detailKey){
+  return !!(
+    detailKey &&
+    _currentCronDetail &&
+    !_currentCronDetail.read_only &&
+    String(_currentCronDetail.id) === String(jobId) &&
+    _currentCronDetailKey === detailKey &&
+    _cronJobKey(_currentCronDetail) === detailKey
+  );
+}
+
+function _findCronJob(jobOrId){
+  if (jobOrId && typeof jobOrId === 'object') return jobOrId;
+  const id = String(jobOrId || '');
+  if (!_cronList || !id) return null;
+  return _cronList.find(j => !j.read_only && String(j.id) === id) ||
+    _cronList.find(j => String(j.id) === id) ||
+    null;
+}
+
+function _appendCronProfileToggle(parent){
+  if (!parent || (!_showAllCronProfiles && _cronOtherProfileCount <= 0)) return;
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'padding:10px 0 0';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sm-btn';
+  btn.style.cssText = 'width:100%;justify-content:center';
+  btn.textContent = _showAllCronProfiles
+    ? 'Show active profile only'
+    : `Show ${_cronOtherProfileCount} from other profiles`;
+  btn.onclick = async () => {
+    _showAllCronProfiles = !_showAllCronProfiles;
+    await loadCrons();
+  };
+  wrap.appendChild(btn);
+  parent.appendChild(wrap);
+}
+
 async function loadCronProfiles(){
   if (_cronProfilesCache) return _cronProfilesCache;
   try {
@@ -561,12 +711,13 @@ async function loadCrons(animate) {
   }
   try {
     await loadCronProfiles();
-    const data = await api('/api/crons');
+    const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
+    const data = await api('/api/crons' + allProfilesQS);
     _cronList = data.jobs || [];
-    if (!_cronList.length) {
-      box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('cron_no_jobs'))}</div>`;
-      if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
-      return;
+    _cronOtherProfileCount = Number(data.other_profile_count || 0);
+    if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
+      _showAllCronProfiles = false;
+      _cronOtherProfileCount = 0;
     }
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
@@ -581,23 +732,40 @@ async function loadCrons(animate) {
     const _appendCronItem = (parent, { job, status }) => {
       const item = document.createElement('div');
       item.className = 'cron-item';
-      item.id = 'cron-' + job.id;
-      const isNewRun = _cronNewJobIds.has(String(job.id));
+      item.id = _cronItemId(job);
+      if (job.read_only) {
+        item.classList.add('readonly');
+        item.style.opacity = '0.78';
+      }
+      const isNewRun = !job.read_only && _cronNewJobIds.has(String(job.id));
       const isAgentMode = !job.no_agent;
-      const profileLabel = _cronProfileLabel(job.profile);
-      const profileTitle = _cronProfileTitle(job.profile);
+      const ownerProfileLabel = _cronProfileLabel(_cronOwnerProfileName(job));
+      const ownerProfileTitle = `Owner profile: ${ownerProfileLabel}`;
+      const readOnlyBadge = job.read_only
+        ? '<span class="cron-status disabled" title="Read-only from another profile">Read-only</span>'
+        : '';
       item.innerHTML = `
         <div class="cron-header">
           ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
           ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : `<span class="cron-script-badge" title="${esc(t('cron_script_badge_title') || 'Script job (no agent)')}">📜</span>`}
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
-          <span class="cron-profile-badge" title="${esc(profileTitle)}">${esc(profileLabel)}</span>
+          <span class="cron-profile-badge" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
+          ${readOnlyBadge}
         </div>`;
-      item.onclick = () => openCronDetail(job.id, item);
-      if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
+      item.onclick = () => openCronDetail(job, item);
+      if (_currentCronDetailKey && _currentCronDetailKey === _cronJobKey(job)) item.classList.add('active');
       parent.appendChild(item);
     };
+    if (!_cronList.length) {
+      const emptyText = (!_showAllCronProfiles && _cronOtherProfileCount > 0)
+        ? 'No cron jobs in the active profile.'
+        : (t('cron_no_jobs') || 'No jobs yet');
+      box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(emptyText)}</div>`;
+      _appendCronProfileToggle(box);
+      if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
+      return;
+    }
     for (const entry of _activeJobs) _appendCronItem(box, entry);
     if (_pausedJobs.length) {
       let collapsed = true;
@@ -620,9 +788,10 @@ async function loadCrons(animate) {
       for (const entry of _pausedJobs) _appendCronItem(inner, entry);
       box.appendChild(details);
     }
+    _appendCronProfileToggle(box);
     // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
-      const refreshed = _cronList.find(j => j.id === _currentCronDetail.id);
+      const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
       if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
@@ -725,6 +894,7 @@ function _cronAgentPromptCardHtml(job){
 
 function _renderCronDetail(job){
   _currentCronDetail = job;
+  _currentCronDetailKey = _cronJobKey(job);
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -737,6 +907,7 @@ function _renderCronDetail(job){
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
   const isNoAgent = _isCronScriptJob(job);
+  const isReadOnly = !!job.read_only;
   const cronJobMode = _cronModeLabel(job);
   const modelProvider =
     job.provider && job.model ? `${esc(job.provider)}/${esc(job.model)}` :
@@ -745,12 +916,16 @@ function _renderCronDetail(job){
     isNoAgent ? '' : esc(t('cron_model_use_default') || 'Use profile default');
   const profileLabel = _cronProfileLabel(job.profile);
   const profileTitle = _cronProfileTitle(job.profile);
+  const ownerProfileName = _cronOwnerProfileName(job);
+  const ownerProfileLabel = _cronProfileLabel(ownerProfileName);
+  const ownerProfileTitle = `Owner profile: ${ownerProfileLabel}`;
+  const showOwnerRow = !!ownerProfileName && (isReadOnly || ownerProfileName !== _cronProfileName(job.profile));
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
   const attention = status.state === 'needs_attention' || status.state === 'schedule_error';
   const croniterHint = job.last_error && /croniter/i.test(job.last_error)
     ? `<p>${esc(t('cron_attention_croniter_hint'))}</p>`
     : '';
-  const attentionBanner = attention ? `
+  const attentionBanner = !isReadOnly && attention ? `
       <div class="detail-alert cron-attention-panel">
         <div class="detail-alert-title">${esc(t('cron_status_needs_attention'))}</div>
         <p>${esc(t('cron_attention_desc'))}</p>
@@ -761,6 +936,11 @@ function _renderCronDetail(job){
           <button type="button" class="cron-btn" onclick="copyCurrentCronDiagnostics()">${esc(t('cron_attention_copy_diagnostics'))}</button>
         </div>
       </div>` : '';
+  const readOnlyBanner = isReadOnly ? `
+      <div class="detail-alert">
+        <div class="detail-alert-title">Read-only from another profile</div>
+        <p>Switch to ${esc(ownerProfileLabel)} to run, edit, or inspect live status and output for this cron job.</p>
+      </div>` : '';
   const toastNotifications = job.toast_notifications !== false;
   const outputTitle = _cronOutputTitle(job);
   const skillsRow = isNoAgent ? '' : `<div class="detail-row"><div class="detail-row-label">${esc(t('cron_skills_label') || 'Skills')}</div><div class="detail-row-value">${esc(skills)}</div></div>`;
@@ -768,6 +948,7 @@ function _renderCronDetail(job){
   body.innerHTML = `
     <div class="main-view-content">
       ${attentionBanner}
+      ${readOnlyBanner}
       ${isNoAgent ? _cronScriptJobBannerHtml() : ''}
       <div class="detail-card">
         <div class="detail-card-title">${esc(t('cron_status_active').replace(/./,c=>c.toUpperCase()))}</div>
@@ -777,15 +958,16 @@ function _renderCronDetail(job){
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_mode_label') || 'Mode')}</div><div class="detail-row-value"><span class="detail-badge cron-mode-badge ${isNoAgent ? 'script' : 'agent'}" id="cronJobMode">${esc(cronJobMode)}</span>${modelProvider ? ` <code>${modelProvider}</code>` : ''}</div></div>
+        ${showOwnerRow ? `<div class="detail-row"><div class="detail-row-label">Owner profile</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? (t('cron_toast_notifications_enabled') || 'Enabled') : (t('cron_toast_notifications_disabled') || 'Disabled'))}</span></div></div>
         ${skillsRow}
         ${lastError}
       </div>
       ${instructionCard}
-      <div class="detail-card ${_cronNewJobIds.has(String(job.id)) ? 'has-new-run' : ''}" id="cronDetailRuns">
+      <div class="detail-card ${!isReadOnly && _cronNewJobIds.has(String(job.id)) ? 'has-new-run' : ''}" id="cronDetailRuns">
         <div class="detail-card-title">${esc(outputTitle)}</div>
-        <div style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
+        <div style="color:var(--muted);font-size:12px">${esc(isReadOnly ? 'Live output is available only when this profile is active here.' : (t('loading') || 'Loading'))}</div>
       </div>
     </div>`;
   body.style.display = '';
@@ -793,7 +975,7 @@ function _renderCronDetail(job){
   _cronMode = 'read';
   _setCronHeaderButtons('read', job);
   // Load runs asynchronously
-  _loadCronDetailRuns(job.id);
+  if (!isReadOnly) _loadCronDetailRuns(job.id, _currentCronDetailKey);
 }
 
 function _setCronHeaderButtons(mode, job) {
@@ -810,6 +992,10 @@ function _setCronHeaderButtons(mode, job) {
   const show = b => b && (b.style.display = '');
   if (mode === 'read') {
     if (header) header.style.display = 'flex';
+    if (job && job.read_only) {
+      [runBtn,pauseBtn,resumeBtn,editBtn,dupBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
+      return;
+    }
     show(runBtn);
     const status = job ? _cronStatusMeta(job) : null;
     const resumable = job && (
@@ -829,10 +1015,10 @@ function _setCronHeaderButtons(mode, job) {
   }
 }
 
-async function _loadCronDetailRuns(jobId){
+async function _loadCronDetailRuns(jobId, detailKey){
   try {
     const data = await api(`/api/crons/history?job_id=${encodeURIComponent(jobId)}&limit=50`);
-    if (!_currentCronDetail || _currentCronDetail.id !== jobId) return;
+    if (!_cronDetailMatches(jobId, detailKey)) return;
     const card = $('cronDetailRuns');
     if (!card) return;
     const outputTitle = _cronOutputTitle(_currentCronDetail);
@@ -943,26 +1129,28 @@ async function _loadRunContent(jobId, filename, runId){
   }
 }
 
-function openCronDetail(id, el){
-  const job = _cronList ? _cronList.find(j => j.id === id) : null;
+function openCronDetail(jobOrId, el){
+  const job = _findCronJob(jobOrId);
   if (!job) return;
+  const detailKey = _cronJobKey(job);
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
-  const target = el || $('cron-' + id);
+  const target = el || $(_cronItemId(job));
   if (target) target.classList.add('active');
   // Remove new-run dot from this job since user is now viewing it
-  _clearCronUnreadForJob(id);
+  if (!job.read_only) _clearCronUnreadForJob(job.id);
   const dot = target && target.querySelector('.cron-new-dot');
-  if (dot) dot.remove();
+  if (dot && !job.read_only) dot.remove();
   _cronPreFormDetail = null;
   _editingCronId = null;
   _stopCronWatch();
   _renderCronDetail(job);
-  _checkCronWatchOnDetail(id);
+  if (!job.read_only) _checkCronWatchOnDetail(job.id, detailKey);
   _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearCronDetail(){
   _currentCronDetail = null;
+  _currentCronDetailKey = '';
   _cronMode = 'empty';
   _stopCronWatch();
   const title = $('taskDetailTitle');
@@ -1394,7 +1582,7 @@ async function saveCronForm(){
       showToast(t('cron_job_updated'));
       await loadCrons();
       const job = _cronList && _cronList.find(j => j.id === editedId);
-      if (job) openCronDetail(editedId);
+      if (job) openCronDetail(job);
       return;
     }
     const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications};
@@ -1420,7 +1608,7 @@ async function saveCronForm(){
     await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
     if (newId) openCronDetail(newId);
-    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1].id);
+    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1]);
   }catch(e){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
   }
@@ -1464,7 +1652,7 @@ let _cronWatchInterval = null;
 let _cronWatchStart = null;
 let _cronWatchTimerInterval = null;
 
-function _startCronWatch(jobId) {
+function _startCronWatch(jobId, detailKey) {
   _stopCronWatch();
   _cronWatchStart = Date.now();
   _cronWatchInterval = setInterval(async () => {
@@ -1472,13 +1660,13 @@ function _startCronWatch(jobId) {
       const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
       if (!data.running) {
         _stopCronWatch();
-        if (_currentCronDetail && _currentCronDetail.id === jobId) {
-          _loadCronDetailRuns(jobId);
+        if (_cronDetailMatches(jobId, detailKey)) {
+          _loadCronDetailRuns(jobId, detailKey);
         }
         return;
       }
       // Still running — update elapsed
-      if (_currentCronDetail && _currentCronDetail.id === jobId) {
+      if (_cronDetailMatches(jobId, detailKey)) {
         const el = $('cronRunningIndicator');
         if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed(data.elapsed);
       }
@@ -1486,13 +1674,13 @@ function _startCronWatch(jobId) {
   }, 3000);
   // Timer update every second
   _cronWatchTimerInterval = setInterval(() => {
-    if (_currentCronDetail && _cronWatchStart) {
+    if (_cronDetailMatches(jobId, detailKey) && _cronWatchStart) {
       const el = $('cronRunningIndicator');
       if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed((Date.now() - _cronWatchStart) / 1000);
     }
   }, 1000);
   // Inject running indicator into detail card
-  if (_currentCronDetail && _currentCronDetail.id === jobId) {
+  if (_cronDetailMatches(jobId, detailKey)) {
     _injectRunningIndicator();
   }
 }
@@ -1522,11 +1710,11 @@ function _formatElapsed(seconds) {
   return m + 'm ' + s + 's';
 }
 
-function _checkCronWatchOnDetail(jobId) {
+function _checkCronWatchOnDetail(jobId, detailKey) {
   // When opening a detail view, check if job is running
   api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false}).then(data => {
-    if (data.running && _currentCronDetail && _currentCronDetail.id === jobId) {
-      _startCronWatch(jobId);
+    if (data.running && _cronDetailMatches(jobId, detailKey)) {
+      _startCronWatch(jobId, detailKey);
     }
   }).catch(() => {});
 }
@@ -1535,7 +1723,7 @@ async function cronRun(id) {
   try {
     await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
     showToast(t('cron_job_triggered'));
-    _startCronWatch(id);
+    _startCronWatch(id, _currentCronDetailKey);
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
@@ -2284,10 +2472,6 @@ async function runKanbanDispatcher(){
   // Confirmation dialog first because this actually consumes API budget on
   // each spawned worker.  Result toast surfaces what happened so users see
   // the dispatcher actually doing work.
-  if (!_kanbanCurrentBoard) {
-    showToast(t('kanban_unavailable') || 'Kanban unavailable', 'error');
-    return;
-  }
 
   _kanbanIsDispatching = true;
   _setKanbanDispatcherButtonsDisabled(true);
@@ -2688,6 +2872,8 @@ function openKanbanCreate(){
     }
   });
   _kanbanPopulateTenantDatalist();
+  _kanbanPopulateWorkspacePathDatalist();
+  _kanbanPopulateParentsDatalist();
   modal.hidden = false;
   if (_kanbanTaskModalFocusCleanup) {
     _kanbanTaskModalFocusCleanup();
@@ -2778,6 +2964,9 @@ function _kanbanResetTaskModalFields(values){
   // .value before the options exist would silently fail.
   set('kanbanTaskModalTenant', v.tenant || '');
   set('kanbanTaskModalPriority', v.priority != null ? v.priority : 0);
+  set('kanbanTaskModalSkills', Array.isArray(v.skills) ? v.skills.join(', ') : (v.skills || ''));
+  set('kanbanTaskModalMaxRuntimeSeconds', v.max_runtime_seconds != null ? v.max_runtime_seconds : '');
+  set('kanbanTaskModalParents', '');
   const errEl = document.getElementById('kanbanTaskModalError');
   if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
@@ -2787,20 +2976,25 @@ function _kanbanResetTaskModalFields(values){
 function _kanbanSetTaskModalLabels(mode){
   const titleH = document.getElementById('kanbanTaskModalTitle');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
-  const workspaceKindEl = document.getElementById('kanbanTaskModalWorkspaceKind');
-  const workspacePathEl = document.getElementById('kanbanTaskModalWorkspacePath');
   if (mode === 'edit') {
     if (titleH) titleH.textContent = t('kanban_edit_task') || 'Edit task';
     if (submitBtn) submitBtn.textContent = t('save') || 'Save';
-    // Disable workspace fields during edit since they are not handled by the backend
-    if (workspaceKindEl) workspaceKindEl.disabled = true;
-    if (workspacePathEl) workspacePathEl.disabled = true;
   } else {
     if (titleH) titleH.textContent = t('kanban_new_task') || 'New task';
     if (submitBtn) submitBtn.textContent = t('create') || 'Create';
-    // Enable workspace fields during create
-    if (workspaceKindEl) workspaceKindEl.disabled = false;
-    if (workspacePathEl) workspacePathEl.disabled = false;
+  }
+  // Workspace and new backend fields are create-only; backend patch doesn't handle them.
+  const createOnlyIds = [
+    'kanbanTaskModalWorkspaceKind',
+    'kanbanTaskModalWorkspacePath',
+    'kanbanTaskModalSkills',
+    'kanbanTaskModalMaxRuntimeSeconds',
+    'kanbanTaskModalParents',
+  ];
+  const disabled = mode === 'edit';
+  for (const id of createOnlyIds) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = disabled;
   }
 }
 
@@ -2821,6 +3015,27 @@ function _kanbanPopulateTenantDatalist(){
   const tenants = (_kanbanBoard && Array.isArray(_kanbanBoard.tenants)) ? _kanbanBoard.tenants : [];
   const tList = document.getElementById('kanbanTaskModalTenantList');
   if (tList) tList.innerHTML = tenants.map(v => `<option value="${esc(v)}"></option>`).join('');
+}
+
+function _kanbanPopulateWorkspacePathDatalist(){
+  const cols = (_kanbanBoard && _kanbanBoard.columns) || [];
+  const seen = new Set();
+  const opts = [];
+  for (const col of cols) {
+    for (const task of (col.tasks || [])) {
+      const path = task && task.workspace_path;
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      opts.push(`<option value="${esc(path)}"></option>`);
+    }
+  }
+  const list = document.getElementById('kanbanTaskModalWorkspacePathList');
+  if (list) list.innerHTML = opts.join('');
+}
+
+function _kanbanPopulateParentsDatalist(){
+  const list = document.getElementById('kanbanTaskModalParentsList');
+  if (list) list.innerHTML = _kanbanLinkableTaskOptions(null);
 }
 
 function _trapModalFocus(modalEl){
@@ -2911,6 +3126,9 @@ async function submitKanbanTaskModal(){
   const priorityEl = document.getElementById('kanbanTaskModalPriority');
   const workspaceKindEl = document.getElementById('kanbanTaskModalWorkspaceKind');
   const workspacePathEl = document.getElementById('kanbanTaskModalWorkspacePath');
+  const skillsEl = document.getElementById('kanbanTaskModalSkills');
+  const maxRuntimeEl = document.getElementById('kanbanTaskModalMaxRuntimeSeconds');
+  const parentsEl = document.getElementById('kanbanTaskModalParents');
   const errEl = document.getElementById('kanbanTaskModalError');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
   const title = titleEl ? titleEl.value.trim() : '';
@@ -2939,6 +3157,9 @@ async function submitKanbanTaskModal(){
   const statusVal = statusEl ? statusEl.value : '';
   const priorityRaw = priorityEl ? priorityEl.value : '';
   const workspacePathVal = workspacePathEl ? workspacePathEl.value.trim() : '';
+  const skillsRaw = skillsEl ? skillsEl.value.trim() : '';
+  const maxRuntimeRaw = maxRuntimeEl ? maxRuntimeEl.value.trim() : '';
+  const parentsRaw = parentsEl ? parentsEl.value.trim() : '';
   if (isEdit) {
     payload.body = bodyVal;
     payload.assignee = assigneeVal || null;
@@ -2965,6 +3186,19 @@ async function submitKanbanTaskModal(){
     }
     payload.workspace_kind = workspaceKind;
     if (workspacePathVal) payload.workspace_path = workspacePathVal;
+    if (skillsRaw) {
+      payload.skills = skillsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    if (maxRuntimeRaw) {
+      if (!/^[1-9]\d*$/.test(maxRuntimeRaw)) {
+        if (errEl) errEl.textContent = t('kanban_max_runtime_invalid')
+          || 'Max runtime must be a whole number of seconds greater than 0.';
+        if (maxRuntimeEl) maxRuntimeEl.focus();
+        return;
+      }
+      payload.max_runtime_seconds = Number(maxRuntimeRaw);
+    }
+    if (parentsRaw) payload.parents = [parentsRaw];
   }
   // Soft warning: a Ready task with the explicit "Unassigned" option will sit
   // forever because the dispatcher skips unassigned rows (kanban_db.py:3567).
@@ -5687,10 +5921,116 @@ async function switchToWorkspace(path,name){
 
 // ── Profile panel + dropdown ──
 let _profilesCache = null;
+let _profileDropdownFetchPromise = null;
+let _profileDropdownCacheLoadedFromStorage = false;
+const PROFILE_DROPDOWN_CACHE_KEY = 'hermes-webui-profile-dropdown-cache-v1';
+const PROFILE_DROPDOWN_CACHE_TTL_MS = 5 * 60 * 1000;
 let _profileSwitchGeneration = 0;
 let _profileDropdownTrigger = null;  // tracks which element triggered the dropdown
+let _profileDropdownOpenGeneration = 0;
+
+function _profileDropdownClearStoredCache(){
+  try{localStorage.removeItem(PROFILE_DROPDOWN_CACHE_KEY);}catch(_){}
+}
+
+function _profileDropdownDataCacheUsable(data){
+  return !!(
+    data &&
+    Array.isArray(data.profiles) &&
+    data.profiles.length &&
+    data.profiles.every(p=>
+      p &&
+      typeof p.name==='string' &&
+      // Renderer-read fields must be safe types: renderProfileDropdown /
+      // renderProfilesPanel call p.model.split('/') guarded only by truthiness,
+      // so a poisoned cached row like {name:"x", model:{}} would pass a
+      // name-only check yet throw synchronously on dropdown open (bricking
+      // profile switching). Reject rows whose model is a non-string truthy value.
+      (p.model==null || typeof p.model==='string')
+    )
+  );
+}
+
+function _profileDropdownCacheUsable(data){
+  return !!(_profileDropdownDataCacheUsable(data) && data.single_profile_mode !== true);
+}
+
+function _profileDropdownReadStoredCache(){
+  if(_profileDropdownCacheLoadedFromStorage) return _profileDropdownCacheUsable(_profilesCache) ? _profilesCache : null;
+  _profileDropdownCacheLoadedFromStorage = true;
+  try{
+    const raw=localStorage.getItem(PROFILE_DROPDOWN_CACHE_KEY);
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    if(!parsed || typeof parsed.ts!=='number' || !parsed.data) { _profileDropdownClearStoredCache(); return null; }
+    if(Date.now()-parsed.ts>PROFILE_DROPDOWN_CACHE_TTL_MS) { _profileDropdownClearStoredCache(); return null; }
+    if(!_profileDropdownCacheUsable(parsed.data)) { _profileDropdownClearStoredCache(); return null; }
+    _profilesCache = parsed.data;
+    return _profilesCache;
+  }catch(_){_profileDropdownClearStoredCache();return null;}
+}
+
+function _profileDropdownWriteStoredCache(data){
+  if(!_profileDropdownCacheUsable(data)) { _profileDropdownClearStoredCache(); return; }
+  try{localStorage.setItem(PROFILE_DROPDOWN_CACHE_KEY, JSON.stringify({ts:Date.now(), data}));}catch(_){}
+}
+
+function _profileDropdownBestCachedData(){
+  if(_profileDropdownCacheUsable(_profilesCache)) return _profilesCache;
+  if(_profileDropdownDataCacheUsable(_profilesCache)) return null;
+  _profilesCache = null;
+  return _profileDropdownReadStoredCache();
+}
+
+function _profileDropdownFetchFresh(){
+  if(_profileDropdownFetchPromise) return _profileDropdownFetchPromise;
+  _profileDropdownFetchPromise = api('/api/profiles', {timeoutToast:false}).then(data=>{
+    if(_profileDropdownDataCacheUsable(data)) _profilesCache = data;
+    _profileDropdownWriteStoredCache(data);
+    return data;
+  }).finally(()=>{ _profileDropdownFetchPromise = null; });
+  return _profileDropdownFetchPromise;
+}
+
+function _warmProfileDropdownCache(){
+  _profileDropdownBestCachedData();
+  _profileDropdownFetchFresh().catch(()=>{});
+}
+
+if(typeof window!=='undefined'){
+  window.addEventListener('load',()=>{
+    setTimeout(()=>{
+      if(typeof document==='undefined'||!document.hidden) _warmProfileDropdownCache();
+    },1200);
+  },{once:true});
+}
+
+function _renderProfileDropdownLoading(){
+  const dd=$('profileDropdown');
+  if(!dd)return;
+  dd.innerHTML=`<div class="profile-opt profile-opt-loading"><div class="profile-opt-name">${esc(t('loading')||'Loading...')}</div></div>`;
+}
+
+function _openProfileDropdownShell(){
+  const dd=$('profileDropdown');
+  if(!dd)return;
+  dd.classList.add('open');
+  _positionProfileDropdown();
+  const chip=$('profileChip');
+  if(chip && _profileDropdownTrigger===chip) chip.classList.add('active');
+  const tbtn=$('titlebarProfileBtn');
+  if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
+}
 
 async function _profileSwitchPanelLoad(){
+  // Cross-profile cron visibility is an active-profile opt-in; never carry it
+  // into the next profile when the Tasks panel wasn't the visible panel.
+  _showAllCronProfiles = false;
+  _cronOtherProfileCount = 0;
+  _cronPreFormDetail = null;
+  _editingCronId = null;
+  _cronIsDuplicate = false;
+  _clearCronDetail();
   if (_currentPanel === 'skills') await loadSkills();
   if (_currentPanel === 'memory') await loadMemory();
   if (_currentPanel === 'tasks') await loadCrons();
@@ -5723,6 +6063,10 @@ function _refreshProfileSwitchBackground(gen){
     if (typeof _applyTabOrder === 'function') _applyTabOrder(order);
     if (typeof _applyTabVisibility === 'function') _applyTabVisibility(hidden);
     _ensureComposerControlVisibilityState(s||{});
+    if(Array.isArray(s&&s.composer_control_order)){
+      const nextOrder=_setComposerControlOrder(s.composer_control_order);
+      if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(nextOrder);
+    }
     _renderComposerControlChips();
     _renderComposerSituationalControlChips();
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
@@ -5737,6 +6081,7 @@ async function loadProfilesPanel() {
   try {
     const data = await api('/api/profiles');
     _profilesCache = data;
+    _profileDropdownWriteStoredCache(data);
     panel.innerHTML = '';
 
     // Hide "New profile" button in single profile mode
@@ -5776,7 +6121,7 @@ async function loadProfilesPanel() {
       card.className = 'profile-card';
       card.dataset.name = p.name;
       const meta = [];
-      if (p.model) meta.push(p.model.split('/').pop());
+      if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
       if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
       const gwDot = p.gateway_running
@@ -5942,10 +6287,11 @@ async function deleteCurrentProfile(){
 }
 
 function renderProfileDropdown(data) {
+  data = data || {};
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
-  const allProfiles = data.profiles || [];
+  const allProfiles = (Array.isArray(data.profiles) ? data.profiles : []).filter(p => p && typeof p.name === 'string');
   const active = (S.activeProfile && allProfiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
     : (data.active || 'default');
@@ -5954,7 +6300,7 @@ function renderProfileDropdown(data) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
     const meta = [];
-    if (p.model) meta.push(p.model.split('/').pop());
+    if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
     if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
@@ -5989,24 +6335,39 @@ function toggleProfileDropdown(e) {
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   // Track which element triggered the dropdown for positioning
   _profileDropdownTrigger = (e && e.currentTarget) || $('profileChip');
-  api('/api/profiles').then(data => {
+  const openGen = ++_profileDropdownOpenGeneration;
+  const cached = _profileDropdownBestCachedData();
+
+  if(cached && !cached.single_profile_mode){
+    renderProfileDropdown(cached);
+    _openProfileDropdownShell();
+  }else{
+    _renderProfileDropdownLoading();
+    _openProfileDropdownShell();
+  }
+
+  _profileDropdownFetchFresh().then(data => {
+    if(openGen !== _profileDropdownOpenGeneration) return;
     // In single profile mode, don't show profile dropdown at all
     if (data.single_profile_mode) {
       closeProfileDropdown();
       return;
     }
     renderProfileDropdown(data);
-    dd.classList.add('open');
-    _positionProfileDropdown();
-    // Mark the triggering button as active
-    const chip=$('profileChip');
-    if(chip && _profileDropdownTrigger===chip) chip.classList.add('active');
-    const tbtn=$('titlebarProfileBtn');
-    if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
-  }).catch(e => { showToast(t('profiles_load_failed')); });
+    _openProfileDropdownShell();
+  }).catch(e => {
+    if(openGen !== _profileDropdownOpenGeneration) return;
+    if(cached && !cached.single_profile_mode){
+      // Keep the cached menu open; the next click/background refresh will retry.
+      return;
+    }
+    closeProfileDropdown();
+    showToast(t('profiles_load_failed'));
+  });
 }
 
 function closeProfileDropdown() {
+  _profileDropdownOpenGeneration++;
   const dd = $('profileDropdown');
   if (dd) dd.classList.remove('open');
   const chip=$('profileChip');
@@ -6566,7 +6927,10 @@ let _settingsPreferencesAutosaveRetryPayload = null;
 const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
 const _HIDDEN_TABS_LS_KEY = 'hermes-webui-hidden-tabs';
 const _TAB_ORDER_LS_KEY = 'hermes-webui-tab-order';
+const _COMPOSER_CONTROL_ORDER_LS_KEY = 'hermes-webui-composer-control-order';
 let _tabVisibilityDragSuppressUntil = 0;
+let _composerControlDragSuppressUntil = 0;
+let _composerControlDraggingKey = '';
 
 function _sanitizeTabPanelList(panels){
   if(!Array.isArray(panels)) return [];
@@ -6798,11 +7162,123 @@ function _ensureComposerControlVisibilityState(settings){
   Object.assign(window._composerControlVisibility, fromSettings);
 }
 
-function _composerControlVisibilityPayload(){
-  const payload={};
+function _composerControlDefsForSettings(){
   const baseDefs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
   const situationalDefs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
-  const defs=baseDefs.concat(situationalDefs);
+  return baseDefs.concat(situationalDefs);
+}
+
+function _getComposerControlOrder(){
+  if(Array.isArray(window._composerControlOrder)){
+    return typeof window._sanitizeComposerControlOrder==='function'
+      ? window._sanitizeComposerControlOrder(window._composerControlOrder)
+      : window._composerControlOrder.slice();
+  }
+  try{
+    const raw=localStorage.getItem(_COMPOSER_CONTROL_ORDER_LS_KEY);
+    if(raw){
+      const parsed=JSON.parse(raw);
+      if(typeof window._sanitizeComposerControlOrder==='function') return window._sanitizeComposerControlOrder(parsed);
+      if(Array.isArray(parsed)) return parsed.filter(key=>typeof key==='string');
+    }
+  }catch(e){}
+  return [];
+}
+
+function _setComposerControlOrder(order){
+  const sanitized=typeof window._sanitizeComposerControlOrder==='function'
+    ? window._sanitizeComposerControlOrder(order)
+    : (Array.isArray(order)?order.filter(key=>typeof key==='string') : []);
+  window._composerControlOrder=sanitized;
+  try{localStorage.setItem(_COMPOSER_CONTROL_ORDER_LS_KEY,JSON.stringify(sanitized));}catch(e){}
+  return sanitized;
+}
+
+function _orderedComposerControlDefsForSettings(defs){
+  defs=Array.isArray(defs)?defs:[];
+  const byKey=new Map(defs.map(def=>[def.key,def]));
+  const out=[];
+  _getComposerControlOrder().forEach(function(key){
+    if(byKey.has(key)) out.push(byKey.get(key));
+  });
+  defs.forEach(function(def){if(out.indexOf(def)===-1) out.push(def);});
+  return out;
+}
+
+function _composerControlOrderGroupKey(key){
+  const def=_composerControlDefsForSettings().find(item=>item&&item.key===key);
+  return def&&def.orderGroup?def.orderGroup:'';
+}
+
+function _composerControlDropAllowed(sourceKey,targetKey){
+  if(!sourceKey||!targetKey||sourceKey===targetKey) return false;
+  const sourceGroup=_composerControlOrderGroupKey(sourceKey);
+  const targetGroup=_composerControlOrderGroupKey(targetKey);
+  return !!sourceGroup&&sourceGroup===targetGroup;
+}
+
+function _clearComposerControlDragOver(){
+  document.querySelectorAll('[data-composer-control-key].drag-over').forEach(function(el){el.classList.remove('drag-over');});
+}
+
+function _moveComposerControlOrderKey(sourceKey,targetKey){
+  if(!_composerControlDropAllowed(sourceKey,targetKey)) return false;
+  const order=_orderedComposerControlDefsForSettings(_composerControlDefsForSettings()).map(def=>def.key);
+  const from=order.indexOf(sourceKey);
+  const to=order.indexOf(targetKey);
+  if(from===-1||to===-1) return false;
+  order.splice(from,1);
+  order.splice(to,0,sourceKey);
+  const next=_setComposerControlOrder(order);
+  if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(next);
+  _renderComposerControlChips();
+  _renderComposerSituationalControlChips();
+  _scheduleAppearanceAutosave();
+  return true;
+}
+
+function _handleComposerControlChipDrop(e,targetKey){
+  if(e){e.preventDefault();e.stopPropagation();}
+  _clearComposerControlDragOver();
+  const sourceKey=e&&e.dataTransfer?e.dataTransfer.getData('text/plain'):_composerControlDraggingKey;
+  if(_moveComposerControlOrderKey(sourceKey,targetKey)) _composerControlDragSuppressUntil=Date.now()+250;
+  _composerControlDraggingKey='';
+}
+
+function _wireComposerControlChipDrag(chip,key){
+  if(!chip)return;
+  chip.setAttribute('data-composer-control-key',key);
+  chip.setAttribute('draggable','true');
+  chip.addEventListener('dragstart',function(e){
+    _composerControlDraggingKey=key;
+    chip.classList.add('dragging');
+    if(e.dataTransfer){
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain',key);
+    }
+  });
+  chip.addEventListener('dragend',function(){
+    chip.classList.remove('dragging');
+    _clearComposerControlDragOver();
+    _composerControlDraggingKey='';
+  });
+  chip.addEventListener('dragover',function(e){
+    const sourceKey=_composerControlDraggingKey;
+    if(!_composerControlDropAllowed(sourceKey,key)){
+      if(e.dataTransfer)e.dataTransfer.dropEffect='none';
+      return;
+    }
+    e.preventDefault();
+    chip.classList.add('drag-over');
+    if(e.dataTransfer)e.dataTransfer.dropEffect='move';
+  });
+  chip.addEventListener('dragleave',function(){chip.classList.remove('drag-over');});
+  chip.addEventListener('drop',function(e){_handleComposerControlChipDrop(e,key);});
+}
+
+function _composerControlVisibilityPayload(){
+  const payload={};
+  const defs=_composerControlDefsForSettings();
   const state=window._composerControlVisibility||{};
   defs.forEach(function(def){payload[def.key]=!!state[def.key];});
   return payload;
@@ -6832,7 +7308,7 @@ function _renderComposerControlChips(){
   const defs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
   const state=window._composerControlVisibility||{};
   container.innerHTML='';
-  defs.forEach(function(def){
+  _orderedComposerControlDefsForSettings(defs).forEach(function(def){
     const chip=document.createElement('button');
     chip.type='button';
     chip.className='tab-visibility-chip';
@@ -6841,7 +7317,8 @@ function _renderComposerControlChips(){
     chip.textContent=_composerControlChipLabel(def);
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',hidden?'false':'true');
-    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};
+    _wireComposerControlChipDrag(chip,def.key);
     container.appendChild(chip);
   });
 }
@@ -6852,7 +7329,7 @@ function _renderComposerSituationalControlChips(){
   const defs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
   const state=window._composerControlVisibility||{};
   container.innerHTML='';
-  defs.forEach(function(def){
+  _orderedComposerControlDefsForSettings(defs).forEach(function(def){
     const chip=document.createElement('button');
     chip.type='button';
     chip.className='tab-visibility-chip';
@@ -6861,7 +7338,8 @@ function _renderComposerSituationalControlChips(){
     chip.textContent=_composerControlChipLabel(def);
     chip.setAttribute('role','switch');
     chip.setAttribute('aria-checked',hidden?'false':'true');
-    chip.onclick=function(){_toggleComposerControlChip(def.key);};
+    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};
+    _wireComposerControlChipDrag(chip,def.key);
     container.appendChild(chip);
   });
 }
@@ -6911,6 +7389,47 @@ function switchSettingsSection(name,opts){
   if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection();
 }
 
+function _normalizeSettingsSearchText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function _extractSettingsDescriptionText(field, labelEl) {
+  const chunks = [];
+  const settingsSearch = (field.dataset && field.dataset.settingsSearch) || '';
+  if (settingsSearch) chunks.push(settingsSearch);
+  field.querySelectorAll('[data-i18n]').forEach(node => {
+    if (labelEl && (node === labelEl || labelEl.contains(node))) return;
+    const key = node.dataset ? node.dataset.i18n : null;
+    if (key) chunks.push(t(key));
+  });
+  return chunks.join(' ');
+}
+
+function _extractSettingsValueText(field) {
+  const chunks = [];
+  const controls = [...field.querySelectorAll('select, input, textarea')];
+  controls.forEach(control => {
+    const tagName = (control.tagName || '').toLowerCase();
+    if (tagName === 'select') {
+      control.querySelectorAll('option').forEach(option => {
+        if (option.dataset && option.dataset.i18n) {
+          chunks.push(t(option.dataset.i18n));
+        } else {
+          chunks.push(option.textContent);
+        }
+      });
+      return;
+    }
+    const type = (control.getAttribute && control.getAttribute('type')) || control.type || '';
+    if (tagName === 'input' && ['checkbox', 'radio', 'file', 'submit', 'reset', 'button'].includes(type)) return;
+    if (control.value) chunks.push(control.value);
+  });
+  return chunks.join(' ');
+}
+
 async function _buildSettingsIndex() {
   if (_settingsIndex) return;
   // Memoize the in-flight build so concurrent searches share one pass; the
@@ -6920,6 +7439,9 @@ async function _buildSettingsIndex() {
     // Ensure lazy-loaded panes are populated before reading the DOM
     await Promise.all([loadProvidersPanel(), loadPluginsPanel(), loadExtensionsPanel()]);
     const index = [];
+    const add = (entry) => {
+      index.push({ ...entry, _settingsSearchIndex: index.length });
+    };
     const sectionMap = {
       settingsPaneConversation: 'conversation',
       settingsPaneAppearance: 'appearance',
@@ -6943,31 +7465,96 @@ async function _buildSettingsIndex() {
         const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
         if (!labelEl) return;
         const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
-        const label = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
-        if (label) {
-          const searchBlob = [label, field.textContent, field.dataset ? field.dataset.settingsSearch : '']
-            .filter(Boolean)
-            .join(' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          index.push({ label, searchBlob, sectionKey, i18nKey, el: field });
-        }
+        const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
+        if (!titleText) return;
+        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
+        const searchBlob = [titleText, valueText, descriptionText, field.textContent]
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        add({
+          label: titleText,
+          titleText,
+          valueText,
+          descriptionText,
+          searchBlob,
+          sectionKey,
+          i18nKey,
+          el: field,
+        });
       });
       if (sectionKey === 'providers') {
         pane.querySelectorAll('.provider-card').forEach(card => {
           const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+          if (cardName) {
+            const titleText = cardName;
+            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+            const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            add({
+              label: cardName,
+              titleText,
+              valueText,
+              descriptionText,
+              searchBlob,
+              sectionKey,
+              el: card,
+              cardName,
+            });
+          }
           card.querySelectorAll('.provider-card-field').forEach(field => {
             const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
             const label = [cardName, fieldLabel].filter(Boolean).join(' ');
-            if (label) index.push({ label, sectionKey, el: field, cardName, fieldLabel });
+            if (!label) return;
+            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
+            const searchBlob = [label, valueText, descriptionText, field.textContent]
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            add({
+              label,
+              titleText: label,
+              valueText,
+              descriptionText,
+              searchBlob,
+              sectionKey,
+              el: field,
+              cardName,
+              fieldLabel,
+            });
           });
         });
       }
       if (sectionKey === 'plugins') {
         pane.querySelectorAll('.plugin-card').forEach(card => {
           const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+          if (!cardName) return;
+          const titleText = cardName;
+          const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+          const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+          const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          add({
+            label: cardName,
+            titleText,
+            valueText,
+            descriptionText,
+            searchBlob,
+            sectionKey,
+            el: card,
+            cardName,
+          });
         });
       }
     }
@@ -6998,16 +7585,26 @@ async function filterSettings(query) {
     system: t('settings_tab_system') || 'System',
     help: t('settings_tab_help') || 'Help',
   };
-  const matches = (_settingsIndex || []).filter(entry =>
-    (entry.searchBlob || entry.label).toLowerCase().includes(q)
-  );
+  const matches = (_settingsIndex || []).map((entry) => {
+    const score = _scoreSettingsSearchMatch(entry, q);
+    return score ? { entry, score, index: entry._settingsSearchIndex } : null;
+  }).filter(Boolean);
   if (!matches.length) {
     resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
     resultsEl.style.display = '';
     return;
   }
   resultsEl.innerHTML = '';
-  for (const m of matches.slice(0, 12)) {
+  matches.sort((left, right) => {
+    if (left.score.bucketIndex !== right.score.bucketIndex) {
+      return left.score.bucketIndex - right.score.bucketIndex;
+    }
+    if (left.score.matchIndex !== right.score.matchIndex) {
+      return left.score.matchIndex - right.score.matchIndex;
+    }
+    return left.index - right.index;
+  });
+  for (const { entry: m } of matches.slice(0, 12)) {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'settings-search-result';
@@ -7024,6 +7621,29 @@ async function filterSettings(query) {
     resultsEl.appendChild(item);
   }
   resultsEl.style.display = '';
+}
+
+function _scoreSettingsSearchMatch(entry, q) {
+  const query = (q || '').toLowerCase().trim();
+  if (!query) return null;
+  const buckets = [
+    ['titleText', 0],
+    ['valueText', 1],
+    ['descriptionText', 2],
+    ['searchBlob', 3],
+  ];
+  for (const [bucketName, bucketIndex] of buckets) {
+    const hay = _normalizeSettingsSearchText(entry[bucketName]);
+    if (!hay) continue;
+    const matchIndex = hay.indexOf(query);
+    if (matchIndex < 0) continue;
+    return {
+      bucketIndex,
+      matchType: matchIndex === 0 ? 'prefix' : 'contains',
+      matchIndex,
+    };
+  }
+  return null;
 }
 
 function _navigateToSettingsField(entry) {
@@ -7236,11 +7856,14 @@ function _appearancePayloadFromUi(){
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
+    large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
+    project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
     ..._structuredCodeViewFromUi(),
     show_titlebar_profile: !!($('settingsShowTitlebarProfile')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
     activity_feed_expanded_default: worklogDetailsExpanded,
     ..._composerControlVisibilityPayload(),
+    composer_control_order: _getComposerControlOrder(),
     hidden_tabs: _getHiddenTabs(),
     tab_order: _getTabOrder(),
   };
@@ -7325,6 +7948,8 @@ async function _autosaveAppearanceSettings(payload){
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
     window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
+    window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
+    window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){
       // Re-sync from the server-validated/clamped values so the UI and runtime
       // globals match exactly what was persisted.
@@ -7347,6 +7972,10 @@ async function _autosaveAppearanceSettings(payload){
     }
     if(saved){
       _ensureComposerControlVisibilityState(saved);
+      if(Array.isArray(saved.composer_control_order)){
+        const nextOrder=_setComposerControlOrder(saved.composer_control_order);
+        if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(nextOrder);
+      }
       _renderComposerControlChips();
       _renderComposerSituationalControlChips();
       if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
@@ -7401,11 +8030,15 @@ function _preferencesPayloadFromUi(){
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
+  const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
+  if(showClaudeCodeCb) payload.show_claude_code_sessions=showClaudeCodeCb.checked;
   const showCronCb=$('settingsShowCronSessions');
   // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
   // identically to the explicit saveSettings() path, so neither save route can
   // persist show_cron_sessions=true while show_cli_sessions=false. (#3514)
   if(showCronCb) payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked);
+  const showWebhookCb=$('settingsShowWebhookSessions');
+  if(showWebhookCb) payload.show_webhook_sessions=!!(showCliCb&&showCliCb.checked&&showWebhookCb.checked);
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
@@ -7428,8 +8061,10 @@ function _preferencesPayloadFromUi(){
   if(pinnedLimitField) payload.pinned_sessions_limit=parseInt(pinnedLimitField.value,10);
   const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
   if(autoTitleRefreshSel) payload.auto_title_refresh_every=parseInt(autoTitleRefreshSel.value,10);
-  const busyInputModeSel=$('settingsBusyInputMode');
-  if(busyInputModeSel) payload.busy_input_mode=busyInputModeSel.value;
+  const defaultMessageModeSel=$('settingsDefaultMessageMode');
+  if(defaultMessageModeSel) payload.default_message_mode=defaultMessageModeSel.value;
+  const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
+  if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
   return payload;
@@ -7502,6 +8137,17 @@ async function _autosavePreferencesSettings(payload){
       window._showConversationOutline=!!(saved&&saved.show_conversation_outline);
       document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
       if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
+    }
+    if(payload&&payload.default_message_mode!==undefined){
+      // #5170 mirror write on autosave, under the #5145 rename: persist the
+      // saved mode so a reload/offline first-send honors it (legacy fallback).
+      const _dmm=(saved&&saved.default_message_mode)||(saved&&saved.busy_input_mode);
+      window._defaultMessageMode=(typeof _persistDefaultMessageMode==='function')?_persistDefaultMessageMode(_dmm):(_dmm||'steer');
+      if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    }
+    if(payload&&payload.show_busy_placeholder_hint!==undefined){
+      window._showBusyPlaceholderHint=!!(saved&&saved.show_busy_placeholder_hint);
+      if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -7666,6 +8312,27 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    const largeTextPasteCb=$('settingsLargeTextPasteAsAttachment');
+    if(largeTextPasteCb){
+      largeTextPasteCb.checked=settings.large_text_paste_as_attachment!==false;
+      window._largeTextPasteAsAttachment=largeTextPasteCb.checked;
+      largeTextPasteCb.onchange=function(){
+        window._largeTextPasteAsAttachment=this.checked;
+        _scheduleAppearanceAutosave();
+      };
+    }
+    const pqcCb=$('settingsProjectQuickCreate');
+    if(pqcCb){
+      pqcCb.checked=!!(settings.project_quick_create_buttons);
+      window._projectQuickCreate=pqcCb.checked;
+      pqcCb.onchange=function(){
+        window._projectQuickCreate=this.checked;
+        // Rebuild the sidebar so the per-project + buttons appear/disappear
+        // immediately, rather than only on the next render.
+        try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+        _scheduleAppearanceAutosave();
+      };
+    }
     const structuredCodeModeSel=$('settingsStructuredCodeMode');
     const structuredCodeLinesField=$('settingsStructuredCodeAutoLines');
     if(structuredCodeModeSel){
@@ -7704,6 +8371,10 @@ async function loadSettingsPanel(){
       };
     }
     _ensureComposerControlVisibilityState(settings);
+    if(Array.isArray(settings.composer_control_order)){
+      const composerOrder=_setComposerControlOrder(settings.composer_control_order);
+      if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(composerOrder);
+    }
     _renderComposerControlChips();
     _renderComposerSituationalControlChips();
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
@@ -7896,12 +8567,30 @@ async function loadSettingsPanel(){
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=settings.show_cli_sessions!==false;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
+    if(showClaudeCodeCb){
+      showClaudeCodeCb.checked=!!settings.show_claude_code_sessions;
+      showClaudeCodeCb.disabled=showCliCb?!showCliCb.checked:true;
+      showClaudeCodeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    if(showCliCb){showCliCb.addEventListener('change',function(){
+      const enabled=!!showCliCb.checked;
+      if(showCronCb) showCronCb.disabled=!enabled;
+      if(showClaudeCodeCb) showClaudeCodeCb.disabled=!enabled;
+      _schedulePreferencesAutosave();
+    },{once:false});}
     const showCronCb=$('settingsShowCronSessions');
     if(showCronCb){
       showCronCb.checked=!!settings.show_cron_sessions;
       showCronCb.disabled=showCliCb?!showCliCb.checked:true;
       showCronCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-      if(showCliCb){showCliCb.addEventListener('change',function(){showCronCb.disabled=!showCliCb.checked;},{once:false});}
+    }
+    const showWebhookCb=$('settingsShowWebhookSessions');
+    if(showWebhookCb){
+      showWebhookCb.checked=!!settings.show_webhook_sessions;
+      showWebhookCb.disabled=showCliCb?!showCliCb.checked:true;
+      showWebhookCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      if(showCliCb){showCliCb.addEventListener('change',function(){showWebhookCb.disabled=!showCliCb.checked;},{once:false});}
     }
     const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -7975,6 +8664,8 @@ async function loadSettingsPanel(){
       const current=localStorage.getItem('hermes-tts-voice')||'';
       if(engine==='elevenlabs'){
         ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
+      } else if(engine==='openai'){
+        ttsVoiceSel.innerHTML='<option value="">OpenAI voice (server-configured)</option>';
       } else if(engine==='edge'){
         const edgeVoices=[
           {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
@@ -8047,13 +8738,22 @@ async function loadSettingsPanel(){
       autoTitleRefreshSel.value=['0','5','10','20'].includes(val)?val:'0';
       autoTitleRefreshSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
-    // Busy input mode
-    const busyInputModeSel=$('settingsBusyInputMode');
-    if(busyInputModeSel){
-      const val=String(settings.busy_input_mode||'queue');
-      busyInputModeSel.value=['queue','interrupt','steer'].includes(val)?val:'queue';
-      busyInputModeSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    // Default message mode
+    const defaultMessageModeSel=$('settingsDefaultMessageMode');
+    if(defaultMessageModeSel){
+      const val=String(settings.default_message_mode||settings.busy_input_mode||'steer');
+      defaultMessageModeSel.value=['queue','interrupt','steer'].includes(val)?val:'steer';
+      // #5170 mirror write on panel load, under the #5145 rename.
+      window._defaultMessageMode=(typeof _persistDefaultMessageMode==='function')?_persistDefaultMessageMode(defaultMessageModeSel.value):defaultMessageModeSel.value;
+      defaultMessageModeSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
+    const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
+    if(showBusyPlaceholderHintCb){
+      showBusyPlaceholderHintCb.checked=!!settings.show_busy_placeholder_hint;
+      window._showBusyPlaceholderHint=showBusyPlaceholderHintCb.checked;
+      showBusyPlaceholderHintCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');
     if(botNameField){
@@ -8341,6 +9041,22 @@ function _extensionSidecarCard(sidecars){
     const origin=(sidecar&&sidecar.origin)||'';
     const healthPath=(sidecar&&sidecar.health_path)||'';
     const healthUrl=(sidecar&&sidecar.health_url)||'';
+    const proxy=(sidecar&&sidecar.proxy&&typeof sidecar.proxy==='object')?sidecar.proxy:{};
+    const proxyAvailable=proxy.available===true;
+    const proxyConsented=proxy.consented===true;
+    const proxyConsentRequired=proxy.consent_required===true;
+    const proxyOriginChanged=proxy.origin_changed===true;
+    const proxyPath=(proxy&&proxy.path)||'';
+    const proxyStatus=proxyConsented
+      ?'consented'
+      :(proxyOriginChanged
+        ?'reconfirm required'
+        :(proxyConsentRequired
+          ?'approval required'
+          :'unavailable'));
+    const proxyButton=(proxyAvailable&&id)
+      ?`<button class="sm-btn extension-toggle-btn" type="button" data-extension-sidecar-proxy-id="${esc(id)}" data-extension-sidecar-proxy-approved="${proxyConsented?'false':'true'}">${esc(proxyConsented?'Revoke proxy consent':'Approve proxy consent')}</button>`
+      :'';
     return `<div class="extension-sidecar-row" data-sidecar-index="${index}">
       <div class="extension-sidecar-row-head">
         <div class="extension-sidecar-title">${esc(title)}</div>
@@ -8351,7 +9067,10 @@ function _extensionSidecarCard(sidecars){
         <div><span>Origin</span><code>${esc(origin)}</code></div>
         <div><span>Health path</span><code>${esc(healthPath)}</code></div>
         <div><span>Health URL</span><code>${esc(healthUrl)}</code></div>
+        <div><span>Proxy</span><code>${esc(proxyStatus)}</code></div>
+        <div><span>Proxy path</span><code>${esc(proxyPath)}</code></div>
       </div>
+      <div class="extension-sidecar-actions">${proxyButton}</div>
       <div class="extension-sidecar-runtime" data-sidecar-runtime-index="${index}" hidden></div>
     </div>`;
   }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
@@ -8515,6 +9234,7 @@ function _renderExtensionsPanel(data,seq){
     </div>
   `;
   _bindExtensionToggleButtons(target);
+  _bindExtensionSidecarProxyButtons(target);
   _bindExtensionSettingsButtons(target);
   _monitorExtensionSidecars(sidecars,seq);
 }
@@ -8523,6 +9243,13 @@ function _bindExtensionToggleButtons(root){
   if(!root) return;
   root.querySelectorAll('[data-extension-toggle-id]').forEach(btn=>{
     btn.addEventListener('click',()=>handleExtensionToggle(btn));
+  });
+}
+
+function _bindExtensionSidecarProxyButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-sidecar-proxy-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionSidecarProxyConsent(btn));
   });
 }
 
@@ -8542,6 +9269,25 @@ async function handleExtensionToggle(btn){
     btn.disabled=false;
     btn.textContent=previousText;
     showToast('Failed to update extension: '+(e&&e.message?e.message:String(e)));
+  }
+}
+
+async function handleExtensionSidecarProxyConsent(btn){
+  if(!btn||btn.disabled) return;
+  const id=btn.dataset.extensionSidecarProxyId||'';
+  const approved=btn.dataset.extensionSidecarProxyApproved==='true';
+  if(!id) return;
+  const previousText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent=approved?'Approving…':'Revoking…';
+  try{
+    const data=await api('/api/extensions/sidecar-proxy-consent',{method:'POST',body:JSON.stringify({id,approved})});
+    showToast(approved?'Extension sidecar proxy approved.':'Extension sidecar proxy consent revoked.');
+    _renderExtensionsPanel(data,++_extensionsSidecarMonitorSeq);
+  }catch(e){
+    btn.disabled=false;
+    btn.textContent=previousText;
+    showToast('Failed to update extension sidecar proxy consent: '+(e&&e.message?e.message:String(e)));
   }
 }
 
@@ -9176,7 +9922,11 @@ async function _loadPluginPage(path, label) {
 
 // ── Providers panel ─────────────────────────────────────────────────────────
 
-const _providerCardEls = new Map(); // providerId → {card, statusDot, input, saveBtn, removeBtn}
+const _providerCardEls = new Map(); // providerId → entry used by save/remove/test handlers
+const _SELF_HOSTED_DEFAULT_BASE_URLS = Object.freeze({
+  ollama: 'http://localhost:11434/v1',
+  lmstudio: 'http://localhost:1234/v1',
+});
 
 async function _fetchProviderQuotaStatus(force=false){
   const endpoint=force?`/api/provider/quota?refresh=1&ts=${Date.now()}`:'/api/provider/quota';
@@ -9192,7 +9942,7 @@ async function loadProvidersPanel(){
   try{
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider);
+    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted);
     list.innerHTML='';
     _providerCardEls.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
@@ -9474,7 +10224,13 @@ async function renderProviderCostChart(card){
   }
   const body=card.querySelector('.provider-quota-body');
   if(!body||body.querySelector('.provider-cost-chart-wrap')) return;
-  if(!history||history.ok===false) return;
+  if(!history||history.ok===false){
+    const wrap=document.createElement('div');
+    wrap.className='provider-cost-chart-wrap';
+    _attachBudgetControls(wrap,history||{},card,0);
+    body.appendChild(wrap);
+    return;
+  }
   const snaps=Array.isArray(history.snapshots)?history.snapshots:[];
   // need at least 2 snapshots to have one non-null delta
   const hasData=snaps.filter(s=>s.delta!=null).length>=1;
@@ -9483,12 +10239,14 @@ async function renderProviderCostChart(card){
     empty.className='provider-cost-chart-wrap';
     empty.innerHTML='<div class="provider-cost-chart-title">7-day spend</div><div class="provider-quota-message">Not enough data yet. Cost chart builds after 2 daily snapshots.</div>';
     body.appendChild(empty);
+    _attachBudgetControls(empty,history,card,0);
     return;
   }
   const maxDelta=Math.max(...snaps.map(s=>s.delta!=null?Number(s.delta):0),1e-9);
   const nonNull=snaps.filter(s=>s.delta!=null).map(s=>Number(s.delta));
   const avg=nonNull.length?nonNull.reduce((a,b)=>a+b,0)/nonNull.length:0;
-  const pace='$'+(avg*30).toFixed(2);
+  const paceNum=avg*30;
+  const pace='$'+paceNum.toFixed(2);
   const bars=snaps.map(s=>{
     const delta=s.delta!=null?Number(s.delta):null;
     const pct=delta!=null?Math.max((delta/maxDelta)*100,delta>0?2:0).toFixed(1):'0';
@@ -9499,7 +10257,103 @@ async function renderProviderCostChart(card){
   const wrap=document.createElement('div');
   wrap.className='provider-cost-chart-wrap';
   wrap.innerHTML=`<div class="provider-cost-chart-title">7-day spend <span class="provider-cost-chart-pace">Monthly pace: ${esc(pace)}</span></div><div class="provider-cost-chart-bars insights-daily-token-chart">${bars}</div>`;
+  const monthly_budget=history&&history.monthly_budget!=null?history.monthly_budget:null;
+  if(monthly_budget!=null&&paceNum>0){
+    const paceSpan=wrap.querySelector('.provider-cost-chart-pace');
+    if(paceSpan){
+      const pct=Math.round((paceNum/monthly_budget)*100);
+      const pctSpan=document.createElement('span');
+      pctSpan.className='provider-cost-chart-pct'+(pct>=100?' over':pct>=80?' warn':'');
+      pctSpan.textContent=`(${pct}%)`;
+      paceSpan.appendChild(pctSpan);
+    }
+  }
   body.appendChild(wrap);
+  _attachBudgetControls(wrap,history,card,paceNum);
+}
+
+function _attachBudgetControls(wrap,history,card,paceNum){
+  const budget=history&&history.monthly_budget!=null?Number(history.monthly_budget):null;
+  const row=document.createElement('div');
+  row.className='provider-cost-budget-row';
+
+  const titleDiv=document.createElement('div');
+  titleDiv.className='provider-cost-budget-title';
+  titleDiv.textContent=t('provider_cost_budget_label');
+  row.appendChild(titleDiv);
+
+  const inputGroup=document.createElement('div');
+  inputGroup.className='provider-cost-budget-input-group';
+
+  const prefix=document.createElement('span');
+  prefix.className='provider-cost-budget-prefix';
+  prefix.textContent='$';
+  inputGroup.appendChild(prefix);
+
+  const input=document.createElement('input');
+  input.type='number';
+  input.min='0.01';
+  input.step='0.01';
+  input.className='provider-cost-budget-input';
+  input.placeholder=t('provider_cost_budget_placeholder')||'e.g. 50.00';
+  if(budget!=null) input.value=budget.toFixed(2);
+  inputGroup.appendChild(input);
+
+  const setBtn=document.createElement('button');
+  setBtn.type='button';
+  setBtn.className='provider-cost-budget-set';
+  setBtn.textContent=t('provider_cost_budget_set');
+  inputGroup.appendChild(setBtn);
+
+  const clearBtn=document.createElement('button');
+  clearBtn.type='button';
+  clearBtn.className='provider-cost-budget-clear';
+  clearBtn.textContent=t('provider_cost_budget_clear');
+  if(budget==null) clearBtn.style.display='none';
+  inputGroup.appendChild(clearBtn);
+
+  row.appendChild(inputGroup);
+
+  if(budget!=null&&paceNum>0){
+    const pct=Math.round((paceNum/budget)*100);
+    const barWrap=document.createElement('div');
+    barWrap.className='provider-cost-budget-bar-wrap';
+    const bar=document.createElement('div');
+    bar.className='provider-cost-budget-bar';
+    const fill=document.createElement('div');
+    fill.className='provider-cost-budget-bar-fill'+(pct>=100?' over':pct>=80?' warn':'');
+    fill.style.width=Math.min(100,pct)+'%';
+    bar.appendChild(fill);
+    barWrap.appendChild(bar);
+    const pctLabel=document.createElement('span');
+    pctLabel.className='provider-cost-budget-pct-label';
+    pctLabel.textContent=t('provider_cost_budget_pct',pct,budget.toFixed(2));
+    barWrap.appendChild(pctLabel);
+    row.appendChild(barWrap);
+  }
+
+  wrap.appendChild(row);
+
+  async function _saveBudget(value){
+    try{
+      await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
+      const existing=card.querySelector('.provider-cost-chart-wrap');
+      if(existing) existing.remove();
+      renderProviderCostChart(card);
+    }catch(e){
+      if(typeof showToast==='function') showToast(t('provider_cost_budget_save_failed'));
+    }
+  }
+
+  setBtn.addEventListener('click',()=>{
+    const val=parseFloat(input.value);
+    if(!isFinite(val)||val<=0) return;
+    _saveBudget(val);
+  });
+
+  clearBtn.addEventListener('click',()=>{
+    _saveBudget(null);
+  });
 }
 
 function _buildProviderCard(p){
@@ -9564,7 +10418,140 @@ function _buildProviderCard(p){
   }
 
   let input=null;
+  let focusInput=null;
   let saveBtn=null;
+  if(p.is_self_hosted){
+    const defaultBaseUrl=_SELF_HOSTED_DEFAULT_BASE_URLS[p.id];
+    const baseUrlField=document.createElement('div');
+    baseUrlField.className='provider-card-field';
+    const baseUrlLabel=document.createElement('label');
+    baseUrlLabel.className='provider-card-label';
+    baseUrlLabel.textContent='Base URL';
+    baseUrlField.appendChild(baseUrlLabel);
+    const baseUrlRow=document.createElement('div');
+    baseUrlRow.className='provider-card-row';
+    const baseUrlInput=document.createElement('input');
+    baseUrlInput.type='text';
+    baseUrlInput.className='provider-card-input';
+    baseUrlInput.placeholder=defaultBaseUrl||'http://localhost:11434/v1';
+    baseUrlInput.value=(p.base_url||'').trim()||defaultBaseUrl||'';
+    baseUrlInput.autocomplete='off';
+    const testBtn=document.createElement('button');
+    testBtn.type='button';
+    testBtn.className='provider-card-btn provider-card-btn-ghost';
+    testBtn.textContent='Test connection';
+    const probeStatus=document.createElement('div');
+    probeStatus.className='provider-card-hint';
+    baseUrlRow.appendChild(baseUrlInput);
+    baseUrlRow.appendChild(testBtn);
+    baseUrlField.appendChild(baseUrlRow);
+    baseUrlField.appendChild(probeStatus);
+
+    const keyField=document.createElement('div');
+    keyField.className='provider-card-field';
+    const keyLabel=document.createElement('label');
+    keyLabel.className='provider-card-label';
+    keyLabel.textContent='API key (optional)';
+    keyField.appendChild(keyLabel);
+    const keyRow=document.createElement('div');
+    keyRow.className='provider-card-row';
+    const keyInput=document.createElement('input');
+    keyInput.type='password';
+    keyInput.className='provider-card-input';
+    keyInput.autocomplete='off';
+    keyInput.placeholder='Optional';
+    keyRow.appendChild(keyInput);
+    keyField.appendChild(keyRow);
+
+    const modelField=document.createElement('div');
+    modelField.className='provider-card-field';
+    const modelLabel=document.createElement('label');
+    modelLabel.className='provider-card-label';
+    modelLabel.textContent=t('providers_status_model')||'Model';
+    modelField.appendChild(modelLabel);
+    const modelRow=document.createElement('div');
+    modelRow.className='provider-card-row';
+    const modelInput=document.createElement('input');
+    modelInput.type='text';
+    modelInput.className='provider-card-input';
+    modelInput.autocomplete='off';
+    modelInput.placeholder='model id';
+    const modelDatalist=document.createElement('datalist');
+    const modelListId='providerModelList-'+p.id;
+    modelDatalist.id=modelListId;
+    modelInput.setAttribute('list',modelListId);
+    const setModelChoices=(models)=>{
+      modelDatalist.innerHTML='';
+      const choices=Array.isArray(models)?models:[];
+      for(const model of choices){
+        const modelId=model&&model.id?model.id:model;
+        const option=document.createElement('option');
+        option.value=modelId;
+        modelDatalist.appendChild(option);
+      }
+    };
+    const initialModelChoices=Array.isArray(p.models)?p.models:[];
+    setModelChoices(initialModelChoices);
+
+    const saveRow=document.createElement('div');
+    saveRow.className='provider-card-row';
+    saveRow.style.marginTop='6px';
+    saveBtn=document.createElement('button');
+    saveBtn.type='button';
+    saveBtn.className='provider-card-btn provider-card-btn-primary';
+    saveBtn.textContent=t('providers_save');
+    saveBtn.onclick=()=>_saveSelfHostedProvider(p.id);
+    saveBtn.disabled=true;
+    saveRow.appendChild(saveBtn);
+    if(p.has_key){
+      const removeBtn=document.createElement('button');
+      removeBtn.type='button';
+      removeBtn.className='provider-card-btn provider-card-btn-danger';
+      removeBtn.textContent=t('providers_remove');
+      removeBtn.onclick=()=>_removeProviderKey(p.id);
+      saveRow.appendChild(removeBtn);
+    }
+    modelRow.appendChild(modelInput);
+    modelField.appendChild(modelRow);
+    body.appendChild(baseUrlField);
+    body.appendChild(keyField);
+    body.appendChild(modelField);
+    body.appendChild(saveRow);
+    body.appendChild(modelDatalist);
+    card.appendChild(body);
+
+    const checkSaveEnabled=()=>{
+      const hasUrl=baseUrlInput.value.trim().length>0;
+      const hasModel=modelInput.value.trim().length>0;
+      saveBtn.disabled=!(hasUrl&&hasModel);
+    };
+    baseUrlInput.addEventListener('input',checkSaveEnabled);
+    modelInput.addEventListener('input',checkSaveEnabled);
+    checkSaveEnabled();
+
+    _providerCardEls.set(p.id,{
+      card,
+      baseUrlInput,
+      apiKeyInput:keyInput,
+      modelInput,
+      modelDatalist,
+      saveBtn,
+      testBtn,
+      probeStatus,
+      isSelfHosted:true,
+      setModelChoices,
+      updateSaveState:checkSaveEnabled,
+    });
+    focusInput=modelInput;
+    testBtn.onclick=()=>_testSelfHostedConnection(p.id);
+    header.addEventListener('click',e=>{
+      if(e.target.closest('.provider-card-body')) return;
+      card.classList.toggle('open');
+      if(card.classList.contains('open')) setTimeout(()=>focusInput&&focusInput.focus(),0);
+    });
+    return card;
+  }
+
   if(p.configurable){
     const field=document.createElement('div');
     field.className='provider-card-field';
@@ -9608,6 +10595,8 @@ function _buildProviderCard(p){
     }
     field.appendChild(row);
     body.appendChild(field);
+    focusInput=input;
+
   }else{
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
@@ -9677,7 +10666,7 @@ function _buildProviderCard(p){
     // Don't toggle when clicking inside body (defensive; body isn't inside header)
     if(e.target.closest('.provider-card-body')) return;
     card.classList.toggle('open');
-    if(card.classList.contains('open')) setTimeout(()=>input.focus(),0);
+    if(card.classList.contains('open')) setTimeout(()=>focusInput&&focusInput.focus(),0);
   });
   return card;
 }
@@ -9749,6 +10738,108 @@ async function _removeProviderKey(providerId){
       showToast('Error: '+e.message);
     }
     if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
+  }
+}
+
+async function _testSelfHostedConnection(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els||!els.isSelfHosted) return;
+  const baseUrl=(els.baseUrlInput.value||'').trim();
+  const apiKey=(els.apiKeyInput.value||'').trim();
+  if(!baseUrl){
+    showToast('Base URL is required');
+    return;
+  }
+
+  const testBtn=els.testBtn;
+  if(!testBtn) return;
+  const prevLabel=testBtn.textContent;
+  testBtn.disabled=true;
+  testBtn.textContent='Testing...';
+  if(els.probeStatus){
+    els.probeStatus.style.color='var(--muted)';
+    els.probeStatus.textContent='Testing connection...';
+  }
+
+  try{
+    const res=await api('/api/onboarding/probe',{
+      method:'POST',
+      body:JSON.stringify({provider:providerId,base_url:baseUrl,api_key:apiKey||undefined}),
+    });
+    if(res&&res.ok){
+      const models=Array.isArray(res.models)?res.models:[];
+      if(els.setModelChoices){
+        els.setModelChoices(models);
+      }
+      if(els.probeStatus){
+        const count=models.length;
+        els.probeStatus.style.color='var(--ok)';
+        els.probeStatus.textContent=`Connected. ${count} model(s) available.`;
+      }
+      if(!els.modelInput.value&&models.length&&models[0]){
+        els.modelInput.value=models[0].id||models[0];
+      }
+      if(els.updateSaveState){
+        els.updateSaveState();
+      }
+    }else{
+      const err=(res&&res.error)||'unreachable';
+      const detail=(res&&res.detail)?` (${res.detail})`:'';
+      if(els.probeStatus){
+        els.probeStatus.style.color='var(--accent)';
+        els.probeStatus.textContent=`${err}${detail}`;
+      }
+      showToast(`Connection test failed: ${err}`);
+    }
+  }catch(e){
+    if(els.probeStatus){
+      els.probeStatus.style.color='var(--accent)';
+      els.probeStatus.textContent=e&&e.message?e.message:'Connection test failed';
+    }
+    showToast('Connection test failed: '+(e&&e.message||'request error'));
+  }finally{
+    testBtn.disabled=false;
+    testBtn.textContent=prevLabel;
+  }
+}
+
+async function _saveSelfHostedProvider(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els||!els.isSelfHosted) return;
+  const baseUrl=(els.baseUrlInput.value||'').trim();
+  const key=(els.apiKeyInput.value||'').trim();
+  const model=(els.modelInput.value||'').trim();
+  if(!baseUrl){
+    showToast('Base URL is required');
+    return;
+  }
+  if(!model){
+    showToast('Model is required');
+    return;
+  }
+  if(!els.saveBtn) return;
+  const saveBtn=els.saveBtn;
+  const prevLabel=saveBtn.textContent;
+  saveBtn.disabled=true;
+  saveBtn.textContent='Saving...';
+  try{
+    const payload={provider:providerId,base_url:baseUrl,model:model};
+    if(key) payload.api_key=key;
+    const res=await api('/api/providers/self-hosted',{method:'POST',body:JSON.stringify(payload)});
+    if(res&&res.ok){
+      showToast(`${res.provider} configured`);
+      if(els.apiKeyInput) els.apiKeyInput.value='';
+      _refreshModelDropdownsAfterProviderChange();
+      await loadProvidersPanel();
+    }else{
+      showToast(res&&res.error||'Failed to save provider');
+      saveBtn.disabled=false;
+      saveBtn.textContent=prevLabel;
+    }
+  }catch(e){
+    showToast('Error: '+(e&&e.message||'Failed to save provider'));
+    saveBtn.disabled=false;
+    saveBtn.textContent=prevLabel;
   }
 }
 
@@ -9951,13 +11042,14 @@ async function deletePasskey(id){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
+  const {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showQuotaChip=showQuotaChip===true;
   window._showConversationOutline=showConversationOutline===true;
   document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
   if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
+  window._showBusyPlaceholderHint=showBusyPlaceholderHint===true;
   window._showTps=showTps;
   window._fadeTextEffect=!!fadeTextEffect;
   window._showCliSessions=showCliSessions;
@@ -9974,16 +11066,34 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
-  window._busyInputMode=body.busy_input_mode||'queue';
+  // #5170 mirror write in _applySavedSettingsUi, under the #5145 rename:
+  // persist so a reload/offline first-send honors the resolved mode.
+  window._defaultMessageMode=(typeof _persistDefaultMessageMode==='function')
+    ? _persistDefaultMessageMode(body.default_message_mode||body.busy_input_mode)
+    : (body.default_message_mode||body.busy_input_mode||'steer');
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
   window._autoScrollFollow=body.auto_scroll_follow!==false;
+  window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;
+  window._projectQuickCreate=!!body.project_quick_create_buttons;
   if(Object.prototype.hasOwnProperty.call(body,'structured_code_default_view')){
     _applyStructuredCodeViewSettings(body.structured_code_default_view,body.structured_code_auto_tree_lines,false);
   }
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
+  else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  _ensureComposerControlVisibilityState(saved||body||{});
+  const composerOrderSource=(saved&&Array.isArray(saved.composer_control_order))
+    ? saved.composer_control_order
+    : (Array.isArray(body.composer_control_order)?body.composer_control_order:null);
+  if(composerOrderSource){
+    const composerOrder=_setComposerControlOrder(composerOrderSource);
+    if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(composerOrder);
+  }
+  _renderComposerControlChips();
+  _renderComposerSituationalControlChips();
+  if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
   const maxTokensField=$('settingsMaxTokens');
   if(maxTokensField){
     const savedRawMaxTokens=saved&&saved.max_tokens;
@@ -10522,7 +11632,9 @@ async function saveSettings(andClose){
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
+  const showClaudeCodeSessions=!!($('settingsShowClaudeCodeSessions')||{}).checked;
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
+  const showWebhookSessions=!!($('settingsShowWebhookSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
@@ -10531,7 +11643,8 @@ async function saveSettings(andClose){
   const fontSize=($('settingsFontSize')||{}).value||localStorage.getItem('hermes-font-size')||'default';
   const language=($('settingsLanguage')||{}).value||'en';
   const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
-  const busyInputMode=($('settingsBusyInputMode')||{}).value||'queue';
+  const defaultMessageMode=($('settingsDefaultMessageMode')||{}).value||'steer';
+  const showBusyPlaceholderHint=!!($('settingsShowBusyPlaceholderHint')||{}).checked;
   const body={};
 
   if(sendKey) body.send_key=sendKey;
@@ -10543,7 +11656,11 @@ async function saveSettings(andClose){
   body.chat_activity_display_mode=(($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')?'transparent_stream':'compact_worklog';
   body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
+  body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
+  body.project_quick_create_buttons=!!($('settingsProjectQuickCreate')||{}).checked;
   Object.assign(body,_structuredCodeViewFromUi());
+  Object.assign(body,_composerControlVisibilityPayload());
+  body.composer_control_order=_getComposerControlOrder();
   body.language=language;
   body.show_token_usage=showTokenUsage;
   const maxTokensField=$('settingsMaxTokens');
@@ -10556,15 +11673,19 @@ async function saveSettings(andClose){
   }
   body.show_quota_chip=showQuotaChip===true;
   body.show_conversation_outline=showConversationOutline===true;
+  body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
-  // Cron sessions are gated on CLI sessions (server short-circuits otherwise);
-  // mirror the autosave path so the explicit Save Settings button persists it too. (#3514)
+  // Persist the opt-out child independently; the read path applies the parent gate.
+  body.show_claude_code_sessions=showClaudeCodeSessions;
+  // Cron and webhook sessions are gated on CLI sessions (server short-circuits otherwise);
+  // mirror the autosave path so the explicit Save Settings button persists them too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;
+  body.show_webhook_sessions=showCliSessions&&showWebhookSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
@@ -10576,7 +11697,7 @@ async function saveSettings(andClose){
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
   body.show_thinking=window._showThinking!==false;
   body.sidebar_density=sidebarDensity;
-  body.busy_input_mode=busyInputMode;
+  body.default_message_mode=defaultMessageMode;
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
@@ -10602,7 +11723,7 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
       const pwField=$('settingsPassword'); if(pwField) pwField.value='';
@@ -10632,7 +11753,7 @@ async function saveSettings(andClose){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
       }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();

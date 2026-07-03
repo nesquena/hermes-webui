@@ -101,6 +101,14 @@ def _run_commands_js(script_body: str) -> dict:
             if (path === '/api/commands') return {{
               commands: [
                 {{
+                  name: 'pet',
+                  description: 'Desktop Companion command',
+                  category: 'Tools',
+                  aliases: [],
+                  cli_only: true,
+                  gateway_only: false
+                }},
+                {{
                   name: 'browser',
                   description: 'Attach browser tools',
                   category: 'Tools',
@@ -300,6 +308,8 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
         await loadAgentCommandMetadata(true);
         await loadBundleCommands(true);
         await loadSkillCommands(true);
+        const pet = await getSlashAutocompleteMatches('/pet');
+        const browser = await getSlashAutocompleteMatches('/bro');
         const handoff = await getSlashAutocompleteMatches('/handoff');
         const delegate = await getSlashAutocompleteMatches('/delegate');
         const incident = await getSlashAutocompleteMatches('/incident');
@@ -308,6 +318,10 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
         const skills = await getSlashAutocompleteMatches('/skills');
         const use = await getSlashAutocompleteMatches('/use');
         return {
+          pet_names: pet.map(item => item.name),
+          pet_sources: pet.map(item => item.source),
+          pet_descs: pet.map(item => item.desc),
+          browser_names: browser.map(item => item.name),
           handoff_names: handoff.map(item => item.name),
           delegate_names: delegate.map(item => item.name),
           incident_names: incident.map(item => item.name),
@@ -322,6 +336,10 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
         """
     )
 
+    assert result["pet_names"] == ["pet"]
+    assert result["pet_sources"] == ["agent"]
+    assert result["pet_descs"] == ["Desktop Companion command"]
+    assert result["browser_names"] == []
     assert result["handoff_names"] == []
     assert result["delegate_names"] == []
     assert result["incident_names"] == ["incident-review"]

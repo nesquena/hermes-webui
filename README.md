@@ -259,6 +259,8 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Enable via `HERMES_WEBUI_PASSWORD` env var or Settings panel
 - Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
 - After registering at least one passkey, Settings -> System can remove the password and keep passkey-only sign-in enabled. Password auth remains the bootstrap/recovery path until you choose to go passwordless; passkeys are same-origin and stored locally in the WebUI state directory
+- Optional native OIDC login for WebUI sessions -- configure `webui_oidc.issuer`, `client_id`, `allow_claim`, and `allow_values` in `config.yaml`, or set the matching `HERMES_WEBUI_OIDC_*` environment variables. OIDC stays disabled until all four are present, and startup prints a warning if the config is partial.
+- Native OIDC stores the PKCE/state nonce flow in process memory. That works for the shipped single-process server, and it also works behind a load balancer when callbacks stay sticky to the same WebUI instance. Multi-instance deployments need session affinity, or the callback can land on a different process and fail state validation.
 - Signed HMAC HTTP-only cookie with 24h TTL
 - Minimal dark-themed login page at `/login`
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
@@ -365,7 +367,7 @@ Full list of environment variables:
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
 | `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
-| `HERMES_WEBUI_SESSIONS_MAX` | `100` | Max compact `Session` objects held in the in-memory LRU. Lighter than the agent cache; lower it on installs with hundreds of sessions |
+| `HERMES_WEBUI_SESSIONS_MAX` | `300` | Legacy operator override for the max compact `Session` objects held in the in-memory LRU. Prefer the `webui.sessions_cache_max` key in `config.yaml` (which takes precedence); this env var remains a fallback. Bounds resident memory so long-running installs cannot accumulate every session ever touched and eventually crash (#4765/#2233/#4633). Eviction only ever drops clean, persisted, non-active sessions — an evicted session lazily reloads from its JSON sidecar on next access |
 
 Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 
@@ -637,24 +639,24 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
 <!-- BEGIN GENERATED CONTRIBUTORS -->
-Over **288 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+Over **304 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 264 | `v0.49.3` → `v0.51.587` |
-| 2 | [@rodboev](https://github.com/rodboev) | 204 | `v0.51.223` → `v0.51.586` |
+| 1 | [@franksong2702](https://github.com/franksong2702) | 289 | `v0.49.3` → `v0.51.721` |
+| 2 | [@rodboev](https://github.com/rodboev) | 265 | `v0.51.223` → `v0.51.731` |
 | 3 | [@Michaelyklam](https://github.com/Michaelyklam) | 157 | `v0.50.240` → `v0.51.198` |
 | 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 116 | `v0.50.279` → `v0.51.519` |
 | 5 | [@bergeouss](https://github.com/bergeouss) | 80 | `v0.48.0` → `v0.51.527` |
 | 6 | [@AJV20](https://github.com/AJV20) | 57 | `v0.51.93` → `v0.51.346` |
 | 7 | [@dso2ng](https://github.com/dso2ng) | 43 | `v0.50.227` → `v0.51.578` |
 | 8 | [@Sanjays2402](https://github.com/Sanjays2402) | 27 | `v0.50.292` → `v0.51.484` |
-| 9 | [@starship-s](https://github.com/starship-s) | 25 | `v0.50.123` → `v0.51.547` |
+| 9 | [@starship-s](https://github.com/starship-s) | 27 | `v0.50.123` → `v0.51.638` |
 | 10 | [@Hinotoi-agent](https://github.com/Hinotoi-agent) | 23 | `v0.50.10` → `v0.51.522` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 288 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 304 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
 <!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions

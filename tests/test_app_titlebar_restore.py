@@ -18,7 +18,7 @@ def test_app_titlebar_returns_to_centered_desktop_layout():
 
 
 def test_app_titlebar_subtitle_shows_message_count_again():
-    assert "subText = t('n_messages', vis.length);" in PANELS_JS
+    assert "subText = String(vis.length);" in PANELS_JS
 
 
 def test_queue_updates_do_not_hijack_app_titlebar_subtitle():
