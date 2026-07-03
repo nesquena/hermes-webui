@@ -163,8 +163,13 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
     assert "row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);" in UI_JS
     assert "seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);" in UI_JS
     assert "container.querySelector(`[data-session-msg-idx=\"${sessionIdx}\"]`)" in UI_JS
-    assert "if(!row&&anchorKey) return false;" in UI_JS
-    assert "if(!row&&hasSessionIdx) return false;" in UI_JS
+    # Desktop scroll jump-back root fix: a stale content-derived anchor key must NOT
+    # dead-end before the sessionIdx fallback (the old `if(!row&&anchorKey) return false;`
+    # sat before sessionIdx was consulted, so a live-stream stale key could never reach
+    # the session-index recovery and the caller fell back to an absolute jump). The
+    # concede now requires BOTH key and sessionIdx lookups to have failed.
+    assert "if(!row&&anchorKey) return false;" not in UI_JS
+    assert "if(!row&&(anchorKey||hasSessionIdx)) return false;" in UI_JS
     assert "_restoreMessageViewportAnchor(snapshot.anchor,0)" in restore
     assert "if(!restoredViaAnchor){" in restore
     assert "el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop))" in restore
