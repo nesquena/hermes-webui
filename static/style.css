@@ -3978,10 +3978,6 @@ body.resizing .sidebar{transition:none!important;}
   box-shadow:none;
   transition:background .18s ease,border-color .18s ease,opacity .22s ease;
 }
-/* Only animate entrance for rows in the LIVE turn — putting the animation on the
-   base row class replayed the whole transcript's shimmer on every renderMessages
-   rebuild. (Trifecta finding V9.) */
-#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter .18s ease-out both;}
 .transparent-event-row[data-event-type="thinking"]{
   background:transparent;
   border-color:transparent;
@@ -4268,11 +4264,6 @@ body.resizing .sidebar{transition:none!important;}
   .transparent-event-row .thinking-card-header{min-height:30px;padding:5px 8px;}
   .transparent-detail-mode{padding:4px 6px 5px;}
 }
-@keyframes transparent-event-enter{
-  from{opacity:0;transform:translateY(2px);}
-  to{opacity:1;transform:translateY(0);}
-}
-
 /* ── Old-event fading (transparent mode: medium → low) ─────────────── */
 /* ── Old-event fading (transparent mode, LIVE turn only — gated in JS) ───── */
 .transparent-event-row[data-transparent-fade="1"]{opacity:.86;}
