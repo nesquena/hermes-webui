@@ -2261,7 +2261,8 @@ def _profile_model_selection_exists(
             continue
         if model_provider and provider_id == model_provider:
             provider_seen = True
-        for model in group.get("models", []) or []:
+        all_group_models = (group.get("models") or []) + (group.get("extra_models") or [])
+        for model in all_group_models:
             if not isinstance(model, dict):
                 continue
             model_id = str(model.get("id") or "").strip()
