@@ -594,6 +594,26 @@ def test_blueprint_command_can_return_agent_seed(monkeypatch):
     }
 
 
+def test_curator_command_uses_subprocess_capture(monkeypatch):
+    """Curator command capture must not mutate process-global stdout/stderr."""
+    from api import commands
+
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((list(cmd), kwargs))
+        return commands.subprocess.CompletedProcess(cmd, 0, "curator ok\n", "")
+
+    monkeypatch.setattr(commands.sys, "executable", "/python")
+    monkeypatch.setattr(commands.subprocess, "run", fake_run)
+
+    assert commands._run_curator_command("/curator status") == "curator ok"
+    assert calls == [(
+        ["/python", "-m", "hermes_cli.main", "curator", "status"],
+        {"capture_output": True, "text": True, "timeout": 30},
+    )]
+
+
 def test_webui_safe_agent_commands_are_allowlisted(monkeypatch):
     """Safe non-CLI agent commands should be accepted by the executor allowlist."""
     from api import commands

@@ -6,10 +6,10 @@ so the frontend can still load with WEBUI_ONLY commands.
 """
 from __future__ import annotations
 from contextlib import nullcontext
-import contextlib
-import io
 import logging
 import shlex
+import subprocess
+import sys
 import threading
 from typing import Any
 
@@ -88,13 +88,6 @@ def _shellish_args(command: str) -> list[str]:
         return shlex.split(command)[1:]
     except ValueError:
         return str(command or "").split()[1:]
-
-
-def _capture_stdout(fn) -> str:
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        fn()
-    return buf.getvalue().strip()
 
 
 def _text_or_no_output(value: Any) -> str:
@@ -515,19 +508,22 @@ def _run_bundles_command() -> str:
 
 def _run_curator_command(command: str) -> str:
     tokens = _shellish_args(command) or ["status"]
-
-    def _run() -> None:
-        try:
-            from hermes_cli.curator import cli_main
-            cli_main(tokens)
-        except SystemExit:
-            pass
-
     try:
-        return _text_or_no_output(_capture_stdout(_run))
+        proc = subprocess.run(
+            [sys.executable, "-m", "hermes_cli.main", "curator", *tokens],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
     except Exception as exc:
         logger.warning("Curator command failed", exc_info=True)
         raise RuntimeError("Curator command failed") from exc
+    output = "\n".join(
+        part for part in (proc.stdout.strip(), proc.stderr.strip()) if part
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(output or "Curator command failed")
+    return _text_or_no_output(output)
 
 
 def _run_kanban_command(arg_string: str) -> str:

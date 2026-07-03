@@ -1495,6 +1495,13 @@ async function send(){
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
         if(_agentResult&&typeof _agentResult==='object'&&typeof _agentResult.message==='string'&&_agentResult.message.trim()){
+          const _agentOutput=typeof _agentResult.output==='string'?_agentResult.output.trim():'';
+          if(_agentOutput){
+            if(!S.session){await newSession();await renderSessionList();}
+            S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+            S.messages.push({role:'assistant',content:_agentOutput,_ts:Date.now()/1000});
+            renderMessages();
+          }
           _slashDisplayTextOverride=text;
           text=_agentResult.message.trim();
         }else{

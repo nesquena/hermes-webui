@@ -483,6 +483,8 @@ def test_webui_agent_command_whitelist_includes_safe_agent_commands():
     ):
         assert repr(command) in MESSAGES_JS
     assert "if(_agentResult&&typeof _agentResult==='object'&&typeof _agentResult.message==='string'" in MESSAGES_JS
+    assert "const _agentOutput=typeof _agentResult.output==='string'?_agentResult.output.trim():'';" in MESSAGES_JS
+    assert "S.messages.push({role:'assistant',content:_agentOutput" in MESSAGES_JS
     assert "_slashDisplayTextOverride=text;" in MESSAGES_JS
     assert "text=_agentResult.message.trim();" in MESSAGES_JS
 
