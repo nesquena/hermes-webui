@@ -37,6 +37,52 @@ jobs:
         if: always()
         run: python3 scripts/ruff_lint.py --all
 
+  # JS runtime-error guard (ESLint). The JS twin of the ruff gate above. Runs the
+  # runtime-guard config (no-const-assign, no-import-assign — the #3162 brick-class
+  # bug family) over static/*.js. tests/test_static_js_runtime_lint.py runs the same
+  # check in-suite but skips gracefully when eslint is absent, so this job is the
+  # hard gate that guarantees the guard actually runs on every PR.
+  lint-js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # No cache: the repo intentionally has no package-lock.json (eslint is
+          # the sole dev dep, installed with --no-save); a fresh install is fast.
+
+      - name: Install ESLint
+        run: npm install --no-save --no-audit --no-fund
+
+      - name: ESLint runtime guard (static/*.js)
+        run: npm run lint:runtime
+
+  # JS runtime-error guard (ESLint). The JS twin of the ruff gate above. Runs the
+  # runtime-guard config (no-const-assign, no-import-assign — the #3162 brick-class
+  # bug family) over static/*.js. tests/test_static_js_runtime_lint.py runs the same
+  # check in-suite but skips gracefully when eslint is absent, so this job is the
+  # hard gate that guarantees the guard actually runs on every PR.
+  lint-js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # No cache: the repo intentionally has no package-lock.json (eslint is
+          # the sole dev dep, installed with --no-save); a fresh install is fast.
+
+      - name: Install ESLint
+        run: npm install --no-save --no-audit --no-fund
+
+      - name: ESLint runtime guard (static/*.js)
+        run: npm run lint:runtime
+
   test:
     runs-on: ubuntu-latest
     strategy:
