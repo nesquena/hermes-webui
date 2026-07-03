@@ -108,7 +108,7 @@ def handle_run_status(handler, parsed):
     if not run_id:
         return bad(handler, "run_id is required", 400)
     if "/" in run_id or "\\" in run_id:
-        return bad(handler, "invalid run_id", 400)
+        return bad(handler, "invalid route", 404)
     if runtime_adapter_agent_runs_enabled():
         adapter = _adapter()
         if adapter is None:
@@ -139,7 +139,6 @@ def handle_run_status(handler, parsed):
     d = status.to_dict()
     d.setdefault("controls", ["observe"] if not status.terminal else [])
     return json_response(handler, d)
-
 
 def handle_run_events(handler, parsed):
     """GET /api/runs/{run_id}/events"""
@@ -184,10 +183,9 @@ def handle_run_events(handler, parsed):
             },
         )
     jrn = _journal()
-    events = jrn.read_events(run_id)
+    events = jrn.read_events(run_id, after_seq=after_seq, limit=limit)
     if events is None:
         return json_response(handler, {"error": "not_found"}, status=404)
-    events = jrn.read_events(run_id, after_seq=after_seq, limit=limit)
     if "text/event-stream" in accept_header:
         return _sse_stream_run_events(handler, run_id, events)
     return json_response(
@@ -197,7 +195,6 @@ def handle_run_events(handler, parsed):
             "events": [e.to_dict() for e in (events or [])],
         },
     )
-
 
 def _parse_int(value):
     if value is None:

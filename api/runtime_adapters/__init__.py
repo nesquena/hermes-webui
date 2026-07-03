@@ -6,6 +6,7 @@ Exposes a factory that builds the configured adapter based on
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any
 
 from api.runtime_adapter import (
@@ -22,11 +23,13 @@ _AGENT_RUNS_BASE_URL_ENV = "HERMES_WEBUI_AGENT_RUNS_BASE_URL"
 _AGENT_RUNS_API_KEY_ENV = "HERMES_WEBUI_AGENT_RUNS_API_KEY"
 
 _adapter_instance = None
+_adapter_instance_lock = threading.Lock()
 
 
 def _reset_adapter_instance_for_test():
     global _adapter_instance
-    _adapter_instance = None
+    with _adapter_instance_lock:
+        _adapter_instance = None
 
 
 def get_runtime_adapter(environ: dict[str, str] | None = None) -> RuntimeAdapter | None:
@@ -40,8 +43,10 @@ def get_runtime_adapter(environ: dict[str, str] | None = None) -> RuntimeAdapter
     if mode == _RUNTIME_ADAPTER_AGENT_RUNS:
         from api.runtime_adapters.agent_runs import AgentRunsAdapter
 
-        _adapter_instance = AgentRunsAdapter.from_env(environ=environ)
-        return _adapter_instance
+        with _adapter_instance_lock:
+            if _adapter_instance is None:
+                _adapter_instance = AgentRunsAdapter.from_env(environ=environ)
+            return _adapter_instance
     if mode == _RUNTIME_ADAPTER_JOURNAL:
         return None
     return None

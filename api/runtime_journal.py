@@ -118,30 +118,32 @@ def _load_index(index_path_obj: Path) -> dict:
     return data
 
 
+def _write_json_unlocked(target: Path, data: dict) -> None:
+    tmp = target.with_suffix(
+        f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
 def _atomic_write_json(
     target: Path,
     data: dict,
     lock: threading.Lock,
 ) -> None:
-    tmp = target.with_suffix(
-        f".tmp.{os.getpid()}.{threading.current_thread().ident}"
-    )
     with lock:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(data, ensure_ascii=False, indent=2)
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, target)
-        except Exception:
-            try:
-                tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise
-
+        _write_json_unlocked(target, data)
 
 class RuntimeJournal:
     """Durable append-only run event store.
@@ -188,30 +190,32 @@ class RuntimeJournal:
         )
         now = time.time()
         self._base_dir.mkdir(parents=True, exist_ok=True)
-        index = _load_index(self._index_file)
-        index["active_sessions"][sid] = run_id
-        index["runs"][run_id] = {
-            "run_id": run_id,
-            "session_id": sid,
-            "status": "queued",
-            "last_event_id": None,
-            "last_seq": None,
-            "terminal": False,
-            "controls": ["cancel"],
-            "pending_approval_ids": [],
-            "pending_clarify_ids": [],
-            "error": None,
-            "result": None,
-            "created_at": now,
-        }
-        _atomic_write_json(self._index_file, index, self._index_lock)
+        with self._index_lock:
+            index = _load_index(self._index_file)
+            index["active_sessions"][sid] = run_id
+            index["runs"][run_id] = {
+                "run_id": run_id,
+                "session_id": sid,
+                "status": "queued",
+                "last_event_id": None,
+                "last_seq": None,
+                "terminal": False,
+                "controls": ["cancel"],
+                "pending_approval_ids": [],
+                "pending_clarify_ids": [],
+                "error": None,
+                "result": None,
+                "created_at": now,
+            }
+            _write_json_unlocked(self._index_file, index)
         return status
 
     def append_event(self, event: RuntimeEvent) -> RuntimeEvent:
         rid = _validate_id(event.run_id, "run_id")
-        index = _load_index(self._index_file)
-        if rid not in index["runs"]:
-            raise ValueError(f"unknown run_id {rid!r}")
+        with self._index_lock:
+            index = _load_index(self._index_file)
+            if rid not in index["runs"]:
+                raise ValueError(f"unknown run_id {rid!r}")
         path = _run_file_path(rid, self._base_dir)
         event_lock = _lock_for_run(rid, self._event_locks, self._event_locks_guard)
         with event_lock:
@@ -233,18 +237,22 @@ class RuntimeJournal:
                         os.close(dir_fd)
                 except OSError:
                     pass
-        run_info = index["runs"][rid]
-        run_info["last_event_id"] = event.event_id
-        run_info["last_seq"] = int(event.seq)
-        if run_info.get("status") == "queued":
-            run_info["status"] = "running"
-        if event.terminal:
-            run_info["terminal"] = True
-            sid = run_info["session_id"]
-            if index["active_sessions"].get(sid) == rid:
-                index["active_sessions"].pop(sid, None)
-        index["runs"][rid] = run_info
-        _atomic_write_json(self._index_file, index, self._index_lock)
+        with self._index_lock:
+            index = _load_index(self._index_file)
+            run_info = index["runs"].get(rid)
+            if run_info is None:
+                raise ValueError(f"unknown run_id {rid!r}")
+            run_info["last_event_id"] = event.event_id
+            run_info["last_seq"] = int(event.seq)
+            if run_info.get("status") == "queued":
+                run_info["status"] = "running"
+            if event.terminal:
+                run_info["terminal"] = True
+                sid = run_info["session_id"]
+                if index["active_sessions"].get(sid) == rid:
+                    index["active_sessions"].pop(sid, None)
+            index["runs"][rid] = run_info
+            _write_json_unlocked(self._index_file, index)
         return event
 
     def read_events(
@@ -328,21 +336,22 @@ class RuntimeJournal:
         rid = _validate_id(run_id, "run_id")
         if not is_valid_status(status):
             raise ValueError(f"invalid terminal status {status!r}")
-        index = _load_index(self._index_file)
-        entry = index["runs"].get(rid)
-        if entry is None:
-            return None
-        entry["status"] = str(status)
-        entry["terminal"] = True
-        if result is not None:
-            entry["result"] = dict(result)
-        if error is not None:
-            entry["error"] = str(error.get("message", error))
-        index["runs"][rid] = entry
-        sid = entry["session_id"]
-        if index["active_sessions"].get(sid) == rid:
-            index["active_sessions"].pop(sid, None)
-        _atomic_write_json(self._index_file, index, self._index_lock)
+        with self._index_lock:
+            index = _load_index(self._index_file)
+            entry = index["runs"].get(rid)
+            if entry is None:
+                return None
+            entry["status"] = str(status)
+            entry["terminal"] = True
+            if result is not None:
+                entry["result"] = dict(result)
+            if error is not None:
+                entry["error"] = str(error.get("message", error))
+            index["runs"][rid] = entry
+            sid = entry["session_id"]
+            if index["active_sessions"].get(sid) == rid:
+                index["active_sessions"].pop(sid, None)
+            _write_json_unlocked(self._index_file, index)
         return make_status(
             run_id=entry["run_id"],
             session_id=entry["session_id"],
@@ -356,3 +365,4 @@ class RuntimeJournal:
             error=entry.get("error"),
             result=entry.get("result"),
         )
+
