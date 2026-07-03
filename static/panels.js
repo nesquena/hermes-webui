@@ -8454,12 +8454,17 @@ async function loadSettingsPanel(){
     const langSel=$('settingsLanguage');
     if(langSel){
       langSel.innerHTML='';
-      if(typeof LOCALES!=='undefined'){
-        for(const [code,bundle] of Object.entries(LOCALES)){
-          const opt=document.createElement('option');
-          opt.value=code;opt.textContent=bundle._label||code;
-          langSel.appendChild(opt);
-        }
+      // Language bundles load lazily (only the active one + English are present
+      // in LOCALES at boot), so populate the picker from the full static
+      // AVAILABLE_LOCALES/LOCALE_LABELS list rather than the loaded bundles.
+      const _langCodes=(typeof AVAILABLE_LOCALES!=='undefined')?AVAILABLE_LOCALES
+        :((typeof LOCALES!=='undefined')?Object.keys(LOCALES):[]);
+      const _langLabels=(typeof LOCALE_LABELS!=='undefined')?LOCALE_LABELS:{};
+      for(const code of _langCodes){
+        const opt=document.createElement('option');
+        opt.value=code;
+        opt.textContent=((typeof LOCALES!=='undefined'&&LOCALES[code]&&LOCALES[code]._label))||_langLabels[code]||code;
+        langSel.appendChild(opt);
       }
       langSel.value=resolvedLanguage;
       langSel.addEventListener('change',function(){
