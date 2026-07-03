@@ -7688,6 +7688,7 @@ function renderSessionListFromCache(){
       }
     };
     const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{
+      if(_gestureState==='idle') return false;  // press never began on this row
       const wasDragging=_gestureState==='dragging'||_swipeTracking;
       _clearLongPressTimer();
       if(_renamingSid){_gestureState='idle';return false;}

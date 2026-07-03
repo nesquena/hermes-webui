@@ -283,3 +283,29 @@ def test_touch_session_rows_preserve_vertical_scroll():
     assert "user-select:none" in item_rule
     assert "-webkit-user-select:none" in item_rule
     assert "-webkit-touch-callout:none" in item_rule
+
+
+def test_session_gesture_finish_ignores_idle_state():
+    """Test that _finishSessionGesture bails early when _gestureState is 'idle'.
+    
+    This prevents unintended session switches when a drag starts outside the
+    session row and ends on top of it. The gesture must have begun with a
+    pointerdown on the row itself (_gestureState='pressing'), otherwise the
+    pointerup should be ignored.
+    
+    See: https://github.com/nesquena/hermes-webui/issues/5462
+    """
+    # Find the _finishSessionGesture function
+    fn_start = SESSIONS_JS.find("const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{")
+    assert fn_start != -1, "_finishSessionGesture function not found"
+    
+    # Extract the first ~200 characters of the function body
+    fn_body_start = SESSIONS_JS[fn_start:fn_start+200]
+    
+    # Verify the idle-state guard is present at the beginning
+    assert "if(_gestureState==='idle') return false;" in fn_body_start, \
+        "Missing idle-state guard at the beginning of _finishSessionGesture"
+    
+    # Also verify that the fork row handler has the same guard (consistency check)
+    fork_start = SESSIONS_JS.find("rowEl.onpointerup=(e)=>{\n          if(e.pointerType==='mouse'||_gestureState==='idle') return;")
+    assert fork_start != -1, "Fork row pointerup handler should have idle guard"
