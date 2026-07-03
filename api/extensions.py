@@ -6,11 +6,13 @@ It is disabled by default and never executes or fetches third-party URLs.
 """
 
 import html
+import http.client
 import json
 import math
 import logging
 import os
 import re
+import socket
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -19,7 +21,11 @@ import hashlib
 import io
 import time
 import zipfile
-from urllib.request import HTTPRedirectHandler, build_opener, urlopen
+from urllib.request import (
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    build_opener,
+)
 
 from api.helpers import _security_headers, j
 
@@ -108,9 +114,80 @@ class _AllowlistRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _connect_ipv4_first(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    """Connect to *address*, preferring IPv4 to avoid dead-route stalls.
+
+    Some networks advertise IPv6 routes (router advertisements, tunnel brokers)
+    that do not actually reach the public internet.  ``socket.create_connection``
+    follows the OS address ordering, which typically tries IPv6 first; each dead
+    address stalls for the full TCP timeout (~75–130 s) before falling back to
+    IPv4.  This makes gallery installs and registry fetches appear to hang until
+    the browser or curl timeout kills them.
+
+    We iterate families in IPv4→IPv6 order so the common case (IPv4 works, IPv6
+    is a broken route) completes instantly.  IPv6 is still tried as a fallback so
+    IPv6-only networks are unaffected.
+
+    Signature matches ``socket.create_connection`` including the
+    ``_GLOBAL_DEFAULT_TIMEOUT`` sentinel so callers that rely on the stdlib
+    default-timeout behaviour are not broken.
+    """
+    host, port = address
+    if timeout is socket._GLOBAL_DEFAULT_TIMEOUT:
+        timeout = socket.getdefaulttimeout()
+    last_error: OSError | None = None
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            infos = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
+        except socket.gaierror:
+            continue
+        for _fam, socktype, proto, _canon, sockaddr in infos:
+            sock = None
+            try:
+                sock = socket.socket(_fam, socktype, proto)
+                if timeout is not None:
+                    sock.settimeout(timeout)
+                if source_address is not None:
+                    sock.bind(source_address)
+                sock.connect(sockaddr)
+                return sock
+            except OSError as exc:
+                last_error = exc
+                if sock is not None:
+                    sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"Could not connect to {host}:{port}")
+
+
+class _IPv4FirstHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that resolves IPv4 addresses before IPv6.
+
+    Overrides the class-level ``_create_connection`` that
+    ``HTTPConnection.connect()`` calls — the stdlib extension point designed for
+    exactly this kind of per-class customisation (added in Python 3.9,
+    bpo-37830).  No global state is mutated, so the change is thread-safe under
+    ``ThreadingHTTPServer``.
+    """
+
+    _create_connection = staticmethod(_connect_ipv4_first)
+
+
+class _IPv4FirstHTTPSHandler(HTTPSHandler):
+    """HTTPS handler that builds IPv4-first connections for gallery downloads."""
+
+    def https_open(self, req):
+        return self.do_open(_IPv4FirstHTTPSConnection, req)
+
+
+def _build_gallery_opener():
+    """Opener with IPv4-first downloads and redirect-host allowlist."""
+    return build_opener(_IPv4FirstHTTPSHandler, _AllowlistRedirectHandler)
+
+
 def _safe_download(url: str, max_bytes: int, timeout: int = 30) -> bytes:
     """Download from an allowlisted host, rejecting cross-host redirects."""
-    opener = build_opener(_AllowlistRedirectHandler)
+    opener = _build_gallery_opener()
     resp = opener.open(url, timeout=timeout)
     try:
         return resp.read(max_bytes + 1)
@@ -1813,7 +1890,8 @@ def get_extension_registry() -> Dict[str, Any]:
         if cached is not None and (now - cached_at) < _REGISTRY_TTL_SECONDS:
             return {"entries": cached}
         try:
-            raw = urlopen(_REGISTRY_URL, timeout=10).read(2 * 1024 * 1024)
+            opener = _build_gallery_opener()
+            raw = opener.open(_REGISTRY_URL, timeout=10).read(2 * 1024 * 1024)
             data = json.loads(raw.decode("utf-8"))
             if isinstance(data, list):
                 entries = data
