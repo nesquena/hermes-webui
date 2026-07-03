@@ -305,7 +305,7 @@ def test_parent_indicator_hover_only_style():
 
 def test_i18n_branch_keys():
     """Verify all branch-related i18n keys exist in English locale."""
-    with open('static/i18n.js') as f:
+    with open('static/i18n.js', encoding='utf-8') as f:
         src = f.read()
     required_keys = [
         'cmd_branch',

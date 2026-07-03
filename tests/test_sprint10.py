@@ -48,11 +48,11 @@ def test_api_modules_exist(cleanup_test_sessions):
 
 def test_server_py_under_750_lines(cleanup_test_sessions):
     """server.py should be under 750 lines after the split."""
-    lines = len((REPO_ROOT / "server.py").read_text().splitlines())
+    lines = len((REPO_ROOT / "server.py").read_text(encoding="utf-8").splitlines())
     assert lines < 750, f"server.py is {lines} lines -- split may not have landed"
 
 def test_api_config_has_cancel_flags(cleanup_test_sessions):
-    src = (REPO_ROOT / "api/config.py").read_text()
+    src = (REPO_ROOT / "api/config.py").read_text(encoding="utf-8")
     assert "CANCEL_FLAGS" in src
     assert "STREAMS" in src
 

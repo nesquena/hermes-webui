@@ -142,7 +142,7 @@ def test_excalidraw_embed_wrap_structure():
 
 def test_excalidraw_i18n_keys():
     """Verify Excalidraw i18n keys exist in all 7 locales."""
-    with open('static/i18n.js') as f:
+    with open('static/i18n.js', encoding='utf-8') as f:
         src = f.read()
     required_keys = [
         'excalidraw_loading', 'excalidraw_too_large', 'excalidraw_invalid',

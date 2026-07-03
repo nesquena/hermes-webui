@@ -111,7 +111,7 @@ class TestGitInfoParallel:
 
     def test_uses_thread_pool(self):
         source = pathlib.Path(__file__).parent.parent / "api" / "workspace.py"
-        src = source.read_text()
+        src = source.read_text(encoding="utf-8")
         fn = src[src.find("def git_info_for_workspace") :]
         fn = fn[: fn.find("\ndef ")]
 

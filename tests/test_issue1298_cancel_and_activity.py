@@ -285,7 +285,7 @@ class TestIssue1298ActivityGroupExpandPersistence:
     """
 
     def test_ui_js_tracks_user_expand_intent_for_live_activity_group(self):
-        src = (REPO_ROOT / "static" / "ui.js").read_text()
+        src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
         assert "_liveActivityUserExpanded" in src, (
             "ui.js must declare a per-turn tracker for the user's expand intent "
             "on the live activity group (#1298)"
@@ -299,7 +299,7 @@ class TestIssue1298ActivityGroupExpandPersistence:
         """ensureActivityGroup() must consult _liveActivityUserExpanded when
         creating a fresh live group so the user's prior expand survives the
         destroy/recreate cycle."""
-        src = (REPO_ROOT / "static" / "ui.js").read_text()
+        src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
         # Find the ensureActivityGroup function body
         m = re.search(
             r"function ensureActivityGroup\(inner, opts\)\{(.*?)\n\}",
@@ -319,7 +319,7 @@ class TestIssue1298ActivityGroupExpandPersistence:
     def test_finalize_thinking_card_respects_user_expand(self):
         """finalizeThinkingCard() must NOT force-collapse the live activity
         group when the user has explicitly expanded it (#1298)."""
-        src = (REPO_ROOT / "static" / "ui.js").read_text()
+        src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
         m = re.search(
             r"function finalizeThinkingCard\(\)\{(.*?)\n\}",
             src, re.DOTALL,
@@ -340,7 +340,7 @@ class TestIssue1298ActivityGroupExpandPersistence:
     def test_inline_onclick_records_user_intent(self):
         """The summary button's click path must call _onLiveActivityToggle
         so user clicks update the tracker (#1298)."""
-        src = (REPO_ROOT / "static" / "ui.js").read_text()
+        src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
         # The summary button is built inline inside ensureActivityGroup.
         assert "_onLiveActivityToggle" in src, (
             "_onLiveActivityToggle helper must be defined"
@@ -370,7 +370,7 @@ class TestIssue1298ActivityGroupExpandPersistence:
         """clearLiveToolCards() — invoked between turns — must reset the
         per-turn user-expand tracker so the next turn starts collapsed by
         default (#1298)."""
-        src = (REPO_ROOT / "static" / "ui.js").read_text()
+        src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
         m = re.search(
             r"function clearLiveToolCards\(\)\{(.*?)\n\}",
             src, re.DOTALL,

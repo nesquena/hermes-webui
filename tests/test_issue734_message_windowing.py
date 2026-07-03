@@ -1,8 +1,8 @@
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-UI_JS = (REPO / "static" / "ui.js").read_text()
-CSS = (REPO / "static" / "style.css").read_text()
+UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def test_message_windowing_caps_initial_dom_to_recent_messages():

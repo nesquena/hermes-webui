@@ -12,7 +12,7 @@ _HELPERS_PY = Path(__file__).resolve().parents[1] / "api/helpers.py"
 
 
 def _helpers_src() -> str:
-    return _HELPERS_PY.read_text()
+    return _HELPERS_PY.read_text(encoding="utf-8")
 
 
 class TestCSPConnectSrcJsdelivr:

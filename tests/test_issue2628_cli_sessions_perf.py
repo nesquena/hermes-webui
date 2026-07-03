@@ -68,7 +68,7 @@ def test_importable_agent_rows_push_sidebar_limit_into_sql(tmp_path):
     assert [row["id"] for row in rows][:3] == ["cli_perf_0119", "cli_perf_0118", "cli_perf_0117"]
     assert {row["actual_message_count"] for row in rows} == {5}
 
-    src = (REPO_ROOT / "api" / "agent_sessions.py").read_text()
+    src = (REPO_ROOT / "api" / "agent_sessions.py").read_text(encoding="utf-8")
     assert "WITH candidates AS" in src
     assert "JOIN candidates c ON c.id = s.id" in src
     assert "SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id" in src

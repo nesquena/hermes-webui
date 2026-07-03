@@ -299,7 +299,7 @@ def test_start_allows_alternate_port_while_launchd_job_runs_on_default(tmp_path)
         assert result.returncode == 0, combined
         pid_file = tmp_path / ".hermes" / "webui.pid"
         if pid_file.exists():
-            started_pid = int(pid_file.read_text().strip())
+            started_pid = int(pid_file.read_text(encoding="utf-8").strip())
     finally:
         if started_pid:
             try:

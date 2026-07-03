@@ -92,7 +92,7 @@ def test_skill_save_delete_roundtrip(cleanup_test_sessions):
     data, status = post("/api/skills/save", {"name": skill_name, "content": content})
     assert status == 200 and data.get("ok") is True
     skill_path = pathlib.Path(data["path"])
-    assert skill_path.exists() and skill_path.read_text() == content
+    assert skill_path.exists() and skill_path.read_text(encoding="utf-8") == content
     del_data, del_status = post("/api/skills/delete", {"name": skill_name})
     assert del_status == 200 and del_data.get("ok") is True
     assert not skill_path.exists()

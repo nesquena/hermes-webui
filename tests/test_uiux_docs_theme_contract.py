@@ -24,7 +24,7 @@ LEGACY_THEME_LABELS = ("Solarized", "Monokai", "Nord", "OLED")
 
 def test_uiux_demo_docs_use_current_theme_skin_axes():
     for doc_path in DEMO_DOCS:
-        html = doc_path.read_text()
+        html = doc_path.read_text(encoding="utf-8")
         assert 'data-theme="' not in html, f"{doc_path} should not use legacy data-theme"
         assert 'class="dark" data-skin="slate"' in html
         assert "classList.toggle('dark'" in html

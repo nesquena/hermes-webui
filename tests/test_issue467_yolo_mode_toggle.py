@@ -209,7 +209,7 @@ class TestYoloI18n:
 
     @pytest.fixture(scope="class")
     def i18n_js(self):
-        with open("static/i18n.js", "r") as f:
+        with open("static/i18n.js", "r", encoding="utf-8") as f:
             return f.read()
 
     @pytest.mark.parametrize("locale", LOCALES)

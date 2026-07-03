@@ -12,7 +12,7 @@ REPO = pathlib.Path(__file__).parent.parent
 
 
 def read(rel):
-    return (REPO / rel).read_text()
+    return (REPO / rel).read_text(encoding="utf-8")
 
 
 def test_cmd_dropdown_moved_inside_composer_box():

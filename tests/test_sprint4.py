@@ -94,7 +94,7 @@ def test_file_create(cleanup_test_sessions):
     fname = f"test_{uuid.uuid4().hex[:6]}.txt"
     result, status = post("/api/file/create", {"session_id": sid, "path": fname, "content": "hello sprint4"})
     assert status == 200 and result["ok"] is True
-    assert (ws / fname).read_text() == "hello sprint4"
+    assert (ws / fname).read_text(encoding="utf-8") == "hello sprint4"
 
 def test_file_create_requires_fields(cleanup_test_sessions):
     sid, _ = make_session_tracked(cleanup_test_sessions)

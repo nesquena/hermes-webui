@@ -43,8 +43,8 @@ class TestExtractArchiveAttachmentDir:
         dest = Path(result["dest"])
         assert dest.is_relative_to(session_dir)
         assert dest.name == "demo"
-        assert (dest / "hello.txt").read_text() == "Hello, world!"
-        assert (dest / "sub" / "nested.txt").read_text() == "Nested file"
+        assert (dest / "hello.txt").read_text(encoding="utf-8") == "Hello, world!"
+        assert (dest / "sub" / "nested.txt").read_text(encoding="utf-8") == "Nested file"
 
     def test_session_cleanup_covers_extracted_archives(self, tmp_path, monkeypatch):
         inbox = tmp_path / "att-inbox"

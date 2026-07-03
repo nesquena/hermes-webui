@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text()
+MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 def test_reattach_path_uses_replay_when_status_reports_journal():

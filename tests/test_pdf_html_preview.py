@@ -10,7 +10,7 @@ import pytest
 
 
 def _read_js(name):
-    with open(os.path.join('static', name)) as f:
+    with open(os.path.join('static', name), encoding='utf-8') as f:
         return f.read()
 
 
@@ -288,7 +288,7 @@ class TestI18nKeys:
     HTML_KEYS = ['html_loading', 'html_too_large', 'html_error', 'html_open_full', 'html_sandbox_label']
 
     def _find_locale_block(self, locale):
-        with open('static/i18n.js') as f:
+        with open('static/i18n.js', encoding='utf-8') as f:
             content = f.read()
         start = content.find(f"'{locale}':")
         if start < 0:

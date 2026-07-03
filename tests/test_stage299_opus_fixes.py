@@ -18,7 +18,7 @@ ROUTES_PY = Path(__file__).parent.parent / "api" / "routes.py"
 
 
 def _read_source():
-    return ROUTES_PY.read_text()
+    return ROUTES_PY.read_text(encoding="utf-8")
 
 
 def test_wiki_max_files_constant_present():
@@ -72,7 +72,7 @@ def test_count_files_returns_zero_for_forbidden_root(tmp_path, monkeypatch):
 
 def test_render_llm_wiki_status_uses_url_scheme_guard():
     """Opus SHOULD-FIX #1: docs_url interpolated into href must be scheme-guarded."""
-    panels_js = (Path(__file__).parent.parent / "static" / "panels.js").read_text()
+    panels_js = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
     # Find the _renderLlmWikiStatus function body
     start = panels_js.find("function _renderLlmWikiStatus")
     end = panels_js.find("\nfunction ", start + 1)

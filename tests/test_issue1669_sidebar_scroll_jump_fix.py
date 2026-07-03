@@ -22,7 +22,7 @@ SESSIONS_JS = Path(__file__).parent.parent / "static" / "sessions.js"
 
 
 def _read_source():
-    return SESSIONS_JS.read_text()
+    return SESSIONS_JS.read_text(encoding="utf-8")
 
 
 def test_render_restores_scroll_top_for_non_virtualized_lists():

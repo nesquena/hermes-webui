@@ -138,7 +138,7 @@ def render_md(raw):
 def test_render_md_pre_pass_converts_strong(cleanup_test_sessions):
     """ui.js renderMd() must have pre-pass that converts <strong> to **."""
     src = REPO_ROOT / "static" / "ui.js"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     assert "<strong>" in code and "**" in code, "pre-pass for <strong> not found"
     # Verify the specific conversion pattern
     assert re.search(r"<strong>.*?\*\*", code, re.S), \
@@ -148,7 +148,7 @@ def test_render_md_pre_pass_converts_strong(cleanup_test_sessions):
 def test_render_md_has_safety_net(cleanup_test_sessions):
     """ui.js must have a safety-net that escapes unknown HTML tags after the pipeline."""
     src = REPO_ROOT / "static" / "ui.js"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     assert "SAFE_TAGS" in code, "SAFE_TAGS allowlist regex not found in ui.js"
     assert "esc(tag)" in code, "safety-net esc(tag) call not found in ui.js"
 
@@ -156,21 +156,21 @@ def test_render_md_has_safety_net(cleanup_test_sessions):
 def test_render_md_stashes_code_blocks(cleanup_test_sessions):
     """ui.js pre-pass must stash code blocks before replacing safe HTML tags."""
     src = REPO_ROOT / "static" / "ui.js"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     assert "fence_stash" in code, "fence_stash not found in renderMd pre-pass"
 
 
 def test_render_md_handles_br_tag(cleanup_test_sessions):
     """ui.js must convert <br> to newline in pre-pass."""
     src = REPO_ROOT / "static" / "ui.js"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     assert re.search(r"<br\\s\*", code) or "<br" in code, "<br> handling not found"
 
 
 def test_render_md_no_placeholder_remnants(cleanup_test_sessions):
     """Old Unicode placeholder approach (\\uE001-\\uE005) must be gone."""
     src = REPO_ROOT / "static" / "ui.js"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     for old_ph in ["\\uE001", "\\uE002", "\\uE003", "\\uE004", "\\uE005"]:
         assert old_ph not in code, \
             f"Old placeholder {old_ph} still present — broken implementation not cleaned up"
@@ -179,7 +179,7 @@ def test_render_md_no_placeholder_remnants(cleanup_test_sessions):
 def test_render_md_safe_tag_allowlist_complete(cleanup_test_sessions):
     """SAFE_TAGS allowlist must include all tags the pipeline emits."""
     src = REPO_ROOT / "static" / "ui.js"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     required = ["strong", "em", "code", "pre", "ul", "ol", "li",
                 "table", "blockquote", "hr", "br", "a", "div"]
     safe_tags_match = re.search(r"SAFE_TAGS\s*=\s*/(.+?)/i", code)
@@ -657,7 +657,7 @@ def test_multiple_paragraphs_separated(cleanup_test_sessions):
 
 def test_table_structure_in_ui_js(cleanup_test_sessions):
     """ui.js must contain table rendering logic with thead/tbody structure."""
-    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     assert "<table>" in src or "table>" in src, "table rendering not found in ui.js"
     assert "thead" in src, "thead not found in table renderer"
     assert "tbody" in src, "tbody not found in table renderer"
@@ -701,12 +701,12 @@ def test_strong_text_not_double_escaped(cleanup_test_sessions):
 
 def test_inline_md_helper_in_ui_js(cleanup_test_sessions):
     """ui.js must define inlineMd() helper function."""
-    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     assert "function inlineMd(" in src, "inlineMd() helper not found in ui.js"
 
 def test_inline_md_used_in_list_handler(cleanup_test_sessions):
     """List handler in ui.js must call inlineMd() not esc() for item text."""
-    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     # Find the list block handler
     ul_idx = src.find("html+='<ul>'") or src.find('html+=`<ul>`') or src.find("let html='<ul>'")
     assert ul_idx >= 0 or "inlineMd(text)" in src, "inlineMd not called in list handler"
@@ -715,14 +715,14 @@ def test_inline_md_used_in_list_handler(cleanup_test_sessions):
 
 def test_inline_md_used_in_blockquote_handler(cleanup_test_sessions):
     """Blockquote handler in ui.js must call inlineMd() not esc() for content."""
-    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     assert "inlineMd(t)" in src, "inlineMd not called in blockquote/heading handler"
 
 
 def test_sessions_js_has_svg_icons(cleanup_test_sessions):
     """sessions.js must define ICONS object with SVG strings for sidebar buttons."""
     src = REPO_ROOT / "static" / "sessions.js"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     assert "const ICONS=" in code or "const ICONS =" in code, "ICONS constant not found"
     for icon in ["pin", "folder", "archive", "trash", "dup"]:
         assert icon + ":" in code or f"'{icon}'" in code, f"ICONS.{icon} not found"
@@ -732,7 +732,7 @@ def test_sessions_js_has_svg_icons(cleanup_test_sessions):
 def test_sessions_js_has_dropdown_actions(cleanup_test_sessions):
     """sessions.js must use a single trigger button and dropdown for session actions."""
     src = REPO_ROOT / "static" / "sessions.js"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     assert "session-actions-trigger" in code, "session action trigger button not found in sessions.js"
     assert "session-action-menu" in code, "session action dropdown menu not found in sessions.js"
 
@@ -740,7 +740,7 @@ def test_sessions_js_has_dropdown_actions(cleanup_test_sessions):
 def test_style_css_has_session_actions_dropdown(cleanup_test_sessions):
     """style.css must define trigger and dropdown styles for session actions."""
     src = REPO_ROOT / "static" / "style.css"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     assert ".session-actions" in code, ".session-actions not found in style.css"
     assert ".session-action-menu" in code, ".session-action-menu not found in style.css"
     assert "position:fixed" in code or "position: fixed" in code, \
@@ -750,7 +750,7 @@ def test_style_css_has_session_actions_dropdown(cleanup_test_sessions):
 def test_style_css_active_session_uses_accent(cleanup_test_sessions):
     """Active session style should use accent color variable, not hardcoded hex."""
     src = REPO_ROOT / "static" / "style.css"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     assert "var(--accent" in code and ".session-item.active" in code, \
         "Active session must use var(--accent) variables in style.css"
 
@@ -765,7 +765,7 @@ def test_sessions_js_uses_action_menu_not_per_row_buttons(cleanup_test_sessions)
     membership instead.
     """
     src = REPO_ROOT / "static" / "sessions.js"
-    code = src.read_text()
+    code = src.read_text(encoding="utf-8")
     assert "session-actions-trigger" in code, "session-actions-trigger not found in sessions.js"
     assert "_openSessionActionMenu" in code, "_openSessionActionMenu not found in sessions.js"
     assert "closeSessionActionMenu" in code, "closeSessionActionMenu not found in sessions.js"

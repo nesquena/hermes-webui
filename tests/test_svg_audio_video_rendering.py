@@ -109,7 +109,7 @@ def test_media_label_class():
 
 def test_i18n_keys():
     """Verify media rendering i18n keys exist in all locales."""
-    with open('static/i18n.js') as f:
+    with open('static/i18n.js', encoding='utf-8') as f:
         src = f.read()
     required_keys = [
         'media_audio_label',

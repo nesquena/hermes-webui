@@ -424,7 +424,7 @@ class TestApprovalCardTimerLogic:
 
     def test_approval_min_visible_ms_constant_present(self):
         """APPROVAL_MIN_VISIBLE_MS constant exists and is 30000."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert 'APPROVAL_MIN_VISIBLE_MS' in src
         import re
         m = re.search(r'APPROVAL_MIN_VISIBLE_MS\s*=\s*(\d+)', src)
@@ -433,35 +433,35 @@ class TestApprovalCardTimerLogic:
 
     def test_hide_approval_card_has_force_parameter(self):
         """hideApprovalCard() accepts a force parameter."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert 'hideApprovalCard(force=false)' in src or \
                'hideApprovalCard(force = false)' in src, \
             'hideApprovalCard must have force=false default parameter'
 
     def test_hide_approval_card_checks_force_flag(self):
         """hideApprovalCard body has a conditional on force."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         # The guard: if (!force && _approvalVisibleSince)
         assert '!force' in src, 'hideApprovalCard must check !force before deferred hide'
 
     def test_approval_hide_timer_variable_present(self):
         """Module-level _approvalHideTimer variable is declared."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert '_approvalHideTimer' in src
 
     def test_approval_visible_since_variable_present(self):
         """Module-level _approvalVisibleSince variable is declared."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert '_approvalVisibleSince' in src
 
     def test_approval_signature_variable_present(self):
         """Module-level _approvalSignature variable is declared."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert '_approvalSignature' in src
 
     def test_respond_approval_calls_hide_with_force(self):
         """respondApproval must call hideApprovalCard(true) — not no-arg."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         # Extract respondApproval function body
         import re
         m = re.search(r'async function respondApproval.*?(?=\nasync function|\nfunction |\Z)',
@@ -478,7 +478,7 @@ class TestApprovalCardTimerLogic:
 
     def test_stream_done_calls_hide_with_force(self):
         """Done SSE event handler must call hideApprovalCard(true)."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         # Find the done event handler section (stopApprovalPolling followed by hideApprovalCard)
         import re
         # Look for pattern: stopApprovalPolling();\n + hideApprovalCard
@@ -493,7 +493,7 @@ class TestApprovalCardTimerLogic:
 
     def test_poll_loop_still_uses_no_force(self):
         """Poll loop approval hides (when pending gone) keep no-force behavior."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         # Poll/SSE empty-state hides should preserve the 30s visibility guard.
         # Owner-scoped prompt cleanup now routes this through the helper, whose
         # default force=false is behavior-equivalent to the old hideApprovalCard().
@@ -505,7 +505,7 @@ class TestApprovalCardTimerLogic:
 
     def test_show_approval_card_signature_dedup(self):
         """showApprovalCard uses a signature to avoid resetting timer on repeat polls."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         # The sig computation must use JSON.stringify on card content
         import re
         m = re.search(r'function showApprovalCard.*?(?=\nfunction |\nasync function |\Z)',
@@ -517,7 +517,7 @@ class TestApprovalCardTimerLogic:
 
     def test_clear_approval_hide_timer_helper_present(self):
         """_clearApprovalHideTimer helper exists to cancel deferred hides."""
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert '_clearApprovalHideTimer' in src, \
             '_clearApprovalHideTimer helper must exist to cancel deferred setTimeout'
 
@@ -534,7 +534,7 @@ class TestClarifyCardTimerLogic:
         return pathlib.Path(__file__).parent.parent / 'static' / 'style.css'
 
     def test_clarify_min_visible_ms_constant_present(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert 'CLARIFY_MIN_VISIBLE_MS' in src
         import re
         m = re.search(r'CLARIFY_MIN_VISIBLE_MS\s*=\s*(\d+)', src)
@@ -542,42 +542,42 @@ class TestClarifyCardTimerLogic:
         assert int(m.group(1)) == 30000, f'Expected 30000, got {m.group(1)}'
 
     def test_hide_clarify_card_has_force_parameter(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert 'hideClarifyCard(force=false)' in src or \
                'hideClarifyCard(force=false, reason=' in src or \
                'hideClarifyCard(force = false)' in src, \
             'hideClarifyCard must have force=false default parameter'
 
     def test_hide_clarify_card_checks_force_flag(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert '!force' in src, 'hideClarifyCard must check !force before deferred hide'
 
     def test_clarify_hide_timer_variable_present(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert '_clarifyHideTimer' in src
 
     def test_clarify_visible_since_variable_present(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert '_clarifyVisibleSince' in src
 
     def test_clarify_signature_variable_present(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert '_clarifySignature' in src
 
     def test_clarify_countdown_element_present(self):
-        html = self._get_html().read_text()
+        html = self._get_html().read_text(encoding="utf-8")
         assert 'id="clarifyCountdown"' in html, \
             'clarify card must include a countdown element so users see timeout risk'
 
     def test_clarify_countdown_uses_pending_expiry(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert '_clarifyCountdownTimer' in src
         assert 'function _startClarifyCountdown' in src
         assert 'expires_at' in src, \
             'clarify countdown must use expires_at from the pending payload'
 
     def test_clarify_countdown_does_not_restart_for_same_expiry(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         m = re.search(r'function _startClarifyCountdown.*?(?=\nfunction |\nasync function |\Z)',
                       src, re.DOTALL)
         assert m, '_startClarifyCountdown function not found'
@@ -591,14 +591,14 @@ class TestClarifyCardTimerLogic:
             'same-expiry guard must run before clearing the current interval'
 
     def test_hide_clarify_card_can_preserve_draft(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert 'function _stashClarifyDraft' in src
         assert 'sessionStorage.setItem' in src
         assert "$('msg')" in src, \
             'clarify timeout should keep the typed draft visible in the composer'
 
     def test_clarify_draft_appends_to_existing_composer_text(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         m = re.search(r'function _stashClarifyDraft.*?(?=\nfunction |\nasync function |\Z)',
                       src, re.DOTALL)
         assert m, '_stashClarifyDraft function not found'
@@ -609,7 +609,7 @@ class TestClarifyCardTimerLogic:
             'preserved clarify drafts should be separated from existing composer text'
 
     def test_cancel_stream_does_not_preserve_clarify_draft(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         m = re.search(r"source\.addEventListener\('cancel'.*?\n    \}\);",
                       src, re.DOTALL)
         assert m, 'cancel event handler not found'
@@ -620,7 +620,7 @@ class TestClarifyCardTimerLogic:
         ), 'explicit stream cancel must not use the timeout/terminal draft preservation path'
 
     def test_clarify_urgent_countdown_has_non_color_cue(self):
-        css = self._get_css().read_text()
+        css = self._get_css().read_text(encoding="utf-8")
         m = re.search(r'\.clarify-countdown\.urgent\{([^}]*)\}', css)
         assert m, 'urgent clarify countdown style missing'
         body = m.group(1)
@@ -628,7 +628,7 @@ class TestClarifyCardTimerLogic:
             'urgent countdown styling must include a non-color visual cue'
 
     def test_respond_clarify_sends_clarify_id_and_waits_for_ack(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         import re
         m = re.search(r'async function respondClarify.*?(?=\nasync function|\nfunction |\Z)',
                       src, re.DOTALL)
@@ -649,14 +649,14 @@ class TestClarifyCardTimerLogic:
             'respondClarify must wait for the API response before calling hideClarifyCard (issue #2639)'
 
     def test_clarify_poll_loop_uses_no_force(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         assert "_hideClarifyCardIfOwner(sid, false, 'expired');" in src or \
                "else { hideClarifyCard(false, 'expired'); }" in src or \
                "else {hideClarifyCard(false,'expired');}" in src, \
             'Clarify poll loop should hide without force=true'
 
     def test_show_clarify_card_signature_dedup(self):
-        src = self._get_js().read_text()
+        src = self._get_js().read_text(encoding="utf-8")
         import re
         m = re.search(r'function showClarifyCard.*?(?=\nfunction |\nasync function |\Z)',
                       src, re.DOTALL)

@@ -9,12 +9,12 @@ import pytest
 
 
 def _read_js(name):
-    with open(os.path.join('static', name)) as f:
+    with open(os.path.join('static', name), encoding='utf-8') as f:
         return f.read()
 
 
 def _read_css():
-    with open(os.path.join('static', 'style.css')) as f:
+    with open(os.path.join('static', 'style.css'), encoding='utf-8') as f:
         return f.read()
 
 

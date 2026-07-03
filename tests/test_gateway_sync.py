@@ -1167,7 +1167,7 @@ def test_sessions_response_distinguishes_same_user_different_chat_identity_from_
     sessions_file = _get_test_state_dir() / 'sessions' / 'sessions.json'
     original_sessions_json = None
     if sessions_file.exists():
-        original_sessions_json = sessions_file.read_text()
+        original_sessions_json = sessions_file.read_text(encoding="utf-8")
     sessions_file.parent.mkdir(parents=True, exist_ok=True)
     sessions_payload = {
         "agent:main:telegram:dm:1143399746": {

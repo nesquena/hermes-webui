@@ -186,7 +186,7 @@ def test_file_save(cleanup_test_sessions):
     fname = f"save_{uuid.uuid4().hex[:6]}.txt"
     (ws / fname).write_text("original content")
     result, status = post("/api/file/save", {"session_id": sid, "path": fname, "content": "updated"})
-    assert status == 200 and (ws / fname).read_text() == "updated"
+    assert status == 200 and (ws / fname).read_text(encoding="utf-8") == "updated"
 
 def test_file_save_requires_fields(cleanup_test_sessions):
     sid, _ = make_session_tracked(cleanup_test_sessions)

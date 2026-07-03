@@ -91,8 +91,8 @@ def test_repair_discoverability_dry_run_plans_without_mutating_files(tmp_path):
         "clear_index_cli_flag",
         "materialize_sidecar_from_state_db",
     }
-    assert json.loads((tmp_path / f"{stale}.json").read_text())["is_cli_session"] is True
-    assert json.loads((tmp_path / "_index.json").read_text())[0]["is_cli_session"] is True
+    assert json.loads((tmp_path / f"{stale}.json").read_text(encoding="utf-8"))["is_cli_session"] is True
+    assert json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))[0]["is_cli_session"] is True
     assert not (tmp_path / f"{missing}.json").exists()
     assert not (tmp_path / "backup").exists()
 
@@ -107,7 +107,7 @@ def test_repair_discoverability_apply_requires_backup_dir(tmp_path):
 
     assert result["ok"] is False
     assert result["error"] == "backup_dir_required_for_apply"
-    assert json.loads((tmp_path / f"{sid}.json").read_text())["is_cli_session"] is True
+    assert json.loads((tmp_path / f"{sid}.json").read_text(encoding="utf-8"))["is_cli_session"] is True
 
 
 def test_repair_discoverability_apply_backs_up_and_repairs_safe_findings(tmp_path):
@@ -133,11 +133,11 @@ def test_repair_discoverability_apply_backs_up_and_repairs_safe_findings(tmp_pat
         "clear_index_cli_flag",
         "materialize_sidecar_from_state_db",
     }
-    assert json.loads((tmp_path / f"{stale}.json").read_text())["is_cli_session"] is False
-    assert json.loads((tmp_path / "_index.json").read_text())[0]["is_cli_session"] is False
-    index_rows = json.loads((tmp_path / "_index.json").read_text())
+    assert json.loads((tmp_path / f"{stale}.json").read_text(encoding="utf-8"))["is_cli_session"] is False
+    assert json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))[0]["is_cli_session"] is False
+    index_rows = json.loads((tmp_path / "_index.json").read_text(encoding="utf-8"))
     assert {row["session_id"] for row in index_rows} == {stale, missing}
-    recovered = json.loads((tmp_path / f"{missing}.json").read_text())
+    recovered = json.loads((tmp_path / f"{missing}.json").read_text(encoding="utf-8"))
     assert recovered["title"] == "Recovered From State"
     assert recovered["message_count"] == 2
     assert len(recovered["messages"]) == 2
@@ -172,4 +172,4 @@ def test_repair_discoverability_cli_defaults_to_dry_run(tmp_path):
     result = json.loads(completed.stdout)
     assert result["dry_run"] is True
     assert [action["action"] for action in result["planned"]] == ["clear_sidecar_cli_flag", "clear_index_cli_flag"]
-    assert json.loads((tmp_path / f"{sid}.json").read_text())["is_cli_session"] is True
+    assert json.loads((tmp_path / f"{sid}.json").read_text(encoding="utf-8"))["is_cli_session"] is True

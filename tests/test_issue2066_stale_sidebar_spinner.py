@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 
-SESSIONS_JS = (Path(__file__).resolve().parent.parent / "static" / "sessions.js").read_text()
+SESSIONS_JS = (Path(__file__).resolve().parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
 def _function_block(name: str, next_name: str) -> str:

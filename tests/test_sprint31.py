@@ -25,7 +25,7 @@ class TestWriteEndpointToConfig:
     def test_writes_base_url(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
         _write_endpoint_to_config(tmp_path, base_url="http://localhost:11434")
-        cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        cfg = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
         assert cfg["model"]["base_url"] == "http://localhost:11434"
 
     def test_writes_api_key(self, tmp_path):
@@ -37,7 +37,7 @@ class TestWriteEndpointToConfig:
     def test_writes_both(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
         _write_endpoint_to_config(tmp_path, base_url="http://localhost:8080", api_key="mykey")
-        cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        cfg = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
         assert cfg["model"]["base_url"] == "http://localhost:8080"
         assert "api_key" not in cfg["model"]
 
@@ -47,7 +47,7 @@ class TestWriteEndpointToConfig:
         (tmp_path / "config.yaml").write_text(yaml.dump(existing))
         from api.profiles import _write_endpoint_to_config
         _write_endpoint_to_config(tmp_path, base_url="http://localhost:1234")
-        cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        cfg = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
         # Existing keys preserved
         assert cfg["model"]["default"] == "gpt-4o"
         assert cfg["model"]["provider"] == "openai"

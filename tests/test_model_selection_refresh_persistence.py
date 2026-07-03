@@ -9,9 +9,9 @@ next ``loadSession()`` before ``syncTopbar()`` projects server metadata.
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BOOT_JS = (ROOT / "static" / "boot.js").read_text()
-SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text()
-UI_JS = (ROOT / "static" / "ui.js").read_text()
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _body_between(src: str, start: str, end: str) -> str:

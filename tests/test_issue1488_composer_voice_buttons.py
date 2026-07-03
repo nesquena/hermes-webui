@@ -20,7 +20,7 @@ import re
 
 
 def _src(name: str) -> str:
-    with open(f"static/{name}") as f:
+    with open(f"static/{name}", encoding="utf-8") as f:
         return f.read()
 
 

@@ -45,7 +45,7 @@ def test_index_html_file_exists():
     assert p.stat().st_size > 5000, "index.html seems too small"
 
 def test_server_py_has_no_html_string():
-    txt = (REPO_ROOT / "server.py").read_text()
+    txt = (REPO_ROOT / "server.py").read_text(encoding="utf-8")
     assert 'HTML = r"""' not in txt, "server.py still contains inline HTML string"
     assert "doctype html" not in txt.lower(), "server.py still contains raw HTML"
 

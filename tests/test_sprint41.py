@@ -12,10 +12,10 @@ import re
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-CSS = (REPO_ROOT / "static" / "style.css").read_text()
-HTML = (REPO_ROOT / "static" / "index.html").read_text()
-MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text()
-STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text()
+CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 
 
 # ── streaming.py: title auto-generation condition ─────────────────────────

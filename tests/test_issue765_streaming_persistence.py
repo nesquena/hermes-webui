@@ -50,7 +50,7 @@ class TestSaveSkipIndex:
         s = _make_session("s1")
         s.save()
         assert s.path.exists()
-        data = json.loads(s.path.read_text())
+        data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["session_id"] == "s1"
         assert len(data["messages"]) == 1
 
@@ -59,7 +59,7 @@ class TestSaveSkipIndex:
         s = _make_session("s2")
         s.save(skip_index=True)
         assert s.path.exists()
-        data = json.loads(s.path.read_text())
+        data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["session_id"] == "s2"
 
     def test_save_with_skip_index_skips_index_rebuild(self):
@@ -75,7 +75,7 @@ class TestSaveSkipIndex:
         s.save()
         index = models.SESSION_INDEX_FILE
         assert index.exists(), "Index file should be created by default save()"
-        data = json.loads(index.read_text())
+        data = json.loads(index.read_text(encoding="utf-8"))
         sids = [e["session_id"] for e in data]
         assert "s4" in sids
 
@@ -89,7 +89,7 @@ class TestSaveSkipIndex:
         s.messages.append({"role": "user", "content": "thanks"})
         s.save()
         assert models.SESSION_INDEX_FILE.exists()
-        data = json.loads(s.path.read_text())
+        data = json.loads(s.path.read_text(encoding="utf-8"))
         assert len(data["messages"]) == 3
 
     def test_skip_index_save_with_touch_updated_at_false(self):
@@ -98,7 +98,7 @@ class TestSaveSkipIndex:
         original_updated_at = s.updated_at
         time.sleep(0.05)
         s.save(skip_index=True, touch_updated_at=False)
-        data = json.loads(s.path.read_text())
+        data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["updated_at"] == original_updated_at
         assert not models.SESSION_INDEX_FILE.exists()
 
@@ -166,7 +166,7 @@ class TestPeriodicCheckpoint:
             f"got {save_count[0]}"
         )
         # Verify the JSON is on disk and readable
-        data = json.loads(s.path.read_text())
+        data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["pending_user_message"] == "do a long task"
 
     def test_checkpoint_does_not_fire_without_activity(self):
@@ -266,7 +266,7 @@ class TestPeriodicCheckpoint:
         stop_event.set()
         t.join(timeout=1)
 
-        data = json.loads(s.path.read_text())
+        data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["updated_at"] > ts_before, "Checkpoint should update updated_at"
 
 
@@ -569,7 +569,7 @@ class TestIssue765FollowupHardening:
                                 s.save(skip_index=True)
                             # Read back the on-disk JSON to verify atomicity
                             try:
-                                snap = json.loads(s.path.read_text())
+                                snap = json.loads(s.path.read_text(encoding="utf-8"))
                                 with _lock:
                                     checkpoint_snapshots.append(snap.get("messages"))
                             except Exception:
@@ -620,7 +620,7 @@ class TestIssue765FollowupHardening:
 
             assert not errors, f"Checkpoint thread encountered errors: {errors}"
             # Verify the on-disk JSON is parseable
-            data = json.loads(s.path.read_text())
+            data = json.loads(s.path.read_text(encoding="utf-8"))
             assert data["session_id"] == "race_test"
             # Messages must be a list (not corrupted by concurrent mutation)
             assert isinstance(data["messages"], list)
@@ -707,7 +707,7 @@ class TestIssue765FollowupHardening:
                                 s.save(skip_index=True)
                             # Read back the on-disk JSON to verify atomicity
                             try:
-                                snap = json.loads(s.path.read_text())
+                                snap = json.loads(s.path.read_text(encoding="utf-8"))
                                 with _snap_lock:
                                     checkpoint_snapshots.append(snap)
                             except Exception:
@@ -734,7 +734,7 @@ class TestIssue765FollowupHardening:
             t.join(timeout=2)
 
             assert not errors, f"Checkpoint thread encountered errors: {errors}"
-            data = json.loads(s.path.read_text())
+            data = json.loads(s.path.read_text(encoding="utf-8"))
             assert data["session_id"] == "cancel_race"
             assert data["active_stream_id"] is None, (
                 "active_stream_id must be None after cancel cleanup"

@@ -39,7 +39,7 @@ def test_streaming_source_code_gates_on_stream_goal_related():
     """The streaming code must check STREAM_GOAL_RELATED[stream_id] before
     calling evaluate_goal_after_turn, so unrelated turns skip the hook."""
     from pathlib import Path
-    streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
+    streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text(encoding="utf-8")
 
     # Must import STREAM_GOAL_RELATED
     assert "STREAM_GOAL_RELATED" in streaming_py, (
@@ -63,7 +63,7 @@ def test_streaming_sets_pending_goal_continuation_on_goal_continue():
     """When goal_continue is emitted, streaming.py must set
     PENDING_GOAL_CONTINUATION so the next /chat/start marks the stream."""
     from pathlib import Path
-    streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
+    streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text(encoding="utf-8")
 
     assert "PENDING_GOAL_CONTINUATION" in streaming_py, (
         "streaming.py must reference PENDING_GOAL_CONTINUATION"
@@ -83,7 +83,7 @@ def test_routes_reads_pending_goal_continuation():
     """The chat/start handler must check PENDING_GOAL_CONTINUATION and mark
     the new stream as goal-related."""
     from pathlib import Path
-    routes_py = (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text()
+    routes_py = (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
 
     assert "PENDING_GOAL_CONTINUATION" in routes_py, (
         "routes.py must reference PENDING_GOAL_CONTINUATION"
@@ -100,7 +100,7 @@ def test_routes_reads_pending_goal_continuation():
 def test_routes_marks_goal_kickoff_as_goal_related():
     """The /api/goal handler must mark the kickoff stream as goal-related."""
     from pathlib import Path
-    routes_py = (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text()
+    routes_py = (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
 
     # After kickoff stream is started, it must mark the stream
     kickoff_idx = routes_py.find("kickoff_prompt")
@@ -115,7 +115,7 @@ def test_routes_marks_goal_kickoff_as_goal_related():
 def test_start_chat_stream_accepts_goal_related():
     """_start_chat_stream_for_session must accept goal_related kwarg."""
     from pathlib import Path
-    routes_py = (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text()
+    routes_py = (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
 
     assert "goal_related" in routes_py, (
         "routes.py must reference goal_related parameter"
@@ -130,7 +130,7 @@ def test_run_agent_streaming_uses_goal_related():
     """_run_agent_streaming must accept goal_related kwarg and use it to
     gate the goal evaluation hook."""
     from pathlib import Path
-    streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
+    streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text(encoding="utf-8")
 
     # Function must accept goal_related parameter
     func_def_idx = streaming_py.find("def _run_agent_streaming")
@@ -150,7 +150,7 @@ def test_run_agent_streaming_uses_goal_related():
 def test_stream_goal_related_cleaned_up():
     """STREAM_GOAL_RELATED entries must be cleaned up when streams end."""
     from pathlib import Path
-    streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
+    streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text(encoding="utf-8")
 
     # Must have cleanup of STREAM_GOAL_RELATED
     assert "STREAM_GOAL_RELATED" in streaming_py

@@ -242,7 +242,7 @@ class TestSetProviderKey:
             # Verify .env file was written
             env_path = tmp_path / ".env"
             assert env_path.exists(), f".env not written to {env_path}; HERMES_HOME={__import__('os').environ.get('HERMES_HOME')!r}"
-            content = env_path.read_text()
+            content = env_path.read_text(encoding="utf-8")
             assert "ANTHROPIC_API_KEY=sk-ant-test-key-12345678" in content
         finally:
             config.cfg.clear()
@@ -274,7 +274,7 @@ class TestSetProviderKey:
 
             # Verify .env file no longer has the key
             env_path = tmp_path / ".env"
-            content = env_path.read_text() if env_path.exists() else ""
+            content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
             assert "ANTHROPIC_API_KEY" not in content
         finally:
             config.cfg.clear()

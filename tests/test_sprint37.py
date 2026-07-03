@@ -5,8 +5,8 @@ import pathlib
 import re
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-BOOT_JS   = (REPO_ROOT / "static" / "boot.js").read_text()
-HTML      = (REPO_ROOT / "static" / "index.html").read_text()
+BOOT_JS   = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+HTML      = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
 
 # ── Persistence: save on change ───────────────────────────────────────────────

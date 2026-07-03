@@ -137,7 +137,7 @@ class TestSetDefaultModelPreservesAtPrefix:
         `@nous:anthropic/claude-opus-4.6`). `_applyModelToDropdown()` normalises
         on both sides and picks the matching option.
         """
-        js = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
+        js = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
         # Find the block that sets _settingsHermesDefaultModelOnOpen
         anchor = "_settingsHermesDefaultModelOnOpen=(models&&models.default_model)||"
         idx = js.find(anchor)

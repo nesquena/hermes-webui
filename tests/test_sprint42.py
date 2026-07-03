@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text()
+STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 
 
 # ── Shared helpers for sprint-42 additional tests ────────────────────────────
@@ -679,7 +679,7 @@ def test_cleanTitle_is_let_not_const():
 # ── Sprint 42 additional tests: thinking panel persistence (#427) ────────
 def test_streaming_persists_reasoning_in_session():
     """streaming.py must accumulate reasoning_text and patch last assistant message."""
-    src = (REPO / 'api' / 'streaming.py').read_text()
+    src = (REPO / 'api' / 'streaming.py').read_text(encoding="utf-8")
 
     # _reasoning_text must be initialised
     assert "_reasoning_text = ''" in src, \
@@ -707,7 +707,7 @@ def test_streaming_persists_reasoning_in_session():
 
 def test_done_handler_patches_reasoning_field():
     """messages.js done SSE handler must patch reasoningText onto the last assistant message."""
-    src = (REPO / 'static' / 'messages.js').read_text()
+    src = (REPO / 'static' / 'messages.js').read_text(encoding="utf-8")
 
     # The persistence comment must be present inside the done handler
     assert "Persist reasoning trace so thinking card survives page reload" in src, \
@@ -733,7 +733,7 @@ def test_done_handler_patches_reasoning_field():
 
 def test_rendermessages_reads_reasoning_from_messages():
     """ui.js renderMessages must read m.reasoning to display the thinking card."""
-    src = (REPO / 'static' / 'ui.js').read_text()
+    src = (REPO / 'static' / 'ui.js').read_text(encoding="utf-8")
 
     # m.reasoning must be read in the render path
     assert 'm.reasoning' in src, \
@@ -756,7 +756,7 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
     history before saving the session, including reinserting dropped
     reasoning-only assistant segments.
     """
-    src = (REPO / 'api' / 'streaming.py').read_text()
+    src = (REPO / 'api' / 'streaming.py').read_text(encoding="utf-8")
     assert "def _restore_reasoning_metadata(" in src, \
         "streaming.py must define a helper to restore prior reasoning metadata"
     assert "_next_context_messages" in src and "s.context_messages" in src, \
@@ -769,7 +769,7 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
 
 def test_routes_restores_prior_reasoning_metadata_after_followup():
     """The non-streaming route path must preserve prior reasoning metadata too."""
-    src = (REPO / 'api' / 'routes.py').read_text()
+    src = (REPO / 'api' / 'routes.py').read_text(encoding="utf-8")
     assert "_restore_reasoning_metadata" in src, \
         "routes.py must import reasoning metadata restoration helper"
     assert "_next_context_messages" in src and "s.context_messages" in src, \

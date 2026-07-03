@@ -161,7 +161,7 @@ def test_close_all_terminals_closes_snapshot(monkeypatch):
 
 def test_terminal_module_registers_graceful_shutdown_reaper():
     """atexit is still the reap path; pdeathsig must NOT be re-introduced."""
-    src = terminal.Path(terminal.__file__).read_text()
+    src = terminal.Path(terminal.__file__).read_text(encoding="utf-8")
 
     assert "atexit.register(close_all_terminals)" in src
     # The PR_SET_PDEATHSIG implementation broke every Linux user (#2853);

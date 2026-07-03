@@ -47,7 +47,7 @@ def test_ensure_cron_project_creates_per_profile(tmp_path, monkeypatch):
     assert pid_haku != pid_kinni, "Per-profile cron projects must have distinct ids"
 
     # Verify on disk
-    saved = json.loads(projects_file.read_text())
+    saved = json.loads(projects_file.read_text(encoding="utf-8"))
     cron_rows = [p for p in saved if p['name'] == 'Cron Jobs']
     assert len(cron_rows) == 2
     assert {r['profile'] for r in cron_rows} == {'haku', 'kinni'}
@@ -96,7 +96,7 @@ def test_ensure_cron_project_back_tags_legacy_untagged(tmp_path, monkeypatch):
     returned = models.ensure_cron_project()
     assert returned == legacy_pid
 
-    saved = json.loads(projects_file.read_text())
+    saved = json.loads(projects_file.read_text(encoding="utf-8"))
     assert saved[0]['profile'] == 'haku', "Legacy untagged cron project must be back-tagged"
 
 
@@ -166,7 +166,7 @@ def test_load_projects_backfills_from_session_index(tmp_path, monkeypatch):
     assert by_id['tagged3']['profile'] == 'haku', "Already-tagged unchanged"
 
     # Persisted to disk
-    saved = json.loads(projects_file.read_text())
+    saved = json.loads(projects_file.read_text(encoding="utf-8"))
     saved_by_id = {p['project_id']: p for p in saved}
     assert saved_by_id['abc111']['profile'] == 'haku'
     assert saved_by_id['def222']['profile'] == 'kinni'

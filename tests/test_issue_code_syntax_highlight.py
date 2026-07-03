@@ -5,7 +5,7 @@ UI_JS = Path(__file__).resolve().parent.parent / "static" / "ui.js"
 
 
 def _read_ui_js() -> str:
-    return UI_JS.read_text()
+    return UI_JS.read_text(encoding="utf-8")
 
 
 def test_fenced_code_blocks_add_prism_language_class():

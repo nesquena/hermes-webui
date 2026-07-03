@@ -186,7 +186,7 @@ class TestFrontendNormRegex(unittest.TestCase):
     @staticmethod
     def _read_js():
         import pathlib
-        return (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text()
+        return (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
 
     def _extract_norm(self):
         """Extract the norm() lambda from ui.js source."""
@@ -236,7 +236,7 @@ class TestFrontendPreferredProviderMatch(unittest.TestCase):
     @staticmethod
     def _read_js():
         import pathlib
-        return (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text()
+        return (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
 
     def test_find_model_prefers_matching_provider_for_slash_collision(self):
         import re

@@ -34,7 +34,7 @@ def test_session_compact_exposes_prompt_cache_counters():
 
 
 def test_streaming_usage_payload_includes_prompt_cache_counters():
-    src = (ROOT / "api" / "streaming.py").read_text()
+    src = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 
     assert "session_cache_read_tokens" in src
     assert "session_cache_write_tokens" in src
@@ -44,7 +44,7 @@ def test_streaming_usage_payload_includes_prompt_cache_counters():
 
 
 def test_context_indicator_surfaces_cache_hit_rate():
-    src = (ROOT / "static" / "ui.js").read_text()
+    src = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
     assert "cacheReadTok=usage.cache_read_tokens||0" in src
     assert "cacheWriteTok=usage.cache_write_tokens||0" in src
@@ -61,7 +61,7 @@ def test_context_indicator_surfaces_cache_hit_rate():
 
 
 def test_cache_usage_labels_are_localized():
-    src = (ROOT / "static" / "i18n.js").read_text()
+    src = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
     assert src.count("usage_cache_hit_detail:") == 12
     assert src.count("usage_cached_percent:") == 12
@@ -70,7 +70,7 @@ def test_cache_usage_labels_are_localized():
 
 
 def test_done_handler_preserves_per_turn_cache_deltas():
-    src = (ROOT / "static" / "messages.js").read_text()
+    src = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
     assert "_prevCacheRead=(S.session&&S.session.cache_read_tokens)||0" in src
     assert "curCacheRead=d.usage.cache_read_tokens||0" in src

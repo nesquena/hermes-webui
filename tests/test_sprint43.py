@@ -18,16 +18,16 @@ import sys
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-GATEWAY_WATCHER_PY = (REPO_ROOT / "api" / "gateway_watcher.py").read_text()
-CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text()
-BOOTSTRAP_PY = (REPO_ROOT / "bootstrap.py").read_text()
-SERVER_PY = (REPO_ROOT / "server.py").read_text()
-ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text()
-AUTH_PY = (REPO_ROOT / "api" / "auth.py").read_text()
-PROFILES_PY = (REPO_ROOT / "api" / "profiles.py").read_text()
-STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text()
-WORKSPACE_PY = (REPO_ROOT / "api" / "workspace.py").read_text()
-STATE_SYNC_PY = (REPO_ROOT / "api" / "state_sync.py").read_text()
+GATEWAY_WATCHER_PY = (REPO_ROOT / "api" / "gateway_watcher.py").read_text(encoding="utf-8")
+CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
+BOOTSTRAP_PY = (REPO_ROOT / "bootstrap.py").read_text(encoding="utf-8")
+SERVER_PY = (REPO_ROOT / "server.py").read_text(encoding="utf-8")
+ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+AUTH_PY = (REPO_ROOT / "api" / "auth.py").read_text(encoding="utf-8")
+PROFILES_PY = (REPO_ROOT / "api" / "profiles.py").read_text(encoding="utf-8")
+STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+WORKSPACE_PY = (REPO_ROOT / "api" / "workspace.py").read_text(encoding="utf-8")
+STATE_SYNC_PY = (REPO_ROOT / "api" / "state_sync.py").read_text(encoding="utf-8")
 
 
 # ── B324: MD5 usedforsecurity=False ─────────────────────────────────────────
