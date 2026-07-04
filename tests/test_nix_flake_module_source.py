@@ -46,6 +46,13 @@ def test_nixos_module_does_not_chown_existing_hermes_home():
     assert "d ${cfg.hermesHome}" not in MODULE_NIX
 
 
+def test_nixos_module_keeps_webui_state_private_by_default_and_custom_path():
+    assert 'StateDirectoryMode = "0700";' in MODULE_NIX
+    assert 'UMask = "0077";' in MODULE_NIX
+    assert '"d ${cfg.stateDir} 0700 ${cfg.user} ${cfg.group} - -"' in MODULE_NIX
+    assert "2770" not in MODULE_NIX
+
+
 def test_nixos_module_only_creates_default_service_identity():
     assert "cfg.group == defaultGroup" in MODULE_NIX
     assert "cfg.user == defaultUser" in MODULE_NIX
