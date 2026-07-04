@@ -70986,7 +70986,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runn
     assert "raw-prompt" not in serialized
 
 
-def test_run_source_refresh_jobs_rejects_github_actions_org_runner_labels_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_rejects_github_actions_org_runner_labels_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -71022,12 +71022,18 @@ def test_run_source_refresh_jobs_rejects_github_actions_org_runner_labels_final_
     monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
 
     result = run_source_refresh_jobs(limit=1)
-    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5)}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("space-org-runner-labels-final-url-drift", limit=5)
+    serialized = json.dumps({
+        "result": result,
+        "jobs": list_source_refresh_jobs(limit=5),
+        "relevant": relevant,
+    }, sort_keys=True).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert read_calls == []
+    assert relevant["results"] == []
     assert not (root / "vault" / f"{source_id}.md").exists()
     for unsafe in (
         "secret_value_do_not_leak",
