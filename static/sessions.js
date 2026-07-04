@@ -4509,6 +4509,56 @@ function _showSessionListLoadError(error){
   };
 }
 
+function _renderSessionListLoadErrorNote(){
+  if(!_sessionListLoadError) return null;
+  const note=document.createElement('div');
+  note.className='session-list-error session-empty-note';
+  const title=document.createElement('div');
+  title.textContent=_sessionListLoadError.message||'Could not load conversations.';
+  note.appendChild(title);
+  if(_sessionListLoadError.detail){
+    const detail=document.createElement('div');
+    detail.className='session-list-error-detail';
+    detail.textContent=_sessionListLoadError.detail;
+    note.appendChild(detail);
+  }
+  const retry=document.createElement('button');
+  retry.type='button';
+  retry.className='session-list-error-retry';
+  const retrying=Boolean(_sessionListLoadError.retrying);
+  const setPending=()=>{
+    retry.textContent='Retrying...';
+    retry.disabled=true;
+    retry.setAttribute('aria-busy','true');
+    retry.onclick=null;
+  };
+  const bindRetry=()=>{
+    retry.onclick=(e)=>{
+      e.stopPropagation();
+      if(!_sessionListLoadError||_sessionListLoadError.retrying) return;
+      setPending();
+      _sessionListLoadError={..._sessionListLoadError,retrying:true};
+      renderSessionListFromCache();
+      void renderSessionList({deferWhileInteracting:false}).finally(()=>{
+        if(!retry.parentNode||(_sessionListLoadError&&_sessionListLoadError.retrying)) return;
+        retry.textContent='Retry';
+        retry.disabled=false;
+        retry.removeAttribute('aria-busy');
+        bindRetry();
+      });
+    };
+  };
+  if(retrying){
+    setPending();
+  }else{
+    retry.textContent='Retry';
+    retry.disabled=false;
+    bindRetry();
+  }
+  note.appendChild(retry);
+  return note;
+}
+
 async function _runRenderSessionListRefresh(opts, _gen){
   const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
@@ -6521,23 +6571,8 @@ function renderSessionListFromCache(){
   if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
   else{batchBar.style.display='none';}
   if(_sessionListLoadError){
-    const note=document.createElement('div');
-    note.className='session-list-error session-empty-note';
-    const title=document.createElement('div');
-    title.textContent=_sessionListLoadError.message||'Could not load conversations.';
-    note.appendChild(title);
-    if(_sessionListLoadError.detail){
-      const detail=document.createElement('div');
-      detail.className='session-list-error-detail';
-      detail.textContent=_sessionListLoadError.detail;
-      note.appendChild(detail);
-    }
-    const retry=document.createElement('button');
-    retry.type='button';
-    retry.textContent='Retry';
-    retry.onclick=(e)=>{e.stopPropagation();_sessionListLoadError=null;void renderSessionList({deferWhileInteracting:false});};
-    note.appendChild(retry);
-    list.appendChild(note);
+    const note=_renderSessionListLoadErrorNote();
+    if(note) list.appendChild(note);
   }
   if(window._showCliSessions || cliSessionCount>0){
     const sourceTabs=document.createElement('div');

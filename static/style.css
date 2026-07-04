@@ -5524,6 +5524,13 @@ main.main > #mainPlugin{display:none;}
 .session-source-tab:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .session-source-tab.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}
 .session-empty-note{padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;}
+.session-list-error{margin:4px 10px 8px;padding:10px 12px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);color:var(--text);display:flex;flex-direction:column;align-items:flex-start;gap:4px;text-align:left;opacity:1;}
+.session-list-error>div:first-child{font-size:12px;font-weight:600;line-height:1.35;word-break:break-word;}
+.session-list-error-detail{font-size:11px;line-height:1.35;color:var(--muted);word-break:break-word;}
+.session-list-error-retry{margin-top:4px;align-self:flex-start;display:inline-flex;align-items:center;justify-content:center;min-width:0;padding:5px 10px;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);color:var(--text);font-size:11px;font-weight:600;line-height:1.2;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s;}
+.session-list-error-retry:hover:not(:disabled):not([aria-busy="true"]){background:var(--hover-bg);border-color:var(--accent-bg-strong);color:var(--text);}
+.session-list-error-retry:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;}
+.session-list-error-retry:disabled,.session-list-error-retry[aria-busy="true"]{background:var(--surface);border-color:var(--border2);color:var(--muted);cursor:wait;opacity:1;}
 .project-bar{display:flex;gap:4px;padding:4px 10px 8px;flex-wrap:wrap;align-items:center;flex-shrink:0;}
 .project-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:pointer;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation;}
 .project-chip:hover{background:rgba(255,255,255,.08);color:var(--text);}
