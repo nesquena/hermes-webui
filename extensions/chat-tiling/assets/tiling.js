@@ -168,8 +168,8 @@ function showGrid(cols,rows){
   if(T.visible&&T._cols===cols&&T._rows===rows)return;
   if(T.visible){closeAll()}
   T._cols=cols;T._rows=rows;T.visible=true;
-  // Snapshot current session state before entering tiling
-  if(typeof S!=='undefined'){T._saved={session:S.session,messages:[...(S.messages||[])],busy:!!S.busy,activeStreamId:S.activeStreamId||null}}
+  // Snapshot current session state before entering tiling (only on first entry)
+  if(typeof S!=='undefined'&&!T._saved){T._saved={session:S.session,messages:[...(S.messages||[])],busy:!!S.busy,activeStreamId:S.activeStreamId||null}}
   const o=document.getElementById('msgInner');if(o){o.removeAttribute('id');o.classList.add('messages-inner--idle')}
   document.body.classList.add('ext-tiling-body');
   T.grid.style.display='';T.grid.classList.add('ext-tile-grid--active');
