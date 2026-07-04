@@ -4858,10 +4858,10 @@ if(typeof window!=='undefined'){
       }else if(movedDown&&nearBottom){
         _nearBottomCount=_nearBottomCount+1;
         if(_nearBottomCount>=2){
-          if(!_messageUserUnpinned||bottomDistance<=250){
-            _messageUserUnpinned=false;
-            _scrollPinned=true;
-          }
+          // nearBottom already guarantees bottomDistance<250, so the
+          // re-pin threshold is always satisfied when we reach this branch.
+          _messageUserUnpinned=false;
+          _scrollPinned=true;
           _nearBottomCount=0;
         }
       }else if(!_messageUserUnpinned){
