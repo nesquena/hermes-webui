@@ -17436,7 +17436,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_latest_release_f
         assert unsafe not in serialized
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_latest_release_http_origin_even_when_final_url_is_https(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_latest_release_http_origin_even_when_final_url_is_https_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -17458,7 +17458,8 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_latest_release_h
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("Capy Spaces", limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search": search}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("latest-release-http-origin-drift-space", limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs, "search": search, "relevant": relevant}, sort_keys=True).lower()
 
     assert calls == []
     assert read_calls == []
@@ -17467,6 +17468,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_latest_release_h
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / "github-latest-release-http-origin-final-https.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "secret_value_do_not_leak",
         "access_token",
