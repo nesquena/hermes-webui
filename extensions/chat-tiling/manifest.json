@@ -3,40 +3,18 @@
     {
       "id": "chat-tiling",
       "name": "Chat Tiling",
-      "description": "Multi-session tiling layouts: split in 2, 4 corners, or 3×2 grid. Click sessions from the sidebar to open them in tiles.",
+      "description": "Multi-session tiling layouts: split in 2, 4 corners, or 3×2 grid.",
       "version": "0.1.0",
       "author": "ChonSong",
-      "scripts": [
-        "assets/tiling.js"
-      ],
-      "stylesheets": [
-        "assets/tiling.css"
-      ],
-      "capabilities": [
-        "manifest-bundle"
-      ],
+      "homepage": "https://github.com/ChonSong/hermes-webui",
+      "scripts": ["assets/tiling.js"],
+      "capabilities": ["manifest-bundle"],
       "permissions": {
-        "dom": {
-          "owned": true,
-          "mutates_core_views": true
-        },
-        "storage": {
-          "owned": [
-            "hermes-ext-chat-tiling"
-          ]
-        },
-        "webui_api": {
-          "read": [
-            "session",
-            "sessions"
-          ],
-          "write": []
-        },
+        "dom": { "owned": true, "mutates_core_views": true },
+        "storage": { "owned": ["hermes-ext-chat-tiling"] },
+        "webui_api": { "read": ["session", "sessions"], "write": [] },
         "network_external": false,
-        "filesystem": {
-          "arbitrary": false,
-          "serves_bundled_assets": true
-        },
+        "filesystem": { "arbitrary": false, "serves_bundled_assets": true },
         "loopback_sidecar": false,
         "native_host": false
       },
