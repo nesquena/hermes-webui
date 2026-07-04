@@ -29989,7 +29989,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_actions_oidc_sub
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_oidc_subject_claim_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_oidc_subject_claim_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -30067,10 +30067,12 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_oidc_sub
     result = run_source_refresh_jobs(limit=len(drift_variants))
     jobs = list_source_refresh_jobs(limit=20)
     search = search_memory("claim key count: 3", limit=5)
+    relevant = relevant_memory_for_space("space-oidc-subject-final-url-drift", limit=5)
     serialized = json.dumps({
         "result": result,
         "jobs": jobs,
         "search": search,
+        "relevant": relevant,
         "catalog": source_catalog(limit=20),
     }, sort_keys=True).lower()
 
@@ -30082,6 +30084,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_oidc_sub
     assert all(job["status"] == "pending" for job in jobs["jobs"])
     assert not list((root / "vault").glob("github-actions-oidc-subject-final-url-drift-*.md"))
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "hostile body summary",
         "secret_value_do_not_leak",
