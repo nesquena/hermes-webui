@@ -4821,6 +4821,7 @@ let _activeSessionExternalRefreshInFlight = false;
 let _deferredActiveSessionExternalRefreshReason = '';
 let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
+let _sessionEventsRefreshPendingRequest = null;
 let _sessionEventsReconnectTimer = 0;
 let _sessionEventsNeedsRefreshOnOpen = false;
 let _sessionEventsReconnectAttempt = 0;
@@ -4834,7 +4835,20 @@ function _sessionEventsReconnectDelayMs(){
   return Math.min(_sessionEventsReconnectMaxMs, Math.floor(base * 0.75) + jitter);
 }
 let _sessionListRefreshInFlight = false;
-let _sessionListRefreshPendingReason = '';
+let _sessionListRefreshPendingRequest = null;
+
+function _mergeSessionListRefreshOptions(prev, next){
+  const merged = {...(prev||{}), ...(next||{})};
+  if((prev&&prev.force===true)||(next&&next.force===true)) merged.force = true;
+  if((prev&&prev.refreshActive===true)||(next&&next.refreshActive===true)) merged.refreshActive = true;
+  return merged;
+}
+
+function _refreshSessionListAfterSidebarResume(reason){
+  // A direct resume refresh satisfies any pending onopen catch-up from the same close.
+  _sessionEventsNeedsRefreshOnOpen = false;
+  void refreshSessionList(reason, {force:true});
+}
 
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
@@ -5025,7 +5039,10 @@ async function refreshSessionList(reason='manual', opts={}){
   const refreshActive = !!(opts && opts.refreshActive);
   if(!force && typeof document !== 'undefined' && document.hidden) return;
   if(_sessionListRefreshInFlight){
-    _sessionListRefreshPendingReason = reason || 'session-list';
+    _sessionListRefreshPendingRequest = {
+      reason: reason || 'session-list',
+      opts:_mergeSessionListRefreshOptions(_sessionListRefreshPendingRequest && _sessionListRefreshPendingRequest.opts, opts),
+    };
     return;
   }
   _sessionListRefreshInFlight = true;
@@ -5034,17 +5051,23 @@ async function refreshSessionList(reason='manual', opts={}){
     if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list');
   }finally{
     _sessionListRefreshInFlight = false;
-    const pendingReason = _sessionListRefreshPendingReason;
-    _sessionListRefreshPendingReason = '';
-    if(pendingReason) _scheduleSessionEventsRefresh(pendingReason);
+    const pendingRequest = _sessionListRefreshPendingRequest;
+    _sessionListRefreshPendingRequest = null;
+    if(pendingRequest) _scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts);
   }
 }
 
-function _scheduleSessionEventsRefresh(reason){
+function _scheduleSessionEventsRefresh(reason, opts={}){
+  _sessionEventsRefreshPendingRequest = {
+    reason: reason || (_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.reason) || 'event',
+    opts:_mergeSessionListRefreshOptions(_sessionEventsRefreshPendingRequest && _sessionEventsRefreshPendingRequest.opts, opts),
+  };
   if(_sessionEventsRefreshTimer) return;
   _sessionEventsRefreshTimer = setTimeout(() => {
     _sessionEventsRefreshTimer = 0;
-    void refreshSessionList(reason||'event', {refreshActive:true});
+    const request = _sessionEventsRefreshPendingRequest || {reason:'event', opts:{}};
+    _sessionEventsRefreshPendingRequest = null;
+    void refreshSessionList(request.reason||'event', request.opts);
   }, 300);
 }
 
@@ -5113,7 +5136,7 @@ function _installSidebarSseFocusHook(){
     // to prevent, in the multi-window scenario this fix targets (#4151).
     ensureSessionEventsSSE();
     if(!_gatewaySSE) startGatewaySSE();
-    void refreshSessionList('focus');
+    void _refreshSessionListAfterSidebarResume('focus');
   });
 }
 
@@ -5121,6 +5144,7 @@ function _closeSessionEventsSSE(){
   if(_sessionEventsSSE){
     try{if(_sessionEventsSSE.readyState!==2)_sessionEventsSSE.close();}catch(_){ }
     _sessionEventsSSE = null;
+    _sessionEventsNeedsRefreshOnOpen = true;
   }
 }
 
@@ -5131,7 +5155,7 @@ function ensureSessionEventsSSE(){
         _closeSessionEventsSSE();
       }else{
         ensureSessionEventsSSE();
-        void refreshSessionList('visible');
+        void _refreshSessionListAfterSidebarResume('visible');
       }
     });
     document._hermesSessionEventsVisibilityHook = true;
@@ -5147,7 +5171,7 @@ function ensureSessionEventsSSE(){
       _sessionEventsReconnectAttempt = 0;
       if(!_sessionEventsNeedsRefreshOnOpen) return;
       _sessionEventsNeedsRefreshOnOpen = false;
-      void refreshSessionList('reconnect');
+      void _refreshSessionListAfterSidebarResume('reconnect');
     };
     _sessionEventsSSE.addEventListener('sessions_changed', (ev) => {
       const activeProfile = S.activeProfile || 'default';
@@ -5163,7 +5187,7 @@ function ensureSessionEventsSSE(){
         // Non-JSON payload (or transient malformed event). Keep legacy behavior:
         // refresh once event was seen.
       }
-      _scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event');
+      _scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:true});
     });
     _sessionEventsSSE.onerror = () => {
       _sessionEventsNeedsRefreshOnOpen = true;
