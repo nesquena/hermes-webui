@@ -11870,7 +11870,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_single_deploymen
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_single_deployment_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_single_deployment_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -11915,7 +11915,13 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_single_deploymen
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("release-2026-06", limit=5)
-    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5), "search_results": search["results"]}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("single-deployment-drift-space", limit=5)
+    serialized = json.dumps({
+        "result": result,
+        "jobs": list_source_refresh_jobs(limit=5),
+        "search_results": search["results"],
+        "relevant_memory": relevant,
+    }, sort_keys=True).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
@@ -11923,6 +11929,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_single_deploymen
     assert body_read["called"] is False
     assert not (root / "vault" / "github-single-deployment-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "single deployment final url drift body sentinel",
         "secret_value_do_not_leak",
