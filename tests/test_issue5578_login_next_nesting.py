@@ -107,3 +107,23 @@ class TestServerCheckAuthGuard:
         assert "endswith('/login')" in AUTH_PY or "_login_path.endswith('/login')" in AUTH_PY, (
             "check_auth() must detect a login-shaped path and skip the next= wrap"
         )
+
+    def test_check_auth_resolves_to_real_public_login_route(self):
+        # #5578 Codex round-3 (BRICK): a bare relative 'login' from /session/login
+        # resolves BACK to /session/login (not public, not the /login route) and
+        # loops forever. Must use '../login' so it lands on the real public
+        # /login route (and <mount>/login under a subpath mount).
+        AUTH_PY = (ROOT / "api" / "auth.py").read_text(encoding="utf-8")
+        assert "'../login'" in AUTH_PY, (
+            "check_auth() must redirect a session-scoped login path to ../login "
+            "(the real public /login), not a bare relative login that loops"
+        )
+
+    def test_inner_next_helper_drops_login_and_nested(self):
+        # The preserved inner next must itself be safe + non-login + non-nested.
+        import api.auth as auth
+        assert auth._safe_login_inner_next("next=/session/login") == ""
+        assert auth._safe_login_inner_next("next=/x%3Fnext%3D/y") == ""
+        assert auth._safe_login_inner_next("next=//evil") == ""
+        assert auth._safe_login_inner_next("next=/session/abc123") == "/session/abc123"
+        assert auth._safe_login_inner_next("") == ""
