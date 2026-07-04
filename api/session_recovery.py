@@ -212,7 +212,11 @@ def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> b
 
 
 def _session_records_clear_sentinel(session_path: Path) -> bool:
-    """Return True when the live sidecar records the full clear sentinel."""
+    """Return True when the live sidecar records the full clear sentinel.
+
+    This mirrors /api/session/clear persisted_clear exactly; unreadable or
+    partial matches fail open so ordinary backup recovery can still run.
+    """
     try:
         data = json.loads(session_path.read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError, ValueError):
