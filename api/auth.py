@@ -686,14 +686,15 @@ def parse_cookie(handler) -> str | None:
 
 
 def _safe_login_inner_next(query: str | None) -> str:
-    """#5578: extract a SAFE, non-login `next` from a login page's own query.
+    """#5578: extract a SAFE, non-login inner redirect from a login page's query.
 
-    When an expired-auth bounce lands on `/session/login?next=X`, we want to
-    preserve a legitimate inner destination X across the redirect to the real
-    login route — but only if X is itself safe (path-absolute, not protocol-
-    relative/backslash, no control chars) AND not login-shaped / not itself
-    carrying a nested `next=`. Anything else collapses to '' (no next), which
-    kills the self-referential chain. Mirrors _safe_login_redirect_path().
+    When an expired-auth bounce lands back on the login page (which already
+    carries its own `next` in the query), we want to preserve a legitimate inner
+    destination X across the redirect to the real login route — but only if X is
+    itself safe (path-absolute, not protocol-relative/backslash, no control
+    chars) AND not login-shaped / not itself carrying a nested next param.
+    Anything else collapses to '' (no inner redirect), which kills the
+    self-referential chain. Mirrors _safe_login_redirect_path().
     """
     import urllib.parse as _u
     raw = _u.parse_qs(query or "").get("next", [""])[0]
