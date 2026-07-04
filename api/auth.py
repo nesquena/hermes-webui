@@ -727,6 +727,22 @@ def check_auth(handler, parsed) -> bool:
         # the full original URL (the browser auto-decodes once).
         # (Opus pre-release advisor finding for v0.50.258.)
         import urllib.parse as _urlparse
+        # #5578: if the page being redirected is ALREADY login-shaped
+        # (/login, /session/login, or a subpath-mounted */login), do NOT wrap
+        # its full `path?query` — that query already carries a `next=`, so
+        # quoting the whole thing into a fresh `next=` nests the login URL into
+        # itself and re-encodes it on every expired-auth bounce, exploding the
+        # URL until the tab breaks. This guard runs in check_auth() (BEFORE
+        # route handling), which is the actual source of the server-side loop;
+        # the downstream _safe_login_redirect_path() never executes for this
+        # page-redirect. Redirect to bare `login` (no next); the login page
+        # preserves its own already-safe inner `next` from the current URL.
+        _login_path = (parsed.path or '/').rstrip('/')
+        if _login_path == '/login' or _login_path.endswith('/login'):
+            handler.send_header('Location', 'login')
+            handler.send_header('Content-Length', '0')
+            handler.end_headers()
+            return False
         _path_with_query = parsed.path or '/'
         if parsed.query:
             _path_with_query += '?' + parsed.query

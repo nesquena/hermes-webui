@@ -3071,6 +3071,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       return true;
     };
     const redirectToLogin=(nextUrl)=>{
+      // #5578: never nest the login URL into its own next= — if already on a
+      // login-shaped page, reload 'login' bare (the page keeps its inner next).
+      const _p=(window.location.pathname||'').replace(/\/+$/,'');
+      if(/(?:^|\/)login$/.test(_p)){window.location.href='login';return;}
       window.location.href='login?next='+encodeURIComponent(nextUrl);
     };
     return {

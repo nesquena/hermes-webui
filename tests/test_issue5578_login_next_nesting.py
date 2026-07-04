@@ -86,3 +86,24 @@ class TestClientGuardsWired:
         assert "window.location.href='login';" in WORKSPACE_JS
         # And the non-login path still captures the real destination.
         assert "'login?next='+encodeURIComponent" in WORKSPACE_JS
+
+    def test_all_client_401_helpers_guard_login_page(self):
+        # #5578 Codex round-2: workspace.js was fixed but two more client 401
+        # redirect helpers (ui.js _redirectIfUnauth, boot.js redirectToLogin)
+        # also nested the login URL. All three must carry the on-login guard.
+        UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+        BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+        assert "login$/.test(_p)" in UI_JS, "ui.js _redirectIfUnauth must guard the login page"
+        assert "login$/.test(_p)" in BOOT_JS, "boot.js redirectToLogin must guard the login page"
+
+
+class TestServerCheckAuthGuard:
+    def test_check_auth_does_not_nest_login_redirect(self):
+        # #5578 Codex round-2 (BRICK): check_auth() runs BEFORE route handling,
+        # so the server-side page-redirect loop never reached
+        # _safe_login_redirect_path(). check_auth() must itself refuse to wrap a
+        # login-shaped path into a fresh next=.
+        AUTH_PY = (ROOT / "api" / "auth.py").read_text(encoding="utf-8")
+        assert "endswith('/login')" in AUTH_PY or "_login_path.endswith('/login')" in AUTH_PY, (
+            "check_auth() must detect a login-shaped path and skip the next= wrap"
+        )
