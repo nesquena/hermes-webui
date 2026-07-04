@@ -13067,21 +13067,34 @@ def handle_post(handler, parsed) -> bool:
                 # the new session (#5420).
                 prev_session_id = None
             if prev_session_id:
-                try:
-                    from api.session_lifecycle import commit_session_memory
-                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                    prev_agent = None
-                    with SESSION_AGENT_CACHE_LOCK:
-                        _cached = SESSION_AGENT_CACHE.get(prev_session_id)
-                        if _cached:
-                            prev_agent = _cached[0]
-                    commit_session_memory(prev_session_id, agent=prev_agent)
-                except Exception:
-                    logger.debug(
-                        "Lifecycle commit for prev_session %s failed",
-                        prev_session_id,
-                        exc_info=True,
-                    )
+                # Fire-and-forget: commit_memory_session() can take 1-5+ seconds
+                # (extraction call to the memory provider), and blocking the
+                # response here made "+ New Chat" feel slow/unresponsive.
+                # commit_session_memory() already serialises overlapping commits
+                # for a session via its own in-flight guard, so running it off
+                # the request thread is safe.
+                def _commit_prev_session_memory(_sid=prev_session_id):
+                    try:
+                        from api.session_lifecycle import commit_session_memory
+                        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                        prev_agent = None
+                        with SESSION_AGENT_CACHE_LOCK:
+                            _cached = SESSION_AGENT_CACHE.get(_sid)
+                            if _cached:
+                                prev_agent = _cached[0]
+                        commit_session_memory(_sid, agent=prev_agent)
+                    except Exception:
+                        logger.warning(
+                            "Lifecycle commit for prev_session %s failed",
+                            _sid,
+                            exc_info=True,
+                        )
+
+                threading.Thread(
+                    target=_commit_prev_session_memory,
+                    daemon=True,
+                    name=f"commit-memory-{prev_session_id}",
+                ).start()
         s = new_session(
             workspace=workspace,
             model=model,
