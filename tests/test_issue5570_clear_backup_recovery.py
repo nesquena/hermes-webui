@@ -29,6 +29,7 @@ def _clear_sentinel(sid: str) -> dict:
         "pending_attachments": [],
         "pending_started_at": None,
         "pending_user_source": None,
+        "clear_generation": f"clear-{sid}",
     }
 
 
@@ -142,7 +143,7 @@ def test_stale_pre_clear_backup_startup_recovery_skips_restore(tmp_path):
     assert json.loads(live_path.read_text(encoding="utf-8"))["messages"] == []
 
 
-def test_clear_sentinel_with_marker_pair_backup_still_skips_restore(tmp_path):
+def test_same_generation_clear_backup_still_restores(tmp_path):
     sid = "issue5570_clear_marker_pair"
     live_path = tmp_path / f"{sid}.json"
     bak_path = live_path.with_suffix(".json.bak")
@@ -153,10 +154,9 @@ def test_clear_sentinel_with_marker_pair_backup_still_skips_restore(tmp_path):
     status = inspect_session_recovery_status(live_path)
     result = recover_session(live_path)
 
-    assert status["recommend"] == "no_action"
-    assert status["intentional_clear_truncate"] is True
-    assert result["restored"] is False
-    assert json.loads(live_path.read_text(encoding="utf-8"))["messages"] == []
+    assert status["recommend"] == "restore"
+    assert result["restored"] is True
+    assert json.loads(live_path.read_text(encoding="utf-8"))["messages"][0]["content"] == "post-clear prompt"
 
 
 def test_normal_larger_backup_recovery_still_restores(tmp_path):
@@ -213,6 +213,23 @@ def test_empty_non_sentinel_live_session_still_recovers(tmp_path):
     assert status["recommend"] == "restore"
     assert result["restored"] is True
     assert json.loads(live_path.read_text(encoding="utf-8"))["messages"][0]["content"] == "replay prompt"
+
+
+def test_clear_shaped_live_without_clear_generation_still_restores(tmp_path):
+    sid = "issue5570_shape_without_marker"
+    live_path = tmp_path / f"{sid}.json"
+    bak_path = live_path.with_suffix(".json.bak")
+    live = _clear_sentinel(sid)
+    live.pop("clear_generation")
+    _write_json(live_path, live)
+    _write_json(bak_path, _stale_pre_clear_backup(sid))
+
+    status = inspect_session_recovery_status(live_path)
+    result = recover_session(live_path)
+
+    assert status["recommend"] == "restore"
+    assert result["restored"] is True
+    assert json.loads(live_path.read_text(encoding="utf-8"))["messages"][0]["content"] == "pre-clear prompt"
 
 
 def test_empty_live_without_clear_watermark_still_restores(tmp_path):

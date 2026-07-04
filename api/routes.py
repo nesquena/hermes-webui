@@ -13764,6 +13764,7 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
@@ -13784,6 +13785,7 @@ def handle_post(handler, parsed) -> bool:
                     and persisted.get("pending_attachments") == []
                     and persisted.get("pending_started_at") is None
                     and persisted.get("pending_user_source") is None
+                    and persisted.get("clear_generation") == s.clear_generation
                 )
             except (OSError, json.JSONDecodeError, ValueError):
                 logger.warning("session clear could not verify persisted empty state for %s", sid, exc_info=True)

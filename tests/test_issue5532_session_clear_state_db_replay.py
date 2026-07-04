@@ -123,6 +123,7 @@ def test_session_clear_persists_empty_context_and_blocks_state_db_replay(monkeyp
     assert loaded.pending_attachments == []
     assert loaded.pending_started_at is None
     assert loaded.pending_user_source is None
+    assert loaded.clear_generation
     assert loaded.title == "Untitled"
 
     persisted = json.loads(loaded.path.read_text(encoding="utf-8"))
@@ -135,6 +136,7 @@ def test_session_clear_persists_empty_context_and_blocks_state_db_replay(monkeyp
     assert persisted["pending_attachments"] == []
     assert persisted["pending_started_at"] is None
     assert persisted["pending_user_source"] is None
+    assert persisted["clear_generation"] == loaded.clear_generation
 
     state_db_messages = [
         _msg("user", "state prompt", 100.0, "s-u1"),
@@ -182,7 +184,7 @@ def test_empty_sidecar_without_watermark_still_recovers_state_db_rows():
     assert [m["content"] for m in merged] == ["state prompt", "state reply"]
 
 
-def test_clear_sentinel_suppresses_marker_pair_backup_recovery(tmp_path):
+def test_clear_sentinel_does_not_suppress_later_backup_recovery(tmp_path):
     from api.session_recovery import inspect_session_recovery_status, recover_session
 
     live_path = tmp_path / "post_clear_loss.json"
@@ -197,6 +199,7 @@ def test_clear_sentinel_suppresses_marker_pair_backup_recovery(tmp_path):
         "pending_attachments": [],
         "pending_started_at": None,
         "pending_user_source": None,
+        "clear_generation": "clear-post",
     }
     backup = {
         **live,
@@ -207,11 +210,11 @@ def test_clear_sentinel_suppresses_marker_pair_backup_recovery(tmp_path):
     live_path.with_suffix(".json.bak").write_text(json.dumps(backup), encoding="utf-8")
 
     status = inspect_session_recovery_status(live_path)
-    assert status["recommend"] == "no_action"
-    assert status["intentional_clear_truncate"] is True
+    assert status["recommend"] == "restore"
     recovered = recover_session(live_path)
-    assert recovered["restored"] is False
-    assert json.loads(live_path.read_text(encoding="utf-8"))["messages"] == []
+    assert recovered["restored"] is True
+    restored = json.loads(live_path.read_text(encoding="utf-8"))
+    assert restored["messages"][0]["content"] == "post-clear prompt"
 
 
 def test_clearing_empty_live_session_preserves_existing_recoverable_backup(monkeypatch, tmp_path):
@@ -246,9 +249,8 @@ def test_clearing_empty_live_session_preserves_existing_recoverable_backup(monke
 
     assert captured["status"] == 200
     assert session.path.with_suffix(".json.bak").exists()
-    status = inspect_session_recovery_status(session.path)
-    assert status["recommend"] == "no_action"
-    assert status["intentional_clear_truncate"] is True
+    assert Session.load(sid).clear_generation is None
+    assert inspect_session_recovery_status(session.path)["recommend"] == "restore"
     recovered = recover_session(session.path)
-    assert recovered["restored"] is False
-    assert Session.load(sid).messages == []
+    assert recovered["restored"] is True
+    assert Session.load(sid).messages[0]["content"] == "recoverable prompt"

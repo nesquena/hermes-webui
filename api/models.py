@@ -1053,6 +1053,7 @@ class Session:
                  last_prompt_tokens=None,
                  truncation_watermark=None,
                  truncation_boundary=None,
+                 clear_generation=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1104,6 +1105,7 @@ class Session:
         self.last_prompt_tokens = last_prompt_tokens
         self.truncation_watermark = truncation_watermark
         self.truncation_boundary = truncation_boundary
+        self.clear_generation = clear_generation
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1174,6 +1176,7 @@ class Session:
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'truncation_watermark',
             'truncation_boundary',
+            'clear_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',

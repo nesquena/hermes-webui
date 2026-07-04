@@ -211,17 +211,24 @@ def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> b
     return bak_ctx_len > live_ctx_len
 
 
-def _session_records_clear_sentinel(session_path: Path) -> bool:
-    """Return True when the live sidecar records the full clear sentinel.
+def _session_records_clear_sentinel(session_path: Path, bak_path: Path) -> bool:
+    """Return True when the live sidecar records a provenanced clear sentinel.
 
-    This mirrors /api/session/clear persisted_clear exactly; unreadable or
-    partial matches fail open so ordinary backup recovery can still run.
+    The live sidecar must carry the explicit /api/session/clear marker, and
+    the backup must not carry the same marker. Same-generation backups stay
+    recoverable; unreadable or partial matches fail open.
     """
     try:
         data = json.loads(session_path.read_text(encoding='utf-8'))
+        bak = json.loads(bak_path.read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError, ValueError):
         return False
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or not isinstance(bak, dict):
+        return False
+    clear_generation = data.get('clear_generation')
+    if not isinstance(clear_generation, str) or not clear_generation:
+        return False
+    if bak.get('clear_generation') == clear_generation:
         return False
     expected = {
         'messages': [],
@@ -261,7 +268,7 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
         }
     bak_count = _msg_count(bak_path)
     if bak_count > live_count:
-        if _session_records_clear_sentinel(session_path):
+        if _session_records_clear_sentinel(session_path, bak_path):
             return {
                 "session_id": session_path.stem,
                 "live_messages": live_count,
