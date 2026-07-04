@@ -1696,7 +1696,7 @@ const LOCALES = {
     cancelling: 'Annullamento\u2026',
     cancel_failed: 'Annullamento fallito: ',
     mic_denied: 'Accesso al microfono negato. Controlla i permessi del browser.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'L\'input vocale richiede una connessione sicura. Apri Hermes tramite HTTPS o da localhost per usare il microfono.',
     mic_no_speech: 'Nessuna voce rilevata. Riprova.',
     mic_network: 'Riconoscimento vocale non disponibile.',
     mic_error: 'Errore input vocale: ',
@@ -2163,7 +2163,7 @@ const LOCALES = {
      copy_file_path: 'Copia percorso file',
      open_in_vscode: 'Apri in VS Code',
      open_in_vscode_failed: 'Apertura in VS Code fallita: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Cartella download',
     path_copied: 'Percorso file copiato negli appunti',
     path_copy_failed: 'Copia percorso fallita: ',
     session_rename: 'Rinomina conversazione',
@@ -2295,8 +2295,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Segui automaticamente i nuovi contenuti',
     settings_desc_auto_scroll_follow: 'Se abilitato, la vista scorre verso il basso man mano che arrivano nuovi token. Se disabilitato, controlli tu la posizione di scorrimento.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Mostra il selettore di profilo nella barra del titolo',
+    settings_desc_show_titlebar_profile: 'Se attivo, nella barra del titolo in alto a sinistra compare un pulsante per cambiare profilo da qualsiasi scheda. Disattivato per impostazione predefinita; il piè di pagina del compositore ha sempre un selettore di profilo indipendentemente da questa impostazione.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -2354,7 +2354,7 @@ const LOCALES = {
     settings_tab_appearance: 'Aspetto',
     settings_tab_preferences: 'Preferenze',
     settings_tab_plugins: 'Plugin',
-    settings_tab_extensions: 'Extensions',  // TODO: translate
+    settings_tab_extensions: 'Estensioni',
     settings_extensions_gallery_tab: 'Gallery',
     settings_extensions_installed_tab: 'Installed',
     settings_extensions_diagnostics_tab: 'Diagnostics',
@@ -2385,19 +2385,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Estensione installata. Consulta la scheda per i prossimi passi.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Plugin',
     plugins_enable_toggle: 'Abilita',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Visualizza i plugin Hermes installati e gli hook del ciclo di vita che registrano. Questo pannello è di sola lettura.',
+    settings_plugins_empty: 'Nessun plugin Hermes attualmente visibile. Installa o abilita i plugin dalla CLI/config di Hermes per vederli qui.',
+    plugins_unnamed: 'Plugin senza nome',
+    plugins_no_description: 'Nessuna descrizione fornita.',
+    plugins_no_hooks: 'Nessun hook del ciclo di vita registrato',
+    plugins_registered_hooks: 'Hook registrati',
+    plugins_enabled: 'Abilitato',
+    plugins_disabled: 'Disabilitato',
+    plugins_active_provider: 'Attivo (provider)',
+    plugins_provider_no_hooks: 'Plugin provider — nessun hook di visibilità per l\'agente',
+    plugins_load_failed: 'Impossibile caricare i plugin: ',
     settings_tab_system: 'Sistema',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -2685,7 +2685,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'La dashboard è solo loopback sul server. Naviga dal server stesso o riavvialo con --host 0.0.0.0 (non sicuro).',
     tab_logs: 'Log',
     tab_settings: 'Impostazioni',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Chiudi menu',
     new_conversation: 'Nuova conversazione',
     filter_conversations: 'Filtra conversazioni...',
     markdown_table_filter: 'Filtra tabella',
@@ -3364,7 +3364,7 @@ const LOCALES = {
     cancelling: 'キャンセル中…',
     cancel_failed: 'キャンセル失敗: ',
     mic_denied: 'マイクへのアクセスが拒否されました。ブラウザの権限を確認してください。',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: '音声入力にはセキュアな接続が必要です。マイクを使うには HTTPS または localhost 経由で Hermes を開いてください。',
     mic_no_speech: '音声が検出されませんでした。もう一度お試しください。',
     mic_network: '音声認識を利用できません。',
     mic_error: '音声入力エラー: ',
@@ -3963,8 +3963,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: '新しい内容を自動で追従',
     settings_desc_auto_scroll_follow: '有効にすると、ストリーミング中に画面が自動で一番下までスクロールします。無効にすると、スクロール位置を自分で操作できます。',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'タイトルバーにプロファイル切替を表示',
+    settings_desc_show_titlebar_profile: '有効にすると、左上のアプリのタイトルバーにプロファイル切替ボタンが表示され、どのタブからでもプロファイルを変更できます。既定ではオフです。この設定に関係なく、コンポーザーのフッターには常にプロファイル切替があります。',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -4353,7 +4353,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'ダッシュボードはサーバー上のループバック専用です。サーバー上で閲覧するか、--host 0.0.0.0（安全ではありません）で再起動してください。',
     tab_logs: 'ログ',
     tab_settings: '設定',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'メニューを閉じる',
     new_conversation: '新しい会話',
     filter_conversations: '会話を絞り込み...',
     markdown_table_filter: 'テーブルをフィルター',
@@ -5036,7 +5036,7 @@ const LOCALES = {
     cancelling: 'Отменяю…',
     cancel_failed: 'Не удалось отменить: ',
     mic_denied: 'Доступ к микрофону запрещён. Проверьте разрешения браузера.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'Для голосового ввода нужно защищённое соединение. Откройте Hermes по HTTPS или с localhost, чтобы использовать микрофон.',
     mic_no_speech: 'Речь не распознана. Попробуйте ещё раз.',
     mic_network: 'Распознавание речи недоступно.',
     mic_error: 'Ошибка ввода речи: ',
@@ -5226,7 +5226,7 @@ const LOCALES = {
     new_session_creating: 'Создаём новую беседу…',
     compressing: 'Запрашиваю сжатие контекста...',
     token_usage_on: 'Отображение токенов включено',
-    usage_personality_none: 'none', // TODO: translate
+    usage_personality_none: 'нет',
     token_usage_off: 'Отображение токенов выключено',
     usage_cache_hit_detail: 'Кэш: {0}% попаданий ({1} чтение / {2} запись)',
     usage_cached_percent: '{0}% из кэша',
@@ -5328,21 +5328,21 @@ const LOCALES = {
     session_worktree_badge: 'Worktree',
     model_search_placeholder: 'Поиск моделей…',
     model_scope_advisory: 'Применяется к этой беседе со следующего сообщения.',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: 'Наборы инструментов сессии',
+    session_toolsets_desc: 'Использовать значения по умолчанию активного профиля или выбрать пользовательский список наборов инструментов для этой сессии',
+    session_toolsets_global: 'Значения по умолчанию активного профиля',
+    session_toolsets_profile_defaults: 'Значения по умолчанию активного профиля',
+    session_toolsets_custom: 'Пользовательское переопределение',
+    session_toolsets_use_profile_defaults: 'Использовать значения по умолчанию активного профиля',
+    session_toolsets_configured_servers: 'Настроенные серверы MCP',
+    session_toolsets_loading_servers: 'Загрузка настроенных серверов...',
+    session_toolsets_no_configured_servers: 'Нет настроенных серверов MCP',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: 'Применить',
+    session_toolsets_clear: 'Использовать значения по умолчанию',
+    session_toolsets_applied: 'Наборы инструментов обновлены',
+    session_toolsets_cleared: 'Используются значения по умолчанию активного профиля',
+    session_toolsets_failed: 'Не удалось обновить наборы инструментов: ',
     model_scope_toast: 'Применяется к этой беседе со следующего сообщения.',
     reference_only_label: 'Только справка',
     settings_label_skin: 'Скин',
@@ -5423,7 +5423,7 @@ const LOCALES = {
      copy_file_path: 'Копировать путь к файлу',
      open_in_vscode: 'Открыть в VS Code',
      open_in_vscode_failed: 'Не удалось открыть в VS Code: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Папка загрузок',
     path_copied: 'Путь к файлу скопирован в буфер обмена',
     path_copy_failed: 'Не удалось скопировать путь: ',
     session_rename: 'Переименовать беседу',
@@ -5719,21 +5719,21 @@ const LOCALES = {
     dashboard_loopback_warning: 'Панель доступна только через loopback на сервере. Откройте её с самого сервера или перезапустите с --host 0.0.0.0 (небезопасно).',
     tab_logs: 'Logs',
     tab_settings: 'Настройки',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Закрыть меню',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: 'Журналы',
+    logs_file: 'Файл',
+    logs_tail: 'Хвост',
+    logs_auto_refresh: 'Автообновление (5 с)',
+    logs_wrap: 'Перенос строк',
+    logs_copy_all: 'Копировать всё',
+    logs_empty: 'Пока нет строк журнала.',
+    logs_loading: 'Загрузка журналов…',
+    logs_load_failed: 'Не удалось загрузить журналы',
+    logs_status_idle: 'Выберите файл журнала, чтобы просмотреть последние строки.',
+    logs_no_mtime: 'ещё не записано',
+    logs_truncated_hint: 'Показан хвост большого файла журнала; более старые байты пропущены для ограничения использования памяти.',
+    logs_copied: 'Журналы скопированы',
     logs_severity: 'Уровень',
     logs_severity_all: 'Все',
     logs_severity_errors: 'Ошибки',
@@ -5957,16 +5957,16 @@ const LOCALES = {
     provider_category_specialized: 'Специализированные',
     onboarding_api_key_label: 'Ключ API',
     onboarding_api_key_placeholder: 'Оставьте пустым, чтобы сохранить уже сохранённый ключ',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    onboarding_api_key_label_optional: 'API-ключ (необязательно)',
+    onboarding_api_key_placeholder_optional: 'Оставьте пустым для серверов без ключа',
+    onboarding_api_key_help_keyless: 'Большинство установок LM Studio / Ollama / vLLM работают без ключа — оставьте это поле пустым, если ваш сервер не требует аутентификации. Используйте кнопку «Проверить подключение» для проверки.',
+    oauth_login_codex: 'Войти через Codex (ChatGPT)',
+    oauth_codex_step1: 'Шаг 1. Перейдите по этому URL и введите код',
+    oauth_codex_step2: 'Шаг 2. Введите этот код на странице',
+    oauth_codex_polling: 'Ожидание авторизации...',
+    oauth_codex_success: 'Вход через Codex OAuth выполнен!',
+    oauth_codex_error: 'Не удалось выполнить вход через OAuth',
+    oauth_codex_expired: 'Срок действия кода истёк, повторите попытку',
     onboarding_api_key_help_prefix: 'Сохраняется как секрет в вашем файле `.env` Hermes с помощью',
     onboarding_base_url_label: 'Базовый URL',
     onboarding_base_url_placeholder: 'https://your-endpoint.example/v1',
@@ -5992,19 +5992,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Выберите модель перед продолжением.',
     onboarding_error_provider_required: 'Выберите режим настройки перед продолжением.',
     onboarding_error_base_url_required: 'Для собственных endpoint-ов требуется базовый URL.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: 'Проверить подключение',
+    onboarding_probe_probing: 'Проверка подключения…',
+    onboarding_probe_ok: 'Подключено. Доступно моделей: {n}.',
+    onboarding_probe_error_generic: 'Не удалось связаться с настроенным базовым URL.',
+    onboarding_probe_error_invalid_url: 'Базовый URL должен начинаться с http:// или https://.',
+    onboarding_probe_error_dns: 'Не удалось разрешить хост. Проверьте URL или используйте IP-адрес хоста.',
+    onboarding_probe_error_connect_refused: 'В подключении отказано — возможно, сервер не запущен по этому адресу. Внутри Docker попробуйте IP хоста вместо localhost.',
+    onboarding_probe_error_timeout: 'Конечная точка не ответила вовремя. Убедитесь, что сервер запущен и URL указан верно.',
+    onboarding_probe_error_http_4xx: 'Конечная точка вернула ошибку клиента. Проверьте аутентификацию и путь URL (обычно оканчивается на /v1).',
+    onboarding_probe_error_http_5xx: 'Конечная точка вернула ошибку сервера. Проверьте журналы сервера LM Studio / Ollama.',
+    onboarding_probe_error_parse: 'Конечная точка вернула список моделей в неожиданном формате. Убедитесь, что URL указывает на корень API, совместимого с OpenAI.',
+    onboarding_probe_error_unreachable: 'Не удалось связаться с настроенным базовым URL.',
+    onboarding_error_probe_failed: 'Не удалось проверить настроенный базовый URL.',
     onboarding_error_workspace_required: 'Рабочее пространство обязательно.',
     onboarding_error_model_required: 'Модель обязательна.',
     onboarding_complete: 'Первичная настройка завершена',
@@ -6370,8 +6370,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Автопрокрутка к новому содержимому',
     settings_desc_auto_scroll_follow: 'Если включено, область прокручивается вниз по мере поступления новых токенов. Если выключено, вы сами управляете прокруткой.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Показывать переключатель профилей в заголовке окна',
+    settings_desc_show_titlebar_profile: 'Если включено, в заголовке окна в левом верхнем углу появляется кнопка переключения профилей, позволяющая менять профиль с любой вкладки. По умолчанию выключено; в нижней части редактора всегда есть переключатель профилей независимо от этой настройки.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -6425,7 +6425,7 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_plugins: 'Плагины',
-    settings_tab_extensions: 'Extensions',  // TODO: translate
+    settings_tab_extensions: 'Расширения',
     settings_extensions_gallery_tab: 'Gallery',
     settings_extensions_installed_tab: 'Installed',
     settings_extensions_diagnostics_tab: 'Diagnostics',
@@ -6456,19 +6456,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Расширение установлено. Следующие шаги смотрите на карточке.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Плагины',
     plugins_enable_toggle: 'Включить',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Просмотр установленных плагинов Hermes и регистрируемых ими хуков жизненного цикла. Эта панель доступна только для чтения.',
+    settings_plugins_empty: 'Сейчас нет видимых плагинов Hermes. Установите или включите плагины через CLI/конфигурацию Hermes, чтобы увидеть их здесь.',
+    plugins_unnamed: 'Плагин без названия',
+    plugins_no_description: 'Описание не предоставлено.',
+    plugins_no_hooks: 'Нет зарегистрированных хуков жизненного цикла',
+    plugins_registered_hooks: 'Зарегистрированные хуки',
+    plugins_enabled: 'Включено',
+    plugins_disabled: 'Отключено',
+    plugins_active_provider: 'Активен (провайдер)',
+    plugins_provider_no_hooks: 'Плагин провайдера — нет хуков видимости для агента',
+    plugins_load_failed: 'Не удалось загрузить плагины: ',
     settings_tab_system: 'System',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -6565,24 +6565,24 @@ const LOCALES = {
     settings_label_tts_engine: 'Движок TTS',
     settings_desc_tts_engine: 'Выберите движок синтеза речи. Edge TTS использует нейронные голоса Microsoft через сервер.',
 
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
+    checkpoint_date: 'Дата',
+    checkpoint_diff_files_changed: (n) => `${n} файл${n === 1 ? '' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'а' : 'ов')} изменено`,
+    checkpoint_diff_no_changes: 'Различий между этой контрольной точкой и текущим рабочим пространством не найдено.',
+    checkpoint_diff_title: 'Изменения в контрольной точке',
+    checkpoint_empty: 'Для этого рабочего пространства контрольные точки не найдены.',
+    checkpoint_error: 'Не удалось загрузить контрольные точки',
+    checkpoint_files: 'Файлы',
+    checkpoint_loading: 'Загрузка контрольных точек…',
+    checkpoint_message: 'Сообщение',
+    checkpoint_restore: 'Восстановить',
+    checkpoint_restore_confirm_message: (ckpt) => `Восстановить рабочее пространство до контрольной точки "${ckpt}"? Файлы будут перезаписаны сохранёнными версиями. Файлы, добавленные после этой контрольной точки, удалены не будут.`,
+    checkpoint_restore_confirm_title: 'Восстановить контрольную точку?',
+    checkpoint_restored: 'Контрольная точка восстановлена',
+    checkpoint_title: 'Контрольные точки',
+    checkpoint_view_diff: 'Показать diff',
+    insights_activity_by_day: 'Активность по дням',
+    insights_activity_by_hour: 'Активность по часам',
+    insights_cost: 'Оценочная стоимость',
     insights_daily_tokens: 'Daily Tokens',
     insights_model_name: 'Model',
     insights_model_sessions: 'Sessions',
@@ -6596,36 +6596,36 @@ const LOCALES = {
     insights_model_health_replacement: 'Replacement guide',
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: 'No usage data yet',
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
-    outline_title: 'Outline',  // TODO: translate
-    outline_empty: 'No questions yet.',  // TODO: translate
-    outline_loading: 'Loading…',  // TODO: translate
+    insights_footer: 'Показаны данные за последние {days} дн.',
+    insights_skill_usage_title: 'Использование навыков',
+    insights_skill_usage_sub: 'Частота вызова инструментов',
+    insights_skill_usage_total: 'Всего вызовов',
+    insights_skill_usage_skills_used: 'Использовано навыков',
+    insights_skill_usage_no_data: 'Пока нет данных об использовании навыков',
+    insights_skill_usage_no_data_hint: 'Навыки появятся здесь после использования в беседах.',
+    insights_skill_usage_footer: 'Подсчёты из ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Навык',
+    insights_skill_usage_col_uses: 'Использования',
+    insights_skill_usage_col_views: 'Просмотры',
+    insights_skill_usage_col_share: 'Использование, %',
+    insights_skill_usage_col_patches: 'Патчи',
+    insights_input_tokens: 'Ввод',
+    insights_messages: 'Сообщения',
+    insights_models: 'Модели',
+    insights_no_cost: 'Н/Д',
+    insights_output_tokens: 'Вывод',
+    insights_peak_hour: 'Пик: {hour}',
+    insights_sessions: 'Сессии',
+    insights_title: 'Аналитика использования',
+    insights_token_breakdown: 'Разбивка по токенам',
+    insights_tokens: 'Токены',
+    insights_total: 'Всего',
+    settings_desc_api_redact: 'Пользователи с собственным хостингом могут отключить для прозрачности (не рекомендуется для общих экземпляров).',
+    settings_label_api_redact: 'Скрывать конфиденциальные данные в ответах API',
+    subagent_children: 'Сессии субагентов',
+    outline_title: 'Структура',
+    outline_empty: 'Пока нет вопросов.',
+    outline_loading: 'Загрузка…',
     wiki_browse: 'Browse wiki',
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
@@ -6647,7 +6647,7 @@ const LOCALES = {
     cancelling: 'Cancelando…',
     cancel_failed: 'Error al cancelar: ',
     mic_denied: 'Acceso al micrófono denegado. Revisa los permisos del navegador.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'La entrada de voz necesita una conexión segura. Abre Hermes con HTTPS o desde localhost para usar el micrófono.',
     mic_no_speech: 'No se detectó voz. Inténtalo de nuevo.',
     mic_network: 'El reconocimiento de voz no está disponible.',
     mic_error: 'Error de entrada por voz: ',
@@ -6821,21 +6821,21 @@ const LOCALES = {
     workspace_worktree_created: 'Conversación en worktree creada',
     workspace_worktree_failed: 'Error al crear worktree: ',
     session_worktree_badge: 'Worktree',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: 'Conjuntos de herramientas de la sesión',
+    session_toolsets_desc: 'Usa los valores predeterminados del perfil activo o elige una lista personalizada de conjuntos de herramientas para esta sesión',
+    session_toolsets_global: 'Valores predeterminados del perfil activo',
+    session_toolsets_profile_defaults: 'Valores predeterminados del perfil activo',
+    session_toolsets_custom: 'Anulación personalizada',
+    session_toolsets_use_profile_defaults: 'Usar valores predeterminados del perfil activo',
+    session_toolsets_configured_servers: 'Servidores MCP configurados',
+    session_toolsets_loading_servers: 'Cargando servidores configurados...',
+    session_toolsets_no_configured_servers: 'No hay servidores MCP configurados',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: 'Aplicar',
+    session_toolsets_clear: 'Usar valores predeterminados',
+    session_toolsets_applied: 'Conjuntos de herramientas actualizados',
+    session_toolsets_cleared: 'Usando los valores predeterminados del perfil activo',
+    session_toolsets_failed: 'Error al actualizar los conjuntos de herramientas: ',
     model_scope_advisory: 'Se aplica a esta conversación desde tu próximo mensaje.',
     model_scope_toast: 'Se aplica a esta conversación desde tu próximo mensaje.',
     // commands.js
@@ -6881,7 +6881,7 @@ const LOCALES = {
     compress_failed_label: 'La compresión falló',
     focus_label: 'Tema',
     token_usage_on: 'Uso de tokens activado',
-    usage_personality_none: 'none', // TODO: translate
+    usage_personality_none: 'ninguna',
     token_usage_off: 'Uso de tokens desactivado',
     usage_cache_hit_detail: 'Caché: {0}% de acierto ({1} lectura / {2} escritura)',
     usage_cached_percent: '{0}% en caché',
@@ -7008,7 +7008,7 @@ const LOCALES = {
      copy_file_path: 'Copiar ruta del archivo',
      open_in_vscode: 'Abrir en VS Code',
      open_in_vscode_failed: 'Error al abrir en VS Code: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Carpeta de descargas',
     path_copied: 'Ruta del archivo copiada al portapapeles',
     path_copy_failed: 'Error al copiar la ruta: ',
     session_rename: 'Renombrar conversación',
@@ -7324,21 +7324,21 @@ const LOCALES = {
     dashboard_loopback_warning: 'El panel solo usa loopback en el servidor. Navega desde el propio servidor o reinícialo con --host 0.0.0.0 (inseguro).',
     tab_logs: 'Logs',
     tab_settings: 'Ajustes',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Cerrar menú',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: 'Registros',
+    logs_file: 'Archivo',
+    logs_tail: 'Cola',
+    logs_auto_refresh: 'Actualización automática (5 s)',
+    logs_wrap: 'Ajustar líneas',
+    logs_copy_all: 'Copiar todo',
+    logs_empty: 'Aún no hay líneas de registro.',
+    logs_loading: 'Cargando registros…',
+    logs_load_failed: 'Error al cargar los registros',
+    logs_status_idle: 'Elige un archivo de registro para ver las líneas recientes.',
+    logs_no_mtime: 'aún no escrito',
+    logs_truncated_hint: 'Se muestra la cola de un archivo de registro grande; se omitieron los bytes más antiguos para limitar el uso de memoria.',
+    logs_copied: 'Registros copiados',
     logs_severity: 'Severidad',
     logs_severity_all: 'Todo',
     logs_severity_errors: 'Errores',
@@ -7565,16 +7565,16 @@ const LOCALES = {
     provider_category_specialized: 'Especializados',
     onboarding_api_key_label: 'API key',
     onboarding_api_key_placeholder: 'Déjala en blanco para conservar una key ya guardada',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    onboarding_api_key_label_optional: 'Clave de API (opcional)',
+    onboarding_api_key_placeholder_optional: 'Déjalo en blanco para servidores sin clave',
+    onboarding_api_key_help_keyless: 'La mayoría de las instalaciones de LM Studio / Ollama / vLLM funcionan sin clave: deja esto en blanco si tu servidor no requiere autenticación. Usa el botón Probar conexión para verificar.',
+    oauth_login_codex: 'Iniciar sesión con Codex (ChatGPT)',
+    oauth_codex_step1: 'Paso 1: Visita esta URL e introduce el código',
+    oauth_codex_step2: 'Paso 2: Introduce este código en la página',
+    oauth_codex_polling: 'Esperando la autorización...',
+    oauth_codex_success: '¡Inicio de sesión con Codex OAuth correcto!',
+    oauth_codex_error: 'Error al iniciar sesión con OAuth',
+    oauth_codex_expired: 'El código ha caducado, inténtalo de nuevo',
     onboarding_api_key_help_prefix: 'Se guarda como secreto en tu archivo .env de Hermes usando',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://tu-endpoint.example/v1',
@@ -7600,19 +7600,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Elige un modelo antes de continuar.',
     onboarding_error_provider_required: 'Elige un modo de configuración antes de continuar.',
     onboarding_error_base_url_required: 'La base URL es obligatoria para endpoints personalizados.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: 'Probar conexión',
+    onboarding_probe_probing: 'Probando la conexión…',
+    onboarding_probe_ok: 'Conectado. {n} modelo(s) disponible(s).',
+    onboarding_probe_error_generic: 'No se pudo acceder a la URL base configurada.',
+    onboarding_probe_error_invalid_url: 'La URL base debe empezar por http:// o https://.',
+    onboarding_probe_error_dns: 'No se pudo resolver el host. Comprueba la URL o usa la dirección IP del host.',
+    onboarding_probe_error_connect_refused: 'Conexión rechazada: es posible que el servidor no se esté ejecutando en esa dirección. Dentro de Docker, prueba con la IP del host en lugar de localhost.',
+    onboarding_probe_error_timeout: 'El punto de conexión no respondió a tiempo. Comprueba que el servidor se esté ejecutando y que la URL sea correcta.',
+    onboarding_probe_error_http_4xx: 'El punto de conexión devolvió un error de cliente. Comprueba la autenticación y la ruta de la URL (normalmente termina en /v1).',
+    onboarding_probe_error_http_5xx: 'El punto de conexión devolvió un error de servidor. Revisa los registros del servidor de LM Studio / Ollama.',
+    onboarding_probe_error_parse: 'El punto de conexión no devolvió una lista de modelos con el formato esperado. Verifica que la URL apunte a la raíz de la API compatible con OpenAI.',
+    onboarding_probe_error_unreachable: 'No se pudo acceder a la URL base configurada.',
+    onboarding_error_probe_failed: 'No se pudo validar la URL base configurada.',
     onboarding_error_workspace_required: 'El espacio de trabajo es obligatorio.',
     onboarding_error_model_required: 'El modelo es obligatorio.',
     onboarding_complete: 'Onboarding completado',
@@ -7963,8 +7963,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Seguir automáticamente el contenido nuevo',
     settings_desc_auto_scroll_follow: 'Si está activado, la vista se desplaza hacia abajo a medida que llegan nuevos tokens. Si está desactivado, controlas tú la posición de desplazamiento.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Mostrar el selector de perfiles en la barra de título',
+    settings_desc_show_titlebar_profile: 'Cuando está activado, aparece un botón de cambio de perfil en la barra de título de la aplicación, en la esquina superior izquierda, para que puedas cambiar de perfil desde cualquier pestaña. Desactivado de forma predeterminada; el pie del compositor siempre tiene un selector de perfiles independientemente de este ajuste.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -8049,19 +8049,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Extensión instalada. Consulta la tarjeta para ver los próximos pasos.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Plugins',
     plugins_enable_toggle: 'Activar',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Consulta los plugins de Hermes instalados y los hooks de ciclo de vida que registran. Este panel es de solo lectura.',
+    settings_plugins_empty: 'Actualmente no hay plugins de Hermes visibles. Instala o activa plugins desde la CLI/configuración de Hermes para verlos aquí.',
+    plugins_unnamed: 'Plugin sin nombre',
+    plugins_no_description: 'No se proporcionó ninguna descripción.',
+    plugins_no_hooks: 'No hay hooks de ciclo de vida registrados',
+    plugins_registered_hooks: 'Hooks registrados',
+    plugins_enabled: 'Activado',
+    plugins_disabled: 'Desactivado',
+    plugins_active_provider: 'Activo (proveedor)',
+    plugins_provider_no_hooks: 'Plugin de proveedor — sin hooks de visibilidad para el agente',
+    plugins_load_failed: 'Error al cargar los plugins: ',
     settings_tab_system: 'System',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -8145,36 +8145,36 @@ const LOCALES = {
     settings_label_tts_auto_read: 'Leer respuestas automáticamente',
     settings_desc_tts_auto_read: 'Leer en voz alta las respuestas del asistente automáticamente',
     // Composer voice-mode pref (#1488)
-    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_label_voice_mode: 'Botón de modo de voz manos libres',
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_raw_audio: 'Send raw audio instead of transcribing',
     settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
     voice_send_raw: 'Send raw audio',
-    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
+    voice_raw_attached: 'Audio adjuntado. Pulsa Enviar o escribe más.',
     settings_label_tts_voice: 'Voz',
     settings_desc_tts_voice: 'Seleccionar voz para síntesis de voz',
     settings_label_tts_rate: 'Velocidad de voz',
     settings_label_tts_pitch: 'Tono de voz',
     settings_label_tts_engine: 'Motor TTS',
     settings_desc_tts_engine: 'Elija el motor de voz. Edge TTS utiliza voces neuronales de Microsoft a través del servidor.',
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
+    checkpoint_date: 'Fecha',
+    checkpoint_diff_files_changed: (n) => `${n} archivo${n === 1 ? '' : 's'} cambiado${n === 1 ? '' : 's'}`,
+    checkpoint_diff_no_changes: 'No se encontraron diferencias entre este punto de control y el espacio de trabajo actual.',
+    checkpoint_diff_title: 'Cambios en el punto de control',
+    checkpoint_empty: 'No se encontraron puntos de control para este espacio de trabajo.',
+    checkpoint_error: 'Error al cargar los puntos de control',
+    checkpoint_files: 'Archivos',
+    checkpoint_loading: 'Cargando puntos de control…',
+    checkpoint_message: 'Mensaje',
+    checkpoint_restore: 'Restaurar',
+    checkpoint_restore_confirm_message: (ckpt) => `¿Restaurar el espacio de trabajo al punto de control "${ckpt}"? Esto sobrescribirá los archivos con las versiones guardadas. Los archivos añadidos después de este punto de control no se eliminarán.`,
+    checkpoint_restore_confirm_title: '¿Restaurar el punto de control?',
+    checkpoint_restored: 'Punto de control restaurado',
+    checkpoint_title: 'Puntos de control',
+    checkpoint_view_diff: 'Ver diff',
+    insights_activity_by_day: 'Actividad por día',
+    insights_activity_by_hour: 'Actividad por hora',
+    insights_cost: 'Coste estimado',
     insights_daily_tokens: 'Daily Tokens',
     insights_model_name: 'Model',
     insights_model_sessions: 'Sessions',
@@ -8188,45 +8188,45 @@ const LOCALES = {
     insights_model_health_replacement: 'Replacement guide',
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: 'No usage data yet',
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    voice_error: 'Voice not supported in this browser',  // TODO: translate
-    voice_listening: 'Listening…',  // TODO: translate
-    voice_mode_active: 'Voice mode on',  // TODO: translate
-    voice_mode_off: 'Voice mode off',  // TODO: translate
-    voice_speaking: 'Speaking…',  // TODO: translate
-    voice_thinking: 'Thinking…',  // TODO: translate
+    insights_footer: 'Mostrando datos de los últimos {days} días',
+    insights_skill_usage_title: 'Uso de skills',
+    insights_skill_usage_sub: 'Frecuencia de invocación de herramientas',
+    insights_skill_usage_total: 'Invocaciones totales',
+    insights_skill_usage_skills_used: 'Skills usados',
+    insights_skill_usage_no_data: 'Aún no hay datos de uso de skills',
+    insights_skill_usage_no_data_hint: 'Los skills aparecerán aquí una vez que se usen en las conversaciones.',
+    insights_skill_usage_footer: 'Recuentos de ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Skill',
+    insights_skill_usage_col_uses: 'Usos',
+    insights_skill_usage_col_views: 'Vistas',
+    insights_skill_usage_col_share: 'Uso %',
+    insights_skill_usage_col_patches: 'Parches',
+    insights_input_tokens: 'Entrada',
+    insights_messages: 'Mensajes',
+    insights_models: 'Modelos',
+    insights_no_cost: 'N/D',
+    insights_output_tokens: 'Salida',
+    insights_peak_hour: 'Pico: {hour}',
+    insights_sessions: 'Sesiones',
+    insights_title: 'Analíticas de uso',
+    insights_token_breakdown: 'Desglose de tokens',
+    insights_tokens: 'Tokens',
+    insights_total: 'Total',
+    settings_desc_api_redact: 'Los usuarios autoalojados pueden desactivarlo para mayor transparencia (no recomendado para instancias compartidas).',
+    settings_label_api_redact: 'Ocultar datos sensibles en las respuestas de la API',
+    voice_error: 'Voz no compatible con este navegador',
+    voice_listening: 'Escuchando…',
+    voice_mode_active: 'Modo de voz activado',
+    voice_mode_off: 'Modo de voz desactivado',
+    voice_speaking: 'Hablando…',
+    voice_thinking: 'Pensando…',
     // Composer voice buttons (#1488)
-    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate: 'Dictar',
     voice_dictate_active: 'Stop dictation',
-    voice_recording_active: 'Detener grabación',  // TODO: translate
-    voice_mode_toggle: 'Voice mode',  // TODO: translate
-    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
+    voice_recording_active: 'Detener grabación',
+    voice_mode_toggle: 'Modo de voz',
+    voice_mode_toggle_active: 'Salir del modo de voz',
+    subagent_children: 'Sesiones de subagentes',
     outline_title: 'Esquema',
     outline_empty: 'Aún no hay preguntas.',
     outline_loading: 'Cargando…',
@@ -8251,7 +8251,7 @@ const LOCALES = {
     cancelling: 'Wird abgebrochen\u2026',
     cancel_failed: 'Abbrechen fehlgeschlagen: ',
     mic_denied: 'Mikrofonzugriff verweigert. Überprüfen Sie die Browserberechtigungen.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'Für die Spracheingabe ist eine sichere Verbindung erforderlich. Öffne Hermes über HTTPS oder von localhost, um das Mikrofon zu verwenden.',
     mic_no_speech: 'Keine Sprache erkannt. Versuchen Sie es erneut.',
     mic_network: 'Spracherkennung nicht verfügbar.',
     mic_error: 'Spracheingabefehler: ',
@@ -8455,7 +8455,7 @@ const LOCALES = {
     compress_failed_label: 'Komprimierung fehlgeschlagen',
     focus_label: 'Thema',
     token_usage_on: 'Token-Verbrauch an',
-    usage_personality_none: 'none', // TODO: translate
+    usage_personality_none: 'keine',
     token_usage_off: 'Token-Verbrauch aus',
     usage_cache_hit_detail: 'Cache: {0}% Treffer ({1} gelesen / {2} geschrieben)',
     usage_cached_percent: '{0}% im Cache',
@@ -8591,7 +8591,7 @@ const LOCALES = {
      copy_file_path: 'Dateipfad kopieren',
      open_in_vscode: 'In VS Code öffnen',
      open_in_vscode_failed: 'In VS Code öffnen fehlgeschlagen: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Download-Ordner',
     path_copied: 'Dateipfad in die Zwischenablage kopiert',
     path_copy_failed: 'Pfad konnte nicht kopiert werden: ',
     session_rename: 'Unterhaltung umbenennen',
@@ -8907,21 +8907,21 @@ const LOCALES = {
     dashboard_loopback_warning: 'Das Dashboard ist auf dem Server nur per Loopback erreichbar. Öffne es direkt auf dem Server oder starte es mit --host 0.0.0.0 neu (unsicher).',
     tab_logs: 'Logs',
     tab_settings: 'Einstellungen',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Menü schließen',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: 'Protokolle',
+    logs_file: 'Datei',
+    logs_tail: 'Ende',
+    logs_auto_refresh: 'Automatisch aktualisieren (5 s)',
+    logs_wrap: 'Zeilen umbrechen',
+    logs_copy_all: 'Alles kopieren',
+    logs_empty: 'Noch keine Protokollzeilen.',
+    logs_loading: 'Protokolle werden geladen…',
+    logs_load_failed: 'Protokolle konnten nicht geladen werden',
+    logs_status_idle: 'Wähle eine Protokolldatei, um die letzten Zeilen anzuzeigen.',
+    logs_no_mtime: 'noch nicht geschrieben',
+    logs_truncated_hint: 'Es wird das Ende einer großen Protokolldatei angezeigt; ältere Bytes wurden übersprungen, um den Speicherverbrauch zu begrenzen.',
+    logs_copied: 'Protokolle kopiert',
     logs_severity: 'Schweregrad',
     logs_severity_all: 'Alle',
     logs_severity_errors: 'Fehler',
@@ -9237,8 +9237,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Neuen Inhalten automatisch folgen',
     settings_desc_auto_scroll_follow: 'Wenn aktiviert, scrollt die Ansicht nach unten, während neue Tokens eintreffen. Wenn deaktiviert, steuerst du die Scrollposition selbst.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Profilwechsler in der Titelleiste anzeigen',
+    settings_desc_show_titlebar_profile: 'Wenn aktiviert, erscheint in der Titelleiste der App oben links eine Schaltfläche zum Profilwechsel, sodass du das Profil von jedem Tab aus wechseln kannst. Standardmäßig deaktiviert; die Fußzeile des Editors hat unabhängig von dieser Einstellung immer einen Profilwechsler.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -9326,19 +9326,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Erweiterung installiert. Die nächsten Schritte stehen auf der Karte.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Plugins',
     plugins_enable_toggle: 'Aktivieren',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Zeigt installierte Hermes-Plugins und die von ihnen registrierten Lifecycle-Hooks an. Dieses Panel ist schreibgeschützt.',
+    settings_plugins_empty: 'Derzeit sind keine Hermes-Plugins sichtbar. Installiere oder aktiviere Plugins über die Hermes-CLI/-Konfiguration, um sie hier zu sehen.',
+    plugins_unnamed: 'Unbenanntes Plugin',
+    plugins_no_description: 'Keine Beschreibung angegeben.',
+    plugins_no_hooks: 'Keine registrierten Lifecycle-Hooks',
+    plugins_registered_hooks: 'Registrierte Hooks',
+    plugins_enabled: 'Aktiviert',
+    plugins_disabled: 'Deaktiviert',
+    plugins_active_provider: 'Aktiv (Anbieter)',
+    plugins_provider_no_hooks: 'Anbieter-Plugin — keine Hooks für die Agent-Sichtbarkeit',
+    plugins_load_failed: 'Plugins konnten nicht geladen werden: ',
     settings_tab_system: 'System',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -9398,21 +9398,21 @@ const LOCALES = {
     workspace_worktree_created: 'Worktree-Unterhaltung erstellt',
     workspace_worktree_failed: 'Worktree-Erstellung fehlgeschlagen: ',
     session_worktree_badge: 'Worktree',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: 'Sitzungs-Toolsets',
+    session_toolsets_desc: 'Verwende die Standardwerte des aktiven Profils oder wähle eine benutzerdefinierte Toolset-Liste für diese Sitzung',
+    session_toolsets_global: 'Standardwerte des aktiven Profils',
+    session_toolsets_profile_defaults: 'Standardwerte des aktiven Profils',
+    session_toolsets_custom: 'Benutzerdefinierte Überschreibung',
+    session_toolsets_use_profile_defaults: 'Standardwerte des aktiven Profils verwenden',
+    session_toolsets_configured_servers: 'Konfigurierte MCP-Server',
+    session_toolsets_loading_servers: 'Konfigurierte Server werden geladen...',
+    session_toolsets_no_configured_servers: 'Keine konfigurierten MCP-Server',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: 'Anwenden',
+    session_toolsets_clear: 'Standardwerte verwenden',
+    session_toolsets_applied: 'Toolsets aktualisiert',
+    session_toolsets_cleared: 'Standardwerte des aktiven Profils werden verwendet',
+    session_toolsets_failed: 'Toolsets konnten nicht aktualisiert werden: ',
     session_time_unknown: 'Unbekannt',
     session_time_minutes_ago: (n) => `Vor ${n} Minuten`,
     session_time_hours_ago: (n) => `Vor ${n} Stunden`,
@@ -9476,16 +9476,16 @@ const LOCALES = {
     provider_category_specialized: 'Spezialisiert',
     onboarding_api_key_label: 'API-Schlüssel',
     onboarding_api_key_placeholder: 'sk-…',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    onboarding_api_key_label_optional: 'API-Schlüssel (optional)',
+    onboarding_api_key_placeholder_optional: 'Für Server ohne Schlüssel leer lassen',
+    onboarding_api_key_help_keyless: 'Die meisten LM Studio- / Ollama- / vLLM-Installationen laufen ohne Schlüssel — lass dies leer, wenn dein Server keine Authentifizierung erfordert. Verwende die Schaltfläche „Verbindung testen“ zur Überprüfung.',
+    oauth_login_codex: 'Mit Codex (ChatGPT) anmelden',
+    oauth_codex_step1: 'Schritt 1: Rufe diese URL auf und gib den Code ein',
+    oauth_codex_step2: 'Schritt 2: Gib diesen Code auf der Seite ein',
+    oauth_codex_polling: 'Warten auf Autorisierung...',
+    oauth_codex_success: 'Codex-OAuth-Anmeldung erfolgreich!',
+    oauth_codex_error: 'OAuth-Anmeldung fehlgeschlagen',
+    oauth_codex_expired: 'Der Code ist abgelaufen, bitte versuche es erneut',
     onboarding_api_key_help_prefix: 'Gefunden unter',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://api.openai.com/v1',
@@ -9507,19 +9507,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Bitte wählen Sie ein Modell.',
     onboarding_error_provider_required: 'Anbieter erforderlich.',
     onboarding_error_base_url_required: 'Base URL erforderlich.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: 'Verbindung testen',
+    onboarding_probe_probing: 'Verbindung wird getestet…',
+    onboarding_probe_ok: 'Verbunden. {n} Modell(e) verfügbar.',
+    onboarding_probe_error_generic: 'Die konfigurierte Basis-URL konnte nicht erreicht werden.',
+    onboarding_probe_error_invalid_url: 'Die Basis-URL muss mit http:// oder https:// beginnen.',
+    onboarding_probe_error_dns: 'Der Host konnte nicht aufgelöst werden. Überprüfe die URL oder verwende die IP-Adresse des Hosts.',
+    onboarding_probe_error_connect_refused: 'Verbindung abgelehnt — der Server läuft möglicherweise nicht unter dieser Adresse. Verwende innerhalb von Docker die Host-IP anstelle von localhost.',
+    onboarding_probe_error_timeout: 'Der Endpunkt hat nicht rechtzeitig geantwortet. Überprüfe, ob der Server läuft und die URL korrekt ist.',
+    onboarding_probe_error_http_4xx: 'Der Endpunkt hat einen Client-Fehler zurückgegeben. Überprüfe die Authentifizierung und den URL-Pfad (endet normalerweise auf /v1).',
+    onboarding_probe_error_http_5xx: 'Der Endpunkt hat einen Serverfehler zurückgegeben. Überprüfe die Server-Protokolle von LM Studio / Ollama.',
+    onboarding_probe_error_parse: 'Der Endpunkt hat keine Modellliste in der erwarteten Form zurückgegeben. Stelle sicher, dass die URL auf den Stamm der OpenAI-kompatiblen API verweist.',
+    onboarding_probe_error_unreachable: 'Die konfigurierte Basis-URL konnte nicht erreicht werden.',
+    onboarding_error_probe_failed: 'Die konfigurierte Basis-URL konnte nicht validiert werden.',
     onboarding_error_workspace_required: 'Arbeitsbereich erforderlich.',
     onboarding_error_model_required: 'Modell erforderlich.',
     onboarding_complete: 'Einrichtung abgeschlossen!',
@@ -9752,12 +9752,12 @@ const LOCALES = {
     settings_label_tts_auto_read: 'Antworten automatisch vorlesen',
     settings_desc_tts_auto_read: 'Assistenten-Antworten automatisch vorlesen',
     // Composer voice-mode pref (#1488)
-    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_label_voice_mode: 'Freihändiger Sprachmodus-Button',
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_raw_audio: 'Send raw audio instead of transcribing',
     settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
     voice_send_raw: 'Send raw audio',
-    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
+    voice_raw_attached: 'Audio angehängt. Drücke „Senden“ oder gib mehr ein.',
     settings_label_tts_voice: 'Stimme',
     settings_desc_tts_voice: 'Stimme für Sprachsynthese auswählen',
     settings_label_tts_rate: 'Sprechgeschwindigkeit',
@@ -9765,24 +9765,24 @@ const LOCALES = {
     settings_label_tts_engine: 'TTS-Engine',
     settings_desc_tts_engine: 'Sprach-Engine auswählen. Edge TTS verwendet Microsoft Neural Voices über den Server.',
 
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
+    checkpoint_date: 'Datum',
+    checkpoint_diff_files_changed: (n) => `${n} Datei${n === 1 ? '' : 'en'} geändert`,
+    checkpoint_diff_no_changes: 'Zwischen diesem Checkpoint und dem aktuellen Arbeitsbereich wurden keine Unterschiede gefunden.',
+    checkpoint_diff_title: 'Änderungen im Checkpoint',
+    checkpoint_empty: 'Für diesen Arbeitsbereich wurden keine Checkpoints gefunden.',
+    checkpoint_error: 'Checkpoints konnten nicht geladen werden',
+    checkpoint_files: 'Dateien',
+    checkpoint_loading: 'Checkpoints werden geladen…',
+    checkpoint_message: 'Nachricht',
+    checkpoint_restore: 'Wiederherstellen',
+    checkpoint_restore_confirm_message: (ckpt) => `Arbeitsbereich auf Checkpoint "${ckpt}" wiederherstellen? Dadurch werden Dateien mit den gespeicherten Versionen überschrieben. Nach diesem Checkpoint hinzugefügte Dateien werden nicht gelöscht.`,
+    checkpoint_restore_confirm_title: 'Checkpoint wiederherstellen?',
+    checkpoint_restored: 'Checkpoint wiederhergestellt',
+    checkpoint_title: 'Checkpoints',
+    checkpoint_view_diff: 'Diff anzeigen',
+    insights_activity_by_day: 'Aktivität nach Tag',
+    insights_activity_by_hour: 'Aktivität nach Stunde',
+    insights_cost: 'Geschätzte Kosten',
     insights_daily_tokens: 'Daily Tokens',
     insights_model_name: 'Model',
     insights_model_sessions: 'Sessions',
@@ -9796,45 +9796,45 @@ const LOCALES = {
     insights_model_health_replacement: 'Replacement guide',
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: 'No usage data yet',
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    voice_error: 'Voice not supported in this browser',  // TODO: translate
-    voice_listening: 'Listening…',  // TODO: translate
-    voice_mode_active: 'Voice mode on',  // TODO: translate
-    voice_mode_off: 'Voice mode off',  // TODO: translate
-    voice_speaking: 'Speaking…',  // TODO: translate
-    voice_thinking: 'Thinking…',  // TODO: translate
+    insights_footer: 'Daten der letzten {days} Tage werden angezeigt',
+    insights_skill_usage_title: 'Skill-Nutzung',
+    insights_skill_usage_sub: 'Häufigkeit der Tool-Aufrufe',
+    insights_skill_usage_total: 'Aufrufe insgesamt',
+    insights_skill_usage_skills_used: 'Verwendete Skills',
+    insights_skill_usage_no_data: 'Noch keine Skill-Nutzungsdaten',
+    insights_skill_usage_no_data_hint: 'Skills werden hier angezeigt, sobald sie in Unterhaltungen verwendet werden.',
+    insights_skill_usage_footer: 'Zählungen aus ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Skill',
+    insights_skill_usage_col_uses: 'Nutzungen',
+    insights_skill_usage_col_views: 'Aufrufe',
+    insights_skill_usage_col_share: 'Nutzung %',
+    insights_skill_usage_col_patches: 'Patches',
+    insights_input_tokens: 'Eingabe',
+    insights_messages: 'Nachrichten',
+    insights_models: 'Modelle',
+    insights_no_cost: 'k. A.',
+    insights_output_tokens: 'Ausgabe',
+    insights_peak_hour: 'Spitze: {hour}',
+    insights_sessions: 'Sitzungen',
+    insights_title: 'Nutzungsanalysen',
+    insights_token_breakdown: 'Token-Aufschlüsselung',
+    insights_tokens: 'Tokens',
+    insights_total: 'Gesamt',
+    settings_desc_api_redact: 'Selbst gehostete Nutzer können dies zur Transparenz deaktivieren (für gemeinsam genutzte Instanzen nicht empfohlen).',
+    settings_label_api_redact: 'Sensible Daten in API-Antworten schwärzen',
+    voice_error: 'Sprache wird in diesem Browser nicht unterstützt',
+    voice_listening: 'Höre zu…',
+    voice_mode_active: 'Sprachmodus ein',
+    voice_mode_off: 'Sprachmodus aus',
+    voice_speaking: 'Spricht…',
+    voice_thinking: 'Denkt nach…',
     // Composer voice buttons (#1488)
-    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate: 'Diktieren',
     voice_dictate_active: 'Stop dictation',
-    voice_recording_active: 'Aufnahme stoppen',  // TODO: translate
-    voice_mode_toggle: 'Voice mode',  // TODO: translate
-    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
+    voice_recording_active: 'Aufnahme stoppen',
+    voice_mode_toggle: 'Sprachmodus',
+    voice_mode_toggle_active: 'Sprachmodus verlassen',
+    subagent_children: 'Subagenten-Sitzungen',
     outline_title: 'Gliederung',
     outline_empty: 'Noch keine Fragen.',
     outline_loading: 'Laden…',
@@ -13132,7 +13132,7 @@ const LOCALES = {
     cancelling: 'Cancelando…',
     cancel_failed: 'Falha ao cancelar: ',
     mic_denied: 'Acesso ao microfone negado. Verifique as permissões do navegador.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'A entrada de voz precisa de uma conexão segura. Abra o Hermes por HTTPS ou a partir do localhost para usar o microfone.',
     mic_no_speech: 'Nenhuma fala detectada. Tente novamente.',
     mic_network: 'Reconhecimento de fala indisponível.',
     mic_error: 'Erro no input de voz: ',
@@ -13241,21 +13241,21 @@ const LOCALES = {
     model_custom_placeholder: 'ex: openai/gpt-5.4',
     model_show_all_models: 'Mostrar todos os {0} modelos',
     model_search_placeholder: 'Buscar modelos…',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: 'Conjuntos de ferramentas da sessão',
+    session_toolsets_desc: 'Use os padrões do perfil ativo ou escolha uma lista personalizada de conjuntos de ferramentas para esta sessão',
+    session_toolsets_global: 'Padrões do perfil ativo',
+    session_toolsets_profile_defaults: 'Padrões do perfil ativo',
+    session_toolsets_custom: 'Substituição personalizada',
+    session_toolsets_use_profile_defaults: 'Usar os padrões do perfil ativo',
+    session_toolsets_configured_servers: 'Servidores MCP configurados',
+    session_toolsets_loading_servers: 'Carregando servidores configurados...',
+    session_toolsets_no_configured_servers: 'Nenhum servidor MCP configurado',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: 'Aplicar',
+    session_toolsets_clear: 'Usar padrões',
+    session_toolsets_applied: 'Conjuntos de ferramentas atualizados',
+    session_toolsets_cleared: 'Usando os padrões do perfil ativo',
+    session_toolsets_failed: 'Falha ao atualizar os conjuntos de ferramentas: ',
     model_search_no_results: 'Nenhum modelo encontrado',
     model_group_configured: 'Configurados',
     ws_search_placeholder: 'Buscar espaços de trabalho…',
@@ -13490,7 +13490,7 @@ const LOCALES = {
      copy_file_path: 'Copiar caminho do arquivo',
      open_in_vscode: 'Abrir no VS Code',
      open_in_vscode_failed: 'Falha ao abrir no VS Code: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Pasta de downloads',
     path_copied: 'Caminho do arquivo copiado para a área de transferência',
     path_copy_failed: 'Falha ao copiar caminho: ',
     session_rename: 'Renomear conversa',
@@ -13617,8 +13617,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Acompanhar automaticamente o novo conteúdo',
     settings_desc_auto_scroll_follow: 'Quando ativado, a visualização rola para baixo conforme novos tokens chegam. Quando desativado, você controla a posição de rolagem.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Mostrar alternador de perfis na barra de título',
+    settings_desc_show_titlebar_profile: 'Quando ativado, um botão de alternância de perfis aparece na barra de título do app, no canto superior esquerdo, para que você possa trocar de perfil em qualquer aba. Desativado por padrão; o rodapé do compositor sempre tem um alternador de perfis, independentemente desta configuração.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -13707,19 +13707,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Extensão instalada. Veja o cartão para os próximos passos.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Plugins',
     plugins_enable_toggle: 'Ativar',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Veja os plugins do Hermes instalados e os hooks de ciclo de vida que eles registram. Este painel é somente leitura.',
+    settings_plugins_empty: 'Nenhum plugin do Hermes está visível no momento. Instale ou ative plugins pela CLI/configuração do Hermes para vê-los aqui.',
+    plugins_unnamed: 'Plugin sem nome',
+    plugins_no_description: 'Nenhuma descrição fornecida.',
+    plugins_no_hooks: 'Nenhum hook de ciclo de vida registrado',
+    plugins_registered_hooks: 'Hooks registrados',
+    plugins_enabled: 'Ativado',
+    plugins_disabled: 'Desativado',
+    plugins_active_provider: 'Ativo (provedor)',
+    plugins_provider_no_hooks: 'Plugin de provedor — sem hooks de visibilidade para o agente',
+    plugins_load_failed: 'Falha ao carregar os plugins: ',
     settings_tab_system: 'Sistema',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -14000,21 +14000,21 @@ const LOCALES = {
     dashboard_loopback_warning: 'O painel é somente loopback no servidor. Navegue pelo próprio servidor ou reinicie com --host 0.0.0.0 (inseguro).',
     tab_logs: 'Logs',
     tab_settings: 'Configurações',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Fechar menu',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: 'Logs',
+    logs_file: 'Arquivo',
+    logs_tail: 'Fim',
+    logs_auto_refresh: 'Atualização automática (5 s)',
+    logs_wrap: 'Quebrar linhas',
+    logs_copy_all: 'Copiar tudo',
+    logs_empty: 'Ainda não há linhas de log.',
+    logs_loading: 'Carregando logs…',
+    logs_load_failed: 'Falha ao carregar os logs',
+    logs_status_idle: 'Escolha um arquivo de log para ver as linhas recentes.',
+    logs_no_mtime: 'ainda não escrito',
+    logs_truncated_hint: 'Exibindo o fim de um arquivo de log grande; bytes mais antigos foram ignorados para limitar o uso de memória.',
+    logs_copied: 'Logs copiados',
     logs_severity: 'Severidade',
     logs_severity_all: 'Todos',
     logs_severity_errors: 'Erros',
@@ -14240,17 +14240,17 @@ const LOCALES = {
     provider_category_self_hosted: 'Open / self-hosted',
     provider_category_specialized: 'Especializado',
     onboarding_api_key_label: 'API key',
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    oauth_login_codex: 'Entrar com o Codex (ChatGPT)',
+    oauth_codex_step1: 'Etapa 1: Acesse esta URL e insira o código',
+    oauth_codex_step2: 'Etapa 2: Insira este código na página',
+    oauth_codex_polling: 'Aguardando autorização...',
+    oauth_codex_success: 'Login com Codex OAuth realizado com sucesso!',
+    oauth_codex_error: 'Falha no login com OAuth',
+    oauth_codex_expired: 'O código expirou, tente novamente',
     onboarding_api_key_placeholder: 'Deixe em branco para manter key existente',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
+    onboarding_api_key_label_optional: 'Chave de API (opcional)',
+    onboarding_api_key_placeholder_optional: 'Deixe em branco para servidores sem chave',
+    onboarding_api_key_help_keyless: 'A maioria das instalações de LM Studio / Ollama / vLLM funciona sem chave — deixe isto em branco se o seu servidor não exigir autenticação. Use o botão Testar conexão para verificar.',
     onboarding_api_key_help_prefix: 'Salvo como segredo no .env do Hermes usando',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://seu-endpoint.exemplo/v1',
@@ -14276,19 +14276,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Escolha modelo antes de continuar.',
     onboarding_error_provider_required: 'Escolha modo de setup antes de continuar.',
     onboarding_error_base_url_required: 'Base URL é necessária para endpoints customizados.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: 'Testar conexão',
+    onboarding_probe_probing: 'Testando a conexão…',
+    onboarding_probe_ok: 'Conectado. {n} modelo(s) disponível(is).',
+    onboarding_probe_error_generic: 'Não foi possível acessar a URL base configurada.',
+    onboarding_probe_error_invalid_url: 'A URL base deve começar com http:// ou https://.',
+    onboarding_probe_error_dns: 'Não foi possível resolver o host. Verifique a URL ou use o endereço IP do host.',
+    onboarding_probe_error_connect_refused: 'Conexão recusada — o servidor pode não estar em execução nesse endereço. Dentro do Docker, tente o IP do host em vez de localhost.',
+    onboarding_probe_error_timeout: 'O endpoint não respondeu a tempo. Verifique se o servidor está em execução e se a URL está correta.',
+    onboarding_probe_error_http_4xx: 'O endpoint retornou um erro de cliente. Verifique a autenticação e o caminho da URL (geralmente termina em /v1).',
+    onboarding_probe_error_http_5xx: 'O endpoint retornou um erro de servidor. Verifique os logs do servidor do LM Studio / Ollama.',
+    onboarding_probe_error_parse: 'O endpoint não retornou uma lista de modelos no formato esperado. Verifique se a URL aponta para a raiz da API compatível com OpenAI.',
+    onboarding_probe_error_unreachable: 'Não foi possível acessar a URL base configurada.',
+    onboarding_error_probe_failed: 'Não foi possível validar a URL base configurada.',
     onboarding_error_workspace_required: 'Workspace é necessário.',
     onboarding_error_model_required: 'Modelo é necessário.',
     onboarding_complete: 'Configuração completa',
@@ -14506,79 +14506,79 @@ const LOCALES = {
     settings_label_tts_auto_read: 'Ler respostas automaticamente',
     settings_desc_tts_auto_read: 'Ler automaticamente as respostas do assistente',
     // Composer voice-mode pref (#1488)
-    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_label_voice_mode: 'Botão de modo de voz mãos livres',
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_raw_audio: 'Send raw audio instead of transcribing',
     settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
     voice_send_raw: 'Send raw audio',
-    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
+    voice_raw_attached: 'Áudio anexado. Pressione Enviar ou digite mais.',
     settings_label_tts_voice: 'Voz',
     settings_desc_tts_voice: 'Selecionar voz para síntese de voz',
     settings_label_tts_rate: 'Velocidade da fala',
     settings_label_tts_pitch: 'Tom da fala',
     settings_label_tts_engine: 'Motor TTS',
     settings_desc_tts_engine: 'Escolha o mecanismo de fala. Edge TTS usa vozes neurais da Microsoft através do servidor.',
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    insights_model_health_title: 'Model health comparison',  // TODO: translate
-    insights_model_health_provider: 'Provider',  // TODO: translate
-    insights_model_health_replacement: 'Replacement guide',  // TODO: translate
-    insights_model_health_cost_per_m: 'Cost / 1M',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    voice_error: 'Voice not supported in this browser',  // TODO: translate
-    voice_listening: 'Listening…',  // TODO: translate
-    voice_mode_active: 'Voice mode on',  // TODO: translate
-    voice_mode_off: 'Voice mode off',  // TODO: translate
-    voice_speaking: 'Speaking…',  // TODO: translate
-    voice_thinking: 'Thinking…',  // TODO: translate
+    checkpoint_date: 'Data',
+    checkpoint_diff_files_changed: (n) => `${n} arquivo${n === 1 ? '' : 's'} alterado${n === 1 ? '' : 's'}`,
+    checkpoint_diff_no_changes: 'Nenhuma diferença encontrada entre este checkpoint e o espaço de trabalho atual.',
+    checkpoint_diff_title: 'Alterações no checkpoint',
+    checkpoint_empty: 'Nenhum checkpoint encontrado para este espaço de trabalho.',
+    checkpoint_error: 'Falha ao carregar os checkpoints',
+    checkpoint_files: 'Arquivos',
+    checkpoint_loading: 'Carregando checkpoints…',
+    checkpoint_message: 'Mensagem',
+    checkpoint_restore: 'Restaurar',
+    checkpoint_restore_confirm_message: (ckpt) => `Restaurar o espaço de trabalho para o checkpoint "${ckpt}"? Isso sobrescreverá os arquivos com as versões salvas. Arquivos adicionados após este checkpoint não serão excluídos.`,
+    checkpoint_restore_confirm_title: 'Restaurar checkpoint?',
+    checkpoint_restored: 'Checkpoint restaurado',
+    checkpoint_title: 'Checkpoints',
+    checkpoint_view_diff: 'Ver diff',
+    insights_activity_by_day: 'Atividade por dia',
+    insights_activity_by_hour: 'Atividade por hora',
+    insights_cost: 'Custo estimado',
+    insights_footer: 'Exibindo dados dos últimos {days} dias',
+    insights_skill_usage_title: 'Uso de skills',
+    insights_skill_usage_sub: 'Frequência de invocação de ferramentas',
+    insights_skill_usage_total: 'Total de invocações',
+    insights_skill_usage_skills_used: 'Skills usados',
+    insights_skill_usage_no_data: 'Ainda não há dados de uso de skills',
+    insights_skill_usage_no_data_hint: 'Os skills aparecerão aqui depois de usados nas conversas.',
+    insights_skill_usage_footer: 'Contagens de ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Skill',
+    insights_skill_usage_col_uses: 'Usos',
+    insights_skill_usage_col_views: 'Visualizações',
+    insights_skill_usage_col_share: 'Uso %',
+    insights_skill_usage_col_patches: 'Patches',
+    insights_input_tokens: 'Entrada',
+    insights_messages: 'Mensagens',
+    insights_models: 'Modelos',
+    insights_no_cost: 'N/D',
+    insights_output_tokens: 'Saída',
+    insights_peak_hour: 'Pico: {hour}',
+    insights_sessions: 'Sessões',
+    insights_title: 'Análise de uso',
+    insights_token_breakdown: 'Detalhamento de tokens',
+    insights_tokens: 'Tokens',
+    insights_total: 'Total',
+    insights_model_health_title: 'Comparação do estado dos modelos',
+    insights_model_health_provider: 'Provedor',
+    insights_model_health_replacement: 'Guia de substituição',
+    insights_model_health_cost_per_m: 'Custo / 1 mi',
+    settings_desc_api_redact: 'Usuários com hospedagem própria podem desativar para maior transparência (não recomendado para instâncias compartilhadas).',
+    settings_label_api_redact: 'Ocultar dados sensíveis nas respostas da API',
+    voice_error: 'Voz não suportada neste navegador',
+    voice_listening: 'Ouvindo…',
+    voice_mode_active: 'Modo de voz ativado',
+    voice_mode_off: 'Modo de voz desativado',
+    voice_speaking: 'Falando…',
+    voice_thinking: 'Pensando…',
     // Composer voice buttons (#1488)
-    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate: 'Ditar',
     voice_dictate_active: 'Stop dictation',
-    voice_recording_active: 'Parar gravação',  // TODO: translate
-    voice_mode_toggle: 'Voice mode',  // TODO: translate
-    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
+    voice_recording_active: 'Parar gravação',
+    voice_mode_toggle: 'Modo de voz',
+    voice_mode_toggle_active: 'Sair do modo de voz',
+    subagent_children: 'Sessões de subagentes',
     // login-flow keys (issue #1442)
     sign_out_failed: 'Falha ao sair: ',
     disable_auth_confirm_title: 'Desativar proteção por senha',
@@ -14620,7 +14620,7 @@ const LOCALES = {
     cancelling: '취소 중\u2026',
     cancel_failed: '취소 실패: ',
     mic_denied: '마이크 접근이 거부되었습니다. 브라우저 권한을 확인하세요.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: '음성 입력에는 보안 연결이 필요합니다. 마이크를 사용하려면 HTTPS 또는 localhost를 통해 Hermes를 여세요.',
     mic_no_speech: '음성이 감지되지 않았습니다. 다시 시도하세요.',
     mic_network: '음성 인식을 사용할 수 없습니다.',
     mic_error: '음성 입력 오류: ',
@@ -14785,21 +14785,21 @@ const LOCALES = {
     model_custom_placeholder: 'e.g. openai/gpt-5.4',
     model_show_all_models: '{0}개 모델 모두 보기',
     model_search_placeholder: 'Search models…',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: '세션 도구 세트',
+    session_toolsets_desc: '활성 프로필 기본값을 사용하거나 이 세션에 대한 사용자 지정 도구 세트 목록을 선택합니다',
+    session_toolsets_global: '활성 프로필 기본값',
+    session_toolsets_profile_defaults: '활성 프로필 기본값',
+    session_toolsets_custom: '사용자 지정 재정의',
+    session_toolsets_use_profile_defaults: '활성 프로필 기본값 사용',
+    session_toolsets_configured_servers: '구성된 MCP 서버',
+    session_toolsets_loading_servers: '구성된 서버를 불러오는 중...',
+    session_toolsets_no_configured_servers: '구성된 MCP 서버 없음',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: '적용',
+    session_toolsets_clear: '기본값 사용',
+    session_toolsets_applied: '도구 세트가 업데이트됨',
+    session_toolsets_cleared: '활성 프로필 기본값을 사용 중',
+    session_toolsets_failed: '도구 세트를 업데이트하지 못했습니다: ',
     model_search_no_results: 'No models found',
     model_group_configured: '구성됨',
     ws_search_placeholder: '워크스페이스 검색…',
@@ -15052,7 +15052,7 @@ const LOCALES = {
      copy_file_path: '파일 경로 복사',
      open_in_vscode: 'VS Code에서 열기',
      open_in_vscode_failed: 'VS Code에서 열기 실패: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: '다운로드 폴더',
     path_copied: '파일 경로가 클립보드에 복사되었습니다',
     path_copy_failed: '경로 복사 실패: ',
     session_rename: '대화 이름 변경',
@@ -15184,8 +15184,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: '새 내용 자동 따라가기',
     settings_desc_auto_scroll_follow: '활성화하면 토큰이 스트리밍되는 동안 화면이 자동으로 맨 아래로 스크롤됩니다. 비활성화하면 스크롤 위치를 직접 제어합니다.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: '제목 표시줄에 프로필 전환기 표시',
+    settings_desc_show_titlebar_profile: '활성화하면 앱 제목 표시줄 왼쪽 상단에 프로필 전환 버튼이 나타나 어느 탭에서든 프로필을 변경할 수 있습니다. 기본적으로 꺼져 있습니다. 이 설정과 관계없이 작성기 하단에는 항상 프로필 전환기가 있습니다.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -15243,7 +15243,7 @@ const LOCALES = {
     settings_tab_appearance: '외형',
     settings_tab_preferences: '환경설정',
     settings_tab_plugins: '플러그인',
-    settings_tab_extensions: 'Extensions',  // TODO: translate
+    settings_tab_extensions: '확장',
     settings_extensions_gallery_tab: 'Gallery',
     settings_extensions_installed_tab: 'Installed',
     settings_extensions_diagnostics_tab: 'Diagnostics',
@@ -15274,19 +15274,19 @@ const LOCALES = {
     ext_gallery_install_followup: '확장이 설치되었습니다. 카드에서 다음 단계를 확인하세요.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: '플러그인',
     plugins_enable_toggle: '활성화',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: '설치된 Hermes 플러그인과 이들이 등록하는 수명 주기 훅을 봅니다. 이 패널은 읽기 전용입니다.',
+    settings_plugins_empty: '현재 표시되는 Hermes 플러그인이 없습니다. 여기에서 보려면 Hermes CLI/구성에서 플러그인을 설치하거나 활성화하세요.',
+    plugins_unnamed: '이름 없는 플러그인',
+    plugins_no_description: '제공된 설명이 없습니다.',
+    plugins_no_hooks: '등록된 수명 주기 훅 없음',
+    plugins_registered_hooks: '등록된 훅',
+    plugins_enabled: '활성화됨',
+    plugins_disabled: '비활성화됨',
+    plugins_active_provider: '활성(공급자)',
+    plugins_provider_no_hooks: '공급자 플러그인 — 에이전트 표시 훅 없음',
+    plugins_load_failed: '플러그인을 불러오지 못했습니다: ',
     settings_tab_system: '시스템',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -15566,21 +15566,21 @@ const LOCALES = {
     dashboard_loopback_warning: '대시보드는 서버에서 loopback 전용입니다. 서버 자체에서 접속하거나 --host 0.0.0.0(안전하지 않음)으로 다시 시작하세요.',
     tab_logs: 'Logs',
     tab_settings: '설정',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: '메뉴 닫기',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: '로그',
+    logs_file: '파일',
+    logs_tail: '끝부분',
+    logs_auto_refresh: '자동 새로고침(5초)',
+    logs_wrap: '줄 바꿈',
+    logs_copy_all: '모두 복사',
+    logs_empty: '아직 로그 줄이 없습니다.',
+    logs_loading: '로그를 불러오는 중…',
+    logs_load_failed: '로그를 불러오지 못했습니다',
+    logs_status_idle: '최근 줄을 보려면 로그 파일을 선택하세요.',
+    logs_no_mtime: '아직 기록되지 않음',
+    logs_truncated_hint: '대용량 로그 파일의 끝부분을 표시합니다. 메모리 사용을 제한하기 위해 오래된 바이트는 건너뛰었습니다.',
+    logs_copied: '로그가 복사됨',
     logs_severity: '심각도',
     logs_severity_all: '전체',
     logs_severity_errors: '오류',
@@ -15806,17 +15806,17 @@ const LOCALES = {
     provider_category_self_hosted: 'Open / self-hosted',
     provider_category_specialized: 'Specialized',
     onboarding_api_key_label: 'API key',
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    oauth_login_codex: 'Codex(ChatGPT)로 로그인',
+    oauth_codex_step1: '1단계: 이 URL을 방문하여 코드를 입력하세요',
+    oauth_codex_step2: '2단계: 페이지에 이 코드를 입력하세요',
+    oauth_codex_polling: '인증을 기다리는 중...',
+    oauth_codex_success: 'Codex OAuth 로그인 성공!',
+    oauth_codex_error: 'OAuth 로그인 실패',
+    oauth_codex_expired: '코드가 만료되었습니다. 다시 시도하세요',
     onboarding_api_key_placeholder: 'Leave blank to keep an existing saved key',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
+    onboarding_api_key_label_optional: 'API 키(선택 사항)',
+    onboarding_api_key_placeholder_optional: '키가 없는 서버는 비워 두세요',
+    onboarding_api_key_help_keyless: '대부분의 LM Studio / Ollama / vLLM 설치는 키 없이 실행됩니다. 서버에 인증이 필요하지 않으면 비워 두세요. 확인하려면 연결 테스트 버튼을 사용하세요.',
     onboarding_api_key_help_prefix: 'Saved as a secret in your Hermes .env file using',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://your-endpoint.example/v1',
@@ -15842,19 +15842,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Choose a model before continuing.',
     onboarding_error_provider_required: 'Choose a setup mode before continuing.',
     onboarding_error_base_url_required: 'Base URL is required for custom endpoints.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: '연결 테스트',
+    onboarding_probe_probing: '연결을 테스트하는 중…',
+    onboarding_probe_ok: '연결됨. {n}개 모델 사용 가능.',
+    onboarding_probe_error_generic: '구성된 기본 URL에 접근할 수 없습니다.',
+    onboarding_probe_error_invalid_url: '기본 URL은 http:// 또는 https://로 시작해야 합니다.',
+    onboarding_probe_error_dns: '호스트를 확인할 수 없습니다. URL을 확인하거나 호스트의 IP 주소를 사용하세요.',
+    onboarding_probe_error_connect_refused: '연결이 거부되었습니다 — 해당 주소에서 서버가 실행되고 있지 않을 수 있습니다. Docker 내부에서는 localhost 대신 호스트 IP를 사용해 보세요.',
+    onboarding_probe_error_timeout: '엔드포인트가 제때 응답하지 않았습니다. 서버가 실행 중이고 URL이 올바른지 확인하세요.',
+    onboarding_probe_error_http_4xx: '엔드포인트가 클라이언트 오류를 반환했습니다. 인증과 URL 경로(일반적으로 /v1로 끝남)를 확인하세요.',
+    onboarding_probe_error_http_5xx: '엔드포인트가 서버 오류를 반환했습니다. LM Studio / Ollama 서버 로그를 확인하세요.',
+    onboarding_probe_error_parse: '엔드포인트가 예상한 형식의 모델 목록을 반환하지 않았습니다. URL이 OpenAI 호환 API 루트를 가리키는지 확인하세요.',
+    onboarding_probe_error_unreachable: '구성된 기본 URL에 접근할 수 없습니다.',
+    onboarding_error_probe_failed: '구성된 기본 URL을 검증할 수 없습니다.',
     onboarding_error_workspace_required: 'Workspace is required.',
     onboarding_error_model_required: 'Model is required.',
     onboarding_complete: '설정 완료',
@@ -16172,36 +16172,36 @@ const LOCALES = {
     settings_label_tts_auto_read: '답변 자동 읽기',
     settings_desc_tts_auto_read: '도움말 답변을 자동으로 읽어줌',
     // Composer voice-mode pref (#1488)
-    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_label_voice_mode: '핸즈프리 음성 모드 버튼',
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_raw_audio: 'Send raw audio instead of transcribing',
     settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
     voice_send_raw: 'Send raw audio',
-    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
+    voice_raw_attached: '오디오가 첨부되었습니다. 보내기를 누르거나 더 입력하세요.',
     settings_label_tts_voice: '음성',
     settings_desc_tts_voice: '음성 합성 음성 선택',
     settings_label_tts_rate: '말 속도',
     settings_label_tts_pitch: '말 톤',
     settings_label_tts_engine: 'TTS 엔진',
     settings_desc_tts_engine: '음성 엔진을 선택하세요. Edge TTS는 서버를 통해 Microsoft 신경 음성을 사용합니다.',
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
+    checkpoint_date: '날짜',
+    checkpoint_diff_files_changed: (n) => `파일 ${n}개 변경됨`,
+    checkpoint_diff_no_changes: '이 체크포인트와 현재 작업 공간 사이에 차이가 없습니다.',
+    checkpoint_diff_title: '체크포인트의 변경 사항',
+    checkpoint_empty: '이 작업 공간에 대한 체크포인트를 찾을 수 없습니다.',
+    checkpoint_error: '체크포인트를 불러오지 못했습니다',
+    checkpoint_files: '파일',
+    checkpoint_loading: '체크포인트를 불러오는 중…',
+    checkpoint_message: '메시지',
+    checkpoint_restore: '복원',
+    checkpoint_restore_confirm_message: (ckpt) => `작업 공간을 체크포인트 "${ckpt}"(으)로 복원하시겠습니까? 파일이 저장된 버전으로 덮어쓰기됩니다. 이 체크포인트 이후에 추가된 파일은 삭제되지 않습니다.`,
+    checkpoint_restore_confirm_title: '체크포인트를 복원하시겠습니까?',
+    checkpoint_restored: '체크포인트가 복원됨',
+    checkpoint_title: '체크포인트',
+    checkpoint_view_diff: 'diff 보기',
+    insights_activity_by_day: '일별 활동',
+    insights_activity_by_hour: '시간별 활동',
+    insights_cost: '예상 비용',
     insights_daily_tokens: '일별 토큰',
     insights_model_name: '모델',
     insights_model_sessions: '세션',
@@ -16215,45 +16215,45 @@ const LOCALES = {
     insights_model_health_replacement: 'Replacement guide',
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: '아직 사용 데이터가 없습니다',
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    voice_error: 'Voice not supported in this browser',  // TODO: translate
-    voice_listening: 'Listening…',  // TODO: translate
-    voice_mode_active: 'Voice mode on',  // TODO: translate
-    voice_mode_off: 'Voice mode off',  // TODO: translate
-    voice_speaking: 'Speaking…',  // TODO: translate
-    voice_thinking: 'Thinking…',  // TODO: translate
+    insights_footer: '최근 {days}일간의 데이터 표시 중',
+    insights_skill_usage_title: '스킬 사용',
+    insights_skill_usage_sub: '도구 호출 빈도',
+    insights_skill_usage_total: '전체 호출 수',
+    insights_skill_usage_skills_used: '사용된 스킬',
+    insights_skill_usage_no_data: '아직 스킬 사용 데이터가 없습니다',
+    insights_skill_usage_no_data_hint: '스킬은 대화에서 사용되면 여기에 표시됩니다.',
+    insights_skill_usage_footer: '~/.hermes/skills/의 집계',
+    insights_skill_usage_col_skill: '스킬',
+    insights_skill_usage_col_uses: '사용',
+    insights_skill_usage_col_views: '조회',
+    insights_skill_usage_col_share: '사용률 %',
+    insights_skill_usage_col_patches: '패치',
+    insights_input_tokens: '입력',
+    insights_messages: '메시지',
+    insights_models: '모델',
+    insights_no_cost: '해당 없음',
+    insights_output_tokens: '출력',
+    insights_peak_hour: '최고: {hour}',
+    insights_sessions: '세션',
+    insights_title: '사용량 분석',
+    insights_token_breakdown: '토큰 분석',
+    insights_tokens: '토큰',
+    insights_total: '전체',
+    settings_desc_api_redact: '자체 호스팅 사용자는 투명성을 위해 비활성화할 수 있습니다(공유 인스턴스에는 권장되지 않음).',
+    settings_label_api_redact: 'API 응답에서 민감한 데이터 가리기',
+    voice_error: '이 브라우저에서는 음성이 지원되지 않습니다',
+    voice_listening: '듣는 중…',
+    voice_mode_active: '음성 모드 켜짐',
+    voice_mode_off: '음성 모드 꺼짐',
+    voice_speaking: '말하는 중…',
+    voice_thinking: '생각하는 중…',
     // Composer voice buttons (#1488)
-    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate: '받아쓰기',
     voice_dictate_active: 'Stop dictation',
-    voice_recording_active: '녹음 중지',  // TODO: translate
-    voice_mode_toggle: 'Voice mode',  // TODO: translate
-    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
+    voice_recording_active: '녹음 중지',
+    voice_mode_toggle: '음성 모드',
+    voice_mode_toggle_active: '음성 모드 종료',
+    subagent_children: '서브에이전트 세션',
     outline_title: '개요',
     outline_empty: '아직 질문이 없습니다.',
     outline_loading: '로딩 중…',
@@ -17923,7 +17923,7 @@ const LOCALES = {
     cancelling: 'İptal ediliyor\u2026',
     cancel_failed: 'İptal başarısız oldu:',
     mic_denied: 'Mikrofon erişimi reddedildi. Tarayıcı izinlerini kontrol edin.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'Sesli giriş güvenli bir bağlantı gerektirir. Mikrofonu kullanmak için Hermes\'i HTTPS üzerinden veya localhost\'tan açın.',
     mic_no_speech: 'Konuşma algılanmadı. Tekrar deneyin.',
     mic_network: 'Konuşma tanıma kullanılamıyor.',
     mic_error: 'Ses girişi hatası:',
@@ -18500,8 +18500,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Yeni içeriği otomatik takip et',
     settings_desc_auto_scroll_follow: 'Etkinleştirildiğinde, yeni belirteçler akarken görünüm en alta kaydırılır. Devre dışı bırakıldığında kaydırma konumunu kendiniz kontrol edersiniz.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Başlık çubuğunda profil değiştiriciyi göster',
+    settings_desc_show_titlebar_profile: 'Etkinleştirildiğinde, sol üstteki uygulama başlık çubuğunda bir profil değiştirici düğmesi görünür, böylece herhangi bir sekmeden profil değiştirebilirsiniz. Varsayılan olarak kapalıdır; bu ayardan bağımsız olarak oluşturucu altbilgisinde her zaman bir profil değiştirici bulunur.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -18559,7 +18559,7 @@ const LOCALES = {
     settings_tab_appearance: 'Dış görünüş',
     settings_tab_preferences: 'Tercihler',
     settings_tab_plugins: 'Eklentiler',
-    settings_tab_extensions: 'Extensions',  // TODO: translate
+    settings_tab_extensions: 'Uzantılar',
     settings_extensions_gallery_tab: 'Gallery',
     settings_extensions_installed_tab: 'Installed',
     settings_extensions_diagnostics_tab: 'Diagnostics',
@@ -18881,7 +18881,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'Kontrol Paneli sunucuda yalnızca geri döngüye sahiptir. Ya sunucunun kendisinden göz atın ya da --host 0.0.0.0 (güvenli değil) ile yeniden başlatın.',
     tab_logs: 'Günlükler',
     tab_settings: 'Ayarlar',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Menüyü kapat',
 
     logs_title: 'Günlükler',
     logs_file: 'Dosya',
@@ -19530,18 +19530,18 @@ const LOCALES = {
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: 'Henüz kullanım verisi yok',
     insights_footer: 'Son {days} günün verileri gösteriliyor',
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
+    insights_skill_usage_title: 'Beceri kullanımı',
+    insights_skill_usage_sub: 'Araç çağırma sıklığı',
+    insights_skill_usage_total: 'Toplam çağrılar',
+    insights_skill_usage_skills_used: 'Kullanılan beceriler',
+    insights_skill_usage_no_data: 'Henüz beceri kullanım verisi yok',
+    insights_skill_usage_no_data_hint: 'Beceriler, konuşmalarda kullanıldıklarında burada görünür.',
+    insights_skill_usage_footer: '~/.hermes/skills/ konumundan sayımlar',
+    insights_skill_usage_col_skill: 'Beceri',
+    insights_skill_usage_col_uses: 'Kullanımlar',
+    insights_skill_usage_col_views: 'Görüntülemeler',
+    insights_skill_usage_col_share: 'Kullanım %',
+    insights_skill_usage_col_patches: 'Yamalar',
     insights_input_tokens: 'Giriş',
     insights_messages: 'Mesajlar',
     insights_models: 'Modeller',
