@@ -1231,7 +1231,8 @@ def test_provider_quota_card_is_rendered_in_providers_panel():
     assert "hermes-provider-quota-pool-open" in panels
     assert "provider-quota-pool-chevron" in panels
     assert 'aria-hidden="true"' in panels
-    assert "count>0&&count<=3" in panels
+    assert "count>1&&count<=3" in panels
+    assert "_providerQuotaIsSingleAvailableCredentialPool" in panels
     assert "status.status==='available'||accountLimits.pool" in panels
     assert "provider-quota-window-detail" in panels
     assert "provider_quota_session_limit" in panels

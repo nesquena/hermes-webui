@@ -9997,12 +9997,22 @@ function _providerQuotaPoolShouldDefaultOpen(pool){
     if(saved==='0') return false;
   }catch(e){}
   const count=Array.isArray(pool&&pool.credentials)?pool.credentials.length:0;
-  return count>0&&count<=3;
+  return count>1&&count<=3;
+}
+
+function _providerQuotaIsSingleAvailableCredentialPool(pool){
+  if(!pool||!Array.isArray(pool.credentials)||pool.credentials.length!==1) return false;
+  const total=Number.isFinite(Number(pool.total_credentials))?Number(pool.total_credentials):pool.credentials.length;
+  const available=Number.isFinite(Number(pool.available_credentials))?Number(pool.available_credentials):pool.credentials.filter(c=>c&&c.status==='available').length;
+  const exhausted=Number.isFinite(Number(pool.exhausted_credentials))?Number(pool.exhausted_credentials):0;
+  const failed=Number.isFinite(Number(pool.failed_credentials))?Number(pool.failed_credentials):0;
+  return total===1&&available===1&&exhausted===0&&failed===0;
 }
 
 function _buildProviderQuotaPoolBreakdown(accountLimits){
   const pool=accountLimits&&accountLimits.pool;
   if(!pool||!Array.isArray(pool.credentials)||pool.credentials.length===0) return '';
+  if(_providerQuotaIsSingleAvailableCredentialPool(pool)) return '';
   const defaultOpen=_providerQuotaPoolShouldDefaultOpen(pool);
   const total=Number.isFinite(Number(pool.total_credentials))?Number(pool.total_credentials):pool.credentials.length;
   const available=Number.isFinite(Number(pool.available_credentials))?Number(pool.available_credentials):pool.credentials.filter(c=>c&&c.status==='available').length;
@@ -10064,12 +10074,13 @@ function _buildProviderQuotaCard(status){
   let body='';
   if(accountLimits&&(status.status==='available'||accountLimits.pool)){
     const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
+    const singleAvailablePool=_providerQuotaIsSingleAvailableCredentialPool(accountLimits.pool);
     const details=Array.isArray(accountLimits.details)&&!accountLimits.pool?accountLimits.details:[];
     const windowHtml=windows.map(w=>{
       const used=_formatProviderQuotaPercent(w&&w.used_percent);
       const reset=_formatProviderQuotaReset(w&&w.reset_at);
       const meta=_providerQuotaWindowMeta(used,reset);
-      const detail=(w&&w.detail)?String(w.detail).trim():'';
+      const detail=singleAvailablePool?'':((w&&w.detail)?String(w.detail).trim():'');
       return `
         <div class="provider-quota-metric provider-quota-window">
           <span>${esc(_formatProviderQuotaWindowLabel(accountLimits,w))}</span>
