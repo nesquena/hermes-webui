@@ -13694,13 +13694,33 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
-            s.messages = []
+            # Clear is a full truncate: keep zero messages. Route it through the
+            # SAME helper the /api/session/truncate handler uses so the merge
+            # contract is not forked (#5532 P0 data loss).
+            #
+            # Before this fix /clear wiped s.messages/s.tool_calls but never set
+            # truncation_watermark. The append-only state.db merge
+            # (merge_session_messages_append_only) treats an unset watermark as
+            # "keep everything", so on the next /api/session read the cleared
+            # turns were resurrected from state.db (history reappeared after
+            # clear+refresh) and — because context_messages also survived — a
+            # continued turn still carried the pre-clear context.
+            #
+            # truncate_session_at_keep(s, 0) empties messages AND context_messages
+            # and sets truncation_watermark = truncation_boundary =
+            # _truncation_watermark_for([]) == 0.0. 0.0 is the #2914
+            # "truncate-to-empty" sentinel that blocks ALL state.db replay, so the
+            # merge honors the clear instead of re-adding the deleted transcript.
+            from api.session_ops import (
+                apply_session_title_rename,
+                truncate_session_at_keep,
+            )
+            truncate_session_at_keep(s, 0)
             s.tool_calls = []
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
             # again (#3542 lifecycle gap).
-            from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, "Untitled")
             s.save()
         # Evict cached agent outside the per-session lock.  Eviction may run a
