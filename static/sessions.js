@@ -1220,7 +1220,11 @@ async function newSession(flash, options={}){
       profile:S.activeProfile||'default',
     };
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
-    if(options&&options.worktree) reqBody.worktree=true;
+    const worktreeRequested=Object.prototype.hasOwnProperty.call(options||{},'worktree')
+      ? !!options.worktree
+      : window._newConversationWorktreeDefault!==false;
+    if(worktreeRequested) reqBody.worktree=true;
+    const defaultWorktreeRequested=worktreeRequested&&!Object.prototype.hasOwnProperty.call(options||{},'worktree');
     if(Object.prototype.hasOwnProperty.call(options,'project_id')){
       reqBody.project_id=options.project_id;
     } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
@@ -1294,7 +1298,16 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
-    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    let data;
+    try{
+      data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    }catch(e){
+      if(!defaultWorktreeRequested) throw e;
+      const fallbackBody={...reqBody};
+      delete fallbackBody.worktree;
+      data=await api('/api/session/new',{method:'POST',body:JSON.stringify(fallbackBody)});
+      if(typeof showToast==='function') showToast(((typeof t==='function')?t('new_conversation_worktree_fallback'):'Worktree unavailable; opened a regular conversation instead.'),3600,'warning');
+    }
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }

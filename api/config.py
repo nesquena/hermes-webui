@@ -8014,6 +8014,7 @@ _SETTINGS_DEFAULTS = {
     "render_user_markdown": False,  # opt-in: render full markdown in user messages (#3870)
     "large_text_paste_as_attachment": True,  # convert very large composer text pastes into .md attachments by default
     "project_quick_create_buttons": False,  # opt-in: show per-project "+" quick-create buttons on sidebar project chips (#4676)
+    "new_conversation_worktree_default": True,  # create normal WebUI new conversations in isolated git worktrees by default
     "structured_code_default_view": "auto",  # JSON/YAML fenced-block default render: auto | on | off (#484 follow-up). auto => Tree when line count >= structured_code_auto_tree_lines, else Raw.
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
@@ -8273,6 +8274,7 @@ _SETTINGS_BOOL_KEYS = {
     "render_user_markdown",
     "large_text_paste_as_attachment",
     "project_quick_create_buttons",
+    "new_conversation_worktree_default",
     "session_endless_scroll",
     "auto_scroll_follow",
     "worklog_details_expanded_default",

@@ -280,6 +280,8 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - **Hermes Control Center** (sidebar launcher button) -- Conversation tab (export/import/clear), Preferences tab (model, send key, theme, language, all toggles), System tab (version, password)
 - Send key: Enter (default) or Ctrl/Cmd+Enter
 - Show/hide CLI sessions toggle (enabled by default)
+- New conversations can default to isolated git worktrees, with a Settings toggle
+  to fall back to ordinary workspace-bound sessions when needed
 - Token usage display toggle (off by default, also via `/usage` command)
 - Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes

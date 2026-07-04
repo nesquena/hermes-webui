@@ -74,7 +74,7 @@ def test_project_quick_create_styles_exist_and_are_discrete_to_pointer_layouts()
     assert "@media (hover:none) and (pointer:coarse)" in css
 
 
-def _run_new_session_case(options, active_project=None):
+def _run_new_session_case(options, active_project=None, worktree_default=None, fail_first_worktree=False):
     _DRIVER = r"""
 const fs = require('fs');
 const [path, argsJson] = process.argv.slice(-2);
@@ -155,10 +155,19 @@ globalThis._modelStateForSelect = () => ({ model: 'gpt-4', model_provider: 'open
 globalThis._readPersistedModelState = () => null;
 globalThis.getModelLabel = (v) => v || '';
 globalThis._defaultModel = null;
+if (Object.prototype.hasOwnProperty.call(args, 'worktreeDefault')) {
+  globalThis._newConversationWorktreeDefault = args.worktreeDefault;
+}
 
 const calls = [];
 globalThis.api = async (_url, opts) => {
-  calls.push(JSON.parse(opts.body));
+  const body = JSON.parse(opts.body);
+  calls.push(body);
+  if (args.failFirstWorktree && body && body.worktree && calls.length === 1) {
+    const err = new Error('Workspace is not inside a git repository');
+    err.status = 400;
+    throw err;
+  }
   return { session: { session_id: 's-1', messages: [], model: 'gpt-4', model_provider: 'openai', workspace: null, message_count: 0, last_usage: {} } };
 };
 
@@ -166,7 +175,7 @@ eval(newSessionSrc);
 
 (async () => {
   await newSession(false, args.options);
-  console.log(JSON.stringify({ body: calls[0] || {} }));
+  console.log(JSON.stringify({ body: calls[0] || {}, calls }));
 })().catch(err => {
   console.error(String(err && err.stack ? err.stack : err));
   process.exit(1);
@@ -178,6 +187,10 @@ eval(newSessionSrc);
         "options": options,
         "session": {"session_id": "session-1"},
     }
+    if worktree_default is not None:
+        payload["worktreeDefault"] = worktree_default
+    if fail_first_worktree:
+        payload["failFirstWorktree"] = True
     result = subprocess.run(
         [NODE, "-e", _DRIVER, str(SESSIONS_JS), json.dumps(payload)],
         capture_output=True,
@@ -189,7 +202,10 @@ eval(newSessionSrc);
         raise RuntimeError(
             f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}"
         )
-    return json.loads(result.stdout.strip().splitlines()[-1])["body"]
+    parsed = json.loads(result.stdout.strip().splitlines()[-1])
+    if fail_first_worktree:
+        return parsed["calls"]
+    return parsed["body"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -209,6 +225,113 @@ def test_new_session_respects_explicit_project_id_none():
 def test_new_session_falls_back_to_active_project_when_override_missing():
     body = _run_new_session_case({}, active_project="active-project")
     assert body["project_id"] == "active-project"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_requests_worktree_by_default():
+    body = _run_new_session_case({}, active_project=None)
+    assert body["worktree"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_respects_worktree_default_off():
+    body = _run_new_session_case({}, active_project=None, worktree_default=False)
+    assert "worktree" not in body
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_explicit_worktree_option_overrides_default_off():
+    body = _run_new_session_case({"worktree": True}, active_project=None, worktree_default=False)
+    assert body["worktree"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_explicit_non_worktree_option_overrides_default_on():
+    body = _run_new_session_case({"worktree": False}, active_project=None, worktree_default=True)
+    assert "worktree" not in body
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_default_worktree_failure_falls_back_to_plain_session():
+    calls = _run_new_session_case({}, active_project=None, fail_first_worktree=True)
+    assert len(calls) == 2
+    assert calls[0]["worktree"] is True
+    assert "worktree" not in calls[1]
+    assert calls[1]["prev_session_id"] == calls[0]["prev_session_id"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_explicit_worktree_failure_is_not_silently_downgraded():
+    _DRIVER = r"""
+const fs = require('fs');
+const [path, argsJson] = process.argv.slice(-2);
+const args = JSON.parse(argsJson);
+const src = fs.readFileSync(path, 'utf8');
+function extractAsyncFunction(source, name) {
+  const marker = `async function ${name}(`;
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error(name + ' not found');
+  const brace = source.indexOf('{', source.indexOf(')', start));
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error('function body not closed for ' + name);
+}
+globalThis.window = globalThis;
+globalThis.document = {baseURI:'http://example.test/', createElement(){return {appendChild(){}, selectedOptions:[{dataset:{provider:''}}], dataset:{}};}};
+globalThis.localStorage = {getItem:()=>null,setItem:()=>{}};
+globalThis.history = {replaceState:()=>{}};
+globalThis.NO_PROJECT_FILTER = '__none__';
+globalThis._activeProject = null;
+globalThis._sessionSourceFilter = 'webui';
+globalThis._newSessionInFlight = null;
+globalThis._messagesTruncated = false;
+globalThis._oldestIdx = 0;
+globalThis.INFLIGHT = {};
+globalThis.S = {session:{session_id:'session-1'}, toolCalls:[], messages:[], activeProfile:'default', _pendingSessionToolsets:null, _profileSwitchWorkspace:null, _profileDefaultWorkspace:null};
+globalThis._activeProvider = 'openai';
+globalThis._emptyComposerModelOverride = null;
+globalThis._readEmptyComposerModelOverride = () => null;
+globalThis._clearEmptyComposerModelOverride = () => {};
+globalThis.$ = (id) => id === 'modelSelect' ? {value:'gpt-4', selectedOptions:[{dataset:{provider:'openai'}}]} : null;
+for (const name of ['_setNewSessionPending','updateQueueBadge','_clearPendingSelections','clearLiveToolCards','setComposerStatus','setStatus','updateSendBtn','syncTopbar','renderMessages','startSessionStream','_setSessionViewedCount','_setActiveSessionUrl','_rememberNewChatDraftSession','_hydrateTodosFromSession','_setLiveAssistantTps','_syncCtxIndicator','showToast']) globalThis[name] = () => {};
+globalThis.loadDir = async () => null;
+globalThis._applyModelToDropdown = () => true;
+globalThis._modelStateForSelect = () => ({model:'gpt-4', model_provider:'openai'});
+globalThis._readPersistedModelState = () => null;
+globalThis.getModelLabel = v => v || '';
+globalThis._defaultModel = null;
+globalThis.api = async (_url, opts) => {
+  const body = JSON.parse(opts.body);
+  if (body.worktree) throw new Error('Workspace is not inside a git repository');
+  return {session:{session_id:'s-1', messages:[], model:'gpt-4', model_provider:'openai', workspace:null, message_count:0, last_usage:{}}};
+};
+eval(extractAsyncFunction(src, 'newSession'));
+(async()=>{
+  try {
+    await newSession(false, args.options);
+    console.log(JSON.stringify({ok:true}));
+  } catch (err) {
+    console.log(JSON.stringify({ok:false, message:String(err&&err.message||err)}));
+  }
+})();
+"""
+    result = subprocess.run(
+        [NODE, "-e", _DRIVER, str(SESSIONS_JS), json.dumps({"options": {"worktree": True}})],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    parsed = json.loads(result.stdout.strip().splitlines()[-1])
+    assert parsed["ok"] is False
+    assert "not inside a git repository" in parsed["message"]
 
 
 _HELPER = r"""
