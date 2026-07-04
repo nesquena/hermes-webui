@@ -5765,7 +5765,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // during this retry window and only surface an error after all probes fail.
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
-        const _retryDelays=[1500,3000,5000,8000];
+        const _retryDelays=[1500,3000,5000,8000,12000,20000];
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
         const _probeReconnect=async(attempt=0)=>{
           if(_terminalStateReached || _streamFinalized) return;
@@ -5794,6 +5794,40 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             setTimeout(()=>{void _probeReconnect(attempt+1);}, nextDelay);
             return;
           }
+          // Last-ditch: the stream may have finished while we were retrying.
+          // _restoreSettledSession polls the full session API (not just stream
+          // status) and can recover a completed response without an error banner.
+          // This is especially important on iOS where Tailscale reconnects can
+          // take longer than the retry window.
+          setComposerStatus('Restoring session…');
+          let _restoreTimedOut=false;
+          const _restoreTimer=setTimeout(()=>{
+            // If _restoreSettledSession hangs (flaky Tailscale), don't leave
+            // the UI stuck on "Restoring session…" forever. Fall through to
+            // _handleStreamError after 8s.
+            _restoreTimedOut=true;
+            if(!_terminalStateReached&&!_streamFinalized){
+              if(_deferStreamErrorIfOffline()) return;
+              if(_deferStreamErrorIfPageHidden(source)) return;
+              _flushReasoningToAnchor();
+              _scheduleAnchorRegistryCleanup(120000);
+              _handleStreamError(source);
+            }
+          },8000);
+          try{
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})){
+              if(_restoreTimedOut) return; // timer already fired _handleStreamError
+              clearTimeout(_restoreTimer);
+              return;
+            }
+          }catch(_){
+            // _restoreSettledSession threw — let the timer handle cleanup
+          }
+          if(_restoreTimedOut) return; // timer already fired _handleStreamError
+          clearTimeout(_restoreTimer);
+          if(_terminalStateReached||_streamFinalized) return;
+          if(_deferStreamErrorIfOffline()) return;
+          if(_deferStreamErrorIfPageHidden(source)) return;
           _flushReasoningToAnchor();
           _scheduleAnchorRegistryCleanup(120000);
           _handleStreamError(source);
