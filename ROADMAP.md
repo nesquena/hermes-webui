@@ -2,7 +2,7 @@
 
 > Web companion to the Hermes Agent CLI. Same workflows, browser-native.
 >
-> Last updated: v0.51.192 (May 31, 2026) — ~7,150 tests collected. Recent themes: forward-looking ruff lint gate (#3273), Windows upgrade state-stranding hotfix (#2905), per-model context_length default-only guard (#3256), gateway-configured banner + tooltip i18n, and an ongoing concentric PR-triage cadence.
+> Last updated: v0.51.792 (July 1, 2026) — ~11,500 tests collected. Recent themes: forward-looking ruff lint gate (#3273), Windows upgrade state-stranding hotfix (#2905), per-model context_length default-only guard (#3256), gateway-configured banner + tooltip i18n, and an ongoing concentric PR-triage cadence.
 > Test source: `pytest tests/ --collect-only -q`
 > Per-version detail: see [CHANGELOG.md](./CHANGELOG.md)
 
@@ -230,7 +230,7 @@ Remaining gaps and forward work live in [Forward Work](#forward-work) below.
 - [x] PWA installation (manifest + icons + Android support)
 
 ### Internationalization
-- [x] 9 locales — English, Japanese, Russian, Spanish, German, Chinese (zh + zh-Hant), Portuguese, Korean, French
+- [x] 14 locales — English, Italian, Japanese, Russian, Spanish, German, Chinese (zh + zh-Hant), Portuguese, Korean, French, Turkish, Polish, Vietnamese
 - [x] Key-parity test ensures every locale has every key
 - [x] Right-to-left and CJK input (IME composition fixes)
 

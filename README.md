@@ -521,7 +521,7 @@ system/Homebrew interpreter.
 
 Tests run against an isolated server with a separate state directory.
 Production data and real cron jobs are never touched. Current snapshot:
-**~7,150 tests collected** across **~700 test files**, run in CI on Python 3.11,
+**~11,500 tests collected** across **~1,150 test files**, run in CI on Python 3.11,
 3.12, and 3.13 (3 parallel shards each).
 
 ---
@@ -567,7 +567,7 @@ boot.js           Mobile nav, voice input, theme/skin boot, bfcache handler
 **Tests + packaging**
 
 ```
-tests/            Pytest suite (~7,150 tests; isolated server/state fixtures)
+tests/            Pytest suite (~11,500 tests; isolated server/state fixtures)
 pyproject.toml    Tooling config (ruff lint gate) — not a packaged distribution
 Dockerfile        python:3.12-slim container image
 docker-compose.yml  Compose with named volume and optional auth
