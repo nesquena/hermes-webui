@@ -5874,6 +5874,46 @@ async function promptWorkspacePath(){
   }
 }
 
+function _workspaceSwitchHasConversation(){
+  const messages=Array.isArray(S.messages)?S.messages:((S.session&&Array.isArray(S.session.messages))?S.session.messages:[]);
+  return messages.some(m=>m&&m.role&&m.role!=='tool');
+}
+
+function _syncWorkspaceSwitchProject(projectId){
+  if(typeof _setActiveProjectFilter==='function')_setActiveProjectFilter(projectId||null);
+}
+
+async function _switchWorkspaceInCurrentSession(targetWorkspace){
+  await api('/api/session/update',{method:'POST',body:JSON.stringify({
+    session_id:S.session.session_id,
+    workspace:targetWorkspace,
+    model:S.session.model,
+    model_provider:S.session.model_provider||null
+  })});
+  S.session.workspace=targetWorkspace;
+  S.session.project_id=null;
+  // Explicit workspace switch = user overriding any pending profile-switch default.
+  // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
+  S._profileSwitchWorkspace=null;
+  S._pendingSessionToolsets=null;
+  _syncWorkspaceSwitchProject(null);
+}
+
+async function _switchWorkspaceWithNewSession(targetWorkspace){
+  S._profileSwitchWorkspace=targetWorkspace;
+  S._pendingSessionToolsets=null;
+  if(typeof newSession==='function'){
+    await newSession(true,{awaitWorkspaceLoad:true,project_id:null});
+  }else{
+    const reqBody={workspace:targetWorkspace,profile:S.activeProfile||'default',project_id:null};
+    if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
+    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    if(data&&data.session){S.session=data.session;S.messages=data.session.messages||[];}
+    S._profileSwitchWorkspace=null;
+  }
+  _syncWorkspaceSwitchProject((S.session&&S.session.project_id)||null);
+}
+
 async function switchToWorkspace(path,name){
   const targetWorkspace=String(path||'');
   if(!targetWorkspace){showToast(t('no_workspace'));return;}
@@ -5898,7 +5938,7 @@ async function switchToWorkspace(path,name){
     const currentWorkspace=S.session&&S.session.workspace?String(S.session.workspace):'';
     const label=name||getWorkspaceFriendlyName(targetWorkspace);
     if(S.session&&currentWorkspace===targetWorkspace){
-      syncActiveProjectForWorkspace(targetWorkspace,S.session.project_id||null);
+      _syncWorkspaceSwitchProject(S.session.project_id||null);
       syncTopbar();
       await loadDir('.');
       if (_currentPanel === 'memory') await loadMemory(true);
@@ -5906,25 +5946,29 @@ async function switchToWorkspace(path,name){
       return;
     }
 
-    // Safe default: a workspace switch starts a new conversation bound to that
-    // workspace. The old session keeps its original workspace and cached project
-    // context, while the new session builds a fresh agent prompt from the target
-    // workspace's project files on its first turn.
-    S._profileSwitchWorkspace=targetWorkspace;
-    S._pendingSessionToolsets=null;
-    if(typeof newSession==='function'){
-      await newSession(true,{awaitWorkspaceLoad:true,project_id:null});
-    }else{
-      const reqBody={workspace:targetWorkspace,profile:S.activeProfile||'default',project_id:null};
-      if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
-      const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
-      if(data&&data.session){S.session=data.session;S.messages=data.session.messages||[];}
-      S._profileSwitchWorkspace=null;
+    let startNewSession=!S.session;
+    if(S.session&&_workspaceSwitchHasConversation()){
+      startNewSession=await showConfirmDialog({
+        title:t('workspace_switch_new_chat_confirm_title'),
+        message:t('workspace_switch_new_chat_confirm_message',label),
+        confirmLabel:t('workspace_switch_new_chat_confirm'),
+        cancelLabel:t('workspace_switch_keep_current'),
+        focusCancel:true
+      });
     }
-    syncActiveProjectForWorkspace(targetWorkspace,(S.session&&S.session.project_id)||null);
+    // Any explicit workspace switch consumes staged empty-composer/context flags.
+    S._pendingSessionToolsets=null;
+    if(!startNewSession) S._profileSwitchWorkspace=null;
+    if(startNewSession){
+      await _switchWorkspaceWithNewSession(targetWorkspace);
+    }else{
+      await _switchWorkspaceInCurrentSession(targetWorkspace);
+    }
     if(typeof renderSessionList==='function')await renderSessionList();
     if(typeof syncTopbar==='function')syncTopbar();
     if(typeof renderMessages==='function')renderMessages();
+    await loadDir('.');
+    if (_currentPanel === 'memory') await loadMemory(true);
     showToast(t('workspace_switched_to',label));
   }catch(e){setStatus(t('switch_failed')+e.message);}
 }

@@ -138,14 +138,19 @@ class TestWorkspaceSwitcherBlankPage:
 
     def test_switch_to_workspace_auto_creates_session(self):
         src = read('static/panels.js')
-        m = re.search(r'async function switchToWorkspace\(.*?\n\}', src, re.DOTALL)
-        assert m, "switchToWorkspace not found"
-        fn = m.group(0)
-        assert '_profileDefaultWorkspace' in fn or 'session/new' in fn, (
-            "switchToWorkspace must auto-create session on blank page (Opus Q6 fix)"
+        start = src.find('async function switchToWorkspace(')
+        assert start != -1, "switchToWorkspace not found"
+        end = src.find('// ── Profile panel', start)
+        assert end != -1, "switchToWorkspace end marker not found"
+        region = src[start:end]
+        assert 'let startNewSession=!S.session' in region, (
+            "switchToWorkspace must route blank-page workspace switches to a new session"
         )
-        assert 'session/new' in fn, (
-            "switchToWorkspace must call /api/session/new when S.session is null"
+        assert 'await _switchWorkspaceWithNewSession(targetWorkspace)' in region, (
+            "switchToWorkspace must call the new-session helper when S.session is null"
+        )
+        assert "api('/api/session/new'" in src[src.find('async function _switchWorkspaceWithNewSession('):start], (
+            "the blank-page new-session helper must call /api/session/new fallback"
         )
 
     def test_switch_to_workspace_keeps_busy_guard_before_new_session_create(self):
@@ -159,9 +164,9 @@ class TestWorkspaceSwitcherBlankPage:
             "switchToWorkspace must keep the busy-session workspace switch toast"
         )
         busy_guard = fn.index('if(S.busy)')
-        new_session_call = fn.index("api('/api/session/new'")
-        assert "api('/api/session/update'" not in fn, (
-            "switchToWorkspace must not mutate the current session workspace in place"
+        new_session_call = fn.index('await _switchWorkspaceWithNewSession')
+        assert "showConfirmDialog({" in fn and "workspace_switch_new_chat_confirm_title" in fn, (
+            "switchToWorkspace must ask before starting a new chat mid-conversation"
         )
         assert busy_guard < new_session_call, (
             "switchToWorkspace must reject live-turn workspace switches before "

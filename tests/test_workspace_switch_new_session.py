@@ -15,7 +15,8 @@ _DRIVER_SRC = r"""
 const fs = require('fs');
 
 function extractFunction(src, name) {
-  const start = src.indexOf(`async function ${name}(`);
+  let start = src.indexOf(`async function ${name}(`);
+  if (start < 0) start = src.indexOf(`function ${name}(`);
   if (start < 0) throw new Error(`${name} not found`);
   const bodyStart = src.indexOf('{', src.indexOf(')', start));
   let depth = 0;
@@ -40,6 +41,10 @@ function record(name, payload) {
 
 function t(key, ...values) {
   if (key === 'workspace_switched_to') return `Switched to ${values[0] || ''}`;
+  if (key === 'workspace_switch_new_chat_confirm_title') return 'Start a new chat for this workspace?';
+  if (key === 'workspace_switch_new_chat_confirm_message') return `Switching to ${values[0] || ''} in the current conversation keeps the existing chat history.`;
+  if (key === 'workspace_switch_new_chat_confirm') return 'Start new chat';
+  if (key === 'workspace_switch_keep_current') return 'Keep current';
   return key + (values.length ? ':' + values.join(',') : '');
 }
 
@@ -65,10 +70,13 @@ globalThis.loadMemory = async (...args) => record('loadMemory', args);
 globalThis.syncTopbar = () => record('syncTopbar');
 globalThis.renderMessages = () => record('renderMessages');
 globalThis.renderSessionList = async () => record('renderSessionList');
-globalThis.syncActiveProjectForWorkspace = (...args) => record('syncActiveProjectForWorkspace', args);
+globalThis._setActiveProjectFilter = (...args) => record('_setActiveProjectFilter', args);
 globalThis.cancelEditMode = () => record('cancelEditMode');
 globalThis.clearPreview = () => record('clearPreview');
-globalThis.showConfirmDialog = async () => true;
+globalThis.showConfirmDialog = async (opts) => {
+  record('showConfirmDialog', opts);
+  return !!args.confirmStartNewChat;
+};
 globalThis.api = async (url, opts = {}) => {
   const body = opts.body ? JSON.parse(opts.body) : null;
   record('api', { url, body });
@@ -105,6 +113,10 @@ globalThis.newSession = async (flash, options = {}) => {
   return data;
 };
 
+eval(extractFunction(src, '_workspaceSwitchHasConversation'));
+eval(extractFunction(src, '_syncWorkspaceSwitchProject'));
+eval(extractFunction(src, '_switchWorkspaceInCurrentSession'));
+eval(extractFunction(src, '_switchWorkspaceWithNewSession'));
 eval(extractFunction(src, 'switchToWorkspace'));
 
 (async () => {
@@ -141,7 +153,7 @@ def _run_case(driver_path, payload):
 
 
 @node_test
-def test_workspace_picker_creates_new_session_instead_of_mutating_current_session(driver_path):
+def test_workspace_picker_prompts_then_starts_new_session_when_confirmed(driver_path):
     data = _run_case(driver_path, {
         "session": {
             "session_id": "old-session",
@@ -152,8 +164,15 @@ def test_workspace_picker_creates_new_session_instead_of_mutating_current_sessio
         "activeProfile": "dev-profile",
         "targetWorkspace": "/repo-b",
         "targetName": "Repo B",
+        "confirmStartNewChat": True,
     })
 
+    confirm_calls = [c["payload"] for c in data["calls"] if c["name"] == "showConfirmDialog"]
+    assert len(confirm_calls) == 1
+    assert confirm_calls[0]["title"] == "Start a new chat for this workspace?"
+    assert confirm_calls[0]["confirmLabel"] == "Start new chat"
+    assert confirm_calls[0]["cancelLabel"] == "Keep current"
+    assert confirm_calls[0]["focusCancel"] is True
     api_calls = [c["payload"] for c in data["calls"] if c["name"] == "api"]
     assert [call["url"] for call in api_calls] == ["/api/session/new"]
     assert api_calls[0]["body"]["workspace"] == "/repo-b"
@@ -180,3 +199,52 @@ def test_selecting_current_workspace_does_not_create_a_new_session(driver_path):
     assert not [c for c in data["calls"] if c["name"] in {"api", "newSession"}]
     assert data["session"]["session_id"] == "old-session"
     assert data["session"]["workspace"] == "/repo-a"
+
+
+@node_test
+def test_workspace_picker_keep_current_updates_existing_session(driver_path):
+    data = _run_case(driver_path, {
+        "session": {
+            "session_id": "old-session",
+            "workspace": "/repo-a",
+            "model": "openai/gpt-5.4-mini",
+            "model_provider": "openai",
+            "project_id": "project-a",
+        },
+        "targetWorkspace": "/repo-b",
+        "targetName": "Repo B",
+        "confirmStartNewChat": False,
+    })
+
+    assert [c["name"] for c in data["calls"] if c["name"] == "showConfirmDialog"] == ["showConfirmDialog"]
+    api_calls = [c["payload"] for c in data["calls"] if c["name"] == "api"]
+    assert [call["url"] for call in api_calls] == ["/api/session/update"]
+    assert api_calls[0]["body"] == {
+        "session_id": "old-session",
+        "workspace": "/repo-b",
+        "model": "openai/gpt-5.4-mini",
+        "model_provider": "openai",
+    }
+    assert not [c for c in data["calls"] if c["name"] == "newSession"]
+    assert data["session"]["session_id"] == "old-session"
+    assert data["session"]["workspace"] == "/repo-b"
+    assert data["session"]["project_id"] is None
+
+
+@node_test
+def test_blank_workspace_switch_creates_new_session_without_prompt(driver_path):
+    data = _run_case(driver_path, {
+        "session": None,
+        "messages": [],
+        "activeProfile": "dev-profile",
+        "targetWorkspace": "/repo-b",
+        "targetName": "Repo B",
+    })
+
+    assert not [c for c in data["calls"] if c["name"] == "showConfirmDialog"]
+    api_calls = [c["payload"] for c in data["calls"] if c["name"] == "api"]
+    assert [call["url"] for call in api_calls] == ["/api/session/new"]
+    assert api_calls[0]["body"]["workspace"] == "/repo-b"
+    assert "prev_session_id" not in api_calls[0]["body"]
+    assert data["session"]["session_id"] == "new-session"
+    assert data["session"]["workspace"] == "/repo-b"
