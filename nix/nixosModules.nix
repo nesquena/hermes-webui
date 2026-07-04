@@ -50,8 +50,8 @@ let
   inferredAgentDir =
     if cfg.agent.package == null then
       null
-    else if (cfg.agent.package ? passthru) && (cfg.agent.package.passthru ? hermesVenv) then
-      "${cfg.agent.package.passthru.hermesVenv}/lib/python3.12/site-packages"
+    else if (cfg.agent.package ? passthru) && (cfg.agent.package.passthru ? hermesAgentDir) then
+      "${cfg.agent.package.passthru.hermesAgentDir}"
     else
       null;
 
@@ -148,7 +148,7 @@ in
       package = lib.mkOption {
         type = lib.types.nullOr lib.types.package;
         default = null;
-        description = "Package to derive HERMES_WEBUI_AGENT_DIR and HERMES_WEBUI_PYTHON from when it exposes passthru.hermesVenv.";
+        description = "Package to derive HERMES_WEBUI_AGENT_DIR from passthru.hermesAgentDir and HERMES_WEBUI_PYTHON from passthru.hermesVenv.";
       };
 
       dir = lib.mkOption {

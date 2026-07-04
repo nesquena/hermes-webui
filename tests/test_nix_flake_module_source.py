@@ -32,9 +32,14 @@ def test_nixos_module_decouples_agent_dir_from_python_inference():
     assert "cfg.agent.dir == null && configuredAgentPython" not in MODULE_NIX
 
 
-def test_nixos_module_uses_agent_venv_site_packages_when_available():
-    assert "${cfg.agent.package.passthru.hermesVenv}/lib/python3.12/site-packages" in MODULE_NIX
-    assert "${cfg.agent.package}/share/hermes-agent" not in MODULE_NIX
+def test_nixos_module_uses_explicit_agent_dir_passthru_when_available():
+    hardcoded_python_site_packages = "lib/" + "python3.12" + "/site-packages"
+    legacy_agent_share_dir = "${cfg.agent.package}" + "/share/" + "hermes-agent"
+
+    assert "cfg.agent.package.passthru ? hermesAgentDir" in MODULE_NIX
+    assert "${cfg.agent.package.passthru.hermesAgentDir}" in MODULE_NIX
+    assert hardcoded_python_site_packages not in MODULE_NIX
+    assert legacy_agent_share_dir not in MODULE_NIX
 
 
 def test_nixos_module_does_not_chown_existing_hermes_home():

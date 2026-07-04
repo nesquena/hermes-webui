@@ -424,7 +424,7 @@ services.hermes-webui = {
 
 The module defaults to `127.0.0.1`. Set `host = "0.0.0.0"` and `openFirewall = true` only when you want direct network access, and pair that with auth, for example `HERMES_WEBUI_PASSWORD` via `environmentFiles`.
 
-You can also set `agent.package` instead of `agent.dir` when you are using a compatible Hermes Agent package layout. When the package exposes `passthru.hermesVenv`, the module derives `HERMES_WEBUI_AGENT_DIR` from that venv's site-packages path and sets `HERMES_WEBUI_PYTHON` from the same venv interpreter so bootstrap can use agent dependencies without creating a local `.venv`. If the package does not expose that venv metadata, set `agent.dir` and `agent.python` explicitly.
+You can also set `agent.package` instead of `agent.dir` when you are using a compatible Hermes Agent package layout. When the package exposes `passthru.hermesAgentDir`, the module derives `HERMES_WEBUI_AGENT_DIR` from that path. When it exposes `passthru.hermesVenv`, the module derives `HERMES_WEBUI_PYTHON` from the venv interpreter so bootstrap can use agent dependencies without creating a local `.venv`. If the package does not expose either metadata path, set `agent.dir` and `agent.python` explicitly.
 
 When WebUI reads shared Hermes Agent state, run the service as a user that can already read that state. For a co-located Hermes Agent service, set `user` and `group` to the agent service account; the module only creates the default `hermes-webui` account and never changes ownership of an existing `hermesHome`.
 
