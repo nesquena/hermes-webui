@@ -10487,7 +10487,17 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(row.role==='tool') return `tool:${_anchorSceneToolRowLogicalKey(row)||row.row_id||row.event_id||row.local_id||out.length}`;
     if(row.role==='prose') return `prose:${row.local_id||row.row_id||out.length}`;
     if(row.role==='thinking') return `thinking:${row.local_id||row.row_id||out.length}`;
+function _terminalizedAnchorSceneForRendering(scene){
+  try{
+    const api=(typeof window!=='undefined')&&window.HermesAssistantTurnAnchors;
+    if(api&&typeof api.terminalizeAssistantTurnAnchorActivityScene==='function'){
+      return api.terminalizeAssistantTurnAnchorActivityScene(scene)||scene;
+    }
+  }catch(_){}
+  return scene;
+}
     if(row.role==='lifecycle'){
+  scene=_terminalizedAnchorSceneForRendering(scene);
       const source=String(row.source_event_type||'');
       if(source==='compressing'||source==='compressed') return 'lifecycle:compression';
       return `lifecycle:${source||row.local_id||row.row_id||out.length}`;

@@ -1080,6 +1080,35 @@ def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
     )
 
 
+def _should_retry_no_response_turn(
+    classification: dict | None,
+    *,
+    assistant_added: bool,
+    token_sent: bool,
+    agent_terminal_failure: bool,
+    tool_progress: bool,
+    already_retried: bool,
+    cancel_requested: bool,
+) -> bool:
+    """Return True when a provider-empty turn is safe to retry automatically once.
+
+    This is deliberately narrower than the later terminal-error guard.  A provider
+    can return no content/no error before doing any work; retrying that once
+    improves recovery from transient empty responses.  Do not retry after visible
+    assistant tokens, tool activity, explicit terminal states, cancellation, or a
+    previous retry: those paths can duplicate side effects or hide real failures.
+    """
+    if already_retried or cancel_requested:
+        return False
+    if not isinstance(classification, dict):
+        return False
+    if classification.get('type') not in {'no_response', 'silent_failure'}:
+        return False
+    if assistant_added or token_sent or agent_terminal_failure or tool_progress:
+        return False
+    return True
+
+
 def _preferred_agent_display_name() -> str:
     """Return the configured assistant display name for user-facing copy."""
     try:
@@ -7383,6 +7412,7 @@ def _run_agent_streaming(
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
             _self_healed = False  # (#1401) prevents infinite self-heal retries
+            _no_response_retried = False  # retry provider-empty/no-content turns once
             # Per-message reasoning: dict maps assistant-message index → accumulated text
             # (#3587) replaces the flat _reasoning_text string so each intermediate
             # assistant turn (before tool calls) keeps its own reasoning segment.
@@ -8509,6 +8539,50 @@ def _run_agent_streaming(
             # reasoning with no trailing token/tool boundary to trigger a flush) so the last
             # sub-100ms window reaches the live Thinking view before the terminal done event.
             _flush_reasoning_buffer()
+            _initial_messages = result.get('messages') or []
+            _initial_last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
+            _initial_classification = _classify_provider_error(
+                str(_initial_last_err) if _initial_last_err else '',
+                _initial_last_err,
+                silent_failure=not bool(_initial_last_err),
+            )
+            _initial_assistant_added = _assistant_reply_added_after_current_turn(
+                _initial_messages,
+                _previous_context_messages,
+                msg_text,
+            )
+            _initial_tool_progress = bool(
+                _checkpoint_activity[0]
+                or _live_tool_calls
+                or _live_tool_event_start_ids
+                or _live_tool_event_complete_ids
+            )
+            if _should_retry_no_response_turn(
+                _initial_classification,
+                assistant_added=_initial_assistant_added,
+                token_sent=_token_sent,
+                agent_terminal_failure=_agent_result_terminal_failure(result),
+                tool_progress=_initial_tool_progress,
+                already_retried=_no_response_retried,
+                cancel_requested=cancel_event.is_set(),
+            ):
+                _no_response_retried = True
+                logger.info(
+                    '[webui] no-response self-recovery: retrying stream once for session %s',
+                    session_id,
+                )
+                put('warning', {
+                    'type': 'no_response_retry',
+                    'message': 'Provider returned no content; retrying once…',
+                    'session_id': session_id,
+                })
+                try:
+                    setattr(agent, '_last_error', None)
+                except Exception:
+                    pass
+                _token_sent = False
+                result = agent.run_conversation(**_run_conversation_kwargs)
+                _flush_reasoning_buffer()
             if cancel_event.is_set():
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()

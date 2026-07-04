@@ -823,6 +823,81 @@
     return kind==='tool_started'||kind==='tool_updated'||kind==='tool_completed';
   }
 
+  function _terminalStateClosesOpenToolRows(terminalState){
+    const terminal=normalizeAssistantTurnAnchorTerminalState(terminalState);
+    return terminal==='cancelled'||terminal==='interrupted'||terminal==='connection_lost';
+  }
+
+  function _isOpenToolStatus(status){
+    const raw=_cleanString(status).toLowerCase().replace(/[\s-]+/g,'_');
+    return !raw||raw==='running'||raw==='pending'||raw==='started'||raw==='in_progress';
+  }
+
+  function _terminalizedToolRowStatus(kind, status, terminalState){
+    const terminal=normalizeAssistantTurnAnchorTerminalState(terminalState);
+    if(!_isToolActivityKind(kind)||!_terminalStateClosesOpenToolRows(terminal)) return status;
+    if(kind==='tool_completed') return status||'completed';
+    return _isOpenToolStatus(status)?terminal:(status||terminal);
+  }
+
+  function _terminalizedToolPayload(payload, kind, status, terminalState){
+    const sanitized=_sanitizePayload(payload);
+    if(!_isToolActivityKind(kind)||!_terminalStateClosesOpenToolRows(terminalState)) return sanitized;
+    if(kind==='tool_completed'||!_isOpenToolStatus(status)) return sanitized;
+    if(!sanitized||typeof sanitized!=='object'||Array.isArray(sanitized)) return sanitized;
+    const out={...sanitized};
+    out.done=true;
+    if(!out.status&&!out.state) out.status=normalizeAssistantTurnAnchorTerminalState(terminalState);
+    return out;
+  }
+
+  function _terminalizedToolObject(tool, kind, status, terminalState){
+    if(!tool||typeof tool!=='object'||!_isToolActivityKind(kind)||!_terminalStateClosesOpenToolRows(terminalState)) return tool;
+    if(kind==='tool_completed'||!_isOpenToolStatus(status)) return tool;
+    return Object.freeze({
+      ...tool,
+      done:true,
+    });
+  }
+
+  function _terminalizedActivitySceneRow(row, terminalState){
+    if(!row||typeof row!=='object') return row;
+    const kind=_cleanString(_own(row,'kind'));
+    if(!_isToolActivityKind(kind)||!_terminalStateClosesOpenToolRows(terminalState)) return row;
+    const status=_cleanString(_own(row,'status'))||null;
+    const nextStatus=_terminalizedToolRowStatus(kind,status,terminalState);
+    const tool=_terminalizedToolObject(_own(row,'tool'),kind,status,terminalState);
+    const payload=_terminalizedToolPayload(_own(row,'payload'),kind,status,terminalState);
+    return Object.freeze({
+      ...row,
+      status:nextStatus,
+      tool,
+      payload,
+    });
+  }
+
+  function _terminalizedActivitySceneRows(rows, terminalState){
+    if(!Array.isArray(rows)) return Object.freeze([]);
+    return Object.freeze(rows.map(row=>_terminalizedActivitySceneRow(row,terminalState)));
+  }
+
+  function terminalizeAssistantTurnAnchorActivityScene(scene){
+    if(!scene||typeof scene!=='object') return scene;
+    const lifecycle=scene.lifecycle&&typeof scene.lifecycle==='object'?scene.lifecycle:{};
+    const terminal=normalizeAssistantTurnAnchorTerminalState(scene.terminal_state, lifecycle.terminal_state||lifecycle.status);
+    if(!terminal||!_terminalStateClosesOpenToolRows(terminal)) return scene;
+    return Object.freeze({
+      ...scene,
+      terminal_state:terminal,
+      lifecycle:Object.freeze({
+        ...lifecycle,
+        status:normalizeAssistantTurnAnchorTerminalState(lifecycle.status)||terminal,
+        terminal_state:terminal,
+      }),
+      activity_rows:_terminalizedActivitySceneRows(scene.activity_rows,terminal),
+    });
+  }
+
   function _activityRowToolId(event, kind){
     if(!_isToolActivityKind(kind)) return null;
     const payload=_own(event,'payload')||{};
@@ -971,13 +1046,14 @@
     });
   }
 
-  function _activitySceneRow(event, index, mode){
+  function _activitySceneRow(event, index, mode, terminalState){
     const payload=_own(event,'payload');
     const kind=_cleanString(_own(event,'kind'))||'activity';
-    const status=_cleanString(_own(event,'status'))||null;
+    const rawStatus=_cleanString(_own(event,'status'))||null;
+    const status=_terminalizedToolRowStatus(kind,rawStatus,terminalState);
     const text=_activityRowText(event);
     const toolCallId=_activityRowToolId(event,kind);
-    const sanitizedPayload=_sanitizePayload(payload);
+    const sanitizedPayload=_terminalizedToolPayload(payload,kind,rawStatus,terminalState);
     return Object.freeze({
       row_id:_activityRowId(event,index),
       order_index:index,
@@ -1004,7 +1080,7 @@
       text,
       thinking:_activityRowThinking(event,kind,text),
       tool_call_id:toolCallId,
-      tool:_activityRowTool(event,kind,status,text,toolCallId),
+      tool:_terminalizedToolObject(_activityRowTool(event,kind,status,text,toolCallId),kind,rawStatus,terminalState),
       payload:sanitizedPayload,
     });
   }
@@ -1026,20 +1102,21 @@
         activity_rows:Object.freeze([]),
       });
     }
-    const rows=(Array.isArray(anchor.activity_events)?anchor.activity_events:[])
-      .map((event,index)=>_activitySceneRow(event,index,mode));
     const lifecycle=_copyObject(anchor.lifecycle);
+    const terminalState=_cleanString(_own(lifecycle,'terminal_state'))||null;
+    const rows=(Array.isArray(anchor.activity_events)?anchor.activity_events:[])
+      .map((event,index)=>_activitySceneRow(event,index,mode,terminalState));
     const content=anchor.content&&typeof anchor.content==='object'?anchor.content:{};
-    return Object.freeze({
+    return terminalizeAssistantTurnAnchorActivityScene(Object.freeze({
       version:'activity_scene_v1',
       mode,
       identity:_frozenIdentityCopy(anchor.identity||{}),
       lifecycle:Object.freeze(lifecycle),
       final_answer:typeof content.final_answer==='string'?content.final_answer:'',
       final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
-      terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
+      terminal_state:terminalState,
       activity_rows:Object.freeze(rows),
-    });
+    }));
   }
 
   const ACTIVITY_RECONCILIATION_DEFAULT_FIELDS=Object.freeze([
@@ -1056,10 +1133,10 @@
   function _activityReconciliationInputScene(input, options){
     const opts=(options&&typeof options==='object')?options:{};
     const item=(input&&typeof input==='object')?input:{};
-    if(_own(item,'version')==='activity_scene_v1') return item;
+    if(_own(item,'version')==='activity_scene_v1') return terminalizeAssistantTurnAnchorActivityScene(item);
     const explicitScene=_own(item,'scene')||_own(item,'activity_scene')||_own(opts,'scene')||_own(opts,'activity_scene');
     if(explicitScene&&typeof explicitScene==='object'&&_own(explicitScene,'version')==='activity_scene_v1'){
-      return explicitScene;
+      return terminalizeAssistantTurnAnchorActivityScene(explicitScene);
     }
     const projectionInput=_own(item,'registry')||_own(item,'anchor_registry')||_own(item,'anchor')||item;
     const requestedMode=_cleanString(_own(item,'mode'))||_cleanString(_own(opts,'mode'));
@@ -1642,6 +1719,7 @@
     createAssistantTurnAnchorShadowSnapshot,
     projectAssistantTurnAnchorSettledMessageFinalAnswer,
     projectAssistantTurnAnchorActivityScene,
+    terminalizeAssistantTurnAnchorActivityScene,
     reconcileAssistantTurnAnchorActivityScene,
     createAssistantTurnAnchorRendererSnapshot,
     reconcileAssistantTurnAnchorRendererSnapshot,

@@ -13,6 +13,7 @@ from api.streaming import (
     _cancelled_turn_content,
     _classify_provider_error,
     _finalize_cancelled_turn,
+    _should_retry_no_response_turn,
 )
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -70,6 +71,42 @@ class TestCancelledTurnClassification:
         assert result["type"] == "no_response"
         assert result["label"] == "No response from provider"
         assert "provider returned no content" in result.get("hint", "").lower()
+
+
+class TestNoResponseAutoRecovery:
+    def test_no_response_without_progress_is_retryable_once(self):
+        assert _should_retry_no_response_turn(
+            {"type": "no_response"},
+            assistant_added=False,
+            token_sent=False,
+            agent_terminal_failure=False,
+            tool_progress=False,
+            already_retried=False,
+            cancel_requested=False,
+        ) is True
+
+    def test_no_response_retry_is_not_used_for_progress_terminal_or_cancelled_turns(self):
+        base = {
+            "assistant_added": False,
+            "token_sent": False,
+            "agent_terminal_failure": False,
+            "tool_progress": False,
+            "already_retried": False,
+            "cancel_requested": False,
+        }
+
+        for override in (
+            {"assistant_added": True},
+            {"token_sent": True},
+            {"agent_terminal_failure": True},
+            {"tool_progress": True},
+            {"already_retried": True},
+            {"cancel_requested": True},
+        ):
+            kwargs = base | override
+            assert _should_retry_no_response_turn({"type": "no_response"}, **kwargs) is False
+
+        assert _should_retry_no_response_turn({"type": "rate_limit"}, **base) is False
 
 
 class TestCancelledTurnFinalizer:
@@ -143,6 +180,23 @@ class TestCancelledTurnPersistenceGuards:
         )
         assert "cancelled" in block.lower(), (
             "The cancellation guard should persist/report a cancelled turn, not silently drop state."
+        )
+
+    def test_no_response_retry_runs_once_before_persisted_apperror(self):
+        src = _read("api/streaming.py")
+        first_run_idx = src.find("result = agent.run_conversation(**_run_conversation_kwargs)")
+        assert first_run_idx != -1, "primary run_conversation call not found"
+        apperror_idx = src.find("put('apperror', _error_payload)", first_run_idx)
+        assert apperror_idx != -1, "apperror emission not found after primary run"
+        block = src[first_run_idx:apperror_idx]
+
+        assert "_no_response_retried = False" in src
+        assert "_should_retry_no_response_turn" in block
+        assert "already_retried=_no_response_retried" in block
+        assert "'type': 'no_response_retry'" in block
+        assert block.count("agent.run_conversation(**_run_conversation_kwargs)") >= 2, (
+            "A provider-empty turn should retry once in the worker before a no_response "
+            "apperror is persisted to the transcript."
         )
 
     def test_streamed_progress_without_final_assistant_still_reports_error(self):

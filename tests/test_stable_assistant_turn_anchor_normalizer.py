@@ -324,6 +324,75 @@ def test_structured_fallback_dedupe_keys_do_not_collide_on_delimiters():
     assert data["localNoSeqKey"] == ""
 
 
+def test_cancelled_activity_scene_terminalizes_running_tool_rows():
+    assert NODE, "node is required for assistant_turn_anchors.js activity scene tests"
+    script = f"""
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync({json.dumps(str(ANCHORS_JS))}, 'utf8');
+const sandbox = {{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, {{filename:'assistant_turn_anchors.js'}});
+const api = sandbox.window.HermesAssistantTurnAnchors;
+const anchor = api.createAssistantTurnAnchorSeed({{
+  session_id:'sid-cancel',
+  stream_id:'stream-cancel',
+  run_id:'run-cancel',
+}});
+anchor.activity_events.push({{
+  kind:'tool_started',
+  source_event_type:'tool',
+  status:'running',
+  local_id:'call-1',
+  payload:{{tid:'call-1', name:'read_file', done:false}},
+}});
+anchor.lifecycle.status='cancelled';
+anchor.lifecycle.terminal_state='cancelled';
+const projected = api.projectAssistantTurnAnchorActivityScene(anchor);
+const projectedTool = projected.activity_rows[0];
+assert.strictEqual(projected.terminal_state, 'cancelled');
+assert.strictEqual(projectedTool.status, 'cancelled');
+assert.strictEqual(projectedTool.tool.done, true);
+assert.strictEqual(projectedTool.payload.done, true);
+
+const legacyScene = {{
+  version:'activity_scene_v1',
+  mode:'compact_worklog',
+  terminal_state:'cancelled',
+  lifecycle:{{status:'cancelled', terminal_state:'cancelled'}},
+  activity_rows:[{{
+    row_id:'legacy-tool',
+    kind:'tool_started',
+    role:'tool',
+    source_event_type:'tool',
+    status:'running',
+    tool_call_id:'call-legacy',
+    tool:{{id:'call-legacy', name:'search_files', done:false, is_error:false}},
+    payload:{{tid:'call-legacy', name:'search_files', done:false}},
+  }}],
+}};
+const reconciled = api.reconcileAssistantTurnAnchorActivityScene({{
+  scene: legacyScene,
+  renderer_rows:[{{
+    row_id:'legacy-tool',
+    kind:'tool_started',
+    role:'tool',
+    source_event_type:'tool',
+    status:'cancelled',
+    tool_call_id:'call-legacy',
+    tool_name:'search_files',
+    tool_done:true,
+    tool_is_error:false,
+  }}],
+}});
+assert.strictEqual(reconciled.expected_rows[0].status, 'cancelled');
+assert.strictEqual(reconciled.expected_rows[0].tool_done, true);
+assert.strictEqual(reconciled.matched, true);
+"""
+    subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=True)
+
+
 def test_normalizer_helpers_remain_unwired_from_rendering_and_live_hot_paths():
     helper_names = [
         "normalizeAssistantTurnAnchorSourceEvent",

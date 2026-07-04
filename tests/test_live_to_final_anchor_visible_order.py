@@ -1,6 +1,7 @@
 """Visible-order contract for the first anchor-backed Compact Worklog handoff."""
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,8 +20,9 @@ NODE = shutil.which("node")
 
 
 def _function_body(src, name):
-    start = src.find(f"function {name}")
-    assert start != -1, f"{name} not found"
+    match = re.search(rf"(?m)^\s*(?:async\s+)?function\s+{re.escape(name)}\s*\(", src)
+    assert match is not None, f"{name} not found"
+    start = match.start()
     params = src.find("(", start)
     assert params != -1, f"{name} params not found"
     depth = 0
@@ -130,6 +132,7 @@ function _activityStatusNode(){{ throw new Error('status branch should not execu
 function _anchorSceneToolRowLogicalKey(){{ return ''; }}
 function _anchorSceneMergeToolRows(_prev, row){{ return row; }}
 eval(extractFunc('_anchorSceneIsSettledSuccessfulCompression'));
+eval(extractFunc('_terminalizedAnchorSceneForRendering'));
 eval(extractFunc('_anchorSceneRowsForRendering'));
 eval(extractFunc('_autoCompressionPreviewText'));
 eval(extractFunc('_autoCompressionWorklogNode'));
@@ -381,6 +384,7 @@ function extractFunc(name){{
 function _anchorSceneToolRowLogicalKey(){{ return ''; }}
 function _anchorSceneMergeToolRows(a,b){{ return b; }}
 function _anchorSceneIsSettledSuccessfulCompression(){{ return false; }}
+eval(extractFunc('_terminalizedAnchorSceneForRendering'));
 eval(extractFunc('_anchorSceneRowsForRendering'));
 const scene = {{
   activity_rows: [
@@ -1443,4 +1447,14 @@ def test_runtime_journal_anchor_scene_seeds_live_registry_before_new_events():
     assert "anchorActivityScene:inflight.anchorActivityScene||null" in persist
     assert "applyAssistantTurnAnchorSourceEvent" in hydrate
     assert "_sourceEventTypeForSnapshotAnchorRow" in hydrate
+    assert "scene=_terminalizeAnchorActivityScene(scene);" in hydrate
     assert "_hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene);" in MESSAGES_JS
+
+
+def test_cancelled_anchor_scenes_are_terminalized_before_render_and_persist():
+    rows_for_rendering = _function_body(UI_JS, "_anchorSceneRowsForRendering")
+    settled_completion = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
+
+    assert "terminalizeAssistantTurnAnchorActivityScene" in _function_body(UI_JS, "_terminalizedAnchorSceneForRendering")
+    assert "scene=_terminalizedAnchorSceneForRendering(scene);" in rows_for_rendering
+    assert "return _terminalizeAnchorActivityScene(scene);" in settled_completion

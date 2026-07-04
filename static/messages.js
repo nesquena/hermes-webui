@@ -3389,6 +3389,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return undefined;
   }
+  function _terminalizeAnchorActivityScene(scene){
+    try{
+      if(_anchorApi&&typeof _anchorApi.terminalizeAssistantTurnAnchorActivityScene==='function'){
+        return _anchorApi.terminalizeAssistantTurnAnchorActivityScene(scene)||scene;
+      }
+    }catch(_){}
+    return scene;
+  }
   function _completeSettledAnchorSceneForTurn(messages, lastAsstIndex, projectedScene){
     if(!Array.isArray(messages)||lastAsstIndex<0) return projectedScene;
     const lastAsst=messages[lastAsstIndex];
@@ -3454,7 +3462,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       terminal_state:base.terminal_state||((base.lifecycle&&base.lifecycle.terminal_state)||null),
       activity_rows:rows,
     };
-    return scene;
+    return _terminalizeAnchorActivityScene(scene);
   }
   let _persistAnchorSceneWarned=false;
   function _anchorSceneMessageOffsetForPersist(){
@@ -3706,6 +3714,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _hydrateAnchorRegistryFromActivityScene(scene){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
+    scene=_terminalizeAnchorActivityScene(scene);
     if(!scene||scene.version!=='activity_scene_v1'||!Array.isArray(scene.activity_rows)||!scene.activity_rows.length) return false;
     const sceneKey=[
       scene.identity&&scene.identity.stream_id||streamId||'',
