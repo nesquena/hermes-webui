@@ -21766,7 +21766,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_workflow_timing_
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_timing_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_timing_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -21818,8 +21818,15 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_timing_
     jobs = list_source_refresh_jobs(limit=5)
     catalog = source_catalog(limit=5)
     search = search_memory("WORKFLOW_TIMING_DRIFT_SENTINEL", limit=5)
+    relevant = relevant_memory_for_space("workflow-timing-drift-space", limit=5)
     serialized = json.dumps(
-        {"result": result, "jobs": jobs, "catalog": catalog, "search_results": search["results"]},
+        {
+            "result": result,
+            "jobs": jobs,
+            "catalog": catalog,
+            "search_results": search["results"],
+            "relevant_memory": relevant,
+        },
         sort_keys=True,
     ).lower()
 
@@ -21831,6 +21838,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_timing_
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / "github-workflow-timing-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     assert drifted_final_url.lower() not in serialized
     assert capy_memory._github_workflow_timing_final_url_matches_origin(clean_api_url, clean_api_url) is True
     assert capy_memory._github_workflow_timing_final_url_matches_origin(clean_api_url, drifted_final_url) is False
