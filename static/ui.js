@@ -1953,6 +1953,22 @@ function _formatQuotaPercentShort(value){
   if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
 }
+function _formatQuotaDateShort(value){
+  if(value===null||value===undefined||value==='') return '';
+  const d=new Date(value);
+  if(Number.isNaN(d.getTime())) return String(value||'').trim();
+  try{return d.toLocaleString(undefined,{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});}catch(_e){return String(value||'').trim();}
+}
+function _providerQuotaWindowShortLabel(accountLimits,w,verbose=false){
+  const raw=String((w&&w.label)||'').trim();
+  const provider=String((accountLimits&&accountLimits.provider)||'').toLowerCase();
+  if(provider==='openai-codex'){
+    const lowered=raw.toLowerCase();
+    if(lowered==='session') return verbose?'5h枠':'5h';
+    if(lowered==='weekly') return verbose?'週次':'週';
+  }
+  return raw||'Window';
+}
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
@@ -1967,7 +1983,7 @@ function _providerQuotaIndicatorText(status){
     if(remaining){
       const windowLabel=String((w&&w.label)||'').trim();
       if(providerId==='openai-codex'){
-        const shortWindow=windowLabel.toLowerCase()==='weekly'?'週':(windowLabel.toLowerCase()==='session'?'5h':windowLabel);
+        const shortWindow=_providerQuotaWindowShortLabel(accountLimits,w,false);
         const label=shortWindow?'Codex '+shortWindow+' '+remaining:'Codex '+remaining;
         const titleWindow=windowLabel?windowLabel+' — ':'';
         return {label, title:provider+' — '+titleWindow+remaining+' remaining'};
@@ -2052,13 +2068,63 @@ function _providerQuotaIndicatorUrl(){
   const provider=_providerQuotaIndicatorProvider();
   return provider?'/api/provider/quota?provider='+encodeURIComponent(provider):'/api/provider/quota';
 }
+function _providerQuotaDropdownDetailHtml(status,text){
+  const accountLimits=status&&status.account_limits;
+  if(!accountLimits||typeof accountLimits!=='object') return '';
+  const provider=esc(status.display_name||status.provider||accountLimits.provider||'Provider');
+  let windows=Array.isArray(accountLimits.windows)?accountLimits.windows.filter(w=>w&&w.label):[];
+  const providerId=String(status.provider||accountLimits.provider||'').toLowerCase();
+  if(providerId==='openai-codex'){
+    const order={session:0,weekly:1};
+    windows=windows.slice().sort((a,b)=>{
+      const ak=String(a&&a.label||'').trim().toLowerCase();
+      const bk=String(b&&b.label||'').trim().toLowerCase();
+      return (order[ak]??9)-(order[bk]??9);
+    });
+  }
+  const windowRows=windows.map(w=>{
+    const label=_providerQuotaWindowShortLabel(accountLimits,w,true);
+    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent)||'—';
+    const used=_formatQuotaPercentShort(w&&w.used_percent);
+    const reset=_formatQuotaDateShort(w&&w.reset_at);
+    const detail=String((w&&w.detail)||'').trim();
+    const meta=[];
+    if(used) meta.push('使用 '+used);
+    if(reset) meta.push('リセット '+reset);
+    return `<div class="model-opt-quota-detail-row"><span>${esc(label)}</span><strong>${esc(remaining)}</strong>${meta.length?`<small>${esc(meta.join(' · '))}</small>`:''}${detail?`<small>${esc(detail)}</small>`:''}</div>`;
+  }).join('');
+  const resetCredits=accountLimits.reset_credits&&typeof accountLimits.reset_credits==='object'?accountLimits.reset_credits:null;
+  const resetCount=resetCredits&&resetCredits.available_count!==undefined&&resetCredits.available_count!==null?String(resetCredits.available_count).trim():'';
+  const resetCreditsRow=resetCount?`<div class="model-opt-quota-detail-row model-opt-quota-detail-row--compact"><span>リセット権</span><strong>${esc(resetCount)}</strong></div>`:'';
+  const pool=accountLimits.pool&&typeof accountLimits.pool==='object'?accountLimits.pool:null;
+  let poolRow='';
+  if(pool){
+    const total=Number.isFinite(Number(pool.total_credentials))?Number(pool.total_credentials):(Array.isArray(pool.credentials)?pool.credentials.length:null);
+    const available=Number.isFinite(Number(pool.available_credentials))?Number(pool.available_credentials):null;
+    const exhausted=Number.isFinite(Number(pool.exhausted_credentials))?Number(pool.exhausted_credentials):0;
+    const failed=Number.isFinite(Number(pool.failed_credentials))?Number(pool.failed_credentials):0;
+    const parts=[];
+    if(available!==null&&total!==null) parts.push(`${available}/${total} available`);
+    if(exhausted>0) parts.push(`${exhausted} exhausted`);
+    if(failed>0) parts.push(`${failed} failed`);
+    if(parts.length) poolRow=`<div class="model-opt-quota-detail-row model-opt-quota-detail-row--compact"><span>Pool</span><strong>${esc(parts.join(' · '))}</strong></div>`;
+  }
+  const checked=_formatQuotaDateShort(accountLimits.fetched_at||(status&&status.client_fetched_at));
+  const checkedRow=checked?`<div class="model-opt-quota-detail-checked">最終確認 ${esc(checked)}</div>`:'';
+  const fallback=text&&text.title?`<div class="model-opt-quota-detail-message">${esc(text.title)}</div>`:'';
+  const body=windowRows+resetCreditsRow+poolRow+checkedRow||fallback;
+  if(!body) return '';
+  return `<span class="model-opt-quota-popover" role="note"><span class="model-opt-quota-popover-title">${provider} 使用量</span>${body}</span>`;
+}
 function _providerQuotaDropdownBadgeHtml(providerId){
   const provider=String(providerId||'').toLowerCase();
   if(provider!=='openai-codex') return '';
   const text=_providerQuotaLastText;
   if(!text||!text.label) return '';
   const label=String(text.label||'').replace(/^Codex\s+/,'');
-  return `<span class="model-opt-quota-badge" title="${esc(text.title||text.label)}">${esc(label)}</span>`;
+  const details=_providerQuotaDropdownDetailHtml(_providerQuotaLastStatus,text);
+  const title=esc(text.title||text.label);
+  return `<span class="model-opt-quota-badge" tabindex="0" aria-label="${title}">${esc(label)}</span>${details}`;
 }
 function _rerenderOpenModelDropdownForQuota(){
   try{

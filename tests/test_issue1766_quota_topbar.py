@@ -72,3 +72,22 @@ def test_codex_quota_is_visible_inside_model_dropdown_rows():
     assert "_rerenderOpenModelDropdownForQuota" in UI_JS
     assert "renderModelDropdown()" in UI_JS
     assert "model-opt-quota-badge" in CSS
+
+
+def test_codex_model_dropdown_quota_badge_has_detailed_popover():
+    assert "function _providerQuotaDropdownDetailHtml" in UI_JS
+    assert "_providerQuotaLastStatus" in UI_JS
+    assert "_providerQuotaDropdownDetailHtml(_providerQuotaLastStatus,text)" in UI_JS
+    assert "model-opt-quota-popover" in UI_JS
+    assert "tabindex=\"0\"" in UI_JS
+    assert "5h枠" in UI_JS
+    assert "週次" in UI_JS
+    assert "リセット権" in UI_JS
+    assert "最終確認" in UI_JS
+    assert "reset_credits" in UI_JS
+    assert "accountLimits.windows" in UI_JS
+    assert "used_percent" in UI_JS
+    assert "remaining_percent" in UI_JS
+    assert "reset_at" in UI_JS
+    assert "model-opt:hover .model-opt-quota-popover" in CSS
+    assert "model-opt:focus-within .model-opt-quota-popover" in CSS

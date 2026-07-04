@@ -2602,6 +2602,17 @@
   .provider-quota-chip-dot{width:6px;height:6px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.12);flex:0 0 auto;}
   .provider-quota-chip-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .model-opt-quota-badge{display:inline-flex;align-items:center;margin-left:6px;padding:2px 7px;border:1px solid rgba(34,197,94,.42);border-radius:999px;background:rgba(34,197,94,.12);color:#86efac;font-size:10px;font-weight:750;line-height:1.25;white-space:nowrap;vertical-align:middle;}
+  .model-opt-quota-badge:focus-visible{outline:2px solid rgba(134,239,172,.45);outline-offset:2px;}
+  .model-opt-quota-popover{display:none;flex:1 0 100%;box-sizing:border-box;margin-top:5px;padding:8px 10px;border:1px solid rgba(134,239,172,.28);border-radius:10px;background:color-mix(in srgb,var(--surface) 88%,rgba(34,197,94,.20));box-shadow:0 8px 22px rgba(0,0,0,.28);color:var(--muted);font-size:10.5px;line-height:1.35;cursor:default;}
+  .model-opt:hover .model-opt-quota-popover,.model-opt:focus-within .model-opt-quota-popover{display:block;}
+  .model-opt-quota-popover-title{display:block;margin-bottom:6px;color:var(--text);font-size:11px;font-weight:750;}
+  .model-opt-quota-detail-row{display:grid;grid-template-columns:minmax(42px,auto) 1fr;gap:3px 8px;align-items:baseline;padding:4px 0;border-top:1px solid rgba(255,255,255,.07);}
+  .model-opt-quota-detail-row:first-of-type{border-top:0;padding-top:0;}
+  .model-opt-quota-detail-row>span{color:var(--muted);font-weight:700;}
+  .model-opt-quota-detail-row>strong{justify-self:end;color:#bbf7d0;font-weight:800;font-variant-numeric:tabular-nums;}
+  .model-opt-quota-detail-row>small{grid-column:1 / -1;color:var(--muted);font-size:10px;line-height:1.3;}
+  .model-opt-quota-detail-row--compact{grid-template-columns:minmax(70px,auto) 1fr;}
+  .model-opt-quota-detail-checked,.model-opt-quota-detail-message{margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,.07);color:var(--muted);font-size:10px;}
   /* Increased specificity (.icon-btn.composer-mobile-config-btn) to win the cascade
      against the later-in-source `.icon-btn { display:flex }` rule that this element
      also matches. Without this, the button shows at desktop width — see #1381 review. */
