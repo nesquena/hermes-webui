@@ -87,8 +87,8 @@ class TestIssue3954NewChatShortcutMoved:
         body = BOOT_JS[idx:idx + 1500]
         assert "_currentSessionIsReusableEmptyChat()" in body
 
-    def test_new_shortcut_text_input_guard_before_prevent_default(self):
-        """Text-input guard fires before preventDefault() (#5099 preserved for new chord)."""
+    def test_new_shortcut_prevents_browser_default_before_text_guard(self):
+        """Browser default is suppressed before text inputs skip chat creation."""
         idx = BOOT_JS.find(NEW_CHAT_NEEDLE)
         assert idx >= 0
         body = BOOT_JS[idx:idx + 1500]
@@ -96,8 +96,8 @@ class TestIssue3954NewChatShortcutMoved:
         prevent_idx = body.find("e.preventDefault()")
         assert guard_idx >= 0, "Text-input guard missing from Ctrl/Cmd+Shift+O branch"
         assert prevent_idx >= 0, "preventDefault() missing from Ctrl/Cmd+Shift+O branch"
-        assert guard_idx < prevent_idx, (
-            "Text-input guard must come before preventDefault() in Ctrl/Cmd+Shift+O branch"
+        assert prevent_idx < guard_idx, (
+            "preventDefault() must come before the text-input return in Ctrl/Cmd+Shift+O branch"
         )
 
     def test_tooltip_updated_to_new_shortcut(self):

@@ -2,8 +2,9 @@
 
 Emacs-adjacent users expect Ctrl+K to kill to end-of-line while the composer
 or other editable fields are focused. The new Cmd/Ctrl+Shift+O shortcut must
-still guard text inputs before calling preventDefault(), matching the existing
-Ctrl+B guard pattern. Ctrl+K no longer creates a new chat globally.
+still skip new-chat creation in text inputs, but it suppresses the browser
+default first when the page receives that chord. Ctrl+K no longer creates a new
+chat globally.
 """
 from pathlib import Path
 
@@ -24,21 +25,18 @@ class TestIssue5099NewChatShortcutTextInputGuard:
         assert "isContentEditable" in branch
         assert "if(isText) return" in branch
 
-    def test_new_chat_shortcut_prevent_default_after_text_guard(self):
+    def test_new_chat_shortcut_prevents_browser_default_before_text_guard(self):
         branch = _new_chat_branch_window()
         guard_idx = branch.find("if(isText) return")
         prevent_idx = branch.find("e.preventDefault()")
         assert guard_idx >= 0 and prevent_idx >= 0, (
-            "Ctrl/Cmd+Shift+O must guard text inputs before calling preventDefault()"
+            "Ctrl/Cmd+Shift+O must both suppress browser defaults and guard text inputs"
         )
-        assert guard_idx < prevent_idx, (
-            "preventDefault() must not run before the text-input early return"
+        assert prevent_idx < guard_idx, (
+            "preventDefault() must run before the text-input early return"
         )
 
-    def test_new_chat_shortcut_guard_matches_ctrl_b_idiom(self):
-        ctrl_b_idx = BOOT_JS.find("(e.key==='b'||e.key==='B')")
-        assert ctrl_b_idx >= 0, "Ctrl+B handler not found in boot.js"
-        ctrl_b_block = BOOT_JS[max(0, ctrl_b_idx - 250):ctrl_b_idx + 300]
+    def test_new_chat_shortcut_keeps_text_guard_shape(self):
         new_chat_block = _new_chat_branch_window()
         for needle in (
             "const t=e.target",
@@ -47,7 +45,6 @@ class TestIssue5099NewChatShortcutTextInputGuard:
             "tagName==='TEXTAREA'",
             "isContentEditable",
         ):
-            assert needle in ctrl_b_block, f"Ctrl+B guard missing {needle!r}"
             assert needle in new_chat_block, f"Ctrl/Cmd+Shift+O guard missing {needle!r}"
 
     def test_new_chat_shortcut_still_creates_new_session_outside_inputs(self):

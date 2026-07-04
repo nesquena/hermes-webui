@@ -2025,8 +2025,8 @@ document.addEventListener('keydown',async e=>{
   if((e.metaKey||e.ctrlKey)&&e.shiftKey&&!e.altKey&&(e.key==='o'||e.key==='O')){
     const t=e.target;
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
-    if(isText) return;
     e.preventDefault();
+    if(isText) return;
     // If the current session has no messages AND nothing is in flight, just focus
     // the composer rather than creating another empty session that will clutter
     // the sidebar list (#1171). See the matching guard in $('btnNewChat').onclick
