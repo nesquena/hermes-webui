@@ -76,7 +76,7 @@ function createTile(t){
 function updateHeader(t){
   const el=t.el||T.grid&&T.grid.querySelector(`.ext-tile[data-tile-id="${t.id}"]`);
   if(!el)return;
-  const title=t.session?(t.session.title||'New Chat'):'';
+  const title=t.session?(t.session.display_title||t.session._state_db_title||t.session.title||'New Chat'):'';
   el.querySelector('.ext-tile-title').textContent=title||'Empty tile';
   el.querySelector('.ext-tile-dot').hidden=!t.busy;
 }
