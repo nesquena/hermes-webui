@@ -6698,8 +6698,16 @@ function renderSessionListFromCache(){
     }
     const retry=document.createElement('button');
     retry.type='button';
+    retry.className='session-list-error-retry';
     retry.textContent='Retry';
-    retry.onclick=(e)=>{e.stopPropagation();_sessionListLoadError=null;void renderSessionList({deferWhileInteracting:false});};
+    retry.onclick=(e)=>{
+      e.stopPropagation();
+      if(retry.disabled)return;
+      retry.disabled=true;
+      retry.textContent='Retrying…';
+      _sessionListLoadError=null;
+      void renderSessionList({deferWhileInteracting:false});
+    };
     note.appendChild(retry);
     list.appendChild(note);
   }

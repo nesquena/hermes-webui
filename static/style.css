@@ -5525,6 +5525,17 @@ main.main > #mainPlugin{display:none;}
 .session-source-tab:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .session-source-tab.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}
 .session-empty-note{padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;}
+.session-list-error{opacity:1;}
+.session-list-error-retry{
+  display:inline-block;margin-top:14px;padding:8px 28px;
+  font-size:13px;font-weight:500;line-height:1.4;
+  color:#fff;background:var(--accent-bg);border:1px solid var(--accent-bg);
+  border-radius:6px;cursor:pointer;transition:opacity .15s;
+}
+.session-list-error-retry:hover{filter:brightness(1.15);}
+.session-list-error-retry:disabled{
+  opacity:.55;cursor:not-allowed;filter:none;
+}
 .project-bar{display:flex;gap:4px;padding:4px 10px 8px;flex-wrap:wrap;align-items:center;flex-shrink:0;}
 .project-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:pointer;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation;}
 .project-chip:hover{background:rgba(255,255,255,.08);color:var(--text);}
