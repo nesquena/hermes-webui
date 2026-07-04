@@ -34363,7 +34363,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_milestones_metad
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_milestones_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_milestones_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -34423,7 +34423,8 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_milestones_final
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("unrelated milestone lookup", limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search": search}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("milestones-drift-space", limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs, "search": search, "relevant": relevant}, sort_keys=True).lower()
 
     assert calls == [{"url": canonical_url, "timeout": 8}]
     assert read_calls == []
@@ -34432,6 +34433,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_milestones_final
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / "github-milestones-final-url-drift.md").exists()
     assert drifted_final_url.lower() not in serialized
     for unsafe in (
