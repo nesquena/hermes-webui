@@ -16467,7 +16467,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_release_assets_m
         ),
     ],
 )
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_assets_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_assets_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, drifted_final_url
 ):
     root = tmp_path / "capy-memory"
@@ -16526,7 +16526,11 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_assets_f
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("hostile-body-sentinel", limit=5)
-    serialized = json.dumps({"result": result, "search_results": search["results"]}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("release-assets-drift-space", limit=5)
+    serialized = json.dumps(
+        {"result": result, "search_results": search["results"], "relevant": relevant},
+        sort_keys=True,
+    ).lower()
     drifted_final_url_parts = urlparse(drifted_final_url)
     drifted_final_path_url = drifted_final_url_parts._replace(query="", fragment="").geturl().lower()
     drifted_final_query_key = drifted_final_url_parts.query.partition("=")[0].lower()
@@ -16539,6 +16543,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_assets_f
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / "github-release-assets-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     unsafe_markers = [
         "hostile-body-sentinel",
         "secret_value_do_not_leak",
