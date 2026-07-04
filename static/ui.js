@@ -759,11 +759,35 @@ function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx){
   }
   return -1;
 }
+function _safeEncodeURIComponent(v){
+  try{return encodeURIComponent(String(v));}
+  catch(e){
+    // encodeURIComponent threw URIError -> one or more lone UTF-16 surrogates.
+    // Walk the string as UTF-16 code units: keep valid high(D800-DBFF) +
+    // low(DC00-DFFF) pairs intact (so emoji survive) and drop lone surrogates.
+    // No regex lookbehind/lookahead so this parses on every browser engine
+    // (some older WebViews / Safari <16.4 don't support lookbehind in regex
+    // literals, which would otherwise brick ui.js at parse time).
+    const s=String(v);
+    let cleaned='';
+    for(let i=0;i<s.length;i++){
+      const c=s.charCodeAt(i);
+      if(c>=0xD800&&c<=0xDBFF){
+        const n=(i+1<s.length)?s.charCodeAt(i+1):0;
+        if(n>=0xDC00&&n<=0xDFFF){cleaned+=s[i]+s[i+1];i++;}
+      }else if(c<0xDC00||c>0xDFFF){
+        cleaned+=s[i];
+      }
+    }
+    return encodeURIComponent(cleaned);
+  }
+}
+
 function _messageViewportAnchorKeyForMessage(m){
   if(typeof _compressionMessageAnchorKey!=='function') return '';
   const key=_compressionMessageAnchorKey(m);
   if(!key) return '';
-  return [key.role||'',key.ts??'',key.attachments??0,key.text||''].map(v=>encodeURIComponent(String(v))).join('|');
+  return [key.role||'',key.ts??'',key.attachments??0,key.text||''].map(v=>_safeEncodeURIComponent(v)).join('|');
 }
 function _messageVisibleIndexForAnchorKey(anchorKey, visWithIdx){
   const key=String(anchorKey||'');
