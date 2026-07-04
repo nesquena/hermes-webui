@@ -27303,7 +27303,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_check_runs_metad
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_runs_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_runs_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -27363,6 +27363,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_runs_final
     catalog = source_catalog(limit=5)
     sentinel_search = search_memory(body_sentinel, limit=5)
     row_search = search_memory(check_run_row, limit=5)
+    relevant = relevant_memory_for_space("check-runs-drift-space", limit=5)
     serialized = json.dumps(
         {
             "result": result,
@@ -27370,6 +27371,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_runs_final
             "catalog": catalog,
             "sentinel_search_results": sentinel_search["results"],
             "row_search_results": row_search["results"],
+            "relevant": relevant,
         },
         sort_keys=True,
     ).lower()
@@ -27383,6 +27385,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_runs_final
     assert not (root / "vault" / "github-check-runs-final-url-drift.md").exists()
     assert sentinel_search["results"] == []
     assert row_search["results"] == []
+    assert relevant["results"] == []
     for forbidden in (
         drift_url.lower(),
         "secret_value_do_not_leak",
