@@ -22,10 +22,10 @@ def _current_session_is_reusable_empty_chat_body(src):
 
 
 class TestIssue1432NewChatGuardInFlight:
-    """`+` button and Cmd/Ctrl+K must create a new chat even while the current
-    session is still streaming. The empty-session guard from #1171 was checking
-    `message_count===0` only, which is true the entire time the first user
-    message is in flight (server-side count not yet updated). The guard now
+    """`+` button and Cmd/Ctrl+Shift+O must create a new chat even while the
+    current session is still streaming. The empty-session guard from #1171 was
+    checking `message_count===0` only, which is true the entire time the first
+    user message is in flight (server-side count not yet updated). The guard now
     also requires `!S.busy && !S.session.active_stream_id &&
     !S.session.pending_user_message` — same in-flight signal used at
     `static/messages.js:_restoreSettledSession()`.
@@ -55,7 +55,7 @@ class TestIssue1432NewChatGuardInFlight:
         assert '_currentSessionIsReusableEmptyChat()' in body, \
             "btnNewChat handler must use the shared empty-session guard"
 
-    def test_cmdK_handler_checks_in_flight_state(self):
+    def test_cmdShiftO_handler_checks_in_flight_state(self):
         src = _read('boot.js')
         helper = _current_session_is_reusable_empty_chat_body(src)
 
@@ -68,13 +68,13 @@ class TestIssue1432NewChatGuardInFlight:
         assert 'pending_user_message' in helper, \
             "shared New Chat guard missing pending_user_message check (#1432)"
 
-        # Locate the Cmd/Ctrl+K branch — it sits inside a keydown listener
-        idx = src.find("(e.metaKey||e.ctrlKey)&&e.key==='k'")
-        assert idx >= 0, "Cmd/Ctrl+K handler not found in boot.js"
+        # Locate the Cmd/Ctrl+Shift+O branch — it sits inside a keydown listener
+        idx = src.find("(e.metaKey||e.ctrlKey)&&e.shiftKey&&!e.altKey&&(e.key==='o'||e.key==='O')")
+        assert idx >= 0, "Cmd/Ctrl+Shift+O handler not found in boot.js"
         # Read the next ~1500 chars (handler body)
         body = src[idx:idx + 1500]
         assert '_currentSessionIsReusableEmptyChat()' in body, \
-            "Cmd/Ctrl+K handler must use the shared empty-session guard"
+            "Cmd/Ctrl+Shift+O handler must use the shared empty-session guard"
 
     def test_in_flight_signal_matches_restoreSettledSession(self):
         """The new in-flight check uses the same signal as the canonical

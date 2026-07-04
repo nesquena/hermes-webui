@@ -1997,7 +1997,7 @@ $('msg').addEventListener('keydown',e=>{
     }
   }
 });
-// B14: Cmd/Ctrl+K creates a new chat from anywhere
+// B14: Cmd/Ctrl+Shift+O creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
   // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
   // Skip when typing in an input/textarea/contenteditable so text-edit
@@ -2022,7 +2022,7 @@ document.addEventListener('keydown',async e=>{
       return;
     }
   }
-  if((e.metaKey||e.ctrlKey)&&e.key==='k'){
+  if((e.metaKey||e.ctrlKey)&&e.shiftKey&&!e.altKey&&(e.key==='o'||e.key==='O')){
     const t=e.target;
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
     if(isText) return;
@@ -2034,11 +2034,11 @@ document.addEventListener('keydown',async e=>{
     if(_currentSessionIsReusableEmptyChat()){
       $('msg').focus();return;
     }
-    // Cmd/Ctrl+K should always create a new conversation, even while the current
-    // one is still streaming. The old !S.busy guard meant users had to wait for
-    // a long generation to finish before they could start something new — exactly
-    // the moment they want to switch context. newSession() leaves the in-flight
-    // stream running on its own session; the user just gets a fresh blank one.
+    // Cmd/Ctrl+Shift+O should always create a new conversation, even while the
+    // current one is still streaming. The old !S.busy guard meant users had to
+    // wait for a long generation to finish before they could start something new —
+    // exactly the moment they want to switch context. newSession() leaves the
+    // in-flight stream running on its own session; the user just gets a fresh one.
     await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
   }
   // Cmd/Ctrl+, opens/closes Settings (VS Code convention).
