@@ -202,3 +202,60 @@ def test_clear_matches_truncate_to_empty_marker(monkeypatch, tmp_path):
     assert loaded.truncation_boundary == ref.truncation_boundary == 0.0
     assert loaded.messages == ref.messages == []
     assert loaded.context_messages == ref.context_messages == []
+
+
+def test_clear_detaches_compression_snapshot_parent(monkeypatch, tmp_path):
+    """Codex gate (#5532): clearing a COMPRESSED-CONTINUATION child must not let
+    the pre-clear transcript resurrect via the compression-snapshot parent.
+
+    A compressed continuation keeps its archived transcript in a parent sidecar
+    marked pre_compression_snapshot; _webui_sidecar_lineage_messages_for_display()
+    stitches that parent back for display, merging the child with
+    truncation_watermark=None — so the 0.0 sentinel on the CHILD does NOT stop
+    the parent from resurrecting the cleared history on refresh. The fix detaches
+    the lineage (parent_session_id + compression anchor fields) on clear.
+
+    Fail-without-fix: on the pre-fix handler the child keeps parent_session_id,
+    so the display stitch re-adds the parent's archived messages after clear.
+    """
+    _seed_session_dir(monkeypatch, tmp_path)
+    from api.models import Session
+    import api.routes as routes
+
+    parent = Session(
+        session_id="issue5532parent",
+        messages=_four_turn_messages(),
+        pre_compression_snapshot=True,
+    )
+    parent.save()
+
+    child = Session(
+        session_id="issue5532child",
+        messages=[
+            _msg("user", "post-compression turn", 5.0, "u3"),
+            _msg("assistant", "post-compression reply", 6.0, "a3"),
+        ],
+        context_messages=[],
+        parent_session_id="issue5532parent",
+    )
+    child.save()
+
+    # Sanity: before clear, the display stitch DOES surface the parent snapshot.
+    pre = routes._webui_sidecar_lineage_messages_for_display(Session.load("issue5532child"))
+    assert any(m.get("content") == "first" for m in pre), (
+        "precondition: compressed continuation should stitch the parent snapshot"
+    )
+
+    _call_clear(monkeypatch, "issue5532child")
+
+    loaded = Session.load("issue5532child")
+    assert loaded is not None
+    assert loaded.messages == []
+    # Lineage detached so the stitch can't resurrect the parent transcript.
+    assert getattr(loaded, "parent_session_id", None) in (None, "")
+    assert getattr(loaded, "compression_anchor_visible_idx", None) is None
+    assert getattr(loaded, "compression_anchor_message_key", None) is None
+    assert getattr(loaded, "compression_anchor_summary", None) is None
+    # The load-time display path must return EMPTY — no resurrected parent rows.
+    display = routes._webui_sidecar_lineage_messages_for_display(loaded)
+    assert display == [], f"cleared compressed continuation must not resurrect parent; got {display}"

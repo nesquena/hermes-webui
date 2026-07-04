@@ -13717,6 +13717,20 @@ def handle_post(handler, parsed) -> bool:
             )
             truncate_session_at_keep(s, 0)
             s.tool_calls = []
+            # #5532 (Codex gate): a compressed-continuation child persists its
+            # archived transcript in a parent sidecar marked
+            # pre_compression_snapshot and stitches it back for display via
+            # _webui_sidecar_lineage_messages_for_display(). That stitch merges
+            # the child's own messages with truncation_watermark=None, so the
+            # 0.0 truncate-to-empty sentinel we just set on the CHILD does NOT
+            # stop the PARENT snapshot from resurrecting the pre-clear transcript
+            # on refresh. Detach the compression lineage so a cleared session is
+            # genuinely empty: drop the snapshot parent link + the anchor fields
+            # so the child no longer resolves a pre_compression_snapshot parent.
+            s.parent_session_id = None
+            s.compression_anchor_visible_idx = None
+            s.compression_anchor_message_key = None
+            s.compression_anchor_summary = None
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
