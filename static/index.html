@@ -29,6 +29,7 @@
 <link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
 <script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
+<script>window.__HERMES_WEBUI_BUNDLE_VERSION__='__WEBUI_VERSION__';</script>
 <script>(function(){
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
   if(!token||!window.fetch)return;
@@ -414,6 +415,15 @@
         <button class="update-btn" onclick="dismissUpdate()">Later</button>
         <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>
         <button class="update-btn" id="btnForceUpdate" style="display:none;background:var(--error,#e05);color:#fff;border-color:var(--error,#e05)" onclick="forceUpdate(this)">Force update</button>
+      </div>
+    </div>
+    <div class="update-banner" id="staleClientBanner">
+      <div style="display:flex;flex-direction:column;flex:1;min-width:0">
+        <span id="staleClientMessage"></span>
+        <span id="staleClientVersions" style="font-size:11px;margin-top:4px;color:var(--muted)"></span>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
+        <button class="update-btn update-primary" id="btnStaleClientRefresh" type="button" onclick="hardRefreshWebUIClient()">Hard refresh now</button>
       </div>
     </div>
     <div id="mainChat" class="main-view">

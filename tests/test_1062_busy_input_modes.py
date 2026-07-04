@@ -310,9 +310,13 @@ class TestSendBusyBranchDispatch:
         assert send_idx >= 0, "send() not found"
         steer_idx = MESSAGES_JS.find("defaultMessageMode==='steer'", send_idx)
         assert steer_idx >= 0, "busy steer branch not found"
-        branch = MESSAGES_JS[steer_idx:steer_idx + 900]
+        branch_end = MESSAGES_JS.find("} else if(defaultMessageMode==='interrupt')", steer_idx)
+        assert branch_end > steer_idx, "busy steer branch end not found"
+        branch = MESSAGES_JS[steer_idx:branch_end]
         assert "const _steerDelivered=await _trySteer" in branch
+        assert "const _steerDraftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in branch
         assert "if(_steerDelivered){S.pendingFiles=[];renderTray();}" in branch
+        assert "_clearComposerDraft(S.session.session_id,text,_steerDraftFiles)" in branch
         assert branch.index("const _steerDelivered=await _trySteer") < branch.index("if(_steerDelivered){S.pendingFiles=[];renderTray();}")
 
 

@@ -4219,6 +4219,7 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row .thinking-card.open .thinking-card-body{
   border-top-color:transparent;
   padding:0 0 3px;
+  scrollbar-gutter:stable;
 }
 .transparent-event-row .tool-card-detail > *,
 .transparent-event-row .thinking-card-body > *{min-height:0;}

@@ -2299,6 +2299,80 @@ async function hardRefreshWebUIClient(){
   window.location.reload();
 }
 
+function _normalizeWebUIVersion(value){
+  if(!value) return '';
+  const s=String(value).trim();
+  if(!s) return '';
+  // Suppress placeholder / non-version sentinels (case-insensitive) so a real
+  // client version never "mismatches" against a server that couldn't detect its
+  // own version. api/updates.py can emit 'unknown' (git describe failure in a
+  // Docker/CI image); comparing a real version against 'unknown' would FALSELY
+  // fire the stale-client banner. (Codex #5480 gate)
+  const lower=s.toLowerCase();
+  if(lower==='__webui_version__'||lower==='not detected'||lower==='unknown') return '';
+  return s;
+}
+
+function _currentWebUIBundleVersion(){
+  try{
+    const raw=window.__HERMES_WEBUI_BUNDLE_VERSION__;
+    if(!raw) return '';
+    let s=String(raw);
+    try{ s=decodeURIComponent(s.replace(/\+/g,' ')); }catch(_){}
+    return _normalizeWebUIVersion(s);
+  }catch(_){ return ''; }
+}
+
+function _showStaleWebUIClientBanner(clientVersion,serverVersion){
+  const banner=document.getElementById('staleClientBanner');
+  if(!banner) return;
+  const msg=document.getElementById('staleClientMessage');
+  const versions=document.getElementById('staleClientVersions');
+  if(msg) msg.textContent='This tab is running a different WebUI version. Hard refresh to restore full functionality.';
+  if(versions) versions.textContent='Running: '+clientVersion+' → Server: '+serverVersion;
+  banner.style.display='flex';
+}
+
+function checkWebUIVersionSkew(settings){
+  try{
+    if(!settings) return;
+    const client=_currentWebUIBundleVersion();
+    const server=_normalizeWebUIVersion(settings.webui_version);
+    if(!client||!server) return;
+    if(client===server) return;
+    _showStaleWebUIClientBanner(client,server);
+  }catch(_){}
+}
+window.checkWebUIVersionSkew=checkWebUIVersionSkew;
+
+function _startWebUIVersionSkewMonitor(){
+  let _pollTimer=null;
+  function _isBannerVisible(){
+    const banner=document.getElementById('staleClientBanner');
+    return !!(banner&&banner.style.display==='flex');
+  }
+  function _check(){
+    if(_isBannerVisible()) return;
+    Promise.resolve().then(function(){ return api('/api/settings'); }).then(function(s){ checkWebUIVersionSkew(s); }).catch(function(){});
+  }
+  function _startPoll(){
+    if(_pollTimer||document.hidden) return;
+    _pollTimer=setInterval(function(){
+      if(document.hidden){ clearInterval(_pollTimer); _pollTimer=null; return; }
+      if(_isBannerVisible()){ clearInterval(_pollTimer); _pollTimer=null; return; }
+      _check();
+    },60000);
+  }
+  _check();
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden){ _check(); _startPoll(); }
+    else if(_pollTimer){ clearInterval(_pollTimer); _pollTimer=null; }
+  });
+  window.addEventListener('focus',function(){ _check(); });
+  _startPoll();
+}
+_startWebUIVersionSkewMonitor();
+
 function _kanbanLooksLikeStaleClientError(err){
   const msg = String((err && err.message) || err || '').toLowerCase();
   return !!(err && err.status === 404 && (
@@ -6442,6 +6516,21 @@ window.addEventListener('resize',()=>{
   if(dd&&dd.classList.contains('open')) _positionProfileDropdown();
 });
 
+function _openProfileSwitchSessionBrowser(){
+  try{
+    const isDesktop = (typeof _isDesktopWidth === 'function') ? _isDesktopWidth() : true;
+    if(isDesktop){
+      if(typeof expandSidebar === 'function') expandSidebar();
+      return;
+    }
+    const sidebar=document.querySelector('.sidebar');
+    if(!sidebar)return;
+    try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
+    sidebar.classList.remove('mobile-session-page');
+    sidebar.classList.add('mobile-panel-drawer','mobile-open');
+  }catch(_){}
+}
+
 async function switchToProfile(name) {
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
@@ -6481,6 +6570,7 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
@@ -6501,14 +6591,22 @@ async function switchToProfile(name) {
   // context change where dismissing those transient affordances is correct.
   if (typeof _renamingSid !== 'undefined' && _renamingSid) _renamingSid = null;
   if (typeof closeSessionActionMenu === 'function') closeSessionActionMenu();
-  // Determine whether the current session has any messages.
-  // A session with messages is "in progress" and belongs to the current profile —
-  // we must not retag it.  We'll start a fresh session for the new profile instead.
-  const sessionInProgress = S.session && (
+  // Determine whether the current session must be replaced instead of being
+  // retagged in place. A session with messages/active runtime belongs to the
+  // current profile. After the profile-switch POST returns, we also treat an
+  // otherwise-empty session whose recorded profile does not match the target
+  // profile as replace-only: uploads send S.session.session_id and the backend
+  // correctly rejects old-profile sessions under the new profile cookie.
+  let sessionInProgress = !!(S.session && (
     (S.messages && S.messages.length > 0) ||
     S.session.active_stream_id ||
     S.session.pending_user_message
-  );
+  ));
+  if (_openingExistingSidebarSession && S.session) {
+    // A cross-profile sidebar click is about to load a concrete existing session.
+    // Do not create or retag a blank intermediary session in the destination profile.
+    sessionInProgress = true;
+  }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
@@ -6541,6 +6639,19 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    const targetActiveProfile = S.activeProfile || 'default';
+    let sessionProfileMatchesTarget = true;
+    if (!sessionInProgress && S.session) {
+      const currentSessionProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
+        ? S.session.profile.trim()
+        : 'default';
+      sessionProfileMatchesTarget = (typeof _profileMatchesActiveProfile === 'function')
+        ? _profileMatchesActiveProfile(currentSessionProfile, targetActiveProfile)
+        : (currentSessionProfile === targetActiveProfile || (currentSessionProfile === 'default' && !!S.activeProfileIsDefault));
+      if (!sessionProfileMatchesTarget) {
+        sessionInProgress = true;
+      }
+    }
     // #4650 review: a profile switch can change agent.reasoning_effort (and other
     // reasoning inputs like base_url) WITHOUT changing the default model/provider,
     // which is all the reasoning-chip cache key tracks. Force exactly one reasoning
@@ -6636,10 +6747,20 @@ async function switchToProfile(name) {
     }
 
     // ── Session ────────────────────────────────────────────────────────────
-    _showAllProfiles = false;
+    // Keep the all-profiles sidebar scope sticky across profile switches. It is
+    // a navigation preference shared by the browser session, not a per-profile flag.
     if (typeof animateNextSessionListRefresh === 'function') animateNextSessionListRefresh();
 
-    if (sessionInProgress) {
+    if (sessionInProgress && _openingExistingSidebarSession) {
+      // The caller will immediately load the clicked session after this profile
+      // cookie switch. Avoid creating/retagging an intermediate blank chat.
+      const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+      await renderSessionList();
+      if (_switchGen !== _profileSwitchGeneration) return;
+      if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
+      showToast(t('profile_switched', name));
+    } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
@@ -6659,6 +6780,7 @@ async function switchToProfile(name) {
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
       if (_switchGen !== _profileSwitchGeneration) return;
+      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
       // (#4662 Opus gate). No-op when a real tree already rendered.
@@ -6681,6 +6803,7 @@ async function switchToProfile(name) {
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
       if (_switchGen !== _profileSwitchGeneration) return;
+      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
       // profile's workspace, not the previous one (#1214).
@@ -8336,6 +8459,7 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
+    checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
     const webuiBadge = $('settings-webui-version-badge');

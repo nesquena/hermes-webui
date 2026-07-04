@@ -60,6 +60,13 @@ contributor guidance; it does not change runtime behavior or CI gates.
   queued messages, interrupt replacement, steer visibility, or leftover-steer
   recovery changes.
 - [`docs/rfcs/README.md`](rfcs/README.md): RFC conventions and current RFC index.
+- [`docs/rfcs/session-sse-contract-v1.md`](rfcs/session-sse-contract-v1.md):
+  proposed contract vocabulary, cursor/resume semantics, replay identity, snapshot
+  fallback, event taxonomy, and implementation gates for the per-session SSE
+  stream `GET /api/sessions/{session_id}/events` (#4812). Distinct from the
+  existing global session-list stream `GET /api/sessions/events`. Start here for
+  any work that touches per-session SSE, `Last-Event-ID` replay, or session
+  lifecycle event delivery. Proposed RFCs do not authorize implementation.
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

@@ -748,3 +748,174 @@ def test_bare_custom_provider_no_base_url_with_known_prefix_keeps_custom_and_ful
     )
     assert model == 'google/gemma-2-9b'
     assert base_url is None
+
+
+# ── providers: (config.yaml user-defined provider) scan (#5511) ─────────────
+
+def _resolve_with_providers(model_id, providers_cfg, *, provider=None, default=None):
+    """Helper: temporarily set config.cfg['providers'] + model, call resolve, restore."""
+    old_cfg = dict(config.cfg)
+    model_cfg = {}
+    if provider:
+        model_cfg['provider'] = provider
+    if default:
+        model_cfg['default'] = default
+    config.cfg['model'] = model_cfg
+    config.cfg['providers'] = providers_cfg
+    try:
+        return config.resolve_model_provider(model_id)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
+def test_providers_scan_routes_user_defined_allowlist_5511():
+    """A user-defined providers.<slug>.models allowlist routes a bare model id
+    to that provider (the feature #5511 adds)."""
+    model, provider, base_url = _resolve_with_providers(
+        'my-model-1',
+        {'myprov': {'base_url': 'https://my.example/v1', 'models': ['my-model-1', 'my-model-2']}},
+        provider='openai',
+        default='gpt-5',
+    )
+    assert provider == 'myprov', f"user-defined provider allowlist must route; got {provider!r}"
+    assert model == 'my-model-1'
+    assert base_url == 'https://my.example/v1'
+
+
+def test_providers_scan_skips_copilot_settings_map_5511():
+    """providers.copilot.models is a per-model SETTINGS map, NOT a routable
+    allowlist — a Copilot per-model settings entry must NOT hijack routing away
+    from the model's real provider (#5511 gate-cert CORE finding)."""
+    model, provider, base_url = _resolve_with_providers(
+        'gpt-5',
+        {'copilot': {'models': {'gpt-5': {'reasoning_effort': 'high'}}}},
+        provider='openai',
+        default='gpt-5',
+    )
+    assert provider == 'openai', (
+        "Copilot settings-map entry must NOT hijack routing; "
+        f"gpt-5 must stay on openai, got {provider!r}"
+    )
+    assert model == 'gpt-5'
+
+
+def test_providers_scan_copilot_list_shape_also_skipped_5511():
+    """Defense in depth: even if providers.copilot.models is a list shape, the
+    Copilot exclusion still prevents a routing hijack."""
+    model, provider, base_url = _resolve_with_providers(
+        'gpt-5',
+        {'copilot': {'models': ['gpt-5', 'gpt-5-mini']}},
+        provider='openai',
+        default='gpt-5',
+    )
+    assert provider == 'openai', (
+        f"Copilot (list shape) must not hijack routing; got {provider!r}"
+    )
+    assert model == 'gpt-5'
+
+
+def test_providers_scan_honors_active_provider_ownership_5511():
+    """When the active provider owns the model (it's the configured default),
+    another provider's overlapping providers.<slug>.models entry must NOT hijack
+    routing away from the active provider (#5511 gate finding — active ai-gateway
+    + default gpt-5 was being pulled to providers.openai.models.gpt-5)."""
+    model, provider, base_url = _resolve_with_providers(
+        'gpt-5',
+        {'openai': {'models': ['gpt-5']}},
+        provider='ai-gateway',
+        default='gpt-5',
+    )
+    assert provider == 'ai-gateway', (
+        "active provider that owns the default model must keep routing; "
+        f"gpt-5 must stay on ai-gateway, got {provider!r}"
+    )
+    assert model == 'gpt-5'
+
+
+def test_providers_scan_active_provider_own_entry_still_matches_5511():
+    """The ownership guard still lets the ACTIVE provider's own providers: entry
+    match (e.g. active myprov + a model in providers.myprov.models resolves to
+    myprov with its base_url)."""
+    model, provider, base_url = _resolve_with_providers(
+        'gpt-5',
+        {'myprov': {'base_url': 'https://my.example/v1', 'models': ['gpt-5']}},
+        provider='myprov',
+        default='gpt-5',
+    )
+    assert provider == 'myprov', f"active provider's own entry must match; got {provider!r}"
+    assert base_url == 'https://my.example/v1'
+
+
+def test_providers_scan_ownership_guard_canonicalises_aliased_active_provider_5511():
+    """An ALIASED active provider (e.g. 'z-ai' → canonical 'zai') must still be
+    recognized as owning its catalog models, so another providers.<slug>.models
+    entry can't hijack an active-owned model (#5511 latent-bug gate finding —
+    _provider_models_set was built with the raw alias, missing the canonical
+    _PROVIDER_MODELS key, so the ownership guard silently failed)."""
+    import api.config as config
+    # Pick a real catalog model id owned by the canonical 'zai' provider.
+    zai_models = config._PROVIDER_MODELS.get('zai') or []
+    zai_ids = [m.get('id') for m in zai_models if isinstance(m, dict) and m.get('id')]
+    if not zai_ids:
+        import pytest
+        pytest.skip("no zai catalog models to exercise the alias ownership guard")
+    owned = zai_ids[0]
+    model, provider, base_url = _resolve_with_providers(
+        owned,
+        {'openai': {'models': [owned]}},
+        provider='z-ai',        # aliased form the user may write in config
+    )
+    assert config._canonicalise_provider_id('z-ai') == 'zai'
+    assert provider == 'z-ai', (
+        "aliased active provider (z-ai→zai) that owns the model must not be "
+        f"hijacked by providers.openai.models; got {provider!r}"
+    )
+
+
+def test_providers_scan_ownership_guard_canonicalises_gemini_alias_5511():
+    """A Gemini-family alias (google-gemini → gemini) must canonicalise so the
+    active provider is recognized as owning its catalog models (#5511 latent bug:
+    `gemini` is in _PROVIDER_MODELS but not _PROVIDER_DISPLAY, so the alias was
+    rejected and the ownership guard silently failed)."""
+    import api.config as config
+    assert config._canonicalise_provider_id('google-gemini') == 'gemini', (
+        "google-gemini must canonicalise to gemini"
+    )
+    gem_models = config._PROVIDER_MODELS.get('gemini') or []
+    gem_ids = [m.get('id') for m in gem_models if isinstance(m, dict) and m.get('id')]
+    if not gem_ids:
+        import pytest
+        pytest.skip("no gemini catalog models to exercise the alias ownership guard")
+    owned = gem_ids[0]
+    model, provider, base_url = _resolve_with_providers(
+        owned,
+        {'openai': {'models': [owned]}},
+        provider='google-gemini',
+    )
+    assert provider == 'google-gemini', (
+        "aliased active Gemini provider that owns the model must not be hijacked "
+        f"by providers.openai.models; got {provider!r}"
+    )
+
+
+def test_providers_scan_active_own_providers_entry_owns_over_other_slug_5511():
+    """An active provider defined purely via config.yaml `providers:` (no static
+    catalog entry) owns the models in its OWN providers.<active>.models allowlist,
+    so another provider's entry listing the same bare id (even earlier in config
+    order) must NOT hijack it (#5511 gate finding 5)."""
+    # 'openai' entry lists gpt-x first, but the ACTIVE provider (myprov) also
+    # declares gpt-x in its own providers.myprov.models — active must win.
+    model, provider, base_url = _resolve_with_providers(
+        'gpt-x',
+        {
+            'openai': {'models': ['gpt-x']},
+            'myprov': {'base_url': 'https://my.example/v1', 'models': ['gpt-x']},
+        },
+        provider='myprov',
+    )
+    assert provider == 'myprov', (
+        "active provider's own providers: allowlist must own its model over "
+        f"another slug's overlapping entry; got {provider!r}"
+    )
+    assert base_url == 'https://my.example/v1'

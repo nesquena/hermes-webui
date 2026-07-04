@@ -1065,6 +1065,7 @@ global._syncToolCallGroupSummary=()=>{{}};
     eval(extractFunc('_transparentLiveRowAttributePairs'));
     eval(extractFunc('_transparentLiveRowInteractiveState'));
     eval(extractFunc('_rehydrateTransparentLiveRow'));
+    eval(extractFunc('_refreshTransparentThinkingLiveRow'));
     eval(extractFunc('_refreshTransparentLiveRow'));
     eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 

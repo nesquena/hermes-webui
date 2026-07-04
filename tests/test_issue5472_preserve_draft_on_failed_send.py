@@ -99,12 +99,14 @@ def test_send_still_clears_composer_on_the_happy_path():
     # assertion must actually guard the main send path's clear. (Opus #5484 NIT.)
     main_clear = (
         "if (activeSid && typeof _clearComposerDraft === 'function') "
-        "_composerDraftClearPromise=_clearComposerDraft(activeSid);"
+        "_composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);"
     )
     assert main_clear in MESSAGES_JS, "main send path must clear the persisted draft at send time"
     # The composer textarea wipe must sit immediately above that clear.
     clear_idx = MESSAGES_JS.find(main_clear)
     window_before = MESSAGES_JS[clear_idx - 700:clear_idx]
+    assert "const _submittedDraftTextForClear=$('msg').value||'';" in window_before
+    assert "const _submittedDraftFilesForClear=Array.isArray(_failedSendFilesSnapshot)?[..._failedSendFilesSnapshot]:[];" in window_before
     assert "$('msg').value='';autoResize();" in window_before, (
         "the main-path composer wipe must precede the persisted-draft clear"
     )

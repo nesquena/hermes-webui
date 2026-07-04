@@ -1922,12 +1922,59 @@ def test_delete_imported_messaging_session_preserves_agent_memory(cleanup_test_s
             (sid,),
         ).fetchone()[0]
         assert remaining == 2
+
+        # A messaging-session delete deliberately preserves the state.db
+        # transcript (delete_cli_session is skipped), so it must NOT be
+        # recorded in the deleted-WebUI tombstone — otherwise
+        # _claim_or_synthesize_cli_session() would treat the still-live
+        # channel session as was-webui and self-heal it to a 404 on reopen.
+        import api.models as _m
+        assert sid not in _m._load_webui_deleted_session_tombstone(), (
+            "messaging session must not be tombstoned as a deleted WebUI session"
+        )
     finally:
         try:
             _remove_test_sessions(conn, sid)
             conn.close()
         except Exception:
             pass
+
+
+def test_deleted_webui_session_stays_out_of_sidebar_projection(cleanup_test_sessions):
+    """A tombstoned deleted WebUI session must not resurface via the state.db projection.
+
+    Regression for #5498 (second path): even when non-WebUI sessions are shown,
+    _load_cli_sessions_uncached() projects source='webui' state.db rows into the
+    sidebar. Without honoring the deleted-WebUI tombstone, a deleted session
+    reappears as an 'Agent' ghost. The projection must skip a tombstoned
+    source='webui' row that has no live sidecar.
+    """
+    import api.models as _m
+
+    conn = _ensure_state_db()
+    sid = 'webui_deleted_ghost_projection_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='webui', title='Deleted WebUI Ghost')
+        _m._record_webui_deleted_session_tombstone(sid)
+        # Tombstone should win: ensure no live sidecar exists for this sid.
+        assert not (_m.SESSION_DIR / f'{sid}.json').exists()
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s['session_id'] for s in data.get('sessions', [])}
+        assert sid not in ids, (
+            "deleted (tombstoned) WebUI session must not resurface in the sidebar projection"
+        )
+    finally:
+        try:
+            _m._clear_webui_deleted_session_tombstone(sid)
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
 
 
 def test_imported_cron_sessions_hidden_from_sidebar_by_default(cleanup_test_sessions):

@@ -286,7 +286,7 @@ def test_transparent_event_row_quiet_metadata_visual_rhythm():
     assert "border-radius:0;" in STYLE_CSS
     assert "margin-top:0;" in STYLE_CSS
     assert "padding:0 8px 6px 27px;" in STYLE_CSS
-    assert ".transparent-event-row .thinking-card.open .thinking-card-body{\n  border-top-color:transparent;\n  padding:0 0 3px;\n}" in STYLE_CSS
+    assert ".transparent-event-row .thinking-card.open .thinking-card-body{\n  border-top-color:transparent;\n  padding:0 0 3px;\n  scrollbar-gutter:stable;\n}" in STYLE_CSS
 
     # Tabs: text-link style with an active underline (no pill background).
     assert ".transparent-detail-mode.active{color:var(--text);opacity:1;font-weight:600;box-shadow:inset 0 -1px 0 var(--accent);}" in STYLE_CSS
