@@ -4858,7 +4858,7 @@ if(typeof window!=='undefined'){
       }else if(movedDown&&nearBottom){
         _nearBottomCount=_nearBottomCount+1;
         if(_nearBottomCount>=2){
-          if(!_messageUserUnpinned||bottomDistance<=80){
+          if(!_messageUserUnpinned||bottomDistance<=250){
             _messageUserUnpinned=false;
             _scrollPinned=true;
           }
@@ -5516,7 +5516,21 @@ function _settleFinalScroll(token){
 }
 function scrollIfPinned(){
   if(!_autoScrollFollow) return;
-  if(_messageUserUnpinned) return;
+  if(_messageUserUnpinned){
+    // Only scrollToBottom() cleared this flag, so one scroll-up permanently
+    // killed auto-follow. Re-pin through the same _nearBottomCount debounce
+    // the scroll listener uses (~4859-4866) instead of flipping the flags
+    // on the first chunk that lands near bottom, since this runs on every
+    // streamed chunk and would otherwise fight a reader who's actively
+    // scrolling away, and bypass the listener's own re-pin guards.
+    if(_messageBottomDistance()>250){ _nearBottomCount=0; return; }
+    _nearBottomCount=_nearBottomCount+1;
+    if(_nearBottomCount<2) return;
+    _nearBottomCount=0;
+    if(_recentNonMessageScrollIntent()||_recentMessageTouchScrollIntent()) return;
+    _messageUserUnpinned=false;
+    _scrollPinned=true;
+  }
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
   if(_messageBottomDistance()>500) _setMessageScrollToBottom();
