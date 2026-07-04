@@ -5821,7 +5821,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               return;
             }
           }catch(_){
-            // _restoreSettledSession threw — let the timer handle cleanup
+            // _restoreSettledSession threw. If the timer already fired,
+            // _handleStreamError was called there; we return below.
+            // Otherwise the code below cancels the timer and calls it directly.
           }
           if(_restoreTimedOut) return; // timer already fired _handleStreamError
           clearTimeout(_restoreTimer);

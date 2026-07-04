@@ -5710,13 +5710,12 @@ main.main > #mainPlugin{display:none;}
    especially sensitive: every scrollHeight read forces a full-document re-layout.
    Scoped to pointer:coarse to preserve find-in-page on desktop.
 
-   contain-intrinsic-size is intentionally omitted — a hardcoded size estimate
-   drifts from actual row heights, causing scrollHeight recalculation as rows
-   enter the viewport, which kills flick-scroll momentum on iOS. Without it, the
-   scrollbar is less precise but momentum scrolling is preserved.
+   contain-intrinsic-size: auto 1px keeps off-screen rows in the accessibility
+   tree (VoiceOver) while the 1px estimate is small enough to avoid scrollHeight
+   recalculation jumps that kill flick-scroll momentum on iOS.
    overflow-anchor:none prevents the browser from fighting layout adjustments. */
 @media (pointer: coarse) {
-  .msg-row { content-visibility: auto; contain: layout style; }
+  .msg-row { content-visibility: auto; contain-intrinsic-size: auto 1px; contain: layout style; }
   .messages { overflow-anchor: none; }
   /* Live streaming segments use .assistant-segment (not .msg-row), so they are
      naturally unaffected. The overrides below are defense-in-depth in case the
