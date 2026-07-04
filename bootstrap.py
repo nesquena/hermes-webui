@@ -270,6 +270,13 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
                 if _python_can_run_webui_and_agent(str(candidate), agent_dir):
                     return str(candidate)
 
+    if (os.getenv("HERMES_WEBUI_DISABLE_LOCAL_VENV") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        raise RuntimeError(
+            "Python environment cannot import both WebUI dependencies and Hermes Agent, "
+            "and local .venv creation is disabled for this packaged launch. Set "
+            "HERMES_WEBUI_PYTHON to an interpreter with Hermes Agent dependencies."
+        )
+
     venv_dir = REPO_ROOT / ".venv"
     venv_python = venv_dir / (
         "Scripts/python.exe" if platform.system() == "Windows" else "bin/python"

@@ -27,10 +27,11 @@ pkgs.stdenv.mkDerivation {
     cp "${./../server.py}" "$out/${runtimeDir}/server.py"
     cp "${./../mcp_server.py}" "$out/${runtimeDir}/mcp_server.py"
     cp "${./../requirements.txt}" "$out/${runtimeDir}/requirements.txt"
-    cp -r "${./../api}" "$out/${runtimeDir}/"
-    cp -r "${./../static}" "$out/${runtimeDir}/"
+    cp -r "${./../api}" "$out/${runtimeDir}/api"
+    cp -r "${./../static}" "$out/${runtimeDir}/static"
 
     makeWrapper ${pythonEnv}/bin/python3 "$out/bin/hermes-webui" \
+      --set HERMES_WEBUI_DISABLE_LOCAL_VENV 1 \
       --add-flags "$out/${runtimeDir}/bootstrap.py --foreground --no-browser --skip-agent-install"
 
     runHook postInstall

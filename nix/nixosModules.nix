@@ -15,6 +15,9 @@ let
     "HERMES_WEBUI_PYTHON"
   ];
 
+  defaultUser = "hermes-webui";
+  defaultGroup = "hermes-webui";
+
   protectedEnvironmentFileCheck = pkgs.writeShellScript "hermes-webui-protected-envfile-check" ''
     set -eu
     for env_file in "$@"; do
@@ -47,8 +50,16 @@ let
   inferredAgentDir =
     if cfg.agent.package == null then
       null
+    else if (cfg.agent.package ? passthru) && (cfg.agent.package.passthru ? hermesVenv) then
+      "${cfg.agent.package.passthru.hermesVenv}/lib/python3.12/site-packages"
     else
-      "${cfg.agent.package}/share/hermes-agent";
+      null;
+
+  configuredAgentPython =
+    if cfg.agent.python != null then
+      cfg.agent.python
+    else
+      inferredAgentPython;
 
   mappedEnvironment = (lib.mapAttrsToList
     (name: value: "${name}=${value}")
@@ -66,27 +77,18 @@ let
     // lib.optionalAttrs (cfg.agent.dir == null && inferredAgentDir != null) {
       HERMES_WEBUI_AGENT_DIR = inferredAgentDir;
     }
-    // lib.optionalAttrs (cfg.agent.dir == null && inferredAgentPython != null) {
-      HERMES_WEBUI_PYTHON = inferredAgentPython;
+    // lib.optionalAttrs (configuredAgentPython != null) {
+      HERMES_WEBUI_PYTHON = configuredAgentPython;
     }
     // lib.filterAttrs
       (name: _: !(lib.elem name protectedEnvironment))
       cfg.extraEnvironment));
 
   needsWritableStateDir = cfg.stateDir != defaultStateDir;
-  writableServiceDirs =
-    lib.optionals needsWritableStateDir [ cfg.stateDir ]
-    ++ lib.optionals (cfg.hermesHome != null) [ cfg.hermesHome ];
-
-  userspaceDirs = lib.optionals (cfg.hermesHome != null) [
-    "d ${cfg.hermesHome} 2770 ${cfg.user} ${cfg.group} - -"
+  writableServiceDirs = lib.optionals needsWritableStateDir [ cfg.stateDir ];
+  tmpfilesRules = lib.optionals needsWritableStateDir [
+    "d ${cfg.stateDir} 2770 ${cfg.user} ${cfg.group} - -"
   ];
-
-  tmpfilesRules =
-    (lib.optionals needsWritableStateDir [
-      "d ${cfg.stateDir} 2770 ${cfg.user} ${cfg.group} - -"
-    ])
-    ++ userspaceDirs;
 in
 {
   options.services.hermes-webui = {
@@ -101,19 +103,19 @@ in
 
     user = lib.mkOption {
       type = lib.types.str;
-      default = "hermes-webui";
+      default = defaultUser;
       description = "User that runs the Hermes WebUI service.";
     };
 
     group = lib.mkOption {
       type = lib.types.str;
-      default = "hermes-webui";
+      default = defaultGroup;
       description = "Group that runs the Hermes WebUI service.";
     };
 
     host = lib.mkOption {
       type = lib.types.str;
-      default = "0.0.0.0";
+      default = "127.0.0.1";
       description = "Value for HERMES_WEBUI_HOST.";
     };
 
@@ -121,6 +123,12 @@ in
       type = lib.types.port;
       default = 8787;
       description = "Value for HERMES_WEBUI_PORT.";
+    };
+
+    openFirewall = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Open the configured TCP port in the NixOS firewall.";
     };
 
     stateDir = lib.mkOption {
@@ -140,13 +148,19 @@ in
       package = lib.mkOption {
         type = lib.types.nullOr lib.types.package;
         default = null;
-        description = "Package to derive HERMES_WEBUI_AGENT_DIR from when `agent.dir` is unset.";
+        description = "Package to derive HERMES_WEBUI_AGENT_DIR and HERMES_WEBUI_PYTHON from when it exposes passthru.hermesVenv.";
       };
 
       dir = lib.mkOption {
         type = lib.types.nullOr (lib.types.strMatching "^/.+");
         default = null;
         description = "Explicit path for HERMES_WEBUI_AGENT_DIR.";
+      };
+
+      python = lib.mkOption {
+        type = lib.types.nullOr (lib.types.strMatching "^/.+");
+        default = null;
+        description = "Explicit path for HERMES_WEBUI_PYTHON when the service must run with agent dependencies from a separately managed environment.";
       };
     };
 
@@ -187,13 +201,19 @@ in
         };
     };
 
-    users.groups.${cfg.group} = { };
+    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
 
-    users.users.${cfg.user} = {
-      isSystemUser = true;
-      group = cfg.group;
-      createHome = true;
-      home = cfg.stateDir;
+    users.groups = lib.mkIf (cfg.group == defaultGroup) {
+      ${cfg.group} = { };
+    };
+
+    users.users = lib.mkIf (cfg.user == defaultUser) {
+      ${cfg.user} = {
+        isSystemUser = true;
+        group = cfg.group;
+        createHome = true;
+        home = cfg.stateDir;
+      };
     };
 
     systemd.tmpfiles.rules = tmpfilesRules;

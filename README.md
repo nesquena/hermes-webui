@@ -414,7 +414,7 @@ Service example:
 ```nix
 services.hermes-webui = {
   enable = true;
-  host = "0.0.0.0";
+  host = "127.0.0.1";
   port = 8787;
   stateDir = "/var/lib/hermes-webui";
   agent.dir = "/var/lib/hermes/hermes-agent";
@@ -422,9 +422,11 @@ services.hermes-webui = {
 };
 ```
 
-The module defaults to `0.0.0.0` for a network-reachable system service. Pair that with auth, for example `HERMES_WEBUI_PASSWORD` via `environmentFiles`, or override `host = "127.0.0.1"` when you want loopback-only access.
+The module defaults to `127.0.0.1`. Set `host = "0.0.0.0"` and `openFirewall = true` only when you want direct network access, and pair that with auth, for example `HERMES_WEBUI_PASSWORD` via `environmentFiles`.
 
-You can also set `agent.package` instead of `agent.dir` when you are using a compatible Hermes Agent package layout. The module derives `HERMES_WEBUI_AGENT_DIR` from `<pkg>/share/hermes-agent` and sets `HERMES_WEBUI_PYTHON` from the package's `passthru.hermesVenv` interpreter so bootstrap can use agent dependencies without creating a local `.venv`.
+You can also set `agent.package` instead of `agent.dir` when you are using a compatible Hermes Agent package layout. When the package exposes `passthru.hermesVenv`, the module derives `HERMES_WEBUI_AGENT_DIR` from that venv's site-packages path and sets `HERMES_WEBUI_PYTHON` from the same venv interpreter so bootstrap can use agent dependencies without creating a local `.venv`. If the package does not expose that venv metadata, set `agent.dir` and `agent.python` explicitly.
+
+When WebUI reads shared Hermes Agent state, run the service as a user that can already read that state. For a co-located Hermes Agent service, set `user` and `group` to the agent service account; the module only creates the default `hermes-webui` account and never changes ownership of an existing `hermesHome`.
 
 The module maps directly onto existing WebUI environment variables, including:
 `HERMES_WEBUI_HOST`, `HERMES_WEBUI_PORT`, `HERMES_WEBUI_STATE_DIR`, `HERMES_HOME`, `HERMES_WEBUI_AGENT_DIR`, and `HERMES_WEBUI_PYTHON`.

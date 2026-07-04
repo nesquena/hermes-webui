@@ -32,7 +32,7 @@
                   services.hermes-webui = {
                     enable = true;
                     package = package;
-                    host = "0.0.0.0";
+                    host = "127.0.0.1";
                     port = 8787;
                     stateDir = "/var/lib/hermes-webui";
                     agent.dir = "/var/lib/hermes-agent";
@@ -47,10 +47,23 @@
             module-env-mapping = pkgs.runCommand "hermes-webui-nixos-module-${system}" {
               nativeBuildInputs = [ pkgs.coreutils ];
             } ''
-              grep -q 'HERMES_WEBUI_HOST=0.0.0.0' ${envProbe}
+              grep -q 'HERMES_WEBUI_HOST=127.0.0.1' ${envProbe}
               grep -q 'HERMES_WEBUI_PORT=8787' ${envProbe}
               grep -q 'HERMES_WEBUI_STATE_DIR=/var/lib/hermes-webui' ${envProbe}
               grep -q 'HERMES_WEBUI_AGENT_DIR=/var/lib/hermes-agent' ${envProbe}
+              touch "$out"
+            '';
+            runtime-layout = pkgs.runCommand "hermes-webui-runtime-layout-${system}" {
+              nativeBuildInputs = [ pkgs.coreutils ];
+            } ''
+              test -f ${package}/hermes-webui/bootstrap.py
+              test -f ${package}/hermes-webui/server.py
+              test -d ${package}/hermes-webui/api
+              test -d ${package}/hermes-webui/static
+              cd ${package}/hermes-webui
+              ${package}/bin/hermes-webui --help >/dev/null
+              ${package}/bin/hermes-webui --help 2>&1 | grep -q -- '--foreground'
+              PYTHONPATH=${package}/hermes-webui ${pkgs.python3.withPackages (ps: with ps; [ pyyaml cryptography ])}/bin/python3 -c 'import api.config, server; print("runtime imports ok")'
               touch "$out"
             '';
           }
