@@ -33373,7 +33373,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_contributor_stat
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_contributor_stats_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_contributor_stats_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch
 ):
     root = tmp_path / "capy-memory"
@@ -33432,9 +33432,11 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_contributor_stat
     jobs = list_source_refresh_jobs(limit=5)
     catalog = source_catalog(limit=25)
     search = search_memory(body_sentinel_login, limit=5)
+    relevant = relevant_memory_for_space("contributor-stats-drift-space", limit=5)
     serialized = json.dumps({
         "catalog": catalog,
         "jobs": jobs,
+        "relevant_memory": relevant,
         "result": result,
         "search_results": search["results"],
     }, sort_keys=True).lower()
@@ -33451,6 +33453,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_contributor_stat
     assert jobs["jobs"][0]["status"] == "pending"
     assert not (root / "vault" / "github-contributor-stats-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "https://api.github.com/repos/capy/spaces/stats/contributors?access_token=secret_value_do_not_leak#raw-prompt",
         "secret_value_do_not_leak",
