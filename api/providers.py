@@ -212,6 +212,7 @@ def _snapshot_payload(snapshot):
         "plan": getattr(snapshot, "plan", None),
         "windows": windows,
         "details": list(getattr(snapshot, "details", ()) or ()),
+        "reset_credits": getattr(snapshot, "reset_credits", None),
         "available": bool(getattr(snapshot, "available", bool(windows))),
         "unavailable_reason": getattr(snapshot, "unavailable_reason", None),
         "fetched_at": _iso(getattr(snapshot, "fetched_at", None)),
@@ -271,6 +272,39 @@ def _title_case_slug(value):
     if not cleaned:
         return None
     return cleaned.replace("_", " ").replace("-", " ").title()
+
+
+def _codex_reset_credits_payload(payload):
+    if not isinstance(payload, dict):
+        return None
+    candidates = []
+    for key in (
+        "rate_limit_reset_credits",
+        "rate_limit_reset_credit",
+        "usage_limit_reset_credits",
+        "usage_limit_resets",
+        "limit_reset_credits",
+        "reset_credits",
+        "resets",
+    ):
+        if key in payload:
+            candidates.append(payload.get(key))
+    rate_limit = payload.get("rate_limit")
+    if isinstance(rate_limit, dict):
+        for key in ("reset_credits", "resets", "usage_limit_resets"):
+            if key in rate_limit:
+                candidates.append(rate_limit.get(key))
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            for key in ("available_count", "remaining_count", "count", "available"):
+                number = _number(candidate.get(key))
+                if number is not None:
+                    return {"available_count": int(number) if float(number).is_integer() else number}
+        else:
+            number = _number(candidate)
+            if number is not None:
+                return {"available_count": int(number) if float(number).is_integer() else number}
+    return None
 
 
 def _resolve_codex_usage_url(base_url):
@@ -353,6 +387,7 @@ def _codex_snapshot_from_usage_payload(payload):
             details.append("Credits balance: $" + format(float(balance), ".2f"))
         elif credits.get("unlimited"):
             details.append("Credits balance: unlimited")
+    reset_credits = _codex_reset_credits_payload(payload)
 
     return SimpleNamespace(
         provider="openai-codex",
@@ -361,7 +396,8 @@ def _codex_snapshot_from_usage_payload(payload):
         plan=_title_case_slug(payload.get("plan_type")),
         windows=tuple(windows),
         details=tuple(details),
-        available=bool(windows or details),
+        reset_credits=reset_credits,
+        available=bool(windows or details or reset_credits),
         unavailable_reason=None,
         fetched_at=datetime.now(timezone.utc),
     )
@@ -545,6 +581,18 @@ def _codex_pool_snapshot(entries, rows, queried):
     if plans:
         details.append("Plans: " + ", ".join(plans))
     plan = plans[0] if len(plans) == 1 else None
+    reset_credit_counts = []
+    for row in available_rows:
+        reset_credits = row.get("reset_credits")
+        if not isinstance(reset_credits, dict):
+            continue
+        count = _number(reset_credits.get("available_count"))
+        if count is not None:
+            reset_credit_counts.append(count)
+    reset_credits = None
+    if reset_credit_counts:
+        best_count = max(reset_credit_counts)
+        reset_credits = {"available_count": int(best_count) if float(best_count).is_integer() else best_count}
     windows = tuple(
         SimpleNamespace(
             label=window.get("label"),
@@ -561,6 +609,7 @@ def _codex_pool_snapshot(entries, rows, queried):
         plan=plan,
         windows=windows,
         details=tuple(details),
+        reset_credits=reset_credits,
         available=bool(available_rows),
         unavailable_reason=None if available_rows else "No Codex pool credentials returned available account limits.",
         fetched_at=datetime.now(timezone.utc),
@@ -604,6 +653,7 @@ def _probe_codex_pool_entry(item):
         "plan": getattr(snapshot, "plan", None) if snapshot is not None else None,
         "windows": windows,
         "details": details,
+        "reset_credits": getattr(snapshot, "reset_credits", None) if snapshot is not None else None,
         "unavailable_reason": None if snapshot_available else _safe_unavailable_reason(reason or getattr(snapshot, "unavailable_reason", None)),
         "fetched_at": _iso(getattr(snapshot, "fetched_at", None)) if snapshot is not None else None,
     }
@@ -1374,6 +1424,12 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
         for detail in (getattr(snapshot, "details", ()) or ())
         if str(detail).strip()
     ]
+    reset_credits_payload = getattr(snapshot, "reset_credits", None)
+    reset_credits = None
+    if isinstance(reset_credits_payload, dict):
+        available_count = _quota_number(reset_credits_payload.get("available_count"))
+        if available_count is not None:
+            reset_credits = {"available_count": available_count}
     plan = str(getattr(snapshot, "plan", "") or "").strip() or None
     unavailable_reason = str(getattr(snapshot, "unavailable_reason", "") or "").strip() or None
     result = {
@@ -1383,7 +1439,8 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
         "plan": plan,
         "windows": windows,
         "details": details,
-        "available": bool(getattr(snapshot, "available", bool(windows or details))) and not unavailable_reason,
+        "reset_credits": reset_credits,
+        "available": bool(getattr(snapshot, "available", bool(windows or details or reset_credits))) and not unavailable_reason,
         "unavailable_reason": unavailable_reason,
         "fetched_at": _isoformat_utc(getattr(snapshot, "fetched_at", None)),
     }
@@ -1468,6 +1525,7 @@ def _account_usage_payload_to_snapshot(payload: Any) -> Any:
         plan=payload.get("plan"),
         windows=windows,
         details=tuple(payload.get("details") or ()),
+        reset_credits=payload.get("reset_credits") if isinstance(payload.get("reset_credits"), dict) else None,
         available=bool(payload.get("available")),
         unavailable_reason=payload.get("unavailable_reason"),
         fetched_at=payload.get("fetched_at"),

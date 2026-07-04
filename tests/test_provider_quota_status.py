@@ -206,6 +206,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 ),
             ),
             details=("Credits balance: $12.50",),
+            reset_credits={"available_count": 2},
             unavailable_reason=None,
         )
 
@@ -248,6 +249,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
             },
         ],
         "details": ["Credits balance: $12.50"],
+        "reset_credits": {"available_count": 2},
         "available": True,
         "unavailable_reason": None,
         "fetched_at": "2030-03-17T12:30:00Z",
@@ -354,6 +356,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 "secondary_window": {"used_percent": 40, "reset_at": "2030-03-24T12:30:00Z"},
             },
             "credits": {"has_credits": True, "balance": 12.5},
+            "rate_limit_reset_credits": {"available_count": 2},
         }
         return _FakeResponse(json.dumps(payload).encode("utf-8"))
 
@@ -383,6 +386,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
     assert snapshot["source"] == "usage_api_pool"
     assert snapshot["windows"][0]["label"] == "Session"
     assert snapshot["windows"][0]["used_percent"] == 15
+    assert snapshot["reset_credits"] == {"available_count": 2}
     assert snapshot["details"] == ["1/2 credentials available", "1 exhausted", "Plans: Pro"]
     assert snapshot["available"] is True
     assert snapshot["pool"] == {
@@ -433,6 +437,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                     },
                 ],
                 "details": ["Credits balance: $12.50"],
+                "reset_credits": {"available_count": 2},
                 "unavailable_reason": None,
                 "fetched_at": snapshot["pool"]["credentials"][0]["fetched_at"],
             },
@@ -1233,6 +1238,9 @@ def test_provider_quota_card_is_rendered_in_providers_panel():
     assert "provider_quota_weekly_limit" in panels
     assert "_providerQuotaUnavailableReason" in panels
     assert "provider_quota_retry_after" in panels
+    assert "_providerQuotaResetCreditsHtml" in panels
+    assert "provider_quota_reset_credits" in panels
+    assert "year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'" in panels
     assert "accountLimits.details)&&!accountLimits.pool" in panels
 
 

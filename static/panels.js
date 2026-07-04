@@ -7743,6 +7743,7 @@ function _appearancePayloadFromUi(){
     render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
     large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
     project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
+    new_conversation_worktree_default: !!($('settingsNewConversationWorktreeDefault')||{}).checked,
     ..._structuredCodeViewFromUi(),
     show_titlebar_profile: !!($('settingsShowTitlebarProfile')||{}).checked,
     worklog_details_expanded_default: worklogDetailsExpanded,
@@ -7835,6 +7836,9 @@ async function _autosaveAppearanceSettings(payload){
     window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
     window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
+    window._newConversationWorktreeDefault=(saved&&Object.prototype.hasOwnProperty.call(saved,'new_conversation_worktree_default'))
+      ? saved.new_conversation_worktree_default!==false
+      : !!(payload&&payload.new_conversation_worktree_default);
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){
       // Re-sync from the server-validated/clamped values so the UI and runtime
       // globals match exactly what was persisted.
@@ -8212,6 +8216,15 @@ async function loadSettingsPanel(){
         // Rebuild the sidebar so the per-project + buttons appear/disappear
         // immediately, rather than only on the next render.
         try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+        _scheduleAppearanceAutosave();
+      };
+    }
+    const newWorktreeDefaultCb=$('settingsNewConversationWorktreeDefault');
+    if(newWorktreeDefaultCb){
+      newWorktreeDefaultCb.checked=settings.new_conversation_worktree_default!==false;
+      window._newConversationWorktreeDefault=newWorktreeDefaultCb.checked;
+      newWorktreeDefaultCb.onchange=function(){
+        window._newConversationWorktreeDefault=this.checked;
         _scheduleAppearanceAutosave();
       };
     }
@@ -9898,7 +9911,13 @@ function _formatProviderQuotaReset(value){
   if(!value) return '';
   const d=new Date(value);
   if(Number.isNaN(d.getTime())) return '';
-  try{return d.toLocaleString();}catch(e){return value;}
+  try{return d.toLocaleString(undefined,{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}catch(e){return value;}
+}
+
+function _formatProviderQuotaCount(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '';
+  return Number.isInteger(n)?String(n):String(Math.round(n*10)/10);
 }
 
 function _formatProviderQuotaWindowLabel(accountLimits,w){
@@ -9944,6 +9963,14 @@ function _providerQuotaWindowMeta(used,reset){
   if(used!=='—') meta.push(t('provider_quota_used_meta',used));
   if(reset) meta.push(t('provider_quota_resets_meta',reset));
   return meta;
+}
+
+function _providerQuotaResetCreditsHtml(accountLimits){
+  const resetCredits=accountLimits&&accountLimits.reset_credits;
+  if(!resetCredits||typeof resetCredits!=='object') return '';
+  const count=_formatProviderQuotaCount(resetCredits.available_count);
+  if(!count) return '';
+  return `<div class="provider-quota-metric provider-quota-reset-credits"><span>${esc(t('provider_quota_reset_credits'))}</span><strong>${esc(count)}</strong></div>`;
 }
 
 function _providerQuotaRetryAfterText(value){
@@ -10052,11 +10079,12 @@ function _buildProviderQuotaCard(status){
         </div>
       `;
     }).join('');
+    const resetCreditsHtml=_providerQuotaResetCreditsHtml(accountLimits);
     const detailHtml=details.length
       ? `<div class="provider-quota-details">${details.map(d=>`<span>${esc(d)}</span>`).join('')}</div>`
       : '';
     const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
-    body=windowHtml+detailHtml+poolHtml;
+    body=windowHtml+resetCreditsHtml+detailHtml+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
   }else if(status.status==='available'&&quota){
     body=`
@@ -10713,6 +10741,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._autoScrollFollow=body.auto_scroll_follow!==false;
   window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;
   window._projectQuickCreate=!!body.project_quick_create_buttons;
+  window._newConversationWorktreeDefault=body.new_conversation_worktree_default!==false;
   if(Object.prototype.hasOwnProperty.call(body,'structured_code_default_view')){
     _applyStructuredCodeViewSettings(body.structured_code_default_view,body.structured_code_auto_tree_lines,false);
   }
@@ -11296,6 +11325,7 @@ async function saveSettings(andClose){
   body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
   body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
   body.project_quick_create_buttons=!!($('settingsProjectQuickCreate')||{}).checked;
+  body.new_conversation_worktree_default=!!($('settingsNewConversationWorktreeDefault')||{}).checked;
   Object.assign(body,_structuredCodeViewFromUi());
   Object.assign(body,_composerControlVisibilityPayload());
   body.composer_control_order=_getComposerControlOrder();

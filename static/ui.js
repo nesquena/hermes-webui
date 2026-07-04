@@ -1952,11 +1952,24 @@ function _formatQuotaPercentShort(value){
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
+  const providerId=String(status.provider||(status.account_limits&&status.account_limits.provider)||'').toLowerCase();
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
+    let w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
+    if(providerId==='openai-codex'){
+      w=accountLimits.windows.find(x=>x&&String(x.label||'').trim().toLowerCase()==='weekly'&&Number.isFinite(Number(x.remaining_percent)))||w;
+    }
     const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    if(remaining){
+      const windowLabel=String((w&&w.label)||'').trim();
+      if(providerId==='openai-codex'){
+        const shortWindow=windowLabel.toLowerCase()==='weekly'?'週':(windowLabel.toLowerCase()==='session'?'5h':windowLabel);
+        const label=shortWindow?'Codex '+shortWindow+' '+remaining:'Codex '+remaining;
+        const titleWindow=windowLabel?windowLabel+' — ':'';
+        return {label, title:provider+' — '+titleWindow+remaining+' remaining'};
+      }
+      return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    }
   }
   const quota=status.quota||null;
   if(quota){
@@ -10474,7 +10487,17 @@ function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
     _syncToolRowsContainer(tools, !!(opts&&opts.live));
   }
 }
+function _terminalizedAnchorSceneForRendering(scene){
+  try{
+    const api=(typeof window!=='undefined')&&window.HermesAssistantTurnAnchors;
+    if(api&&typeof api.terminalizeAssistantTurnAnchorActivityScene==='function'){
+      return api.terminalizeAssistantTurnAnchorActivityScene(scene)||scene;
+    }
+  }catch(_){}
+  return scene;
+}
 function _anchorSceneRowsForRendering(scene, opts){
+  scene=_terminalizedAnchorSceneForRendering(scene);
   const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
   const settled=!!(opts&&opts.settled);
   const live=!settled;
@@ -10487,17 +10510,7 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(row.role==='tool') return `tool:${_anchorSceneToolRowLogicalKey(row)||row.row_id||row.event_id||row.local_id||out.length}`;
     if(row.role==='prose') return `prose:${row.local_id||row.row_id||out.length}`;
     if(row.role==='thinking') return `thinking:${row.local_id||row.row_id||out.length}`;
-function _terminalizedAnchorSceneForRendering(scene){
-  try{
-    const api=(typeof window!=='undefined')&&window.HermesAssistantTurnAnchors;
-    if(api&&typeof api.terminalizeAssistantTurnAnchorActivityScene==='function'){
-      return api.terminalizeAssistantTurnAnchorActivityScene(scene)||scene;
-    }
-  }catch(_){}
-  return scene;
-}
     if(row.role==='lifecycle'){
-  scene=_terminalizedAnchorSceneForRendering(scene);
       const source=String(row.source_event_type||'');
       if(source==='compressing'||source==='compressed') return 'lifecycle:compression';
       return `lifecycle:${source||row.local_id||row.row_id||out.length}`;

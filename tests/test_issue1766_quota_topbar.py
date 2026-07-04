@@ -46,4 +46,7 @@ def test_quota_indicator_formats_openrouter_and_account_limit_shapes():
     assert "limit_remaining" in UI_JS
     assert "account_limits" in UI_JS
     assert "remaining_percent" in UI_JS
+    assert "providerId==='openai-codex'" in UI_JS
+    assert "String(x.label||'').trim().toLowerCase()==='weekly'" in UI_JS
+    assert "Codex '+shortWindow+' '+remaining" in UI_JS
     assert "provider-quota-chip" in CSS
