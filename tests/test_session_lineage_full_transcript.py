@@ -276,6 +276,52 @@ def test_webui_fork_session_does_not_stitch_non_snapshot_parent(monkeypatch):
     ]
 
 
+def test_webui_fork_session_does_not_stitch_snapshot_parent(monkeypatch):
+    """A fork child must stay isolated even if its parent later becomes a snapshot."""
+    parent = SimpleNamespace(
+        session_id="parent-snapshot-fork",
+        parent_session_id=None,
+        pre_compression_snapshot=True,
+        truncation_watermark=None,
+        messages=[{"role": "user", "content": "parent should stay separate", "timestamp": 1.0}],
+    )
+    child = SimpleNamespace(
+        session_id="child-snapshot-fork",
+        parent_session_id="parent-snapshot-fork",
+        session_source="fork",
+        pre_compression_snapshot=False,
+        truncation_watermark=None,
+        messages=[{"role": "user", "content": "fork child only", "timestamp": 2.0}],
+    )
+
+    monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent-snapshot-fork" else None)
+
+    assert [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)] == [
+        "fork child only",
+    ]
+
+
+def test_webui_merged_lineage_keeps_fork_child_isolated(monkeypatch):
+    parent = SimpleNamespace(
+        session_id="merged-parent-fork",
+        messages=[{"role": "user", "content": "parent only", "timestamp": 1.0}],
+    )
+    fork = SimpleNamespace(
+        session_id="merged-fork",
+        parent_session_id="merged-parent-fork",
+        session_source="fork",
+        relationship_type="child_session",
+        messages=[{"role": "user", "content": "fork starts here", "timestamp": 2.0}],
+        truncation_watermark=None,
+    )
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: parent)
+
+    merged = routes._merged_webui_lineage_messages_for_display(fork, fork.messages)
+
+    assert [m["content"] for m in merged] == ["fork starts here"]
+
+
 def test_webui_lineage_display_keeps_child_tail_after_snapshot_watermark(monkeypatch):
     """A child sidecar watermark must not delete the child's persisted continuation tail."""
     parent = SimpleNamespace(

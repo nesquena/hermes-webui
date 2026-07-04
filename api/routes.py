@@ -8052,6 +8052,9 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     segments = []
     current = session
     session_messages = list(getattr(session, "messages", []) or [])
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    if source == "fork":
+        return session_messages
     seen = {str(getattr(session, "session_id", "") or "")}
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
