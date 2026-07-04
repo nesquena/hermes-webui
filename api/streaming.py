@@ -1195,8 +1195,20 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
             'hint': 'The run stopped before a provider response completed. If you did not cancel it, try again.',
         }
     _is_quota = _is_quota_error_text(err_str)
+    # A credential-POOL exhaustion ("All 0 credential(s) exhausted for <provider>")
+    # is a distinct shape from account/plan quota: it means the profile's
+    # credential pool has no usable keys for that provider (a config problem),
+    # not that a funded account ran out of credits. It is NOT matched by
+    # _is_quota_error_text ('credential(s) exhausted' != 'credits exhausted'), so
+    # without this it fell through to the generic error label/hint. Classify it
+    # explicitly so the user gets a pool-specific, actionable hint. (#3929)
+    _is_credential_pool_empty = (
+        'credential(s) exhausted' in _err_lower
+        or 'credentials exhausted' in _err_lower
+        or ('credential' in _err_lower and 'exhausted' in _err_lower)
+    )
     _is_auth = (
-        not _is_quota and (
+        not _is_quota and not _is_credential_pool_empty and (
             _probe_status_code == 401
             or
             '401' in err_str
@@ -1228,6 +1240,12 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
         or ('context length exceeded' in _err_lower and 'cannot compress further' in _err_lower)
         or ('context compression' in _err_lower and 'max compression attempts' in _err_lower)
     )
+    if _is_credential_pool_empty:
+        return {
+            'label': 'No usable credentials',
+            'type': 'credential_pool_empty',
+            'hint': 'The credential pool for this provider has no usable keys left (all entries exhausted or unconfigured). Add or refresh a key for this provider in your Hermes config / credential pool, or switch providers via `hermes model`.',
+        }
     if _is_quota:
         return {
             'label': 'Out of credits',
@@ -9454,6 +9472,7 @@ def _run_agent_streaming(
             put('cancel', _cancel_event_payload('Cancelled by user'))
             return
         _exc_is_quota = _classification['type'] == 'quota_exhausted'
+        _exc_is_credential_pool_empty = _classification['type'] == 'credential_pool_empty'
         # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.
         # Rate-limit detection remains guarded as: (not _exc_is_quota).
         _exc_is_rate_limit = (_classification['type'] == 'rate_limit') and (not _exc_is_quota)
@@ -9464,6 +9483,10 @@ def _run_agent_streaming(
 
         # The user hint still points to Settings / `hermes model` from _classify_provider_error().
         if _exc_is_quota:
+            _exc_label, _exc_type, _exc_hint = (
+                _classification['label'], _classification['type'], _classification['hint'],
+            )
+        elif _exc_is_credential_pool_empty:
             _exc_label, _exc_type, _exc_hint = (
                 _classification['label'], _classification['type'], _classification['hint'],
             )
