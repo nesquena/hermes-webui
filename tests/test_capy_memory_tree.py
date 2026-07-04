@@ -17173,7 +17173,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_reaction
     "https://api.github.com/repos/capy/spaces/releases/43/reactions",
     "https://user:ghp_SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/releases/42/reactions",
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_reactions_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_reactions_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, drifted_final_url
 ):
     root = tmp_path / "capy-memory"
@@ -17223,7 +17223,8 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_reaction
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("release-bot", limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search": search}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("release-reactions-drift-space", limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs, "search": search, "relevant": relevant}, sort_keys=True).lower()
 
     assert calls == [{"url": "https://api.github.com/repos/capy/spaces/releases/42/reactions", "timeout": 8, "accept": "application/json"}]
     assert read_calls == []
@@ -17233,6 +17234,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_release_reaction
     assert jobs["jobs"][0]["status"] == "pending"
     assert not (root / "vault" / "github-release-reactions-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         body_sentinel.lower(),
         "octo-capy",
