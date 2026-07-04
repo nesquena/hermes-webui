@@ -32997,7 +32997,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_commit_activity_
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_activity_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_activity_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -33039,7 +33039,11 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_activity_
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory(body_sentinel, limit=5)
-    serialized = json.dumps({"result": result, "search_results": search["results"]}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("commit-activity-drift-space", limit=5)
+    serialized = json.dumps(
+        {"result": result, "search_results": search["results"], "relevant": relevant},
+        sort_keys=True,
+    ).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["job_id"] == receipt["job_id"]
@@ -33048,6 +33052,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_activity_
     assert read_calls == []
     assert not (root / "vault" / "github-commit-activity-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "https://api.github.com/repos/capy/spaces/stats/commit_activity?access_token=secret_value_do_not_leak#raw-prompt",
         "secret_value_do_not_leak",
