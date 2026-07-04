@@ -39,7 +39,7 @@ against current source before any route is added.
   route, handler, or related code is added in this PR.
 - This RFC does **not** modify `GET /api/sessions/events` (the existing global
   session-list invalidation stream routed at `api/routes.py:12345-12346` and
-  implemented by `_handle_session_events_stream()` at `api/routes.py:16177`).
+  implemented by `_handle_session_events_stream()` at `api/routes.py:16223`).
 - This RFC does **not** replace or modify existing streams: `/api/chat/stream`,
   `/api/approval/stream`, or `/api/clarify/stream`.
 - This RFC does **not** introduce Android, iOS, or PWA client code.
@@ -54,7 +54,7 @@ against current source before any route is added.
 
 `GET /api/sessions/events` is a **different endpoint** from the one this RFC
 proposes. It is routed at `api/routes.py:12345-12346` and implemented by
-`_handle_session_events_stream()` at `api/routes.py:16177`. It emits bare
+`_handle_session_events_stream()` at `api/routes.py:16223`. It emits bare
 `sessions_changed` events and keepalives for any change to the session list. It
 is a global invalidation signal, not a per-session lifecycle stream. The proposed
 `GET /api/sessions/{session_id}/events` is per-session and path-distinct.
@@ -73,19 +73,19 @@ Line ranges in this inventory were verified against WebUI `master` when this
 RFC was written. Function, constant, and endpoint names are the stable anchors
 if source layout moves later.
 
-- `_parse_run_journal_event_id()` (`api/routes.py:15673-15686`) and
-  `_parse_run_journal_after_seq()` (`api/routes.py:15688-15701`) parse the replay
+- `_parse_run_journal_event_id()` (`api/routes.py:15719-15732`) and
+  `_parse_run_journal_after_seq()` (`api/routes.py:15734-15747`) parse the replay
   cursor from the `after_event_id` / `after_seq` **query params** (not the
   `Last-Event-ID` header — that header is the *proposed* new-endpoint contract
   below, §Reconnect).
-- `_runner_event_id()` at `api/routes.py:15765-15772` constructs the event `id`
+- `_runner_event_id()` at `api/routes.py:15811-15818` constructs the event `id`
   field as `stream_id:seq`.
 - SSE frames carry their `id:` via the `_sse_with_id()` helper, emitted on the
-  live `/api/chat/stream` path at `api/routes.py:15918`, on the runner-observe
-  path at `api/routes.py:15811`, and during journal replay at
-  `api/routes.py:15721` / `15734`.
+  live `/api/chat/stream` path at `api/routes.py:15964`, on the runner-observe
+  path at `api/routes.py:15857`, and during journal replay at
+  `api/routes.py:15767` / `15780`.
 - `_replay_run_journal()` reads events by `(session_id, stream_id)` at
-  `api/routes.py:15703-15735`.
+  `api/routes.py:15749-15781`.
 - `api/streaming.py:6265-6285` writes current live agent streams to
   `STREAMS[stream_id]`.
 - `api/streaming.py:6620-6634` appends SSE events to the run journal and carries
@@ -165,7 +165,7 @@ position.
 
 **`event_id` is opaque to clients.** Its current source-compatible form is
 `stream_id:seq`, as constructed by `_runner_event_id()` at
-`api/routes.py:15765-15772`. Clients must treat it as an opaque string and must
+`api/routes.py:15811-15818`. Clients must treat it as an opaque string and must
 not parse or construct cursor values.
 
 **`seq` is monotonic within a stream/run.** It is not a session-global counter
@@ -183,7 +183,7 @@ events. The live `STREAMS[stream_id]` queue (`api/streaming.py:6265-6285`) is
 not a reliable replay source because it holds only recent in-memory state.
 
 A future implementation must replay from the run journal via the existing
-`_replay_run_journal()` path (`api/routes.py:15703-15735`) and fall back to the
+`_replay_run_journal()` path (`api/routes.py:15749-15781`) and fall back to the
 snapshot mechanism when journal entries are unavailable for a given cursor.
 
 ## Snapshot fallback

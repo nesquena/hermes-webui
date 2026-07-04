@@ -89,7 +89,7 @@ def test_clear_endpoint_sets_truncation_watermark(monkeypatch, tmp_path):
     This is the fail-without-fix assertion: on origin/master the watermark
     stays None because the handler never set it.
     """
-    models = _seed_session_dir(monkeypatch, tmp_path)
+    _seed_session_dir(monkeypatch, tmp_path)
     from api.models import Session
 
     session = Session(
