@@ -843,6 +843,19 @@ def _run_gateway_chat_streaming(
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
+            # Stamp stable ids on the two new rows (shared with the display merge
+            # below) so display and model-context copies share an id for the
+            # fork/truncate aligner (#context-message-stable-id).
+            try:
+                from api.streaming import _assign_stable_message_ids
+
+                _assign_stable_message_ids(
+                    [user_msg, assistant_msg],
+                    previous_context,
+                    list(getattr(s, "messages", None) or []),
+                )
+            except Exception:
+                logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
             s.context_messages = previous_context + [user_msg, assistant_msg]
             try:
                 from api.streaming import _is_context_compression_marker

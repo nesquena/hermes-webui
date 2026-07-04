@@ -20193,6 +20193,7 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
+                _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
                 _merge_display_messages_after_agent_result,
                 _restore_display_reasoning_metadata,
@@ -20261,6 +20262,9 @@ def _handle_chat_sync(handler, body):
             _previous_context_messages,
             _next_context_messages,
             msg,
+        )
+        _assign_stable_message_ids(
+            _result_messages, _previous_messages, _previous_context_messages
         )
         s.context_messages = _next_context_messages
         s.messages = _merge_display_messages_after_agent_result(

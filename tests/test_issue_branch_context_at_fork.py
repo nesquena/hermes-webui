@@ -106,7 +106,13 @@ def test_truncate_context_for_display_keep_drops_unkept_tool_rows_after_user_bou
     assert "a2" not in contents
 
 
-def test_truncate_context_for_display_keep_prefers_compact_summary_fallback():
+def test_truncate_context_for_display_keep_aligns_compacted_context_via_id():
+    # Context shorter than display (compacted large-session signature) with a
+    # leading summary. Before stable ids (#context-message-stable-id) the aligner
+    # short-circuited to the raw display-index slice ctx[:keep] == [compact, u1],
+    # dropping the kept assistant turn a1 — the documented fork mis-cut. With ids
+    # present the matcher aligns keep=2 (display prefix [u1, a1]) to the compact
+    # summary prefix PLUS both kept turns.
     msgs = [
         {"role": "user", "content": "u1", "id": "u1", "timestamp": 1.0},
         {"role": "assistant", "content": "a1", "id": "a1", "timestamp": 2.0},
@@ -117,6 +123,25 @@ def test_truncate_context_for_display_keep_prefers_compact_summary_fallback():
         {"role": "user", "content": "compact", "id": "summary"},
         {"role": "user", "content": "u1", "id": "u1", "timestamp": 1.0},
         {"role": "assistant", "content": "a1", "id": "a1", "timestamp": 2.0},
+    ]
+    out = truncate_context_for_display_keep(ctx, msgs, 2)
+    assert [m["content"] for m in out] == ["compact", "u1", "a1"]
+
+
+def test_truncate_context_for_display_keep_shortcuts_without_ids():
+    # Same shape but id-less (legacy data): no ids to align on, so the raw-index
+    # shortcut still fires exactly as before — proving zero regression for the
+    # sessions that predate the stable-id fix.
+    msgs = [
+        {"role": "user", "content": "u1", "timestamp": 1.0},
+        {"role": "assistant", "content": "a1", "timestamp": 2.0},
+        {"role": "user", "content": "u2", "timestamp": 3.0},
+        {"role": "assistant", "content": "a2", "timestamp": 4.0},
+    ]
+    ctx = [
+        {"role": "user", "content": "compact"},
+        {"role": "user", "content": "u1", "timestamp": 1.0},
+        {"role": "assistant", "content": "a1", "timestamp": 2.0},
     ]
     out = truncate_context_for_display_keep(ctx, msgs, 2)
     assert out == ctx[:2]

@@ -98,6 +98,14 @@ def _truncation_watermark_for(messages):
         return 0.0
 
 
+def _any_row_has_id(rows) -> bool:
+    """Return True if any row carries a non-null stable ``id``."""
+    for row in rows or []:
+        if isinstance(row, dict) and row.get('id') is not None:
+            return True
+    return False
+
+
 def truncate_context_for_display_keep(
     context_messages: list | None,
     full_messages: list | None,
@@ -110,7 +118,15 @@ def truncate_context_for_display_keep(
     msgs = full_messages if isinstance(full_messages, list) else []
     if not ctx:
         return []
-    if len(ctx) <= len(msgs):
+    # A context array no longer than the display array (the large/compacted
+    # session signature) historically could not be aligned, so it was sliced at
+    # the raw display index — the documented fork/truncate mis-cut. With stable
+    # per-message ids (#context-message-stable-id) the matcher below CAN align a
+    # shorter/compacted context, so only take the raw-index shortcut when neither
+    # array carries ids to align on. Legacy id-less sessions keep the old
+    # behavior exactly (no regression); the matcher's final fallback still
+    # returns ctx[:keep] if id matching cannot resolve the boundary.
+    if len(ctx) <= len(msgs) and not (_any_row_has_id(ctx) and _any_row_has_id(msgs)):
         return ctx[:keep]
     if len(msgs) == 0:
         return []

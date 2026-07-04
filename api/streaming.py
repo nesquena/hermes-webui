@@ -4170,6 +4170,46 @@ def _deduplicate_context_messages(messages):
     return deduped
 
 
+def _assign_stable_message_ids(result_messages, *existing_arrays):
+    """Mint a stable, session-unique integer ``id`` on model-result rows lacking one.
+
+    Both ``messages`` (display transcript) and ``context_messages`` (model-facing
+    history) are derived from the *same* per-turn ``result['messages']`` dicts.
+    Stamping the id on those shared dicts here makes each logical row carry an
+    identical id in both arrays, so the fork/truncate aligner
+    (``session_ops.truncate_context_for_display_keep``) can match rows by its
+    preferred ``id`` key instead of the fragile content-signature fallback that
+    goes blind on large sessions full of structurally-identical rows.
+
+    Ids are monotonic within a session (max existing id + 1, seeded from the
+    result rows plus any ``existing_arrays`` passed for collision-avoidance).
+    Across sessions ids may repeat, which is safe: alignment only ever compares
+    rows within one session, and a fork copies both arrays together so the child
+    stays internally consistent. Rows whose historical id was carried forward by
+    ``_restore_reasoning_metadata`` keep it; only genuinely new rows are minted.
+
+    Returns the number of rows newly stamped. Mutates ``result_messages`` in place.
+    """
+    if not result_messages:
+        return 0
+    seed = 0
+    for arr in (result_messages, *existing_arrays):
+        for m in arr or []:
+            if isinstance(m, dict):
+                mid = m.get('id')
+                # bool is an int subclass; exclude it so a stray True/False id
+                # can never seed the counter.
+                if isinstance(mid, int) and not isinstance(mid, bool) and mid > seed:
+                    seed = mid
+    stamped = 0
+    for m in result_messages:
+        if isinstance(m, dict) and m.get('id') is None:
+            seed += 1
+            m['id'] = seed
+            stamped += 1
+    return stamped
+
+
 def _prune_context_tool_results_after_compression(agent, context_messages):
     """Run the active compressor's cheap tool-result pruning on model context.
 
@@ -4235,6 +4275,13 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
         if isinstance(prev_msg, dict) and isinstance(cur_msg, dict) and _safe_projection(prev_msg) == _safe_projection(cur_msg):
             if prev_msg.get('role') == 'assistant' and prev_msg.get('reasoning') and not cur_msg.get('reasoning'):
                 cur_msg['reasoning'] = prev_msg['reasoning']
+            # Carry the stable per-message id (#context-message-stable-id) forward
+            # the same way timestamp is carried. The agent rebuilds result rows
+            # without our id every turn; without this, historical context rows
+            # would be re-minted a fresh id each turn and drift out of alignment
+            # with their display counterpart.
+            if prev_msg.get('id') is not None and cur_msg.get('id') is None:
+                cur_msg['id'] = prev_msg['id']
             if prev_msg.get('timestamp') and not cur_msg.get('timestamp'):
                 cur_msg['timestamp'] = prev_msg['timestamp']
             elif prev_msg.get('_ts') and not cur_msg.get('_ts') and not cur_msg.get('timestamp'):
@@ -8186,6 +8233,13 @@ def _run_agent_streaming(
                         _next_context_messages,
                         msg_text,
                     )
+                    # Stamp stable ids on the shared result rows AFTER the context
+                    # restore (so carried-forward ids survive) and BEFORE both
+                    # arrays are built, so display and model-context copies of each
+                    # row share an id for the fork/truncate aligner.
+                    _assign_stable_message_ids(
+                        _result_messages, _previous_messages, _previous_context_messages
+                    )
                     s.context_messages = _deduplicate_context_messages(_next_context_messages)
                     s.messages = _merge_display_messages_after_agent_result(
                         _previous_messages,
@@ -8495,6 +8549,9 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                     msg_text,
+                                )
+                                _assign_stable_message_ids(
+                                    _result_messages, _previous_messages, _previous_context_messages
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
@@ -9551,6 +9608,9 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                     msg_text,
+                                )
+                                _assign_stable_message_ids(
+                                    _result_messages, _previous_messages, _previous_context_messages
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
