@@ -30475,7 +30475,7 @@ def test_github_workflow_run_approvals_final_url_matches_origin_rejects_dirty_or
     ) is False
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_run_approvals_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_run_approvals_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -30535,7 +30535,8 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_run_app
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("approval body leak probe", limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search": search}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("workflow-run-approvals-drift-space", limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs, "search": search, "relevant": relevant}, sort_keys=True).lower()
 
     assert read_calls == []
     assert helper_calls == [(origin_uri, raw_final_url)]
@@ -30545,6 +30546,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_run_app
     assert not (root / "vault" / "github-workflow-run-approvals-final-url-drift.md").exists()
     assert memory_status()["chunk_count"] == 0
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         raw_final_url.lower(),
         "99999",
