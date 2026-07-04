@@ -211,6 +211,31 @@ def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> b
     return bak_ctx_len > live_ctx_len
 
 
+def _session_records_clear_sentinel(session_path: Path) -> bool:
+    """Return True when the live sidecar records the full clear sentinel."""
+    try:
+        data = json.loads(session_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    expected = {
+        'messages': [],
+        'context_messages': [],
+        'truncation_watermark': 0.0,
+        'truncation_boundary': 0.0,
+        'active_stream_id': None,
+        'pending_user_message': None,
+        'pending_attachments': [],
+        'pending_started_at': None,
+        'pending_user_source': None,
+    }
+    for key, value in expected.items():
+        if key not in data or data.get(key) != value:
+            return False
+    return True
+
+
 def inspect_session_recovery_status(session_path: Path) -> dict:
     """Return a status dict describing whether recovery is recommended.
 
@@ -232,6 +257,14 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
         }
     bak_count = _msg_count(bak_path)
     if bak_count > live_count:
+        if _session_records_clear_sentinel(session_path):
+            return {
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_clear_truncate": True,
+            }
         if (
             _session_records_intentional_compress_shrink(session_path)
             and _backup_predates_intentional_shrink(session_path, bak_path)

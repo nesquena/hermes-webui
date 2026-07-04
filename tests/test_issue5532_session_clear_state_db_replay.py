@@ -182,7 +182,7 @@ def test_empty_sidecar_without_watermark_still_recovers_state_db_rows():
     assert [m["content"] for m in merged] == ["state prompt", "state reply"]
 
 
-def test_clear_sentinel_does_not_suppress_later_backup_recovery(tmp_path):
+def test_clear_sentinel_suppresses_marker_pair_backup_recovery(tmp_path):
     from api.session_recovery import inspect_session_recovery_status, recover_session
 
     live_path = tmp_path / "post_clear_loss.json"
@@ -192,6 +192,11 @@ def test_clear_sentinel_does_not_suppress_later_backup_recovery(tmp_path):
         "context_messages": [],
         "truncation_watermark": 0.0,
         "truncation_boundary": 0.0,
+        "active_stream_id": None,
+        "pending_user_message": None,
+        "pending_attachments": [],
+        "pending_started_at": None,
+        "pending_user_source": None,
     }
     backup = {
         **live,
@@ -202,11 +207,11 @@ def test_clear_sentinel_does_not_suppress_later_backup_recovery(tmp_path):
     live_path.with_suffix(".json.bak").write_text(json.dumps(backup), encoding="utf-8")
 
     status = inspect_session_recovery_status(live_path)
-    assert status["recommend"] == "restore"
+    assert status["recommend"] == "no_action"
+    assert status["intentional_clear_truncate"] is True
     recovered = recover_session(live_path)
-    assert recovered["restored"] is True
-    restored = json.loads(live_path.read_text(encoding="utf-8"))
-    assert restored["messages"][0]["content"] == "post-clear prompt"
+    assert recovered["restored"] is False
+    assert json.loads(live_path.read_text(encoding="utf-8"))["messages"] == []
 
 
 def test_clearing_empty_live_session_preserves_existing_recoverable_backup(monkeypatch, tmp_path):
@@ -241,7 +246,9 @@ def test_clearing_empty_live_session_preserves_existing_recoverable_backup(monke
 
     assert captured["status"] == 200
     assert session.path.with_suffix(".json.bak").exists()
-    assert inspect_session_recovery_status(session.path)["recommend"] == "restore"
+    status = inspect_session_recovery_status(session.path)
+    assert status["recommend"] == "no_action"
+    assert status["intentional_clear_truncate"] is True
     recovered = recover_session(session.path)
-    assert recovered["restored"] is True
-    assert Session.load(sid).messages[0]["content"] == "recoverable prompt"
+    assert recovered["restored"] is False
+    assert Session.load(sid).messages == []
