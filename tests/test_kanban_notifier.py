@@ -683,9 +683,29 @@ class TestDeliver:
 
 class TestThreadLifecycle:
     def test_start_and_stop(self, clean_notifier):
-        assert clean_notifier.start_notifier_thread() is True
-        assert clean_notifier.start_notifier_thread() is False  # already running
-        clean_notifier.stop_notifier_thread(timeout=1)
-        # After stop, can start again
-        assert clean_notifier.start_notifier_thread() is True
-        clean_notifier.stop_notifier_thread(timeout=1)
+        # Config gate is default-off; patch to enable for this test
+        with patch("hermes_cli.config.load_config") as mock_cfg, \
+             patch("hermes_cli.config.cfg_get") as mock_get:
+            mock_cfg.return_value = {}
+            mock_get.return_value = True
+            assert clean_notifier.start_notifier_thread() is True
+            assert clean_notifier.start_notifier_thread() is False  # already running
+            clean_notifier.stop_notifier_thread(timeout=1)
+            # After stop, can start again
+            assert clean_notifier.start_notifier_thread() is True
+            clean_notifier.stop_notifier_thread(timeout=1)
+
+    def test_default_off_when_config_unset(self, clean_notifier):
+        """When kanban.webui_notifier is not set in config, the thread
+        should NOT start (default-off / opt-in per Footprint-Ladder)."""
+        with patch("hermes_cli.config.load_config") as mock_cfg, \
+             patch("hermes_cli.config.cfg_get") as mock_get:
+            mock_cfg.return_value = {}
+            mock_get.return_value = False  # default=False
+            assert clean_notifier.start_notifier_thread() is False
+
+    def test_default_off_when_config_unreadable(self, clean_notifier):
+        """If config.yaml can't be loaded, the thread should NOT start
+        — no always-on thread without explicit user opt-in."""
+        with patch("hermes_cli.config.load_config", side_effect=Exception("no config")):
+            assert clean_notifier.start_notifier_thread() is False

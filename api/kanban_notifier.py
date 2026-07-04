@@ -362,27 +362,34 @@ def start_notifier_thread() -> bool:
     Called from ``server.py`` at WebUI startup, alongside
     ``background_process.start_drain_thread``.
 
-    Gated by ``kanban.webui_notifier`` in config.yaml (default: True).
-    Disable to turn off the polling thread entirely, e.g. when kanban
-    is not in use or the gateway's own notifier is sufficient.
+    Gated by ``kanban.webui_notifier`` in config.yaml (default: False — opt-in).
+    Enable to turn on the polling thread for kanban→agent wake notifications.
+    When unset or false, the thread never starts — no always-on background
+    subsystem for users who don't use kanban.
     """
     global _NOTIFIER_THREAD
     if _NOTIFIER_THREAD is not None and _NOTIFIER_THREAD.is_alive():
         return False
 
-    # Config gate: allow disabling the notifier via config
+    # Config gate: opt-in (default-off) per the optional-capability convention.
+    # A user who doesn't use kanban shouldn't get a new always-on background thread.
     try:
         from hermes_cli.config import load_config, cfg_get
         cfg = load_config()
-        enabled = cfg_get(cfg, "kanban", "webui_notifier", default=True)
+        enabled = cfg_get(cfg, "kanban", "webui_notifier", default=False)
         if not enabled:
-            logger.info(
-                "kanban webui notifier: disabled via config kanban.webui_notifier=false"
+            logger.debug(
+                "kanban webui notifier: not started (kanban.webui_notifier "
+                "not set or false — opt-in feature)"
             )
             return False
     except Exception:
-        # If config can't load, default to enabled (same as auto_subscribe_on_create)
-        pass
+        # If config can't load, stay default-off (don't start an always-on
+        # thread without explicit user opt-in)
+        logger.debug(
+            "kanban webui notifier: config unreadable, staying default-off"
+        )
+        return False
 
     _NOTIFIER_STOP.clear()
     _NOTIFIER_THREAD = threading.Thread(
