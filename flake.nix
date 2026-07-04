@@ -16,11 +16,12 @@
       linuxSystems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
       hermesModule = import ./nix/nixosModules.nix { inherit self; };
+      packageVersion = self.shortRev or (self.dirtyShortRev or "unstable");
       perSystem = forAllSystems (system: let
         pkgs = import nixpkgs { inherit system; };
         package = import ./nix/packages.nix {
           inherit pkgs;
-          version = "0.51.0";
+          version = packageVersion;
         };
         moduleChecks = if builtins.elem system linuxSystems then
           let

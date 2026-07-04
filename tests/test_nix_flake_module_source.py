@@ -25,6 +25,15 @@ def test_nix_package_disables_store_local_venv_fallback():
     assert "--set HERMES_WEBUI_DISABLE_LOCAL_VENV 1" in PACKAGES_NIX
 
 
+def test_nix_package_version_comes_from_flake_source_revision():
+    assert 'version ? "unstable"' in PACKAGES_NIX
+    assert 'packageVersion = self.shortRev or (self.dirtyShortRev or "unstable");' in FLAKE_NIX
+    assert "version = packageVersion;" in FLAKE_NIX
+    assert "0.51.0" not in FLAKE_NIX
+    assert "0.51.0" not in PACKAGES_NIX
+    assert 'api/_version.py' in PACKAGES_NIX
+
+
 def test_nixos_module_decouples_agent_dir_from_python_inference():
     assert "agent.python" in MODULE_NIX
     assert "configuredAgentPython" in MODULE_NIX
@@ -50,6 +59,7 @@ def test_nixos_module_keeps_webui_state_private_by_default_and_custom_path():
     assert 'StateDirectoryMode = "0700";' in MODULE_NIX
     assert 'UMask = "0077";' in MODULE_NIX
     assert '"d ${cfg.stateDir} 0700 ${cfg.user} ${cfg.group} - -"' in MODULE_NIX
+    assert "ReadWritePaths" not in MODULE_NIX
     assert "2770" not in MODULE_NIX
 
 
@@ -58,6 +68,7 @@ def test_nixos_module_only_creates_default_service_identity():
     assert "cfg.user == defaultUser" in MODULE_NIX
     assert "users.groups.${cfg.group}" not in MODULE_NIX
     assert "users.users.${cfg.user}" not in MODULE_NIX
+    assert "createHome = true;" not in MODULE_NIX
 
 
 def test_nixos_module_defaults_to_loopback_with_explicit_firewall_opt_in():

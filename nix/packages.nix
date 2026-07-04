@@ -1,4 +1,4 @@
-{ pkgs, version ? "0.51.0" }:
+{ pkgs, version ? "unstable" }:
 
 let
   pythonEnv = pkgs.python3.withPackages (
@@ -29,6 +29,7 @@ pkgs.stdenv.mkDerivation {
     cp "${./../requirements.txt}" "$out/${runtimeDir}/requirements.txt"
     cp -r "${./../api}" "$out/${runtimeDir}/api"
     cp -r "${./../static}" "$out/${runtimeDir}/static"
+    printf "__version__ = '%s'\n" "$version" > "$out/${runtimeDir}/api/_version.py"
 
     makeWrapper ${pythonEnv}/bin/python3 "$out/bin/hermes-webui" \
       --set HERMES_WEBUI_DISABLE_LOCAL_VENV 1 \

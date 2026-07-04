@@ -85,7 +85,6 @@ let
       cfg.extraEnvironment));
 
   needsWritableStateDir = cfg.stateDir != defaultStateDir;
-  writableServiceDirs = lib.optionals needsWritableStateDir [ cfg.stateDir ];
   tmpfilesRules = lib.optionals needsWritableStateDir [
     "d ${cfg.stateDir} 0700 ${cfg.user} ${cfg.group} - -"
   ];
@@ -194,7 +193,6 @@ in
           Restart = "on-failure";
           Environment = mappedEnvironment;
           EnvironmentFile = map builtins.toString cfg.environmentFiles;
-          ReadWritePaths = map builtins.toString writableServiceDirs;
           StateDirectoryMode = "0700";
           UMask = "0077";
         }
@@ -213,7 +211,6 @@ in
       ${cfg.user} = {
         isSystemUser = true;
         group = cfg.group;
-        createHome = true;
         home = cfg.stateDir;
       };
     };
