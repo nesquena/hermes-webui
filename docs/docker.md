@@ -177,7 +177,7 @@ from the gateway HTTP API. If the Tasks panel shows a gateway warning while the
 job list loads, the warning is about scheduled ticking / gateway health, not
 about the list endpoint.
 
-In older gateway builds, or when the daemon runs in a separate container, `gateway_state.json` can become stale and WebUI may lose confidence even if the daemon is up. This is especially visible if the WebUI container has no gateway URL and can only inspect local state files from its own container.
+In older gateway builds, or when the daemon runs in a separate container, `gateway_state.json` can become stale even while the daemon is up. WebUI treats a fresh `cron/ticker_heartbeat` file in the shared `HERMES_HOME` as the stronger scheduled-job signal, because it proves the scheduler is actively ticking. If both `gateway_state.json` and `cron/ticker_heartbeat` are stale, WebUI still shows the warning.
 
 **Fix**: Run a gateway container alongside the WebUI. The two-container compose file is the recommended path:
 

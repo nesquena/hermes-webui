@@ -40,5 +40,7 @@ def test_docker_docs_explain_single_container_cron_gateway_boundary():
     assert "Gateway metadata stale" in docs
     assert "Gateway endpoint not reachable" in docs
     assert "`gateway_state.json` can become stale" in docs
+    assert "cron/ticker_heartbeat" in docs
+    assert "scheduler is actively ticking" in docs
     assert "HERMES_WEBUI_GATEWAY_BASE_URL" in docs
     assert "docker-compose.two-container.yml" in docs

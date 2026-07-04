@@ -29,6 +29,7 @@ These tests pin every behavior the fix promises:
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -184,6 +185,61 @@ def test_stale_updated_at_with_running_state_reports_unknown(monkeypatch):
     assert payload["details"]["state"] == "unknown"
     assert payload["details"]["reason"] == "gateway_stale_running_state"
     assert payload["details"]["gateway_state"] == "running"
+
+
+def test_stale_running_state_with_fresh_cron_ticker_heartbeat_reports_alive(monkeypatch, tmp_path):
+    """A live cron ticker heartbeat proves scheduled jobs are actually ticking.
+
+    Some gateway builds only update gateway_state.json on lifecycle changes, not
+    every scheduler tick. In two-container Docker deployments WebUI cannot see
+    the gateway PID, so a fresh cron/ticker_heartbeat file should suppress the
+    Tasks-panel stale-metadata warning for an otherwise stale running state.
+    """
+    from api import agent_health
+
+    stale_ts = _iso(datetime.now(timezone.utc) - timedelta(hours=2))
+    heartbeat = tmp_path / "ticker_heartbeat"
+    heartbeat.write_text("tick\n", encoding="utf-8")
+    fresh_epoch = datetime.now(timezone.utc).timestamp() - 30
+    os.utime(heartbeat, (fresh_epoch, fresh_epoch))
+
+    monkeypatch.setattr(
+        agent_health,
+        "_gateway_status_module",
+        lambda: _FakeGatewayStatus(_runtime_status(stale_ts), running_pid=None),
+    )
+    monkeypatch.setattr(agent_health, "_cron_ticker_heartbeat_path", lambda: heartbeat)
+
+    payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is True
+    assert payload["details"]["state"] == "alive"
+    assert payload["details"]["reason"] == "cron_ticker_heartbeat"
+    assert payload["details"]["gateway_state"] == "running"
+
+
+def test_stale_running_state_with_stale_cron_ticker_heartbeat_stays_unknown(monkeypatch, tmp_path):
+    """A fossilized heartbeat must not hide a real gateway outage."""
+    from api import agent_health
+
+    stale_ts = _iso(datetime.now(timezone.utc) - timedelta(hours=2))
+    heartbeat = tmp_path / "ticker_heartbeat"
+    heartbeat.write_text("tick\n", encoding="utf-8")
+    stale_epoch = datetime.now(timezone.utc).timestamp() - 600
+    os.utime(heartbeat, (stale_epoch, stale_epoch))
+
+    monkeypatch.setattr(
+        agent_health,
+        "_gateway_status_module",
+        lambda: _FakeGatewayStatus(_runtime_status(stale_ts), running_pid=None),
+    )
+    monkeypatch.setattr(agent_health, "_cron_ticker_heartbeat_path", lambda: heartbeat)
+
+    payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is None
+    assert payload["details"]["state"] == "unknown"
+    assert payload["details"]["reason"] == "gateway_stale_running_state"
 
 
 def test_fresh_updated_at_with_non_running_state_reports_down(monkeypatch):

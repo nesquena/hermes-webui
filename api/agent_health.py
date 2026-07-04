@@ -35,6 +35,7 @@ from urllib import request as urllib_request
 
 _GATEWAY_PID_FILE = "gateway.pid"
 _GATEWAY_RUNTIME_STATUS_FILE = "gateway_state.json"
+_CRON_TICKER_HEARTBEAT_FILE = "ticker_heartbeat"
 
 
 # Two cron ticks (~60s each). Chosen to avoid false negatives during brief
@@ -199,6 +200,81 @@ def _gateway_root_pid_path() -> Path | None:
         return root_pid
     except Exception:
         return None
+
+
+def _cron_ticker_heartbeat_path() -> Path | None:
+    """Return the cron scheduler heartbeat path when it can be resolved.
+
+    Some agent builds only update gateway_state.json on lifecycle changes. The
+    cron scheduler still writes cron/ticker_heartbeat while it is evaluating
+    scheduled jobs, which is the operational signal the Tasks panel cares about
+    when WebUI cannot inspect a gateway PID across container boundaries.
+    """
+    candidates: list[Path] = []
+
+    try:
+        from hermes_constants import get_default_hermes_root
+
+        candidates.append(get_default_hermes_root() / "cron" / _CRON_TICKER_HEARTBEAT_FILE)
+    except Exception:
+        env_home = os.environ.get("HERMES_HOME")
+        if env_home:
+            candidates.append(Path(env_home) / "cron" / _CRON_TICKER_HEARTBEAT_FILE)
+
+    try:
+        from api.profiles import get_active_hermes_home
+
+        candidates.append(Path(get_active_hermes_home()) / "cron" / _CRON_TICKER_HEARTBEAT_FILE)
+    except Exception:
+        pass
+
+    seen: set[Path] = set()
+    unique_candidates: list[Path] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique_candidates.append(candidate)
+
+    for candidate in unique_candidates:
+        if candidate.exists():
+            return candidate
+    return unique_candidates[0] if unique_candidates else None
+
+
+def _cron_ticker_heartbeat_is_fresh(
+    path: Path | None,
+    *,
+    now: float | None = None,
+    threshold_s: float = GATEWAY_FRESHNESS_THRESHOLD_S,
+) -> bool:
+    """Return True when the cron scheduler heartbeat was written recently."""
+    if path is None:
+        return False
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return False
+
+    reference = time.time() if now is None else now
+    age_s = reference - mtime
+    if age_s < 0:
+        return -age_s <= threshold_s
+    return age_s <= threshold_s
+
+
+def _cron_ticker_heartbeat_detail(path: Path | None) -> dict[str, Any]:
+    """Return non-sensitive heartbeat metadata for diagnostics."""
+    if path is None:
+        return {}
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    return {
+        "ticker_heartbeat_at": datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
+        "ticker_heartbeat_age_s": max(0, round(time.time() - mtime, 3)),
+    }
 
 
 def _read_runtime_status_path(path: Path) -> dict[str, Any] | None:
@@ -513,9 +589,9 @@ def build_agent_health_payload() -> dict[str, Any]:
     # Cross-container fallback (#1879): when ``get_running_pid()`` cannot see
     # the gateway because we're in a different PID namespace, a recent
     # ``updated_at`` on ``gateway_state.json`` is a reliable equivalent signal
-    # since the gateway writes it on every tick. We only trust this fallback
-    # when the gateway also self-reports ``gateway_state == "running"`` so
-    # crash-without-cleanup scenarios still surface as "down".
+    # when the gateway build refreshes it periodically. We only trust this
+    # fallback when the gateway also self-reports ``gateway_state == "running"``
+    # so crash-without-cleanup scenarios still surface as "down".
     if _runtime_status_is_fresh(runtime_status):
         return {
             "alive": True,
@@ -524,6 +600,24 @@ def build_agent_health_payload() -> dict[str, Any]:
                 "state": "alive",
                 "reason": "cross_container_freshness",
                 **safe_details,
+            },
+        }
+
+    # Some gateway builds leave gateway_state.json stale while cron is still
+    # ticking. For scheduled jobs, the cron ticker heartbeat is the stronger
+    # operational signal: jobs are actually being evaluated. Only let this
+    # rescue stale self-reported running metadata; do not invent gateway
+    # configuration from a standalone heartbeat file.
+    heartbeat_path = _cron_ticker_heartbeat_path()
+    if _runtime_status_is_stale_running(runtime_status) and _cron_ticker_heartbeat_is_fresh(heartbeat_path):
+        return {
+            "alive": True,
+            "checked_at": checked_at,
+            "details": {
+                "state": "alive",
+                "reason": "cron_ticker_heartbeat",
+                **safe_details,
+                **_cron_ticker_heartbeat_detail(heartbeat_path),
             },
         }
 
