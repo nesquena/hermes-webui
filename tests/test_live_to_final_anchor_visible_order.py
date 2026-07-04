@@ -72,33 +72,38 @@ def _run_node_script(script):
     return json.loads(result.stdout)
 
 
-def _run_complete_anchor_settlement_case(active_mode):
-    script = f"""
-const fs = require('fs');
-const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))}, 'utf8');
-function extractFunc(name){{
+_EXTRACT_FUNC_JS = """
+function extractFunc(name){
   const start = src.indexOf('function ' + name);
   if(start === -1) throw new Error(name + ' not found');
   const params = src.indexOf('(', start);
   let depth = 0, close = -1;
-  for(let i=params; i<src.length; i++){{
+  for(let i=params; i<src.length; i++){
     if(src[i] === '(') depth++;
-    else if(src[i] === ')'){{
+    else if(src[i] === ')'){
       depth--;
-      if(depth === 0){{ close = i; break; }}
-    }}
-  }}
-  const brace = src.indexOf('{{', close);
+      if(depth === 0){ close = i; break; }
+    }
+  }
+  const brace = src.indexOf('{', close);
   depth = 0;
-  for(let i=brace; i<src.length; i++){{
-    if(src[i] === '{{') depth++;
-    else if(src[i] === '}}'){{
+  for(let i=brace; i<src.length; i++){
+    if(src[i] === '{') depth++;
+    else if(src[i] === '}'){
       depth--;
       if(depth === 0) return src.slice(start, i + 1);
-    }}
-  }}
+    }
+  }
   throw new Error(name + ' body did not close');
-}}
+}
+""".strip()
+
+
+def _run_complete_anchor_settlement_case(active_mode):
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
 const activeMode = {json.dumps(active_mode)};
 global.window = {{
   chatActivityMode(){{ return activeMode; }},
@@ -203,19 +208,7 @@ def test_dom_render_live_compression_row_transitions_to_settled_scene():
     script = f"""
 const fs = require('fs');
 const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
-function extractFunc(name){{
-  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
-  const start = src.search(re);
-  if(start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{{', start) + 1;
-  let depth = 1;
-  while(depth > 0 && i < src.length){{
-    if(src[i] === '{{') depth += 1;
-    else if(src[i] === '}}') depth -= 1;
-    i += 1;
-  }}
-  return src.slice(start, i);
-}}
+{_EXTRACT_FUNC_JS}
 class FakeElement {{
   constructor(tag){{
     this.tagName = String(tag || 'div').toUpperCase();
@@ -373,29 +366,7 @@ def test_anchor_scene_active_mode_falls_back_when_primary_accessor_throws():
     script = f"""
 const fs = require('fs');
 const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))}, 'utf8');
-function extractFunc(name){{
-  const start = src.indexOf('function ' + name);
-  if(start === -1) throw new Error(name + ' not found');
-  const params = src.indexOf('(', start);
-  let depth = 0, close = -1;
-  for(let i=params; i<src.length; i++){{
-    if(src[i] === '(') depth++;
-    else if(src[i] === ')'){{
-      depth--;
-      if(depth === 0){{ close = i; break; }}
-    }}
-  }}
-  const brace = src.indexOf('{{', close);
-  depth = 0;
-  for(let i=brace; i<src.length; i++){{
-    if(src[i] === '{{') depth++;
-    else if(src[i] === '}}'){{
-      depth--;
-      if(depth === 0) return src.slice(start, i + 1);
-    }}
-  }}
-  throw new Error(name + ' body did not close');
-}}
+{_EXTRACT_FUNC_JS}
 eval(extractFunc('_anchorSceneActiveMode'));
 global.window = {{
   chatActivityMode(){{ throw new Error('mode unavailable'); }},
@@ -566,29 +537,7 @@ def test_anchor_scene_has_worklog_worthy_rows_rejects_prose_only_and_terminal_on
     script = f"""
 const fs = require('fs');
 const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))}, 'utf8');
-function extractFunc(name){{
-  const start = src.indexOf('function ' + name);
-  if(start === -1) throw new Error(name + ' not found');
-  const params = src.indexOf('(', start);
-  let depth = 0, close = -1;
-  for(let i=params; i<src.length; i++){{
-    if(src[i] === '(') depth++;
-    else if(src[i] === ')'){{
-      depth--;
-      if(depth === 0){{ close = i; break; }}
-    }}
-  }}
-  const brace = src.indexOf('{{', close);
-  depth = 0;
-  for(let i=brace; i<src.length; i++){{
-    if(src[i] === '{{') depth++;
-    else if(src[i] === '}}'){{
-      depth--;
-      if(depth === 0) return src.slice(start, i + 1);
-    }}
-  }}
-  throw new Error(name + ' body did not close');
-}}
+{_EXTRACT_FUNC_JS}
 eval(extractFunc('_anchorSceneHasWorklogWorthyRows'));
 const proseOnly = {{activity_rows:[{{role:'prose'}}, {{role:'terminal', source_event_type:'done'}}]}};
 const terminalOnly = {{activity_rows:[{{role:'terminal', source_event_type:'done'}}]}};
@@ -625,29 +574,7 @@ def test_live_anchor_scene_dedupes_exact_duplicate_process_prose_only_live():
     script = f"""
 const fs = require('fs');
 const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
-function extractFunc(name){{
-  const start = src.indexOf('function ' + name);
-  if(start === -1) throw new Error(name + ' not found');
-  const params = src.indexOf('(', start);
-  let depth = 0, close = -1;
-  for(let i=params; i<src.length; i++){{
-    if(src[i] === '(') depth++;
-    else if(src[i] === ')'){{
-      depth--;
-      if(depth === 0){{ close = i; break; }}
-    }}
-  }}
-  const brace = src.indexOf('{{', close);
-  depth = 0;
-  for(let i=brace; i<src.length; i++){{
-    if(src[i] === '{{') depth++;
-    else if(src[i] === '}}'){{
-      depth--;
-      if(depth === 0) return src.slice(start, i + 1);
-    }}
-  }}
-  throw new Error(name + ' body did not close');
-}}
+{_EXTRACT_FUNC_JS}
 function _anchorSceneToolRowLogicalKey(){{ return ''; }}
 function _anchorSceneMergeToolRows(a,b){{ return b; }}
 function _anchorSceneIsSettledSuccessfulCompression(){{ return false; }}
@@ -1116,30 +1043,7 @@ def test_live_anchor_scene_transparent_snapshot_render_is_idempotent_and_hides_l
 const assert = require('assert');
 const fs = require('fs');
 const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
-function extractFunc(name){{
-  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
-  const start = src.search(re);
-  if(start < 0) throw new Error(name + ' not found');
-  const params = src.indexOf('(', start);
-  let depth = 0, close = -1;
-  for(let i=params; i<src.length; i++){{
-    if(src[i] === '(') depth++;
-    else if(src[i] === ')'){{
-      depth--;
-      if(depth === 0){{ close = i; break; }}
-    }}
-  }}
-  const brace = src.indexOf('{{', close);
-  depth = 0;
-  for(let i=brace; i<src.length; i++){{
-    if(src[i] === '{{') depth++;
-    else if(src[i] === '}}'){{
-      depth--;
-      if(depth === 0) return src.slice(start, i + 1);
-    }}
-  }}
-  throw new Error(name + ' body did not close');
-}}
+{_EXTRACT_FUNC_JS}
 
 class FakeElement {{
   constructor(tag='div'){{
