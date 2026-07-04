@@ -32,6 +32,13 @@ document.addEventListener('DOMContentLoaded', function () {
       if (raw.charAt(0) !== '/') return './';             // must be path-absolute
       if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return './'; // reject // and \\
       if (/[\x00-\x1f\x7f\s]/.test(raw)) return './';  // reject control chars / whitespace
+      // #5578: never redirect back to the login page, and never accept a `next`
+      // that already nests its own `next=` — that self-referential chain is what
+      // grows the URL exponentially on repeated expired-auth bounces.
+      if (raw.length > 2048) return './';
+      var pathOnly = raw.split('?')[0].split('#')[0].replace(/\/+$/, '');
+      if (pathOnly === '/login' || /\/login$/.test(pathOnly)) return './';
+      if (/(?:\?|%3f|%253f|&|%26)next(?:=|%3d|%253d)/i.test(raw)) return './';
       return raw;
     } catch (_) { return './'; }
   }

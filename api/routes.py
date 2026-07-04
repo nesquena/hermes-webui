@@ -9238,6 +9238,20 @@ def _safe_login_redirect_path(raw_path: str | None) -> str:
         return "/"
     if re.search(r"[\x00-\x1f\x7f\s]", path):
         return "/"
+    # #5578: reject a `next` that points back at the login page (or that already
+    # carries its own nested `next`), so an expired-auth bounce on the login page
+    # can't feed the redirect its own address and grow the URL exponentially.
+    # Length cap is belt-and-suspenders: a legitimate app path is never this long.
+    if len(path) > 2048:
+        return "/"
+    _path_only = path.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    if _path_only.endswith("/login") or _path_only == "/login":
+        return "/"
+    # A raw or (any depth of) percent-encoded `next=` inside the value is the
+    # signature of a nested login-redirect chain — never legitimate here. The
+    # `=` may itself be encoded (%3D / %253D …) at deeper nesting levels.
+    if re.search(r"(?:\?|%3f|%253f|&|%26)next(?:=|%3d|%253d)", path, re.IGNORECASE):
+        return "/"
     return path
 
 
