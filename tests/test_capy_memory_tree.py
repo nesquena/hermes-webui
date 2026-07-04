@@ -28131,7 +28131,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_run_annota
         assert unsafe not in serialized
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_suites_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_suites_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com,api.github.com.evil.invalid")
@@ -28185,12 +28185,14 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_suites_fin
     result = run_source_refresh_jobs(limit=1)
     catalog = source_catalog(limit=5)
     search = search_memory("check suites drift", limit=5)
+    relevant = relevant_memory_for_space("check-suites-drift-space", limit=5)
     serialized = json.dumps({
         "receipt": receipt,
         "result": result,
         "jobs": list_source_refresh_jobs(limit=5),
         "catalog": catalog,
         "search": search,
+        "relevant": relevant,
     }, sort_keys=True).lower()
 
     assert opened_urls == [{
@@ -28205,6 +28207,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_check_suites_fin
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / "github-check-suites-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     assert drifted_final_url.lower() not in serialized
     for unsafe in (
         "check_suites_drift_sentinel",
