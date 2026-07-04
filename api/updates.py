@@ -182,6 +182,14 @@ def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float 
     return snapshot
 
 
+def _git_safe_directory_config(cwd) -> str:
+    try:
+        safe_dir = str(Path(cwd).resolve())
+    except Exception:
+        safe_dir = str(cwd)
+    return f'safe.directory={safe_dir}'
+
+
 def _run_git(args, cwd, timeout=10):
     """Run a git command and return (useful output, ok).
 
@@ -193,7 +201,7 @@ def _run_git(args, cwd, timeout=10):
         return 'git executable not found', False
     try:
         r = subprocess.run(
-            [git_executable] + args, cwd=str(cwd), capture_output=True,
+            [git_executable, '-c', _git_safe_directory_config(cwd)] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
             encoding='utf-8', errors='replace',
         )

@@ -4,6 +4,41 @@ from unittest.mock import MagicMock, patch
 import api.updates as updates
 
 
+class _CompletedGit:
+    returncode = 0
+    stdout = 'git-output\n'
+    stderr = ''
+
+
+def test_run_git_marks_checkout_as_safe_directory(tmp_path):
+    """Version detection must survive git dubious-ownership protection.
+
+    The standalone VPS WebUI can run under a different uid than the checkout
+    owner. Without a per-call safe.directory override, WEBUI_VERSION falls back
+    to "unknown", leaving static assets pinned to ?v=unknown and stale cached JS.
+    """
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen['cmd'] = cmd
+        seen['cwd'] = kwargs.get('cwd')
+        return _CompletedGit()
+
+    with patch.object(updates, '_resolve_git_executable', return_value='git'), \
+         patch.object(updates.subprocess, 'run', side_effect=fake_run):
+        out, ok = updates._run_git(['describe', '--tags', '--always'], tmp_path)
+
+    assert ok is True
+    assert out == 'git-output'
+    assert seen['cmd'][:4] == [
+        'git',
+        '-c',
+        f'safe.directory={tmp_path.resolve()}',
+        'describe',
+    ]
+    assert seen['cwd'] == str(tmp_path)
+
+
 def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
     if args == ['diff-index', '--quiet', 'HEAD', '--']:
         return '', True  # clean tree
