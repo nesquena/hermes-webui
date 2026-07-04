@@ -293,6 +293,66 @@ def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enab
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def test_active_cli_state_db_session_with_persisted_user_turn_is_visible_in_cli_bucket():
+    """Active default-title CLI rows with persisted user content stay visible in the CLI bucket."""
+    conn = _ensure_state_db()
+    active_sid = 'cli_active_visible_001'
+    older_sid = 'cli_older_visible_001'
+    ended_sid = 'cli_ended_hidden_001'
+    now = time.time()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(id, source, title, model, started_at, message_count, ended_at, end_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (active_sid, 'cli', 'Untitled', 'openai/gpt-5', now + 20, 0, None, None),
+        )
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (active_sid,))
+        _insert_message(conn, active_sid, 'user', 'Active CLI session still running', now + 21)
+
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(id, source, title, model, started_at, message_count, ended_at, end_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (older_sid, 'cli', 'Named CLI Session', 'openai/gpt-5', now, 1, None, None),
+        )
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (older_sid,))
+        _insert_message(conn, older_sid, 'user', 'Older visible CLI session', now + 1)
+
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(id, source, title, model, started_at, message_count, ended_at, end_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (ended_sid, 'cli', 'Untitled', 'openai/gpt-5', now + 10, 1, now + 11, 'cli-close'),
+        )
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (ended_sid,))
+        _insert_message(conn, ended_sid, 'user', 'Ended CLI session', now + 11)
+        conn.commit()
+
+        post('/api/settings', {'show_cli_sessions': True})
+
+        data, status = get('/api/sessions?sidebar_source=cli')
+        assert status == 200
+        sessions = data.get('sessions', [])
+        session_ids = [s.get('session_id') for s in sessions]
+        assert active_sid in session_ids
+        assert older_sid in session_ids
+        assert ended_sid not in session_ids, "ended default-title CLI rows with one user turn stay hidden"
+
+        active = next(s for s in sessions if s.get('session_id') == active_sid)
+        older = next(s for s in sessions if s.get('session_id') == older_sid)
+        assert active.get('message_count') == 1
+        assert active.get('updated_at') > older.get('updated_at')
+        assert session_ids.index(active_sid) < session_ids.index(older_sid)
+    finally:
+        try:
+            _remove_test_sessions(conn, active_sid, older_sid, ended_sid)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
 def test_gateway_sessions_without_messages_are_hidden_from_sidebar():
     """Regression: empty agent session rows must not appear as broken sidebar entries."""
     conn = _ensure_state_db()

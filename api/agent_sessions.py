@@ -214,9 +214,18 @@ def is_cli_session_row_visible(row: dict) -> bool:
     if not is_cli_session_row(row):
         return True
 
-    message_count = _as_positive_int(row.get("actual_message_count") or row.get("message_count"))
+    actual_message_count = _as_positive_int(row.get("actual_message_count"))
+    message_count = actual_message_count or _as_positive_int(row.get("message_count"))
     if message_count <= 0:
         return False
+
+    if (
+        actual_message_count > 0
+        and _count_user_turns(row) > 0
+        and row.get("ended_at") is None
+        and not row.get("end_reason")
+    ):
+        return True
 
     if "tui" in {
         _normalize_source_name(row.get("source")),
