@@ -20691,7 +20691,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_jobs_js
     "https://api.github.com/repos/other/spaces/actions/runs/24680/jobs",
     "https://api.github.com/repos/capy/spaces/actions/runs/24680/jobs/extra",
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_jobs_final_url_drift_before_body_read(tmp_path, monkeypatch, final_url):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_jobs_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch, final_url):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -20740,9 +20740,11 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_jobs_fi
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("workflow jobs final url drift", limit=5)
+    relevant = relevant_memory_for_space("workflow-jobs-drift-space", limit=5)
     serialized = json.dumps({
         "result": result,
         "search_results": search["results"],
+        "relevant": relevant,
         "jobs": list_source_refresh_jobs(limit=5)["jobs"],
     }, sort_keys=True).lower()
 
@@ -20753,6 +20755,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_jobs_fi
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert memory_status()["chunk_count"] == 0
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "final_url_drift_body_sentinel",
         "secret_value_do_not_leak",
