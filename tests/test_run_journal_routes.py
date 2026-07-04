@@ -6,7 +6,7 @@ import queue
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ROUTES_SRC = (ROOT / "api" / "routes.py").read_text()
+ROUTES_SRC = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
 
 def test_stream_status_exposes_replay_summary():

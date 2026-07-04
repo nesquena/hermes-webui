@@ -3,8 +3,8 @@
 from pathlib import Path
 
 
-SESSIONS_JS = (Path(__file__).resolve().parent.parent / "static" / "sessions.js").read_text()
-STYLE_CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text()
+SESSIONS_JS = (Path(__file__).resolve().parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
+STYLE_CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def test_pinned_indicator_renders_inside_title_row():
@@ -133,7 +133,7 @@ def test_plain_mouse_hover_does_not_mark_session_row_dragging():
 
 
 def test_sidebar_uses_local_inflight_state_for_immediate_spinner():
-    messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text()
+    messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text(encoding="utf-8")
 
     assert "function _isSessionLocallyStreaming(s)" in SESSIONS_JS
     assert "isActive && Boolean(S.busy)" in SESSIONS_JS
@@ -158,7 +158,7 @@ def test_date_group_caret_expanded_down_collapsed_right():
 def test_apperror_path_calls_render_session_list():
     """apperror handler must call renderSessionList() to clear the streaming indicator
     immediately rather than waiting for the 5s streaming poll interval."""
-    messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text()
+    messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text(encoding="utf-8")
     apperror_idx = messages_js.find("source.addEventListener('apperror'")
     assert apperror_idx != -1, "apperror handler not found in messages.js"
     warning_idx = messages_js.find("source.addEventListener('warning'", apperror_idx)

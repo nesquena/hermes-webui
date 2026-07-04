@@ -21,8 +21,8 @@ import re
 import html as _html
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-UI_JS = (REPO_ROOT / "static" / "ui.js").read_text()
-STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text()
+UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

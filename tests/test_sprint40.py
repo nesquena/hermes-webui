@@ -16,8 +16,8 @@ from unittest.mock import patch
 import api.onboarding as mod
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text()
-ONBOARDING_JS = (REPO_ROOT / "static" / "onboarding.js").read_text()
+I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+ONBOARDING_JS = (REPO_ROOT / "static" / "onboarding.js").read_text(encoding="utf-8")
 
 
 # ── Backend: _build_setup_catalog ──────────────────────────────────────────
@@ -152,7 +152,7 @@ class TestOAuthOnboardingJs(unittest.TestCase):
 
     def test_style_css_has_oauth_card_rules(self):
         """style.css must contain the .onboarding-oauth-card rules."""
-        css = (REPO_ROOT / "static" / "style.css").read_text()
+        css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
         self.assertIn("onboarding-oauth-card", css)
         self.assertIn("onboarding-oauth-ready", css)
         self.assertIn("onboarding-oauth-pending", css)

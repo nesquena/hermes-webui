@@ -4,9 +4,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text()
-SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text()
-UI_SRC = (ROOT / "static" / "ui.js").read_text()
+MESSAGES_SRC = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+SESSIONS_SRC = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+UI_SRC = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _function_body(src: str, signature: str) -> str:

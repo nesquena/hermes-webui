@@ -15,7 +15,7 @@ REPO = pathlib.Path(__file__).parent.parent
 
 
 def read(rel):
-    return (REPO / rel).read_text()
+    return (REPO / rel).read_text(encoding="utf-8")
 
 
 # ── Group A: /root workspace ──────────────────────────────────────────────────
@@ -80,7 +80,7 @@ class TestCronSkillCacheInvalidation:
     def _panels_src(self):
         return read("static/panels.js")
 
-    def test_cache_busted_on_form_open(self):
+    def test_cache_busted_on_form_open(self, encoding="utf-8"):
         src = self._panels_src()
         # toggleCronForm should set cache to null unconditionally
         # openCronCreate() opens the task create form (renamed from toggleCronForm
@@ -94,7 +94,7 @@ class TestCronSkillCacheInvalidation:
             "before fetching skills"
         )
 
-    def test_cache_not_guarded_by_if_on_open(self):
+    def test_cache_not_guarded_by_if_on_open(self, encoding="utf-8"):
         src = self._panels_src()
         # openCronCreate must not gate the fetch behind an if(!_cronSkillsCache) guard.
         m = re.search(

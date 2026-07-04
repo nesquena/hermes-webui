@@ -1,8 +1,8 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-UI_JS = (ROOT / "static" / "ui.js").read_text()
-STYLE_CSS = (ROOT / "static" / "style.css").read_text()
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def test_error_toast_default_duration_is_substantially_longer_than_info_toasts():
