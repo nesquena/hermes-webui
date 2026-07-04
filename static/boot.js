@@ -930,6 +930,7 @@ function _micToastKeyForRecognitionError(error){
     }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
+      recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
       recognition.start();
       _setRecording(true);
       return;
