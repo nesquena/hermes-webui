@@ -89,5 +89,19 @@ def test_codex_model_dropdown_quota_badge_has_detailed_popover():
     assert "used_percent" in UI_JS
     assert "remaining_percent" in UI_JS
     assert "reset_at" in UI_JS
+    assert "_providerQuotaIsSingleAvailableCredentialPool" in UI_JS
+    assert "const detail=singleAvailablePool?'':String((w&&w.detail)||'').trim();" in UI_JS
+    assert "if(pool&&!singleAvailablePool){" in UI_JS
     assert "model-opt:hover .model-opt-quota-popover" in CSS
     assert "model-opt:focus-within .model-opt-quota-popover" in CSS
+
+
+def test_codex_model_dropdown_quota_popover_does_not_expand_dropdown_width():
+    assert ".model-opt{padding:10px 14px;cursor:pointer;transition:background .12s;display:flex;flex-direction:column;gap:3px;align-items:flex-start;min-width:0;}" in CSS
+    assert ".model-opt-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;min-width:0;}" in CSS
+    assert "inline-size:100%" in CSS
+    assert "max-inline-size:100%" in CSS
+    assert "min-inline-size:0" in CSS
+    assert "contain:inline-size" in CSS
+    assert "overflow-wrap:anywhere" in CSS
+    assert "grid-template-columns:minmax(42px,auto) minmax(0,1fr)" in CSS

@@ -2068,11 +2068,21 @@ function _providerQuotaIndicatorUrl(){
   const provider=_providerQuotaIndicatorProvider();
   return provider?'/api/provider/quota?provider='+encodeURIComponent(provider):'/api/provider/quota';
 }
+function _providerQuotaIsSingleAvailableCredentialPool(pool){
+  if(!pool||!Array.isArray(pool.credentials)||pool.credentials.length!==1) return false;
+  const total=Number.isFinite(Number(pool.total_credentials))?Number(pool.total_credentials):pool.credentials.length;
+  const available=Number.isFinite(Number(pool.available_credentials))?Number(pool.available_credentials):pool.credentials.filter(c=>c&&c.status==='available').length;
+  const exhausted=Number.isFinite(Number(pool.exhausted_credentials))?Number(pool.exhausted_credentials):0;
+  const failed=Number.isFinite(Number(pool.failed_credentials))?Number(pool.failed_credentials):0;
+  return total===1&&available===1&&exhausted===0&&failed===0;
+}
 function _providerQuotaDropdownDetailHtml(status,text){
   const accountLimits=status&&status.account_limits;
   if(!accountLimits||typeof accountLimits!=='object') return '';
   const provider=esc(status.display_name||status.provider||accountLimits.provider||'Provider');
   let windows=Array.isArray(accountLimits.windows)?accountLimits.windows.filter(w=>w&&w.label):[];
+  const pool=accountLimits.pool&&typeof accountLimits.pool==='object'?accountLimits.pool:null;
+  const singleAvailablePool=_providerQuotaIsSingleAvailableCredentialPool(pool);
   const providerId=String(status.provider||accountLimits.provider||'').toLowerCase();
   if(providerId==='openai-codex'){
     const order={session:0,weekly:1};
@@ -2087,7 +2097,7 @@ function _providerQuotaDropdownDetailHtml(status,text){
     const remaining=_formatQuotaPercentShort(w&&w.remaining_percent)||'—';
     const used=_formatQuotaPercentShort(w&&w.used_percent);
     const reset=_formatQuotaDateShort(w&&w.reset_at);
-    const detail=String((w&&w.detail)||'').trim();
+    const detail=singleAvailablePool?'':String((w&&w.detail)||'').trim();
     const meta=[];
     if(used) meta.push('使用 '+used);
     if(reset) meta.push('リセット '+reset);
@@ -2096,9 +2106,8 @@ function _providerQuotaDropdownDetailHtml(status,text){
   const resetCredits=accountLimits.reset_credits&&typeof accountLimits.reset_credits==='object'?accountLimits.reset_credits:null;
   const resetCount=resetCredits&&resetCredits.available_count!==undefined&&resetCredits.available_count!==null?String(resetCredits.available_count).trim():'';
   const resetCreditsRow=resetCount?`<div class="model-opt-quota-detail-row model-opt-quota-detail-row--compact"><span>リセット権</span><strong>${esc(resetCount)}</strong></div>`:'';
-  const pool=accountLimits.pool&&typeof accountLimits.pool==='object'?accountLimits.pool:null;
   let poolRow='';
-  if(pool){
+  if(pool&&!singleAvailablePool){
     const total=Number.isFinite(Number(pool.total_credentials))?Number(pool.total_credentials):(Array.isArray(pool.credentials)?pool.credentials.length:null);
     const available=Number.isFinite(Number(pool.available_credentials))?Number(pool.available_credentials):null;
     const exhausted=Number.isFinite(Number(pool.exhausted_credentials))?Number(pool.exhausted_credentials):0;
