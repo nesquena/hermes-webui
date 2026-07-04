@@ -11,7 +11,7 @@
       "capabilities": ["manifest-bundle"],
       "permissions": {
         "dom": { "owned": true, "mutates_core_views": true },
-        "storage": { "owned": ["hermes-ext-chat-tiling"] },
+        "storage": { "owned": true },
         "webui_api": { "read": ["session", "sessions"], "write": [] },
         "network_external": false,
         "filesystem": { "arbitrary": false, "serves_bundled_assets": true },

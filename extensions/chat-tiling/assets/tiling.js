@@ -42,7 +42,7 @@ body.ext-tiling-body #messages{overflow:hidden}
 
 // ── State ──
 const T={tiles:[],activeId:null,nextId:1,grid:null,tb:null,visible:false,_w:null,_tc:{}};
-const tid=i=>T.tiles.find(t=>t.id===i),sid=s=>T.tiles.find(t=>t.sid===s),at=()=>tid(T.activeId);
+const tid=i=>T.tiles.find(t=>t.id===i),bySid=s=>T.tiles.find(t=>t.sid===s),at=()=>tid(T.activeId);
 const gs=(k,d)=>{try{const w=window.HermesExtensionSettings;if(w){const x=w.settingsForExtension('chat-tiling');return x.get(k)!=null?x.get(k):d}}catch(_){}return d};
 
 // ── Composer save/restore ──
@@ -96,7 +96,7 @@ function focusTile(id){
 
 // ── Open session in tile ──
 function openTile(sid,data){
-  if(!sid)return;const e=sid(sid);if(e){focusTile(e.id);return}
+  if(!sid)return;const e=bySid(sid);if(e){focusTile(e.id);return}
   const t=T.tiles.find(t=>!t.sid);if(!t){typeof showToast=='function'&&showToast('All tiles in use. Close one first.',3e3,'error');return}
   t.sid=sid;t.session=data||null;t.messages=(data&&data.messages)||[];t.cv='';t.mv=null;
   updateHeader(t);badge(sid,1);renderMsgs(t);focusTile(t.id);
@@ -168,6 +168,8 @@ function showGrid(cols,rows){
   if(T.visible&&T._cols===cols&&T._rows===rows)return;
   if(T.visible){closeAll()}
   T._cols=cols;T._rows=rows;T.visible=true;
+  // Snapshot current session state before entering tiling
+  if(typeof S!=='undefined'){T._saved={session:S.session,messages:[...(S.messages||[])],busy:!!S.busy,activeStreamId:S.activeStreamId||null}}
   const o=document.getElementById('msgInner');if(o){o.removeAttribute('id');o.classList.add('messages-inner--idle')}
   document.body.classList.add('ext-tiling-body');
   T.grid.style.display='';T.grid.classList.add('ext-tile-grid--active');
@@ -190,7 +192,7 @@ function hideGrid(){
   T.grid.style.display='none';T.grid.classList.remove('ext-tile-grid--active');
   const es=document.getElementById('emptyState');if(es)es.style.display='';
   typeof checkEmptyState=='function'&&checkEmptyState();
-  if(typeof S!=='undefined'){S.session=null;S.messages=[];S.busy=false;S.activeStreamId=null}
+  if(typeof S!=='undefined'){const s=T._saved;T._saved=null;S.session=s?s.session:null;S.messages=s?[...s.messages]:[];S.busy=s?!!s.busy:false;S.activeStreamId=s?s.activeStreamId||null:null}
   typeof syncTopbar=='function'&&syncTopbar();tbActive();
   try{localStorage.removeItem('hermes-ext-tiling-layout')}catch(_){}
 }
