@@ -25,8 +25,19 @@ def test_quota_indicator_is_near_model_picker_in_composer_chrome():
 
 def test_quota_indicator_fetches_provider_quota_on_boot():
     assert "function refreshProviderQuotaIndicator" in UI_JS
-    assert "api('/api/provider/quota')" in UI_JS
+    assert "function _providerQuotaIndicatorProvider" in UI_JS
+    assert "function _providerQuotaIndicatorUrl" in UI_JS
+    assert "'/api/provider/quota?provider='+encodeURIComponent(provider)" in UI_JS
+    assert "api(_providerQuotaIndicatorUrl())" in UI_JS
     assert "refreshProviderQuotaIndicator" in BOOT_JS
+
+
+def test_quota_indicator_uses_session_or_selected_model_provider():
+    assert "S&&S.session&&S.session.model_provider" in UI_JS
+    assert "_captureModelDropdownSelection(sel)" in UI_JS
+    assert "_readPersistedModelState()" in UI_JS
+    assert "_scheduleProviderQuotaIndicatorRefreshForModel" in UI_JS
+    assert "_scheduleProviderQuotaIndicatorRefreshForModel();" in UI_JS
 
 
 def test_quota_indicator_hides_unsupported_or_failed_statuses():

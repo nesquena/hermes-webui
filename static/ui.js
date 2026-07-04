@@ -1936,6 +1936,8 @@ setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
 let _providerQuotaRefreshInFlight=false;
+let _providerQuotaRefreshQueued=false;
+let _providerQuotaLastProvider='';
 
 function _formatQuotaMoneyShort(value){
   const n=Number(value);
@@ -2016,6 +2018,44 @@ function renderProviderQuotaIndicator(status){
   if(mobileAction){mobileAction.style.display='';mobileAction.title=text.title;}
   if(mobileLabel) mobileLabel.textContent=text.label;
 }
+function _providerQuotaIndicatorProvider(){
+  try{
+    const sessionProvider=String((S&&S.session&&S.session.model_provider)||'').trim();
+    if(sessionProvider) return sessionProvider.toLowerCase();
+  }catch(_){}
+  try{
+    const sel=typeof $==='function' ? $('modelSelect') : null;
+    if(sel&&typeof _captureModelDropdownSelection==='function'){
+      const state=_captureModelDropdownSelection(sel);
+      const provider=String((state&&state.model_provider)||'').trim();
+      if(provider) return provider.toLowerCase();
+    }
+    if(sel&&sel.value&&typeof _providerFromModelValue==='function'){
+      const provider=String(_providerFromModelValue(sel.value)||'').trim();
+      if(provider) return provider.toLowerCase();
+    }
+  }catch(_){}
+  try{
+    if(typeof _readPersistedModelState==='function'){
+      const state=_readPersistedModelState();
+      const provider=String((state&&state.model_provider)||'').trim();
+      if(provider) return provider.toLowerCase();
+    }
+  }catch(_){}
+  return '';
+}
+function _providerQuotaIndicatorUrl(){
+  const provider=_providerQuotaIndicatorProvider();
+  return provider?'/api/provider/quota?provider='+encodeURIComponent(provider):'/api/provider/quota';
+}
+function _scheduleProviderQuotaIndicatorRefreshForModel(){
+  const provider=_providerQuotaIndicatorProvider();
+  if(provider===_providerQuotaLastProvider) return;
+  _providerQuotaLastProvider=provider;
+  setTimeout(()=>{
+    if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+  },0);
+}
 async function refreshProviderQuotaIndicator(){
   // Short-circuit before the fetch when the chip is disabled — no point asking
   // the server for quota data the UI will throw away.
@@ -2028,15 +2068,23 @@ async function refreshProviderQuotaIndicator(){
     if(mobileLabel) mobileLabel.textContent='';
     return;
   }
-  if(_providerQuotaRefreshInFlight) return;
+  if(_providerQuotaRefreshInFlight){
+    _providerQuotaRefreshQueued=true;
+    return;
+  }
   _providerQuotaRefreshInFlight=true;
   try{
-    const status=await api('/api/provider/quota');
+    const status=await api(_providerQuotaIndicatorUrl());
+    _providerQuotaLastProvider=_providerQuotaIndicatorProvider();
     renderProviderQuotaIndicator(status);
   }catch(_e){
     renderProviderQuotaIndicator(null);
   }finally{
     _providerQuotaRefreshInFlight=false;
+    if(_providerQuotaRefreshQueued){
+      _providerQuotaRefreshQueued=false;
+      refreshProviderQuotaIndicator();
+    }
   }
 }
 window.addEventListener('visibilitychange',()=>{
@@ -2813,6 +2861,7 @@ function syncModelChip(){
   chip.title=gatewayRouting?`${sel.value||'Conversation model'} ${_gatewayRoutingLabel(gatewayRouting)}`:(sel.value||'Conversation model');
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
   if(mobileAction) mobileAction.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
+  if(typeof _scheduleProviderQuotaIndicatorRefreshForModel==='function') _scheduleProviderQuotaIndicatorRefreshForModel();
 }
 
 function _positionModelDropdown(){
