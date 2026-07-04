@@ -4,7 +4,7 @@
       "id": "chat-tiling",
       "name": "Chat Tiling",
       "description": "Multi-session tiling layouts: split in 2, 4 corners, or 3×2 grid.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "author": "ChonSong",
       "homepage": "https://github.com/ChonSong/hermes-webui",
       "scripts": ["assets/tiling.js"],
