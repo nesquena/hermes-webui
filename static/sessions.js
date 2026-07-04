@@ -1403,6 +1403,15 @@ async function _switchProfileForSessionLoad(profile){
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  // Extension pre-open hook — allows extensions (e.g. chat-tiling) to intercept
+  // before the core navigates. Handler returns {cancel:true} to prevent load.
+  if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+    var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
+    if(_preResult&&_preResult.cancel===true){
+      if(_loadingSessionId===sid) _loadingSessionId=null;
+      return;
+    }
+  }
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
@@ -2043,6 +2052,10 @@ async function loadSession(sid){
     _checkAndShowHandoffHint(sid);
   } else {
     _hideHandoffHint();
+  }
+  // Extension post-load hook
+  if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+    try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
   }
 }
 
