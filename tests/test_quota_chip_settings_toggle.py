@@ -28,34 +28,32 @@ def test_quota_chip_default_off_in_config_defaults():
     assert '"show_quota_chip",' in src, "show_quota_chip must be in _SETTINGS_BOOL_KEYS"
 
 
-def test_quota_chip_render_short_circuits_when_disabled():
-    """Both renderProviderQuotaIndicator and refreshProviderQuotaIndicator must
-    hide the chip when window._showQuotaChip !== true. Specifically renderer
-    must hide BEFORE any other render logic, and refresher must skip the fetch
-    entirely so we don't burn quota API calls for chip-disabled users."""
+def test_quota_chip_render_hides_ambient_chip_but_keeps_dropdown_cache_when_disabled():
+    """show_quota_chip controls only the ambient composer chip.
+
+    Compact composer layouts hide the ambient chip, so Codex quota still needs to
+    be fetched/cached for the model picker row even when the opt-in chip is off.
+    """
     js = UI_JS.read_text(encoding="utf-8")
 
-    # Renderer must early-hide when disabled
     render_start = js.index("function renderProviderQuotaIndicator(status){")
     render_end = js.index("\nasync function refreshProviderQuotaIndicator", render_start)
     render_body = js[render_start:render_end]
     assert "window._showQuotaChip!==true" in render_body, (
-        "renderProviderQuotaIndicator must check window._showQuotaChip before rendering"
+        "renderProviderQuotaIndicator must check window._showQuotaChip before showing the ambient chip"
     )
-    # Guard must come BEFORE the existing _providerQuotaIndicatorText(status) call
+    cache_idx = render_body.index("_providerQuotaLastText=text||null")
     guard_idx = render_body.index("window._showQuotaChip!==true")
-    text_call_idx = render_body.index("_providerQuotaIndicatorText(status)")
-    assert guard_idx < text_call_idx, (
-        "Disabled-chip guard must run before the indicator-text computation"
+    assert cache_idx < guard_idx, (
+        "Quota text must be cached before hiding the ambient chip so the model picker can show it"
     )
 
-    # Refresher must short-circuit fetch when disabled
     refresh_start = js.index("async function refreshProviderQuotaIndicator(){")
-    # Find the closing brace of the function — first 'try{' line marks the live body
-    # Just check the entire snippet ahead of try{
-    refresh_head = js[refresh_start:js.index("try{", refresh_start)]
-    assert "window._showQuotaChip!==true" in refresh_head, (
-        "refreshProviderQuotaIndicator must skip the fetch when chip is disabled"
+    refresh_end = js.index("\nwindow.addEventListener('visibilitychange'", refresh_start)
+    refresh_body = js[refresh_start:refresh_end]
+    assert "api(_providerQuotaIndicatorUrl())" in refresh_body
+    assert "window._showQuotaChip!==true" not in refresh_body, (
+        "refreshProviderQuotaIndicator must still fetch for model-picker quota badges"
     )
 
 

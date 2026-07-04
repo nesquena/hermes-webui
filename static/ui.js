@@ -1938,6 +1938,8 @@ setTimeout(_initMediaPlaybackObserver,0);
 let _providerQuotaRefreshInFlight=false;
 let _providerQuotaRefreshQueued=false;
 let _providerQuotaLastProvider='';
+let _providerQuotaLastStatus=null;
+let _providerQuotaLastText=null;
 
 function _formatQuotaMoneyShort(value){
   const n=Number(value);
@@ -1993,8 +1995,11 @@ function renderProviderQuotaIndicator(status){
   const mobileAction=$('composerMobileQuotaAction');
   const mobileLabel=$('composerMobileQuotaLabel');
   if(!chip||!label) return;
-  // Hide entirely when the user has disabled the ambient quota chip in Settings.
-  // Boot defaults this on; an explicit false preference suppresses it.
+  const text=_providerQuotaIndicatorText(status);
+  _providerQuotaLastStatus=status||null;
+  _providerQuotaLastText=text||null;
+  // Hide only the ambient composer chip when disabled. Keep the fetched quota
+  // cached so compact layouts can still show it inside the model picker.
   if(window._showQuotaChip!==true){
     chip.hidden=true;
     label.textContent='';
@@ -2003,7 +2008,6 @@ function renderProviderQuotaIndicator(status){
     if(mobileLabel) mobileLabel.textContent='';
     return;
   }
-  const text=_providerQuotaIndicatorText(status);
   if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
     chip.hidden=true;
     label.textContent='';
@@ -2048,6 +2052,20 @@ function _providerQuotaIndicatorUrl(){
   const provider=_providerQuotaIndicatorProvider();
   return provider?'/api/provider/quota?provider='+encodeURIComponent(provider):'/api/provider/quota';
 }
+function _providerQuotaDropdownBadgeHtml(providerId){
+  const provider=String(providerId||'').toLowerCase();
+  if(provider!=='openai-codex') return '';
+  const text=_providerQuotaLastText;
+  if(!text||!text.label) return '';
+  const label=String(text.label||'').replace(/^Codex\s+/,'');
+  return `<span class="model-opt-quota-badge" title="${esc(text.title||text.label)}">${esc(label)}</span>`;
+}
+function _rerenderOpenModelDropdownForQuota(){
+  try{
+    const dd=typeof $==='function' ? $('composerModelDropdown') : null;
+    if(dd&&dd.classList&&dd.classList.contains('open')&&typeof renderModelDropdown==='function') renderModelDropdown();
+  }catch(_){}
+}
 function _scheduleProviderQuotaIndicatorRefreshForModel(){
   const provider=_providerQuotaIndicatorProvider();
   if(provider===_providerQuotaLastProvider) return;
@@ -2057,17 +2075,6 @@ function _scheduleProviderQuotaIndicatorRefreshForModel(){
   },0);
 }
 async function refreshProviderQuotaIndicator(){
-  // Short-circuit before the fetch when the chip is disabled — no point asking
-  // the server for quota data the UI will throw away.
-  if(window._showQuotaChip!==true){
-    const chip=$('providerQuotaChip');
-    if(chip){chip.hidden=true;chip.removeAttribute('title');}
-    const mobileAction=$('composerMobileQuotaAction');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    const mobileLabel=$('composerMobileQuotaLabel');
-    if(mobileLabel) mobileLabel.textContent='';
-    return;
-  }
   if(_providerQuotaRefreshInFlight){
     _providerQuotaRefreshQueued=true;
     return;
@@ -2077,8 +2084,10 @@ async function refreshProviderQuotaIndicator(){
     const status=await api(_providerQuotaIndicatorUrl());
     _providerQuotaLastProvider=_providerQuotaIndicatorProvider();
     renderProviderQuotaIndicator(status);
+    _rerenderOpenModelDropdownForQuota();
   }catch(_e){
     renderProviderQuotaIndicator(null);
+    _rerenderOpenModelDropdownForQuota();
   }finally{
     _providerQuotaRefreshInFlight=false;
     if(_providerQuotaRefreshQueued){
@@ -3186,9 +3195,10 @@ function renderModelDropdown(){
     const row=document.createElement('div');
     row.className='model-opt'+(m.value===sel.value?' active':'');
     const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const quotaBadgeHtml=_providerQuotaDropdownBadgeHtml(m.providerId||(m.badge&&m.badge.provider)||_providerFromModelValue(m.value));
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
-    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${quotaBadgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
     row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
     return row;
   };
@@ -3304,10 +3314,11 @@ function renderModelDropdown(){
     const row=document.createElement('div');
     row.className='model-opt'+(m.value===sel.value?' active':'');
     const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+    const quotaBadgeHtml=_providerQuotaDropdownBadgeHtml(m.providerId||(m.badge&&m.badge.provider)||_providerFromModelValue(m.value));
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
     const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
-    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${quotaBadgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
     row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
     return row;
   };
@@ -3402,7 +3413,8 @@ function renderModelDropdown(){
           }
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        const quotaBadgeHtml=_providerQuotaDropdownBadgeHtml((m.badge&&m.badge.provider)||m.providerId||_providerFromModelValue(m.value));
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}${quotaBadgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectModelFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }

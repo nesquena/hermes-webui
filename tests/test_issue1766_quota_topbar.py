@@ -29,6 +29,7 @@ def test_quota_indicator_fetches_provider_quota_on_boot():
     assert "function _providerQuotaIndicatorUrl" in UI_JS
     assert "'/api/provider/quota?provider='+encodeURIComponent(provider)" in UI_JS
     assert "api(_providerQuotaIndicatorUrl())" in UI_JS
+    assert "if(window._showQuotaChip!==true){" not in UI_JS[UI_JS.find("async function refreshProviderQuotaIndicator") : UI_JS.find("window.addEventListener('visibilitychange'", UI_JS.find("async function refreshProviderQuotaIndicator"))]
     assert "refreshProviderQuotaIndicator" in BOOT_JS
 
 
@@ -61,3 +62,13 @@ def test_quota_indicator_formats_openrouter_and_account_limit_shapes():
     assert "String(x.label||'').trim().toLowerCase()==='weekly'" in UI_JS
     assert "Codex '+shortWindow+' '+remaining" in UI_JS
     assert "provider-quota-chip" in CSS
+
+
+def test_codex_quota_is_visible_inside_model_dropdown_rows():
+    assert "let _providerQuotaLastText=null" in UI_JS
+    assert "function _providerQuotaDropdownBadgeHtml" in UI_JS
+    assert "provider!=='openai-codex'" in UI_JS
+    assert "model-opt-quota-badge" in UI_JS
+    assert "_rerenderOpenModelDropdownForQuota" in UI_JS
+    assert "renderModelDropdown()" in UI_JS
+    assert "model-opt-quota-badge" in CSS

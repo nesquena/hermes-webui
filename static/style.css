@@ -2601,6 +2601,7 @@
   .provider-quota-chip:hover{background:rgba(34,197,94,.16);border-color:rgba(34,197,94,.35);}
   .provider-quota-chip-dot{width:6px;height:6px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.12);flex:0 0 auto;}
   .provider-quota-chip-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .model-opt-quota-badge{display:inline-flex;align-items:center;margin-left:6px;padding:2px 7px;border:1px solid rgba(34,197,94,.42);border-radius:999px;background:rgba(34,197,94,.12);color:#86efac;font-size:10px;font-weight:750;line-height:1.25;white-space:nowrap;vertical-align:middle;}
   /* Increased specificity (.icon-btn.composer-mobile-config-btn) to win the cascade
      against the later-in-source `.icon-btn { display:flex }` rule that this element
      also matches. Without this, the button shows at desktop width — see #1381 review. */
