@@ -455,6 +455,158 @@ def test_non_auth_silent_failure_still_uses_no_response(tmp_path, monkeypatch):
     assert saved.messages[-1]["_error"] is True
 
 
+def test_completed_assistant_answer_with_stale_partial_flag_settles_done(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "completed_answer_stale_partial",
+        "stream_completed_answer_stale_partial",
+        pending_user_message="Please finish cleanly",
+    )
+
+    class CompletedAnswerStalePartialAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "status": "partial",
+                "partial": True,
+                "messages": history + [{"role": "assistant", "content": "Completed answer"}],
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_completed_answer_stale_partial",
+        CompletedAnswerStalePartialAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("completed_answer_stale_partial")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "Completed answer"
+    assert not any(msg.get("_error") for msg in saved.messages)
+
+
+def test_stale_partial_with_unfinished_tool_call_still_reports_no_response(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "unfinished_tool_call_stale_partial",
+        "stream_unfinished_tool_call_stale_partial",
+        pending_user_message="Use a tool first",
+    )
+
+    class UnfinishedToolCallStalePartialAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "status": "partial",
+                "partial": True,
+                "messages": history + [
+                    {"role": "user", "content": "Use a tool first"},
+                    {
+                        "role": "assistant",
+                        "content": "Checking the tool result",
+                        "tool_calls": [{"id": "call_1", "type": "function"}],
+                    },
+                ],
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_unfinished_tool_call_stale_partial",
+        UnfinishedToolCallStalePartialAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("unfinished_tool_call_stale_partial")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for unfinished tool-call partial"
+    assert apperrors[-1]["type"] == "no_response"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
+
+
+def test_stale_partial_repeated_prompt_replay_still_reports_no_response(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "repeated_prompt_replay_stale_partial",
+        "stream_repeated_prompt_replay_stale_partial",
+        pending_user_message="Please repeat this",
+    )
+    _seed_prior_turn(
+        session,
+        prior_user="Please repeat this",
+        prior_assistant="Old answer",
+    )
+
+    class RepeatedPromptReplayStalePartialAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Partial text before stale replay")
+            return {
+                "status": "partial",
+                "partial": True,
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_repeated_prompt_replay_stale_partial",
+        RepeatedPromptReplayStalePartialAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("repeated_prompt_replay_stale_partial")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for repeated-prompt stale replay"
+    assert apperrors[-1]["type"] == "no_response"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
+
+
+def test_hard_failure_with_completed_answer_still_reports_no_response(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "hard_failure_completed_answer",
+        "stream_hard_failure_completed_answer",
+        pending_user_message="Please finish despite failure",
+    )
+
+    class HardFailureCompletedAnswerAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "status": "failed",
+                "messages": history + [{"role": "assistant", "content": "Completed answer"}],
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_hard_failure_completed_answer",
+        HardFailureCompletedAnswerAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("hard_failure_completed_answer")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for hard failed result"
+    assert apperrors[-1]["type"] == "no_response"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
+
+
 def test_non_auth_partial_delivery_persists_error_turn(tmp_path, monkeypatch):
     session = _prepare_session("partial_escape", "stream_partial_escape", pending_user_message="Please handle partial silence")
 

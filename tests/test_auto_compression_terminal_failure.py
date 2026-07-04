@@ -170,13 +170,14 @@ def test_compression_exhausted_result_is_terminal_failure_even_after_streamed_te
 
 def test_terminal_failure_gates_shape_check_to_no_streamed_text():
     src = _read("api/streaming.py")
-    start = src.find("_terminal_failure = (")
-    assert start != -1, "terminal failure assignment not found"
+    start = src.find("_is_agent_result_terminal = _agent_result_terminal_failure(result)")
+    assert start != -1, "terminal failure result assignment not found"
     end = src.find("if _terminal_failure:", start)
     assert end != -1, "terminal failure guard not found"
     block = src[start:end]
 
-    assert "_agent_result_terminal_failure(result)" in block
+    assert "_is_agent_result_terminal = _agent_result_terminal_failure(result)" in block
+    assert "_is_agent_result_terminal" in block
     assert "_saved_transcript_lacks_final_answer" in block
     assert "_classification['type'] not in {'cancelled', 'interrupted'}" in block
     assert "not _token_sent" not in block
