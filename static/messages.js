@@ -2705,12 +2705,35 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seq=Number(_assistantSegmentSeq||_currentLiveSegmentSeq||0);
     return Number.isFinite(seq)&&seq>0?seq:1;
   }
+  function _anchorSceneActiveMode(){
+    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'?value:'';
+    if(typeof window!=='undefined'){
+      if(typeof window.chatActivityMode==='function'){
+        try{
+          const mode=normalize(window.chatActivityMode());
+          if(mode) return mode;
+        }catch(_){}
+      }
+      const displayMode=normalize(window._chatActivityDisplayMode);
+      if(displayMode) return displayMode;
+      if(window._transparentStream) return 'transparent_stream';
+    }
+    return 'compact_worklog';
+  }
+  function _anchorSceneRowDisplayHintForMode(row, sceneMode){
+    const hints=row&&typeof row==='object'&&row.display_hints&&typeof row.display_hints==='object'
+      ? row.display_hints
+      : null;
+    if(sceneMode==='transparent_stream') return (hints&&hints.transparent_stream)||'chronological_activity';
+    if(sceneMode==='compact_worklog') return (hints&&hints.compact_worklog)||row.display_hint||'activity_row';
+    return row&&row.display_hint||'activity_row';
+  }
   function _renderAnchorLiveScene(){
     if(!_anchorRegistry||!_isActiveSession()) return false;
     if(typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneForStream!=='function') return false;
     try{
       return !!window._renderLiveAnchorActivitySceneForStream(streamId, activeSid, {
-        mode:'compact_worklog',
+        mode:_anchorSceneActiveMode(),
       });
     }catch(err){
       if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
@@ -2723,7 +2746,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _projectLiveAnchorActivityScene(){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.projectAssistantTurnAnchorActivityScene!=='function') return null;
     try{
-      return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:'compact_worklog'});
+      return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:_anchorSceneActiveMode()});
     }catch(_){
       return null;
     }
@@ -3457,6 +3480,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
+    const sceneMode=base.mode==='transparent_stream'?'transparent_stream':_anchorSceneActiveMode();
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
     const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
       ? messageFinalAnswer
@@ -3479,7 +3503,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(key&&seen.has(key)) return;
       if(key) seen.add(key);
       if(isTextual&&textKey) seenTextKeys.push(textKey);
-      rows.push({...row,order_index:rows.length,seq:rows.length});
+      rows.push({
+        ...row,
+        display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode),
+        order_index:rows.length,
+        seq:rows.length,
+      });
     };
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
     for(const row of projectedRows){
@@ -3496,7 +3525,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const scene={
       ...base,
       version:'activity_scene_v1',
-      mode:'compact_worklog',
+      mode:sceneMode,
       identity:{
         ...((base.identity&&typeof base.identity==='object')?base.identity:{}),
         source_message_refs:messages.slice(turnStart+1,lastAsstIndex+1)
