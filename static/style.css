@@ -5710,6 +5710,19 @@ main.main > #mainPlugin{display:none;}
 
 /* ── Unified indent rail — every child of a turn lines up on --msg-rail ── */
 .msg-row { padding: 12px 0; }
+
+/* On touch devices (iOS/Android PWA), skip layout/paint for off-screen rows
+   so streaming performance doesn't degrade as the chat grows. WKWebView is
+   especially sensitive: every scrollHeight read forces a full-document re-layout.
+   Scoped to pointer:coarse to preserve find-in-page on desktop. */
+@media (pointer: coarse) {
+  .msg-row { content-visibility: auto; contain-intrinsic-size: auto 200px; contain: layout style; }
+  /* Live streaming segments use .assistant-segment (not .msg-row), so they are
+     naturally unaffected. The overrides below are defense-in-depth in case the
+     class structure changes or a tool-card row carries the attribute. */
+  .msg-row[data-live-assistant],
+  .assistant-segment[data-live-assistant] { content-visibility: visible; }
+}
 .msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
 .msg-body code,
 .msg-body pre,
