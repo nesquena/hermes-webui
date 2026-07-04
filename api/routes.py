@@ -13090,11 +13090,14 @@ def handle_post(handler, parsed) -> bool:
                             exc_info=True,
                         )
 
-                threading.Thread(
+                t = threading.Thread(
                     target=_commit_prev_session_memory,
                     daemon=True,
                     name=f"commit-memory-{prev_session_id}",
-                ).start()
+                )
+                from api.session_lifecycle import _register_background_commit_thread
+                _register_background_commit_thread(t)
+                t.start()
         s = new_session(
             workspace=workspace,
             model=model,

@@ -45,6 +45,26 @@ _condition = threading.Condition(_lock)
 
 _sessions: dict[str, dict] = {}
 
+# Background commit threads spawned by fire-and-forget paths (e.g. POST /api/session/new).
+# Tracked so drain_all_on_shutdown() can join them before interpreter teardown,
+# preventing silent data loss when daemon threads are abandoned mid-commit.
+_background_commit_threads: set[threading.Thread] = set()
+_background_commit_threads_lock = threading.Lock()
+
+
+def _register_background_commit_thread(t: threading.Thread) -> None:
+    with _background_commit_threads_lock:
+        _background_commit_threads.add(t)
+
+
+def _drain_background_commit_threads(timeout: float = 5.0) -> None:
+    with _background_commit_threads_lock:
+        threads = list(_background_commit_threads)
+        _background_commit_threads.clear()
+    for t in threads:
+        if t.is_alive():
+            t.join(timeout)
+
 
 def _new_entry() -> dict:
     return {
@@ -226,6 +246,11 @@ def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, ti
 
 
 def drain_all_on_shutdown() -> None:
+    # Drain in-flight background commit threads first (fire-and-forget from
+    # POST /api/session/new) so their commit work completes before we drain
+    # any remaining uncommitted generations inline.
+    _drain_background_commit_threads()
+
     while True:
         with _lock:
             snapshot = [sid for sid, entry in _sessions.items() if entry["generation"] > entry["committed_generation"]]
