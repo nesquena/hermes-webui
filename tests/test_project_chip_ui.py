@@ -80,6 +80,55 @@ class TestContextMenuBackground:
         )
 
 
+class TestProjectDefaultWorkspaceMenu:
+    """Project context menu exposes set/clear affordances for #5457."""
+
+    def test_default_workspace_menu_item_exists(self):
+        idx = SESSIONS_JS.find("function _showProjectContextMenu(")
+        assert idx >= 0
+        body = SESSIONS_JS[idx: idx + 3600]
+        assert "Default workspace" in body
+        assert "_showProjectDefaultWorkspacePicker(" in body
+
+    def test_default_workspace_menu_loads_saved_workspaces(self):
+        idx = SESSIONS_JS.find("function _showProjectContextMenu(")
+        assert idx >= 0
+        body = SESSIONS_JS[idx: idx + 3600]
+        assert "api('/api/workspaces',{method:'GET'})" in body
+
+    def test_default_workspace_picker_posts_project_update(self):
+        idx = SESSIONS_JS.find("function _showProjectDefaultWorkspacePicker(")
+        assert idx >= 0
+        body = SESSIONS_JS[idx: idx + 2600]
+        assert "api('/api/projects/rename'" in body
+        assert "default_workspace:ws||null" in body
+        assert "project_id:proj.project_id" in body
+        assert "name:proj.name" in body
+
+    def test_default_workspace_picker_has_clear_path(self):
+        idx = SESSIONS_JS.find("function _showProjectDefaultWorkspacePicker(")
+        assert idx >= 0
+        body = SESSIONS_JS[idx: idx + 2600]
+        assert "Clear default" in body
+        assert "Default workspace cleared" in body
+
+    def test_default_workspace_picker_clamps_to_viewport(self):
+        idx = SESSIONS_JS.find("function _showProjectDefaultWorkspacePicker(")
+        assert idx >= 0
+        body = SESSIONS_JS[idx: idx + 2600]
+        assert "window.innerWidth" in body
+        assert "document.documentElement.clientHeight" in body
+        assert "Math.max(8,Math.min(anchorEvent.clientX" in body
+        assert "Math.max(8,Math.min(anchorEvent.clientY" in body
+
+    def test_default_workspace_current_marker_normalizes_path_display_key(self):
+        idx = SESSIONS_JS.find("function _showProjectDefaultWorkspacePicker(")
+        assert idx >= 0
+        body = SESSIONS_JS[idx: idx + 2600]
+        assert "_projectWorkspaceDisplayKey(ws)" in body
+        assert "_projectWorkspaceDisplayKey(proj.default_workspace)" in body
+
+
 # ── Bug 2: project-create-input width ─────────────────────────────────────────
 
 
@@ -229,3 +278,115 @@ class TestProjectChipLongPressTouch:
         # touch tuning so the native callout/selection doesn't compete with the gesture
         assert "touch-action:manipulation" in chip_rule
         assert "user-select:none" in chip_rule
+
+
+# ── #5457: project default workspace context menu editor ──────────────────────
+
+
+class TestProjectDefaultWorkspaceContextMenu:
+    """The project context menu must expose a default-workspace set/clear flow (#5457)."""
+
+    def _ctx_menu_block(self):
+        idx = SESSIONS_JS.find("function _showProjectContextMenu(")
+        assert idx != -1, "_showProjectContextMenu not found in sessions.js"
+        end_idx = SESSIONS_JS.find("\nfunction ", idx + 1)
+        return SESSIONS_JS[idx: end_idx if end_idx > 0 else idx + 4000]
+
+    def _picker_block(self):
+        idx = SESSIONS_JS.find("function _showProjectDefaultWorkspacePicker(")
+        assert idx != -1, "_showProjectDefaultWorkspacePicker not found in sessions.js"
+        end_idx = SESSIONS_JS.find("\nfunction ", idx + 1)
+        return SESSIONS_JS[idx: end_idx if end_idx > 0 else idx + 3000]
+
+    def test_picker_function_exists(self):
+        assert "function _showProjectDefaultWorkspacePicker(" in SESSIONS_JS, (
+            "_showProjectDefaultWorkspacePicker function not found — default workspace "
+            "picker is not implemented."
+        )
+
+    def test_context_menu_has_default_workspace_item(self):
+        """The project context menu must include a 'Default workspace' item."""
+        block = self._ctx_menu_block()
+        assert "Default workspace" in block, (
+            "Project context menu does not contain a 'Default workspace' item."
+        )
+
+    def test_context_menu_default_workspace_fetches_workspaces_api(self):
+        """The Default workspace item must call /api/workspaces to populate the picker."""
+        block = self._ctx_menu_block()
+        assert "/api/workspaces" in block, (
+            "Context menu Default workspace item must fetch /api/workspaces for the picker."
+        )
+
+    def test_context_menu_default_workspace_opens_picker(self):
+        """The Default workspace onclick must delegate to _showProjectDefaultWorkspacePicker."""
+        block = self._ctx_menu_block()
+        assert "_showProjectDefaultWorkspacePicker(" in block, (
+            "Context menu item must call _showProjectDefaultWorkspacePicker."
+        )
+
+    def test_picker_posts_default_workspace_to_projects_rename(self):
+        """The picker must persist the selected workspace via /api/projects/rename."""
+        block = self._picker_block()
+        assert "/api/projects/rename" in block, (
+            "_showProjectDefaultWorkspacePicker must POST to /api/projects/rename."
+        )
+        assert "default_workspace" in block, (
+            "_showProjectDefaultWorkspacePicker must include default_workspace in the payload."
+        )
+
+    def test_picker_has_clear_option(self):
+        """The picker must include a 'Clear default' option to remove the project default."""
+        block = self._picker_block()
+        assert "Clear default" in block, (
+            "_showProjectDefaultWorkspacePicker must expose a 'Clear default' action."
+        )
+
+    def test_picker_refreshes_session_list_after_change(self):
+        """The picker must call renderSessionList() after setting or clearing the default."""
+        block = self._picker_block()
+        assert "renderSessionList(" in block, (
+            "_showProjectDefaultWorkspacePicker must refresh the session list after saving."
+        )
+
+    def test_picker_clamps_fixed_position_to_viewport(self):
+        """The picker must keep its fixed menu inside the current viewport."""
+        block = self._picker_block()
+        assert "window.innerWidth" in block
+        assert "document.documentElement.clientWidth" in block
+        assert "Math.max(8,Math.min(anchorEvent.clientX" in block
+        assert "Math.max(8,Math.min(anchorEvent.clientY" in block
+
+    def test_picker_current_marker_uses_workspace_display_key(self):
+        """Current marker comparison must tolerate harmless path display differences."""
+        block = self._picker_block()
+        assert "_projectWorkspaceDisplayKey(ws)" in block
+        assert "_projectWorkspaceDisplayKey(proj.default_workspace)" in block
+
+
+class TestCrossProfileProjectQuickCreate:
+    """Cross-profile project quick-create must switch profile before newSession()."""
+
+    def test_new_session_has_project_profile_switch_helper(self):
+        assert "async function _ensureProjectProfileForNewSession(" in SESSIONS_JS, (
+            "_ensureProjectProfileForNewSession helper not found in sessions.js."
+        )
+
+    def test_new_session_awaits_project_profile_switch_before_building_request(self):
+        idx = SESSIONS_JS.find("async function newSession(")
+        assert idx != -1, "newSession not found in sessions.js"
+        block = SESSIONS_JS[idx: idx + 2600]
+        assert "await _ensureProjectProfileForNewSession(_newSessionProj)" in block, (
+            "newSession must switch to the target project profile before posting the request."
+        )
+        assert "Switch to '+targetProfile+' before opening a new chat in this project" in block, (
+            "newSession must refuse a foreign project when profile switching cannot make it current."
+        )
+
+    def test_quick_create_button_still_routes_through_new_session_project_path(self):
+        idx = SESSIONS_JS.find("function _attachProjectQuickCreateButton(")
+        assert idx != -1, "_attachProjectQuickCreateButton not found in sessions.js"
+        block = SESSIONS_JS[idx: idx + 2200]
+        assert "await newSession(false,{project_id:project.project_id});" in block, (
+            "Quick-create must keep using newSession() with project_id so the shared profile-switch guard runs."
+        )

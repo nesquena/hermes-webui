@@ -66,6 +66,24 @@ def _extract_async_function(source: str, name: str) -> str:
     raise AssertionError(f"could not extract {name}()")
 
 
+def _extract_function(source: str, name: str) -> str:
+    marker = f"function {name}("
+    start = source.find(marker)
+    assert start >= 0, f"{name}() function must exist"
+    brace = source.find("{", source.find(")", start))
+    assert brace > start, f"{name}() function body must start"
+    depth = 0
+    for idx in range(brace, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise AssertionError(f"could not extract {name}()")
+
+
 def _run_node(script: str) -> dict:
     result = subprocess.run(
         [NODE, "-e", script],
@@ -80,7 +98,9 @@ def _run_node(script: str) -> dict:
 
 
 def _new_session_driver(session_workspace: str, default_workspace: str, switch_workspace: str | None) -> str:
-    new_session = _extract_async_function(SESSIONS_JS.read_text(encoding="utf-8"), "newSession")
+    sessions_src = SESSIONS_JS.read_text(encoding="utf-8")
+    project_resolver = _extract_function(sessions_src, "_resolveProjectForNewSession")
+    new_session = _extract_async_function(sessions_src, "newSession")
     return textwrap.dedent(
         f"""
         let captured=null;
@@ -88,6 +108,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         var _messagesTruncated=false;
         var _oldestIdx=0;
         var _activeProject=null;
+        var _allProjects=[];
         var NO_PROJECT_FILTER='__all__';
         var _sessionSourceFilter='webui';
         var S={{
@@ -118,6 +139,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         function syncTopbar(){{}}
         function renderMessages(){{}}
         function loadDir(){{return Promise.resolve();}}
+        {project_resolver}
         {new_session}
         newSession().then(()=>{{
           process.stdout.write(JSON.stringify({{captured,switchWorkspace:S._profileSwitchWorkspace}}));
