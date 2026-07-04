@@ -28862,7 +28862,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_commit_statuses_
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_statuses_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_statuses_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -28908,12 +28908,20 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_statuses_
     monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
 
     result = run_source_refresh_jobs(limit=1)
-    serialized = json.dumps({"result": result, "search": search_memory("final-url-drift", limit=5)}, sort_keys=True).lower()
+    search = search_memory("safe commit statuses drift query", limit=5)
+    relevant = relevant_memory_for_space("space-commit-statuses-final-url-drift", limit=5)
+    serialized = json.dumps({
+        "result": result,
+        "search_results": search["results"],
+        "relevant_memory": relevant,
+    }, sort_keys=True).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert read_called is False
+    assert search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / "github-commit-statuses-final-url-drift.md").exists()
     for unsafe in (
         "ci/build-final-url-drift",
