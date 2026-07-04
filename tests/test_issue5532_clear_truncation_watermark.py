@@ -259,3 +259,45 @@ def test_clear_detaches_compression_snapshot_parent(monkeypatch, tmp_path):
     # The load-time display path must return EMPTY — no resurrected parent rows.
     display = routes._webui_sidecar_lineage_messages_for_display(loaded)
     assert display == [], f"cleared compressed continuation must not resurrect parent; got {display}"
+
+
+def test_clear_survives_startup_recovery(monkeypatch, tmp_path):
+    """Codex gate #2 (#5532): a cleared session must stay cleared across a WebUI
+    restart. s.save() writes a pre-clear .json.bak (messages shrank to []), and
+    recover_all_sessions_on_startup restores any session whose .bak has MORE
+    messages than the live file — ignoring the live truncation_watermark==0.0.
+    Without dropping the stale .bak on clear, startup recovery resurrects the
+    cleared transcript (with a None watermark).
+
+    Fail-without-fix: on the pre-fix handler the .bak survives, recovery restores
+    it, and the reloaded session has messages again + watermark None.
+    """
+    models = _seed_session_dir(monkeypatch, tmp_path)
+    from api.models import Session
+    from api import session_recovery
+
+    session = Session(
+        session_id="issue5532recover",
+        messages=_four_turn_messages(),
+        context_messages=_four_turn_messages(),
+    )
+    session.save()
+    # Second save shrinking to nothing is what /clear does; but drive the REAL
+    # route so the .bak-drop path is exercised end to end.
+    _call_clear(monkeypatch, "issue5532recover")
+
+    session_dir = models.SESSION_DIR
+    live_path = session_dir / "issue5532recover.json"
+    # The stale pre-clear backup must be gone (so recovery can't undo the clear).
+    assert not live_path.with_suffix(".json.bak").exists(), (
+        "clear must drop the pre-clear .json.bak so startup recovery can't resurrect it"
+    )
+
+    result = session_recovery.recover_all_sessions_on_startup(session_dir)
+    assert result["restored"] == 0, f"startup recovery must not restore a cleared session; got {result}"
+
+    loaded = Session.load("issue5532recover")
+    assert loaded is not None
+    assert loaded.messages == []
+    assert (loaded.context_messages or []) == []
+    assert loaded.truncation_watermark == 0.0

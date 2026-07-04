@@ -13737,6 +13737,18 @@ def handle_post(handler, parsed) -> bool:
             # again (#3542 lifecycle gap).
             apply_session_title_rename(s, "Untitled")
             s.save()
+            # #5532 (Codex gate): s.save() writes a pre-clear .json.bak (messages
+            # shrank to []). On the next WebUI startup, session_recovery restores
+            # any session whose .bak has MORE messages than the live file
+            # (bak_count > live_count), and it does NOT know about the live
+            # truncation_watermark==0.0 — so it would resurrect the cleared
+            # transcript (with a None watermark) after a restart. Drop the stale
+            # backup so the intentional clear can't be undone, exactly as the
+            # manual-compress and delete paths already do.
+            try:
+                s.path.with_suffix(".json.bak").unlink(missing_ok=True)
+            except OSError:
+                pass
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
         # I/O must not hold the session mutation lock.
