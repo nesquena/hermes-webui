@@ -25496,7 +25496,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_issue_labels_met
         "non-string",
     ],
 )
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_issue_labels_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_issue_labels_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     drift_name,
@@ -25549,7 +25549,16 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_issue_labels_fin
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("final-drift-label", limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search_results": search["results"]}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("issue-labels-drift-space", limit=5)
+    serialized = json.dumps(
+        {
+            "result": result,
+            "jobs": jobs,
+            "search_results": search["results"],
+            "relevant": relevant,
+        },
+        sort_keys=True,
+    ).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["job_id"] == receipt["job_id"]
@@ -25558,6 +25567,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_issue_labels_fin
     assert read_calls == []
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for forbidden in (
         "secret_value_do_not_leak",
         "raw_prompt_do_not_leak",
