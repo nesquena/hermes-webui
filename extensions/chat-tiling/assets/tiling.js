@@ -241,7 +241,7 @@ function tbActive(){
 // ── Keyboard ──
 function initKeyboard(){
   document.addEventListener('keydown',e=>{
-    if((e.ctrlKey||e.metaKey)&&e.altKey&&!e.repeat){const m={1:[1,1],2:[2,1],4:[2,2],6:[3,2]};if(m[e.key]){e.preventDefault();const[c,r]=m[e.key];if(T.visible&&T._cols===c&&T._rows===r)hideGrid();else showGrid(c,r)}}
+    if((e.ctrlKey||e.metaKey)&&e.altKey&&!e.repeat){const m={1:[1,1],2:[2,1],4:[2,2],6:[3,2]};if(m[e.key]){e.preventDefault();const[c,r]=m[e.key];if(T.visible)hideGrid();else showGrid(c,r)}}
   })
 }
 
