@@ -544,10 +544,10 @@ def test_chat_start_stamps_session_push_owner_from_cookie(monkeypatch):
     )
     seen = []
 
-    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda session_id: session)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda session_id, **kwargs: session)
     monkeypatch.setattr(routes, "_profiles_match", lambda left, right: left == right)
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda s, workspace: workspace or s.workspace)
-    monkeypatch.setattr(routes, "_read_profile_model_config", lambda s, requested_provider: (None, None))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda s, requested_provider: (None, None, None))
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
