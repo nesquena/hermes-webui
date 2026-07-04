@@ -5708,9 +5708,16 @@ main.main > #mainPlugin{display:none;}
 /* On touch devices (iOS/Android PWA), skip layout/paint for off-screen rows
    so streaming performance doesn't degrade as the chat grows. WKWebView is
    especially sensitive: every scrollHeight read forces a full-document re-layout.
-   Scoped to pointer:coarse to preserve find-in-page on desktop. */
+   Scoped to pointer:coarse to preserve find-in-page on desktop.
+
+   contain-intrinsic-size is intentionally omitted — a hardcoded size estimate
+   drifts from actual row heights, causing scrollHeight recalculation as rows
+   enter the viewport, which kills flick-scroll momentum on iOS. Without it, the
+   scrollbar is less precise but momentum scrolling is preserved.
+   overflow-anchor:none prevents the browser from fighting layout adjustments. */
 @media (pointer: coarse) {
-  .msg-row { content-visibility: auto; contain-intrinsic-size: auto 200px; contain: layout style; }
+  .msg-row { content-visibility: auto; contain: layout style; }
+  .messages { overflow-anchor: none; }
   /* Live streaming segments use .assistant-segment (not .msg-row), so they are
      naturally unaffected. The overrides below are defense-in-depth in case the
      class structure changes or a tool-card row carries the attribute. */
