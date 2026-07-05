@@ -65636,7 +65636,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_autolinks_metada
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_autolinks_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_autolinks_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -65675,12 +65675,14 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_autolinks_final_
     jobs = list_source_refresh_jobs(limit=5)
     catalog = source_catalog(limit=5)
     search = search_memory("autolink", limit=5)
+    relevant = relevant_memory_for_space("autolinks-drift-space", limit=5)
     serialized = json.dumps({
         "receipt": receipt,
         "result": result,
         "jobs": jobs,
         "catalog": catalog,
         "search": search,
+        "relevant": relevant,
     }, sort_keys=True).lower()
 
     assert calls == [{
@@ -65695,6 +65697,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_autolinks_final_
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / "github-autolinks-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "secret_value_do_not_leak",
         "access_token",
