@@ -56641,7 +56641,7 @@ def test_github_actions_org_secrets_final_url_matches_origin_requires_exact_cano
     ) is False
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_secrets_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_secrets_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -56706,10 +56706,12 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_secr
     jobs = list_source_refresh_jobs(limit=5)
     status = memory_status()
     search = search_memory("final url drift body sentinel", limit=5)
+    relevant = relevant_memory_for_space("actions-org-secrets-drift-space", limit=5)
     serialized = json.dumps({
         "catalog": capy_memory.source_catalog(limit=5),
         "jobs": jobs,
         "queued": queued,
+        "relevant": relevant,
         "receipt": receipt,
         "result": result,
         "search": search,
@@ -56726,6 +56728,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_secr
     assert not (root / "vault" / "github-actions-org-secrets-final-url-drift.md").exists()
     assert status["chunk_count"] == 0
     assert search["results"] == []
+    assert relevant["results"] == []
     assert drifted_final_url.lower() not in serialized
     for unsafe in (
         "secret_value_do_not_leak",
