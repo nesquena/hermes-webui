@@ -1345,7 +1345,7 @@ async function send(){
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
-    if(text){
+    if(text||S.pendingFiles.length){
       if(!S.session){await newSession();await renderSessionList();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
@@ -1367,19 +1367,17 @@ async function send(){
       }
     const defaultMessageMode=window._defaultMessageMode||'steer';
       if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
-        const _steerDraftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
-        // _trySteer restores the draft and leaves the active stream running if
-        // the agent isn't running / cached / steer-capable.
+        // _trySteer captures the owner session/files before awaiting uploads,
+        // restores/persists the draft on failure, and clears the owner draft
+        // only after /api/chat/steer accepts.
         $('msg').value='';autoResize();
-        // Do NOT clear pendingFiles yet — a failed steer restores the draft and
-        // must keep staged files available for the user's next explicit action.
-        const _steerDelivered=await _trySteer(text, /*explicitSteer=*/false);
-        // After a delivered steer, clear any staged files because the text-only
-        // steer payload has been handled. On failure, keep files staged.
-        if(_steerDelivered){S.pendingFiles=[];renderTray();}
-        if(_steerDelivered&&S.session&&typeof _clearComposerDraft==='function') _clearComposerDraft(S.session.session_id,text,_steerDraftFiles);
+        // Do NOT clear pendingFiles yet — _trySteer uploads with clearPending=false,
+        // and a failed steer must keep staged files available for the user's next explicit action.
+        await _trySteer(text, /*explicitSteer=*/false);
+        // _trySteer clears staged files only after /api/chat/steer accepts, and
+        // only when the visible session still matches the captured owner sid.
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();

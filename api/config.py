@@ -7003,6 +7003,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not raw_models:
                         if pid == "moa":
                             raw_models = _moa_preset_models_from_config(cfg)
+                        elif pid == "opencode-go":
+                            # Skip live /v1/models probe for OpenCode Go — it
+                            # returns models from the public catalog that are
+                            # not enabled on the Go tier, causing 404 when
+                            # selected. Use the curated static list only. (#5311)
+                            pass
                         else:
                             raw_models = _models_from_live_provider_ids(
                                 pid,

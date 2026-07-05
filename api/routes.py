@@ -5127,6 +5127,28 @@ def _check_same_origin_browser_request(handler, *, require_provenance: bool = Fa
     return True
 
 
+def apply_cors_preflight_headers(handler) -> None:
+    """Emit CORS preflight headers on ``handler`` for a same-origin/allowlisted
+    request; emit nothing for a disallowed origin (browser treats the header-less
+    200 as a preflight denial).
+
+    Echoes the request Origin only when it is same-origin or explicitly
+    allowlisted via HERMES_WEBUI_ALLOWED_ORIGINS — the exact policy the CSRF gate
+    enforces for real requests. Reuses _check_same_origin_browser_request so the
+    preflight can never advertise wider access (`*`) than an actual request would
+    be granted. A wildcard here would let any site read authenticated responses
+    on a deployment with no password set. Kept in api/ so server.py stays a thin
+    dispatcher.
+    """
+    origin = handler.headers.get("Origin", "").strip()
+    if not origin or not _check_same_origin_browser_request(handler):
+        return
+    handler.send_header("Access-Control-Allow-Origin", origin)
+    handler.send_header("Vary", "Origin")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
     return path in {
