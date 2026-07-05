@@ -1060,6 +1060,7 @@ def _invalidate_models_cache_after_test():
 
 @pytest.fixture(autouse=True)
 def _invalidate_auth_password_hash_cache_after_test():
+    """Clear auth cache around tests that toggle password auth through env vars."""
     try:
         from api.auth import _invalidate_password_hash_cache
         _invalidate_password_hash_cache()
