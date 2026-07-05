@@ -59141,7 +59141,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_org_p
     "https://api.github.com/orgs/capy/dependabot/secrets/public-key%2Fextra",
     "https://ghp_FINAL_URL_SECRET@api.github.com/orgs/capy/dependabot/secrets/public-key",
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_org_public_key_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_org_public_key_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, final_url
 ):
     root = tmp_path / "capy-memory"
@@ -59181,10 +59181,12 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_org_p
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("dependabot organization public key final url drift", limit=5)
+    relevant = relevant_memory_for_space("dependabot-org-public-key-final-url-drift-space", limit=5)
     serialized = json.dumps({
         "receipt": receipt,
         "result": result,
         "search": search,
+        "relevant": relevant,
     }, sort_keys=True).lower()
 
     assert result["processed"] == 1
@@ -59193,6 +59195,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_org_p
     assert result["jobs"][0]["error"] == "refresh failed"
     assert read_calls == []
     assert search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / "github-dependabot-org-public-key-final-url-drift.md").exists()
     for unsafe in (
         "secret_value_do_not_leak",
