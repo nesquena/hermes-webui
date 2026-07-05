@@ -4036,6 +4036,55 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     return {"ok": True, "model": persisted_model, "provider": persisted_provider or None}
 
 
+def _set_tts_nested_value(path: tuple, value: str) -> None:
+    """Set or clear a nested key in the tts: section of config.yaml.
+
+    Used by set_hermes_tts_provider and set_hermes_edge_voice. Acquires
+    _cfg_lock for the read-modify-write; caller is responsible for
+    calling reload_config() AFTER this returns (outside the lock to
+    avoid deadlock — reload_config() acquires _cfg_lock internally).
+
+    Args:
+        path: tuple of nested keys, e.g. () for tts.provider or
+            ("edge",) for tts.edge.voice. The last key is set on the
+            final dict.
+        value: value to set. If empty string, the key is popped instead
+            (falls back to default).
+    """
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        # Walk/create the nested dict structure
+        target = config_data
+        for key in path[:-1]:
+            if not isinstance(target.get(key), dict):
+                target[key] = {}
+            target = target[key]
+        # Set or clear the leaf value
+        leaf_key = path[-1]
+        if value:
+            target[leaf_key] = value
+        else:
+            target.pop(leaf_key, None)
+        _save_yaml_config_file(config_path, config_data)
+
+
+def set_hermes_tts_provider(provider: str | None) -> dict:
+    """Persist the TTS provider in config.yaml and reload runtime config."""
+    provider_str = str(provider or "").strip().lower()
+    _set_tts_nested_value(("tts", "provider"), provider_str)
+    reload_config()
+    return {"ok": True, "provider": provider_str or None}
+
+
+def set_hermes_edge_voice(voice: str | None) -> dict:
+    """Persist the Edge TTS voice in config.yaml and reload runtime config."""
+    voice_str = str(voice or "").strip()
+    _set_tts_nested_value(("tts", "edge", "voice"), voice_str)
+    reload_config()
+    return {"ok": True, "voice": voice_str or None}
+
+
 # ── Auxiliary model configuration ──────────────────────────────────────────
 
 # Canonical auxiliary task slots. Keep in sync with hermes_cli/config.py

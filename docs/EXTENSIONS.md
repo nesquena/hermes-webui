@@ -453,46 +453,6 @@ extension inherits the guard:
 This is the supported, forward-looking way for theme-pack and theme-creator
 extensions to integrate with the built-in appearance system.
 
-## Registering a custom TTS engine
-
-Extensions can contribute a **text-to-speech engine** that appears in the
-**Settings → TTS Engine** dropdown alongside the built-ins (Browser / Edge /
-ElevenLabs) and is used by **both** playback paths — the hands-free voice-mode
-auto-read and the per-message "Listen" button. Call
-`window.registerHermesTtsEngine(descriptor)`:
-
-```javascript
-window.registerHermesTtsEngine({
-  id: 'voicevox',                 // [a-z0-9_-], not a built-in
-  label: 'VOICEVOX (local)',      // shown in the dropdown (textContent — escaped)
-  // synthesize(text, opts) -> Promise<ArrayBuffer | Blob | TypedArray> of audio.
-  // opts carries the user's saved { voice, rate, pitch } (engine may ignore).
-  synthesize(text, opts) {
-    return fetch('http://127.0.0.1:50021/...', { /* ... */ })
-      .then(r => r.arrayBuffer());
-  }
-});  // -> true on success, false if rejected
-```
-
-Rules and guarantees:
-
-- **id** must be slug-safe (`[a-z0-9][a-z0-9_-]{0,31}`) and may **not** shadow a
-  built-in engine (`browser`, `edge`, `elevenlabs`) — those are reserved.
-- **label** is inserted with `textContent`, never `innerHTML` (no markup
-  injection into the dropdown).
-- `synthesize` must return audio bytes (`ArrayBuffer`, `Blob`, or a typed array);
-  core coerces to an `ArrayBuffer` and plays it through the same `<audio>`
-  lifecycle as the Edge engine (including stop/rearm in voice mode). A rejected
-  promise or empty/invalid result fails gracefully (toast on the Listen button;
-  re-listen in voice mode).
-- Core owns selection, the dropdown option, and playback; the extension only
-  produces audio. Re-registering the same id updates it in place.
-- **Network note:** if your engine calls a local server (e.g. VOICEVOX on
-  `http://127.0.0.1:50021`), that request is a same-origin-policy / CSP
-  `connect-src` concern like any extension network call — loopback is already in
-  the default `connect-src`. Declare `permissions.network_external` honestly
-  based on where it calls.
-
 ## Extension authoring guidance
 
 Extensions share the page with the WebUI app, so they should be additive and
