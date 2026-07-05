@@ -65236,7 +65236,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_actions_secrets_
         ),
     ],
 )
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_public_key_final_url_query_fragment_auth_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_public_key_final_url_query_fragment_auth_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, final_url_case, hostile_final_url
 ):
     root = tmp_path / "capy-memory"
@@ -65296,11 +65296,13 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_public_k
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("actions public key final url drift", limit=5)
+    relevant = relevant_memory_for_space("actions-public-key-drift-space", limit=5)
     catalog = capy_memory.source_catalog(limit=5)
     serialized = json.dumps({
         "catalog": catalog,
         "jobs": jobs,
         "queued": queued,
+        "relevant": relevant,
         "result": result,
         "search": search,
     }, sort_keys=True).lower()
@@ -65317,6 +65319,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_public_k
     assert result["jobs"][0]["error"] == "refresh failed"
     assert jobs["jobs"][0]["status"] == "pending"
     assert search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / f"{source_id}.md").exists()
     for unsafe in (
         hostile_final_url.lower(),
