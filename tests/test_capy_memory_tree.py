@@ -74318,7 +74318,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runn
     ("adjacent-group-id", "https://api.github.com/orgs/capy/actions/runner-groups/202/runners"),
     ("malformed-tail", "https://api.github.com/orgs/capy/actions/runner-groups/201/runners/extra?access_token=SECRET_VALUE_DO_NOT_LEAK"),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runner_group_runners_final_url_drift(tmp_path, monkeypatch, case_id, final_url):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runner_group_runners_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch, case_id, final_url):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com,api.github.com.evil.test")
@@ -74326,22 +74326,35 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runn
     source_id = f"github-actions-org-runner-group-runners-final-url-{case_id}"
     register_source_reference({"source_id": source_id, "title": "GitHub Actions Org Runner Group Runners Final URL Drift", "origin_uri": "https://api.github.com/orgs/capy/actions/runner-groups/201/runners?access_token=***#raw-prompt"})
     payload_bytes = json.dumps({"total_count": 1, "runners": [{"id": 301, "name": "Runner 1", "status": "online", "busy": False, "os": "linux", "architecture": "x64"}]}).encode("utf-8")
+    read_calls = []
 
     class FakeResponse:
         headers = {"Content-Type": "application/json; charset=utf-8"}
         def __enter__(self): return self
         def __exit__(self, *_exc): return False
         def geturl(self): return final_url
-        def read(self, _limit=-1): return payload_bytes
+        def read(self, _limit=-1):
+            read_calls.append("read")
+            return payload_bytes
 
     monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
     result = run_source_refresh_jobs(limit=1)
-    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5)}, sort_keys=True).lower()
+    search = search_memory("org runner group runners", limit=5)
+    relevant = relevant_memory_for_space("org-runner-group-runners-drift-space", limit=5)
+    serialized = json.dumps({
+        "result": result,
+        "jobs": list_source_refresh_jobs(limit=5),
+        "search": search,
+        "relevant": relevant,
+    }, sort_keys=True).lower()
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
+    assert read_calls == []
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert memory_status()["chunk_count"] == 0
+    assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in ("secret_value_do_not_leak", "api.github.com.evil.test", "/orgs/capy/actions/runner-groups/202/runners", "/orgs/capy/actions/runner-groups/201/runners/extra", "access_token", "raw-prompt"):
         assert unsafe not in serialized
 
