@@ -3100,8 +3100,8 @@
     .sidebar-nav .nav-tab svg{width:20px;height:20px;}
     .sidebar-nav .nav-tab.active{background:var(--accent-bg);}
     .sidebar-nav .nav-tab.active::before{left:-4px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;border-radius:0 2px 2px 0;}
-    .sidebar-nav .dashboard-link,
-    .sidebar-nav .dashboard-link.dashboard-link-visible{display:none!important;}
+    /* Dashboard link: visible in mobile sidebar-nav when the dashboard
+       service is running (toggled via dashboard-link-visible by JS). */
     .sidebar .panel-view{height:100%;margin-left:52px;}
     .sidebar .panel-head{padding-right:52px;}
     .mobile-sidebar-close{display:inline-flex!important;position:absolute;right:4px;top:calc(4px + var(--app-titlebar-safe-top));width:44px;height:44px;z-index:4;background:var(--surface);border:1px solid var(--border);}
