@@ -650,6 +650,17 @@ function _micToastKeyForRecognitionError(error){
   let _micPointerDown=false;
   let _micStartSeq=0;
   const _micHoldThresholdMs=300;
+  let _wakeLock=null;
+
+  async function _acquireWakeLock(){
+    if(_wakeLock) return;
+    try{ _wakeLock=await navigator.wakeLock.request('screen');
+      _wakeLock.addEventListener('release',()=>{ _wakeLock=null; }); }catch(_){ _wakeLock=null; }
+  }
+
+  async function _releaseWakeLock(){
+    if(_wakeLock){ try{ await _wakeLock.release(); }catch(_){} _wakeLock=null; }
+  }
 
   function _setButtonTooltipAndKey(btn, key){
     const text = t(key);
@@ -662,6 +673,13 @@ function _micToastKeyForRecognitionError(error){
     }
   }
 
+  // Re-acquire wake lock when the page becomes visible while recording (#4732)
+  if(typeof document!=='undefined'){
+    document.addEventListener('visibilitychange',()=>{
+      if(!document.hidden&&_isRecording) _acquireWakeLock();
+    });
+  }
+
   function _setRecording(on){
     window._micActive=on;
     btn.classList.toggle('recording',on);
@@ -670,7 +688,7 @@ function _micToastKeyForRecognitionError(error){
     _setButtonTooltipAndKey(btn, on ? (_rawAudioMode ? 'voice_recording_active' : 'voice_dictate_active') : (_rawAudioMode ? 'voice_send_raw' : 'voice_dictate'));
     status.style.display=on?'':'none';
     if(statusText) statusText.textContent=on?'Listening':'Listening';
-    if(!on){ _finalText=''; _prefix=''; }
+    if(on){ _acquireWakeLock(); }else{ _releaseWakeLock(); _finalText=''; _prefix=''; }
   }
 
   function _updateMicTooltip(){
@@ -796,7 +814,7 @@ function _micToastKeyForRecognitionError(error){
   function _ensureSpeechRecognition(){
     if(!SpeechRecognition) return null;
     const sr=recognition||new SpeechRecognition();
-    sr.continuous=false;
+    sr.continuous=true;
     sr.interimResults=true;
     sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
