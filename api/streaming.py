@@ -5630,6 +5630,125 @@ def _turn_transcript_lacks_final_assistant_answer(
     return _session_lacks_final_assistant_answer(filtered_messages)
 
 
+def _messages_have_final_assistant_for_current_turn(
+    messages,
+    msg_text,
+    *,
+    previous_display=None,
+) -> bool:
+    """Return True when *messages* already contain a final answer for this turn.
+
+    This is intentionally stricter than ``_session_lacks_final_assistant_answer``:
+    an existing terminal ``_error`` row proves the transcript is settled, but it
+    must not be treated as a successful assistant reply when deciding whether to
+    suppress a synthetic ``no_response`` card. Only a non-error assistant row
+    with visible text after the matching current user turn satisfies this guard.
+    When a pre-turn display transcript is supplied, the matching user row must be
+    at the current-turn boundary rather than an older repeated prompt.
+    """
+    turn_messages = list(messages or [])
+    current_user_idx = _find_current_user_turn(turn_messages, msg_text)
+    if current_user_idx is None:
+        return False
+    previous_display = list(previous_display or [])
+    if previous_display and current_user_idx < len(previous_display):
+        # ``current_user_idx`` belongs to the persisted/reconciled transcript,
+        # while ``previous_display`` is the stale worker's pre-turn view. Keep
+        # this boundary check deliberately conservative: returning False can
+        # miss suppression in a pruned/compressed edge case, but relaxing it can
+        # let an older repeated prompt + old answer mask a real current-turn
+        # silent failure.
+        previous_tail_is_current_user = (
+            current_user_idx == len(previous_display) - 1
+            and _looks_like_current_user_turn(previous_display[-1], msg_text)
+        )
+        if not previous_tail_is_current_user:
+            return False
+    for msg in turn_messages[current_user_idx + 1:]:
+        if not isinstance(msg, dict):
+            continue
+        if _is_context_compression_marker(msg):
+            continue
+        if msg.get('_error'):
+            continue
+        if msg.get('role') != 'assistant':
+            continue
+        if msg.get('tool_calls'):
+            continue
+        if _message_text(msg.get('content')).strip():
+            return True
+    return False
+
+
+def _persisted_final_assistant_messages(
+    session_id,
+    msg_text,
+    *,
+    previous_display=None,
+    profile=None,
+) -> list | None:
+    """Return persisted transcript when it already has this turn's answer.
+
+    The streaming worker can reach the silent-failure branch after another
+    recovery/settlement path has already written the final assistant answer to
+    the sidecar or state.db. Trust persisted transcript truth before appending a
+    synthetic ``No response from provider`` row.
+    """
+    sid = str(session_id or '').strip()
+    if not sid or not str(msg_text or '').strip():
+        return None
+    try:
+        from api.models import Session as _Session
+        persisted = _Session.load(sid)
+    except Exception:
+        persisted = None
+    if persisted is not None:
+        sidecar_messages = list(getattr(persisted, 'messages', None) or [])
+        if _messages_have_final_assistant_for_current_turn(
+            sidecar_messages,
+            msg_text,
+            previous_display=previous_display,
+        ):
+            return sidecar_messages
+        try:
+            state_messages = get_state_db_session_messages(
+                sid,
+                stitch_continuations=True,
+                profile=profile or getattr(persisted, 'profile', None),
+            )
+        except Exception:
+            state_messages = []
+        try:
+            reconciled = reconciled_state_db_messages_for_session(
+                persisted,
+                state_messages=state_messages,
+            )
+        except Exception:
+            reconciled = []
+        if _messages_have_final_assistant_for_current_turn(
+            reconciled,
+            msg_text,
+            previous_display=previous_display,
+        ):
+            return list(reconciled)
+    else:
+        try:
+            state_messages = get_state_db_session_messages(
+                sid,
+                stitch_continuations=True,
+                profile=profile,
+            )
+        except Exception:
+            state_messages = []
+        if _messages_have_final_assistant_for_current_turn(
+            state_messages,
+            msg_text,
+            previous_display=previous_display,
+        ):
+            return list(state_messages)
+    return None
+
+
 def _merged_transcript_lacks_final_assistant_answer(
     previous_display,
     previous_context,
@@ -8913,6 +9032,42 @@ def _run_agent_streaming(
                         # fall through to normal post-result persistence below.
                         pass
                     else:
+                        _persisted_final_messages = None
+                        if _err_type == 'no_response':
+                            _persisted_final_messages = _persisted_final_assistant_messages(
+                                s.session_id,
+                                msg_text,
+                                previous_display=_previous_messages,
+                                profile=getattr(s, 'profile', None),
+                            )
+                        if _persisted_final_messages:
+                            logger.info(
+                                '[webui] Suppressing no_response for session=%s stream=%s: final assistant was already persisted',
+                                s.session_id,
+                                stream_id,
+                            )
+                            s.messages = list(_persisted_final_messages)
+                            _stamp_missing_message_timestamps(s.messages)
+                            s.tool_calls = _extract_tool_calls_from_messages(
+                                s.messages,
+                                live_tool_calls=_live_tool_calls,
+                            )
+                            s.active_stream_id = None
+                            s.pending_user_message = None
+                            s.pending_attachments = []
+                            s.pending_started_at = None
+                            s.pending_user_source = None
+                            try:
+                                s.save()
+                            except Exception:
+                                logger.debug("Failed to save persisted-final no_response suppression", exc_info=True)
+                            put('done', {
+                                'session': redact_session_data(
+                                    _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
+                                ),
+                                'usage': _live_usage_snapshot(),
+                            })
+                            return
                         _error_payload = _provider_error_payload(
                             _err_str or f'{_err_label}.',
                             _err_type,

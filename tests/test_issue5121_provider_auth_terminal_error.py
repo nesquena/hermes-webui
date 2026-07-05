@@ -493,6 +493,61 @@ def test_live_settlement_empty_hint_does_not_append_empty_emphasis(tmp_path, mon
     assert not error_content.endswith("**")
 
 
+def test_silent_failure_suppressed_when_final_answer_already_persisted(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "silent_failure_already_persisted",
+        "stream_silent_failure_already_persisted",
+        pending_user_message="Please use persisted answer",
+    )
+    persisted = Session.load("silent_failure_already_persisted")
+    assert persisted is not None
+    persisted.messages = [
+        {"role": "user", "content": "Please use persisted answer", "timestamp": 1},
+        {"role": "assistant", "content": "Already persisted answer", "timestamp": 2},
+    ]
+    persisted.active_stream_id = "stream_silent_failure_already_persisted"
+    persisted.pending_user_message = "Please use persisted answer"
+    persisted.pending_attachments = ["attachment.txt"]
+    persisted.pending_started_at = 1234567890.0
+    persisted.save()
+
+    # Simulate a stale in-memory worker that did not see the already-finalized
+    # sidecar transcript. The no_response path must re-read persisted truth
+    # before appending a synthetic provider error.
+    session.messages = []
+    session.context_messages = []
+    models.SESSIONS[session.session_id] = session
+
+    class SilentFailureAfterPersistAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            return {
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_silent_failure_already_persisted",
+        SilentFailureAfterPersistAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("silent_failure_already_persisted")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert saved.active_stream_id is None
+    assert saved.pending_user_message is None
+    assert saved.pending_attachments == []
+    assert saved.pending_started_at is None
+    assert saved.pending_user_source is None
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "Already persisted answer"
+    assert not any(msg.get("_error") for msg in saved.messages)
+
+
 def test_completed_assistant_answer_with_stale_partial_flag_settles_done(tmp_path, monkeypatch):
     session = _prepare_session(
         "completed_answer_stale_partial",
