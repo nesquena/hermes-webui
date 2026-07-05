@@ -42170,7 +42170,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_repository_invit
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_invitations_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_invitations_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -42226,7 +42226,14 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_invit
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("drifted-final-url-invitee", limit=5)
-    serialized = json.dumps({"jobs": jobs, "receipt": receipt, "result": result, "search_results": search["results"]}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("repository-invitations-drift-space", limit=5)
+    serialized = json.dumps({
+        "jobs": jobs,
+        "receipt": receipt,
+        "result": result,
+        "search_results": search["results"],
+        "relevant_results": relevant["results"],
+    }, sort_keys=True).lower()
 
     with sqlite3.connect(memory_tree_db_path()) as conn:
         conn.row_factory = sqlite3.Row
@@ -42246,6 +42253,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_invit
     assert source_row["last_error"] == "refresh failed"
     assert not (root / "vault" / "github-invitations-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "drifted-final-url-invitee",
         "access_token",
