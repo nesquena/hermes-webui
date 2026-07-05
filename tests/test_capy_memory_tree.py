@@ -69031,7 +69031,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_security_advisor
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_security_advisories_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_security_advisories_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -69100,7 +69100,13 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_security_advisor
     result = run_source_refresh_jobs(limit=2)
     catalog = source_catalog(limit=5)
     search = search_memory("final-url-drift-package", limit=5)
-    serialized = json.dumps({"result": result, "catalog": catalog, "search_results": search["results"]}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("security-advisories-drift-space", limit=5)
+    serialized = json.dumps({
+        "result": result,
+        "catalog": catalog,
+        "search_results": search["results"],
+        "relevant": relevant,
+    }, sort_keys=True).lower()
 
     assert calls == [
         {
@@ -69121,6 +69127,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_security_advisor
     for source_id in source_ids:
         assert not (root / "vault" / f"{source_id}.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "https://api.github.com/repos/capy/spaces/security-advisories",
         "api.github.com/repos/capy/spaces/security-advisories",
