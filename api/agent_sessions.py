@@ -1,5 +1,6 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import logging
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -86,6 +87,20 @@ def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:
 
 def _safe_lower(value) -> str:
     return str(value or "").strip().lower()
+
+
+def _title_excerpt_from_content(value, max_len: int = 64) -> str | None:
+    """Return a readable title fallback from a first user message."""
+    text = str(value or "")
+    if not text.strip():
+        return None
+    text = re.sub(r"\[WEBUI_IMAGE_ATTACHMENT_NOTICE\].*?(?:\n\s*\n|$)", "", text, flags=re.S)
+    text = re.sub(r"\[WEBUI_IMAGE_CONTEXT[^\]]*\]\s*", "", text)
+    text = re.sub(r"\n\n\[Attached files: [^\]]+\]$", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+    return text[: max(16, int(max_len or 64))]
 
 
 def _normalize_source_name(value: object) -> str:
@@ -300,6 +315,11 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
     segment so the user continues from the current compressed state.
     """
     rows_by_id = {row['id']: row for row in rows}
+    for row in rows:
+        if not row.get('title'):
+            fallback_title = _title_excerpt_from_content(row.get('first_user_title'))
+            if fallback_title:
+                row['title'] = fallback_title
     children_by_parent: dict[str, list[dict]] = {}
     continuation_child_ids = set()
 
@@ -529,6 +549,18 @@ def read_importable_agent_session_rows(
             else:
                 user_message_count_expr = f"COUNT(m.{count_col})"
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
+            if {'session_id', 'role', 'content'}.issubset(message_cols):
+                first_user_order = "mu.timestamp" if messages_has_timestamp else (
+                    "mu.id" if 'id' in message_cols else "mu.rowid"
+                )
+                first_user_title_expr = (
+                    "(SELECT substr(mu.content, 1, 512) FROM messages mu "
+                    "WHERE mu.session_id = s.id AND LOWER(mu.role) = 'user' "
+                    "AND mu.content IS NOT NULL AND TRIM(mu.content) != '' "
+                    f"ORDER BY {first_user_order} ASC LIMIT 1)"
+                )
+            else:
+                first_user_title_expr = "NULL"
             join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
             group_by_clause = "GROUP BY s.id"
         else:
@@ -537,6 +569,7 @@ def read_importable_agent_session_rows(
             actual_count_expr = "s.message_count"
             user_message_count_expr = "s.message_count"
             last_activity_expr = "NULL"
+            first_user_title_expr = "NULL"
             join_clause = ""
             group_by_clause = ""
 
@@ -603,6 +636,7 @@ def read_importable_agent_session_rows(
                    {end_reason_expr},
                    {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
+                   {first_user_title_expr} AS first_user_title,
                    {last_activity_expr} AS last_activity
         """
         if limit is not None:

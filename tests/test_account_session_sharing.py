@@ -214,6 +214,122 @@ def test_tomoki_account_sidebar_sees_all_main_visible_sessions(monkeypatch):
     assert payload["other_profile_count"] == 0
 
 
+def test_tomoki_sidebar_keeps_state_db_webui_rows_when_cli_sessions_disabled(monkeypatch):
+    sidecar_rows = [
+        _row("sidecar-backed", profile="default", owner="tomoki", title="Sidecar"),
+    ]
+    state_db_webui_rows = [
+        {
+            "session_id": "state-db-webui",
+            "title": "Recovered WebUI",
+            "workspace": "/tmp",
+            "model": "test-model",
+            "message_count": 3,
+            "created_at": 20,
+            "updated_at": 20,
+            "last_message_at": 20,
+            "profile": "default",
+            "source_tag": "webui",
+            "raw_source": "webui",
+            "session_source": "webui",
+            "source_label": "WebUI",
+            "is_cli_session": False,
+        },
+    ]
+    state_db_subagent_rows = [
+        {
+            "session_id": "state-db-subagent",
+            "title": "Recovered Subagent",
+            "workspace": "/tmp",
+            "model": "test-model",
+            "message_count": 2,
+            "created_at": 15,
+            "updated_at": 15,
+            "last_message_at": 15,
+            "profile": "default",
+            "source_tag": "subagent",
+            "raw_source": "subagent",
+            "session_source": "subagent",
+            "source_label": "Subagent",
+            "is_cli_session": False,
+        },
+    ]
+
+    monkeypatch.setattr(routes, "all_sessions", lambda **_kwargs: list(sidecar_rows))
+    monkeypatch.setattr(routes, "_current_webui_account", lambda _handler=None: "tomoki", raising=False)
+    monkeypatch.setattr(routes, "_account_session_sharing_enabled", lambda: True, raising=False)
+
+    def fake_get_cli_sessions(source_filter=None, **_kwargs):
+        if source_filter is None:
+            return list(state_db_webui_rows) + list(state_db_subagent_rows)
+        if source_filter == "webui":
+            return list(state_db_webui_rows)
+        if source_filter == "subagent":
+            return list(state_db_subagent_rows)
+        return []
+
+    monkeypatch.setattr(routes, "get_cli_sessions", fake_get_cli_sessions)
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        visible_only=True,
+    )
+
+    assert [row["session_id"] for row in payload["sessions"]] == [
+        "state-db-webui",
+        "state-db-subagent",
+        "sidecar-backed",
+    ]
+    assert payload["webui_session_count"] == 3
+    assert payload["cli_session_count"] == 0
+
+
+def test_session_status_recovers_state_db_webui_row_without_sidecar(monkeypatch):
+    _capture_json(monkeypatch)
+    recovered = Session(
+        session_id="state-db-webui",
+        title="Recovered WebUI",
+        messages=[{"role": "user", "content": "hello"}],
+        workspace="/tmp",
+        model="test-model",
+        profile="default",
+        created_at=1,
+        updated_at=2,
+        source_tag="webui",
+        session_source="webui",
+    )
+
+    def missing_sidecar(*_args, **_kwargs):
+        raise KeyError("state-db-webui")
+
+    monkeypatch.setattr(routes, "get_session", missing_sidecar)
+    monkeypatch.setattr(
+        routes,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {"session_id": _sid, "source_tag": "webui", "profile": "default"},
+    )
+    monkeypatch.setattr(
+        routes,
+        "_claim_or_synthesize_cli_session",
+        lambda _sid, cli_meta=None: (recovered, "materialized"),
+    )
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_a, **_kw: True)
+
+    response = routes.handle_get(
+        SimpleNamespace(headers={}, client_address=("127.0.0.1", 1)),
+        urlparse("/api/session/status?session_id=state-db-webui"),
+    )
+
+    assert response["status"] == 200
+    assert response["payload"]["session_id"] == "state-db-webui"
+    assert response["payload"]["message_count"] == 1
+    assert response["payload"]["active_stream_id"] is None
+
+
 def test_account_sharing_does_not_treat_missing_auth_cookie_as_main(monkeypatch):
     session = Session(
         session_id="private-session",
@@ -279,9 +395,9 @@ def test_shared_account_can_continue_using_original_session_profile(monkeypatch)
 
     monkeypatch.setattr(routes, "_current_webui_account", lambda _handler=None: "sub", raising=False)
     monkeypatch.setattr(routes, "_account_session_sharing_enabled", lambda: True, raising=False)
-    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda _sid, **_kwargs: session)
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _workspace: _s.workspace)
-    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _provider: (None, "test-model"))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _provider: (None, "test-model", {}))
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
@@ -319,7 +435,7 @@ def test_unshared_account_cannot_continue_cross_profile_session(monkeypatch):
     )
     monkeypatch.setattr(routes, "_current_webui_account", lambda _handler=None: "sub", raising=False)
     monkeypatch.setattr(routes, "_account_session_sharing_enabled", lambda: True, raising=False)
-    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda _sid, **_kwargs: session)
 
     response = routes._handle_chat_start(
         SimpleNamespace(headers={}, client_address=("127.0.0.1", 1)),

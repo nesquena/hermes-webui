@@ -39,22 +39,22 @@ def _ensure_state_db(path):
     return conn
 
 
-def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None, source="webui", session_source=None):
+def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None, source="webui", session_source=None, title=None):
     conn.execute(
         """
         INSERT INTO sessions
         (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
         VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
         """,
-        (sid, source, session_source, sid.replace("_", " "), started_at or time.time(), parent, ended_at, end_reason),
+        (sid, source, session_source, title if title is not None else sid.replace("_", " "), started_at or time.time(), parent, ended_at, end_reason),
     )
     conn.commit()
 
 
-def _insert_message(conn, sid, *, timestamp=None, role="user"):
+def _insert_message(conn, sid, *, timestamp=None, role="user", content="hello"):
     conn.execute(
-        "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, 'hello', ?)",
-        (f"msg_{sid}_{role}", sid, role, timestamp or time.time()),
+        "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+        (f"msg_{sid}_{role}_{timestamp or time.time()}", sid, role, content, timestamp or time.time()),
     )
     conn.commit()
 
@@ -169,6 +169,47 @@ def test_importable_agent_projection_keeps_explicit_forks_out_of_compression_lin
         assert fork.get("_parent_lineage_root_id") == "lineage_report_root"
         assert "_lineage_root_id" not in fork
         assert "_compression_segment_count" not in fork
+    finally:
+        conn.close()
+
+
+def test_importable_agent_projection_uses_first_user_message_for_untitled_lineage(tmp_path):
+    conn = _ensure_state_db(tmp_path / "state.db")
+    t0 = time.time() - 100
+    try:
+        _insert_state_row(
+            conn,
+            "untitled_root",
+            title="",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "untitled_tip",
+            title="",
+            parent="untitled_root",
+            started_at=t0 + 6,
+        )
+        _insert_message(
+            conn,
+            "untitled_root",
+            timestamp=t0 + 1,
+            content="Cronを使って自動でバグ探し、バグ候補の判定、判定でバグと断定したら修正、Pushをするようにしたい。",
+        )
+        _insert_message(conn, "untitled_tip", timestamp=t0 + 7, content="続き")
+
+        rows = agent_sessions.read_importable_agent_session_rows(
+            tmp_path / "state.db",
+            exclude_sources=None,
+            include_sources=("webui",),
+        )
+
+        assert [row["id"] for row in rows] == ["untitled_tip"]
+        assert rows[0]["title"].startswith("Cronを使って自動でバグ探し")
+        assert rows[0]["_lineage_root_id"] == "untitled_root"
+        assert rows[0]["_compression_segment_count"] == 2
     finally:
         conn.close()
 

@@ -215,6 +215,16 @@ class TestIndexHtmlIntegration:
         assert "sw.js?v=__WEBUI_VERSION__" in src
         assert "static/ui.js?v=__WEBUI_VERSION__" in src
 
+    def test_index_asset_version_includes_shell_asset_fingerprint(self):
+        """Dirty hotfixes must change ?v= even when WEBUI_VERSION is unchanged."""
+        src = ROUTES.read_text(encoding="utf-8")
+        assert "def _index_asset_signature()" in src
+        assert "def _webui_asset_version_token(" in src
+        assert "asset_sig = _index_asset_signature()" in src
+        assert "version_token = _webui_asset_version_token(WEBUI_VERSION" in src
+        assert "sessions.js" in src and "style.css" in src
+
+
     def test_index_versions_stylesheet(self):
         """Regression for #1507: the `<link rel=stylesheet>` for style.css MUST
         carry the same `?v=__WEBUI_VERSION__` cache-bust query as the JS files.

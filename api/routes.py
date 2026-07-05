@@ -2475,6 +2475,49 @@ def _build_session_list_cache_payload(
             diag_stage=diag_stage,
         )
         deduped_cli = []
+        # `show_cli_sessions` is a user-facing external-session toggle, but the
+        # state.db projection also contains rows for WebUI-owned conversations
+        # whose JSON sidecar disappeared after a crash/restart, plus delegated
+        # subagent children that are displayed as read-only WebUI context. Those
+        # are NOT external CLI sessions; keep them in the WebUI source list even
+        # when the external-session bridge is off.
+        if source_filter in (None, "webui", "subagent"):
+            diag_stage("get_state_db_webui_sessions")
+            try:
+                if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
+                    state_webui_sessions = get_cli_sessions(
+                        source_filter=source_filter,
+                        all_profiles=all_profiles,
+                        include_claude_code=False,
+                    )
+                else:
+                    state_webui_sessions = get_cli_sessions(
+                        source_filter=source_filter,
+                        all_profiles=all_profiles,
+                    )
+            except Exception:
+                logger.debug("Failed to load state.db WebUI sidebar rows", exc_info=True)
+                state_webui_sessions = []
+            state_webui_sessions = [
+                s for s in state_webui_sessions
+                if _session_source_is_webui(s)
+                or str(
+                    s.get("source_tag") or s.get("raw_source")
+                    or s.get("session_source") or s.get("source") or ""
+                ).strip().lower() == "subagent"
+            ]
+            if state_webui_sessions:
+                represented_webui_ids: set[str] = set()
+                for s in webui_sessions:
+                    represented_webui_ids.update(_session_lineage_ids(s))
+                webui_sessions.extend(
+                    _dedupe_cli_sidebar_sessions_for_api(
+                        state_webui_sessions,
+                        represented_webui_ids,
+                        show_cron_sessions=False,
+                        show_webhook_sessions=False,
+                    )
+                )
     diag_stage("sort_sessions")
     merged = webui_sessions + deduped_cli
     merged.sort(
@@ -11119,6 +11162,53 @@ def _save_saved_prompts(prompts: list) -> None:
 # against the cached base, so caching changes no observable output.
 _INDEX_SHELL_CACHE: dict = {}
 _INDEX_SHELL_CACHE_LOCK = threading.Lock()
+_INDEX_ASSET_VERSION_PATHS = (
+    "style.css",
+    "pwa-startup.js",
+    "i18n.js",
+    "icons.js",
+    "assistant_turn_anchors.js",
+    "ui.js",
+    "workspace.js",
+    "terminal.js",
+    "sessions.js",
+    "commands.js",
+    "messages.js",
+    "extension_settings.js",
+    "panels.js",
+    "onboarding.js",
+    "boot.js",
+    "outline.js",
+    "sw.js",
+)
+
+
+def _index_asset_signature() -> tuple[str, tuple]:
+    """Fingerprint shell JS/CSS mtimes so dirty hotfixes bust immutable URLs."""
+    static_root = (Path(__file__).parent.parent / "static").resolve()
+    parts: list[tuple[str, int, int]] = []
+    digest = hashlib.sha1()
+    for rel in _INDEX_ASSET_VERSION_PATHS:
+        path = (static_root / rel).resolve()
+        try:
+            path.relative_to(static_root)
+            st = path.stat()
+        except Exception:
+            parts.append((rel, -1, -1))
+            digest.update(f"{rel}:missing".encode("utf-8"))
+            continue
+        part = (rel, st.st_size, st.st_mtime_ns)
+        parts.append(part)
+        digest.update(f"{rel}:{st.st_size}:{st.st_mtime_ns}".encode("utf-8"))
+    return digest.hexdigest()[:12], tuple(parts)
+
+
+def _webui_asset_version_token(webui_version: str, *, base_version_token: str | None = None) -> str:
+    from urllib.parse import quote
+
+    base = base_version_token or quote(webui_version, safe="")
+    asset_hash, _ = _index_asset_signature()
+    return quote(f"{base}-{asset_hash}", safe="")
 
 
 def _render_index_shell_base() -> str:
@@ -11131,14 +11221,16 @@ def _render_index_shell_base() -> str:
     from api.updates import WEBUI_VERSION
 
     st = _INDEX_HTML_PATH.stat()
-    sig = (st.st_size, st.st_mtime_ns)
+    _asset_hash, asset_sig = _index_asset_signature()
+    sig = (st.st_size, st.st_mtime_ns, asset_sig)
     with _INDEX_SHELL_CACHE_LOCK:
         cached = _INDEX_SHELL_CACHE.get("base")
         if cached and cached[0] == sig:
             return cached[1]
     from urllib.parse import quote
 
-    version_token = quote(WEBUI_VERSION, safe="")
+    base_version_token = quote(WEBUI_VERSION, safe="")
+    version_token = _webui_asset_version_token(WEBUI_VERSION, base_version_token=base_version_token)
     base = (
         _INDEX_HTML_PATH.read_text(encoding="utf-8")
         .replace("__WEBUI_VERSION__", version_token)
@@ -11330,11 +11422,12 @@ def handle_get(handler, parsed) -> bool:
         static_root = Path(__file__).parent.parent / "static"
         sw_path = (static_root / "sw.js").resolve()
         if sw_path.exists():
-            # Inject the current git-derived version as the cache name so the
-            # service worker cache busts automatically on every new deploy.
+            # Inject the asset-fingerprinted version as the cache name so both
+            # new deploys and dirty local hotfixes bust stale shell JS/CSS.
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
-            version_token = quote(WEBUI_VERSION, safe="")
+            base_version_token = quote(WEBUI_VERSION, safe="")
+            version_token = _webui_asset_version_token(WEBUI_VERSION, base_version_token=base_version_token)
             text = sw_path.read_text(encoding="utf-8").replace(
                 "__WEBUI_VERSION__", version_token
             )
@@ -12126,7 +12219,42 @@ def handle_get(handler, parsed) -> bool:
             _clear_stale_stream_state(get_session(sid, metadata_only=True))
             return j(handler, session_status(sid))
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            # No WebUI sidecar: /api/session can still render recoverable
+            # state.db-backed WebUI/subagent rows. Keep /api/session/status
+            # consistent with that detail endpoint so sidebar/focus pollers do
+            # not treat real recovered conversations as deleted.
+            cli_meta = _lookup_cli_session_metadata(sid) or {}
+            synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
+            if reason == "was_webui" or synth is None:
+                return bad(handler, "Session not found", 404)
+            if not _session_visible_to_active_profile(synth, handler):
+                return bad(handler, "Session not found", 404)
+            profile = getattr(synth, "profile", None) or cli_meta.get("profile") or "default"
+            try:
+                from api.profiles import get_hermes_home_for_profile
+                hermes_home = str(get_hermes_home_for_profile(profile))
+            except Exception:
+                hermes_home = ""
+            inp = int(getattr(synth, "input_tokens", 0) or 0)
+            out = int(getattr(synth, "output_tokens", 0) or 0)
+            return j(handler, {
+                "session_id": synth.session_id,
+                "title": synth.title,
+                "model": synth.model,
+                "profile": profile,
+                "hermes_home": hermes_home,
+                "workspace": synth.workspace,
+                "personality": getattr(synth, "personality", None),
+                "message_count": len(getattr(synth, "messages", None) or []),
+                "created_at": synth.created_at,
+                "updated_at": synth.updated_at,
+                "agent_running": False,
+                "active_stream_id": None,
+                "input_tokens": inp,
+                "output_tokens": out,
+                "total_tokens": inp + out,
+                "estimated_cost": getattr(synth, "estimated_cost", 0) or 0,
+            })
 
     if parsed.path == "/api/session/yolo":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]

@@ -2173,8 +2173,12 @@ function _clearSessionSourceTabCounts() {
   _serverCliSessionCount = null;
 }
 
-function _requestedSessionSidebarSource() {
+function _effectiveSessionSourceFilter() {
   return window._showCliSessions ? _sessionSourceFilter : 'webui';
+}
+
+function _requestedSessionSidebarSource() {
+  return _effectiveSessionSourceFilter();
 }
 
 function _sessionListExcludeHiddenEnabled() {
@@ -4488,7 +4492,7 @@ function showSessionListSkeleton(targetProfile){
       && typeof _knownSessionProfileCount === 'function')
     ? _knownSessionProfileCount(targetProfile) : null;
   const filterActive = (typeof _activeProject !== 'undefined' && _activeProject)
-    || (typeof _sessionSourceFilter !== 'undefined' && _sessionSourceFilter === 'cli');
+    || (typeof _effectiveSessionSourceFilter === 'function' && _effectiveSessionSourceFilter() === 'cli');
   const wrap = document.createElement('div');
   wrap.setAttribute('aria-hidden', 'true');
   if(knownCount === 0 && !filterActive){
@@ -4730,7 +4734,7 @@ function _applySessionListPayload(sessData, projData){
   // a different filter). This mirrors the read-side `filterActive` gate in
   // showSessionListSkeleton so the write and read agree on what the count means.
   const _recordFilterActive = (typeof _activeProject !== 'undefined' && _activeProject)
-    || (typeof _sessionSourceFilter !== 'undefined' && _sessionSourceFilter === 'cli');
+    || (typeof _effectiveSessionSourceFilter === 'function' && _effectiveSessionSourceFilter() === 'cli');
   if (!_showAllProfiles && !_recordFilterActive) {
     _recordSessionProfileCount(_allSessionsScope.profile, _allSessions.length);
   }
@@ -6575,10 +6579,10 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
   }
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+  if(_sessionSourceFilter==='cli' && !window._showCliSessions){
     _sessionSourceFilter='webui';
   }
-  const showCliOnly=_sessionSourceFilter==='cli';
+  const showCliOnly=_effectiveSessionSourceFilter()==='cli';
   const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;
   return {
     cliSessionCount,
@@ -6709,8 +6713,9 @@ function renderSessionListFromCache(){
     webuiSessionsRaw,
     cliSessionsRaw,
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
-  const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
-  const isCliView=_sessionSourceFilter==='cli';
+  const effectiveSourceFilter=_effectiveSessionSourceFilter();
+  const referenceRaw=effectiveSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
+  const isCliView=effectiveSourceFilter==='cli';
   const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
@@ -6787,9 +6792,9 @@ function renderSessionListFromCache(){
       const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;
       const btn=document.createElement('button');
       btn.type='button';
-      btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
+      btn.className='session-source-tab'+(effectiveSourceFilter===filter?' active':'');
       btn.textContent=_sessionSourceLabel(filter,count);
-      btn.setAttribute('aria-pressed', _sessionSourceFilter===filter?'true':'false');
+      btn.setAttribute('aria-pressed', effectiveSourceFilter===filter?'true':'false');
       btn.onclick=()=>_setSessionSourceFilter(filter);
       sourceTabs.appendChild(btn);
     }
@@ -6927,7 +6932,7 @@ function renderSessionListFromCache(){
     list.appendChild(toggle);
   }
   // Empty state for active project filter
-  if(_sessionSourceFilter==='cli'&&sessions.length===0){
+  if(effectiveSourceFilter==='cli'&&sessions.length===0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
     empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';

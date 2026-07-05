@@ -50,8 +50,8 @@ def test_partition_helper_applies_message_source_project_and_archive_gates():
 
     assert "function _sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in SESSIONS_JS
     assert "_sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in block
-    assert "if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0)" in block
-    assert "const showCliOnly=_sessionSourceFilter==='cli';" in block
+    assert "if(_sessionSourceFilter==='cli' && !window._showCliSessions){" in block
+    assert "const showCliOnly=_effectiveSessionSourceFilter()==='cli';" in block
     assert "if(!_showArchived&&s.archived) continue;" in block
     assert "if(s.archived){" in block
     assert "const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;" in block
