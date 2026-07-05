@@ -40718,7 +40718,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_license_final_ur
         "http://api.github.com/repos/capy/spaces/license",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_license_http_origin_or_final_url(tmp_path, monkeypatch, origin_uri, final_url):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_license_http_origin_or_final_url_before_body_read_relevant_memory_empty(tmp_path, monkeypatch, origin_uri, final_url):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -40763,7 +40763,8 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_license_http_ori
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("mit license", limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search": search}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("license-http-origin-drift-space", limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs, "search": search, "relevant": relevant}, sort_keys=True).lower()
 
     assert reads == []
     assert result["processed"] == 1
@@ -40771,6 +40772,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_license_http_ori
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "http://api.github.com",
         "placeholder_license_text_do_not_persist",
