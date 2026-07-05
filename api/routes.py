@@ -8053,8 +8053,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     current = session
     session_messages = list(getattr(session, "messages", []) or [])
     source = str(getattr(session, "session_source", "") or "").strip().lower()
-    if source == "fork":
-        return session_messages
+    root_is_fork = source == "fork"
     seen = {str(getattr(session, "session_id", "") or "")}
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
@@ -8062,6 +8061,9 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             break
         parent = Session.load(parent_id)
         if not parent or not getattr(parent, "pre_compression_snapshot", False):
+            break
+        parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
+        if root_is_fork and parent_source != "fork":
             break
         if not segments and _messages_start_with_visible_prefix(
             session_messages,

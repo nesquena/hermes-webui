@@ -278,6 +278,14 @@ def test_webui_fork_session_does_not_stitch_non_snapshot_parent(monkeypatch):
 
 def test_webui_fork_session_does_not_stitch_snapshot_parent(monkeypatch):
     """A fork child must stay isolated even if its parent later becomes a snapshot."""
+    parent = SimpleNamespace(
+        session_id="parent-snapshot-fork",
+        parent_session_id=None,
+        session_source="webui",
+        pre_compression_snapshot=True,
+        truncation_watermark=None,
+        messages=[{"role": "user", "content": "parent should stay separate", "timestamp": 1.0}],
+    )
     child = SimpleNamespace(
         session_id="child-snapshot-fork",
         parent_session_id="parent-snapshot-fork",
@@ -287,13 +295,58 @@ def test_webui_fork_session_does_not_stitch_snapshot_parent(monkeypatch):
         messages=[{"role": "user", "content": "fork child only", "timestamp": 2.0}],
     )
 
-    def fail_load(sid):
-        raise AssertionError(f"fork sidecar should not load parent {sid}")
-
-    monkeypatch.setattr(routes.Session, "load", fail_load)
+    monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent-snapshot-fork" else None)
 
     assert [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)] == [
         "fork child only",
+    ]
+
+
+def test_webui_compressed_fork_stitches_fork_snapshots_only(monkeypatch):
+    original_parent = SimpleNamespace(
+        session_id="original-fork-parent",
+        parent_session_id=None,
+        session_source="webui",
+        pre_compression_snapshot=True,
+        truncation_watermark=None,
+        messages=[{"role": "user", "content": "original parent should stay separate", "timestamp": 0.0}],
+    )
+    first_snapshot = SimpleNamespace(
+        session_id="fork-compression-snapshot-1",
+        parent_session_id="original-fork-parent",
+        session_source="fork",
+        pre_compression_snapshot=True,
+        truncation_watermark=None,
+        messages=[{"role": "user", "content": "before first fork compression", "timestamp": 1.0}],
+    )
+    second_snapshot = SimpleNamespace(
+        session_id="fork-compression-snapshot-2",
+        parent_session_id="fork-compression-snapshot-1",
+        session_source="fork",
+        pre_compression_snapshot=True,
+        truncation_watermark=None,
+        messages=[{"role": "assistant", "content": "before second fork compression", "timestamp": 2.0}],
+    )
+    child = SimpleNamespace(
+        session_id="fork-compression-child",
+        parent_session_id="fork-compression-snapshot-2",
+        session_source="fork",
+        pre_compression_snapshot=False,
+        truncation_watermark=None,
+        messages=[{"role": "assistant", "content": "after fork compression", "timestamp": 3.0}],
+    )
+    by_id = {
+        "original-fork-parent": original_parent,
+        "fork-compression-snapshot-1": first_snapshot,
+        "fork-compression-snapshot-2": second_snapshot,
+    }
+
+    monkeypatch.setattr(routes.Session, "load", lambda sid: by_id.get(sid))
+
+    assert [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)] == [
+        "before first fork compression",
+        "before second fork compression",
+        "after fork compression",
     ]
 
 
