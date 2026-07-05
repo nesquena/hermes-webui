@@ -1,7 +1,7 @@
 # Capy Spaces Source-Refresh Evidence Index
 
 Created: 2026-06-30 21:01 CDT
-Last count refresh: 2026-07-05 03:44 CDT
+Last count refresh: 2026-07-05 04:53 CDT
 Branch: `feat/capy-spaces-foundation`
 
 ## Purpose
@@ -27,13 +27,13 @@ The index is intentionally docs-only. It does not change the Memory Tree impleme
 
 ## Evidence snapshot
 
-Snapshot generated from the checked-out `tests/test_capy_memory_tree.py` on 2026-07-05 03:44 CDT:
+Snapshot generated from the checked-out `tests/test_capy_memory_tree.py` on 2026-07-05 04:53 CDT:
 
 | Search/count | Count | Meaning |
 | --- | ---: | --- |
-| `def test_.*github.*(?:final_url|redirect).*drift` | 134 | GitHub source-refresh drift regressions across route families. |
-| `def test_.*before_body_read` | 125 | Regressions that explicitly name no-body-read behavior. |
-| `def test_.*relevant_memory_empty` | 107 | Regressions that also prove Spaces relevant-memory remains empty after hostile drift. |
+| `def test_.*github.*(?:final_url|redirect).*drift` | 135 | GitHub source-refresh drift regressions across route families. |
+| `def test_.*before_body_read` | 126 | Regressions that explicitly name no-body-read behavior. |
+| `def test_.*relevant_memory_empty` | 108 | Regressions that also prove Spaces relevant-memory remains empty after hostile drift. |
 | `def test_.*ingests_github.*metadata_only` | 154 | Positive metadata-only GitHub ingestion regressions. |
 
 ### Regeneration recipe
@@ -65,7 +65,7 @@ Coarse drift-test family buckets from function names:
 | --- | ---: | --- |
 | Actions / workflows / runners / artifacts / cache / OIDC | 46 | High-value because these routes often expose nested IDs, policy metadata, artifact handles, and secret-adjacent fields. |
 | Issues / PRs / comments / reactions / labels / timeline / milestones | 23 | Review exact owner/repo/number/comment-id parity and no-leak assertions for hostile bodies and actor/user fields. |
-| Security / Dependabot / code scanning / secret scanning / private vulnerability reporting | 16 | Prioritize metadata-only output and no public leakage of advisory, secret, key, or vulnerability details. |
+| Security / Dependabot / code scanning / secret scanning / private vulnerability reporting | 17 | Prioritize metadata-only output and no public leakage of advisory, secret, key, or vulnerability details. |
 | Deployments / Pages / environments | 16 | Check route-tail and ID drift; these routes mix repo IDs, deployment IDs, environment names, and status rows. |
 | Repository metadata / contents / README / license / languages / branches / tags / topics / rulesets / properties | 11 | Confirm raw content bodies and URLs remain out of public receipts. |
 | Traffic / stats / social surfaces | 11 | Confirm aggregate counts/previews only and no actor/body leakage. |

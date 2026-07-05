@@ -47819,36 +47819,98 @@ def test_queue_due_source_refresh_jobs_preserves_github_code_scanning_single_ale
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_single_alert_final_url_query_fragment(tmp_path, monkeypatch):
-    root = tmp_path / "capy-memory"
+@pytest.mark.parametrize(
+    ("case_name", "drifted_final_url"),
+    [
+        (
+            "query-fragment-auth",
+            "https://ghp_SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/code-scanning/alerts/17?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+        ),
+        (
+            "repository-drift",
+            "https://api.github.com/repos/capy/evil-space/code-scanning/alerts/17",
+        ),
+        (
+            "alert-id-drift",
+            "https://api.github.com/repos/capy/spaces/code-scanning/alerts/18",
+        ),
+        (
+            "tail-route-drift",
+            "https://api.github.com/repos/capy/spaces/code-scanning/alerts/17/instances",
+        ),
+    ],
+)
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_single_alert_final_url_drift_before_body_read_relevant_memory_empty(
+    tmp_path,
+    monkeypatch,
+    case_name,
+    drifted_final_url,
+):
+    root = tmp_path / case_name / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
     init_memory_tree()
+    source_id = f"github-code-scanning-single-alert-final-url-drift-{case_name}"
     register_source_reference({
-        "source_id": "github-code-scanning-single-alert-final-url-query-fragment",
-        "title": "GitHub Code Scanning Single Alert Final URL Query Fragment",
+        "source_id": source_id,
+        "title": "GitHub Code Scanning Single Alert Final URL Drift",
         "origin_uri": "https://api.github.com/repos/capy/spaces/code-scanning/alerts/17",
     })
-    body = json.dumps(_github_code_scanning_single_alert_fixture()).encode("utf-8")
+    hostile_body = _github_code_scanning_single_alert_fixture(
+        number=18,
+        url="https://api.github.com/repos/capy/evil-space/code-scanning/alerts/18?access_token=SECRET_VALUE_DO_NOT_LEAK",
+        html_url="https://github.com/capy/evil-space/security/code-scanning/18#raw-prompt",
+        instances_url="https://api.github.com/repos/capy/evil-space/code-scanning/alerts/18/instances",
+        rule_description="SINGLE_ALERT_DRIFT_BODY_SENTINEL raw prompt SECRET_VALUE_DO_NOT_LEAK",
+    )
+    body = json.dumps(hostile_body).encode("utf-8")
+    calls = []
+    read_calls = []
 
     class FakeResponse:
         headers = {"Content-Type": "application/json; charset=utf-8"}
         def __enter__(self): return self
         def __exit__(self, *_exc): return False
-        def geturl(self): return "https://api.github.com/repos/capy/spaces/code-scanning/alerts/17?unexpected=1#frag"
-        def read(self, _limit=-1): return body
+        def geturl(self): return drifted_final_url
+        def read(self, _limit=-1):
+            read_calls.append("read")
+            return body
 
-    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout, "accept": request.headers.get("Accept")})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
     result = run_source_refresh_jobs(limit=1)
-    serialized = json.dumps(result, sort_keys=True).lower()
+    search = search_memory("code scanning alert drift", limit=5)
+    relevant = relevant_memory_for_space("code-scanning-single-alert-drift-space", limit=5)
+    catalog = source_catalog(limit=5)
+    serialized = json.dumps(
+        {"catalog": catalog, "relevant": relevant, "result": result, "search": search},
+        sort_keys=True,
+    ).lower()
 
+    assert calls == [{"url": "https://api.github.com/repos/capy/spaces/code-scanning/alerts/17", "timeout": 8, "accept": "application/json"}]
+    assert read_calls == []
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
-    assert result["jobs"][0]["error"] == "refresh failed"
-    assert not (root / "vault" / "github-code-scanning-single-alert-final-url-query-fragment.md").exists()
-    assert "unexpected=1" not in serialized
-    assert "#frag" not in serialized
-    assert "sql injection" not in serialized
+    assert result["jobs"][0]["error"] in {"refresh fetcher disabled", "refresh failed"}
+    assert not (root / "vault" / f"{source_id}.md").exists()
+    assert search["results"] == []
+    assert relevant["results"] == []
+    for unsafe in (
+        "single_alert_drift_body_sentinel",
+        "evil-space",
+        "alert #18",
+        "alerts/18",
+        "access_token",
+        "secret_value_do_not_leak",
+        "raw-prompt",
+        "ghp_",
+        "17/instances",
+    ):
+        assert unsafe not in serialized
 
 
 def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_single_alert_unsafe_ignored_fields(tmp_path, monkeypatch):
