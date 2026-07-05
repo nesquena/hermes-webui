@@ -6143,6 +6143,7 @@ def get_state_db_session_messages(
     stitch_continuations: bool = False,
     profile=None,
     since_timestamp=None,
+    include_inactive: bool = False,
 ) -> list:
     """Read messages for a Hermes session from state.db.
 
@@ -6158,6 +6159,13 @@ def get_state_db_session_messages(
     raw state.db scan to rows at or after a sidecar-derived timestamp floor while
     preserving the caller's normal merge/window logic.  Full-history callers must
     leave it unset.
+
+    When the messages table exposes an ``active`` column, inactive rows are
+    compacted/archived history and are intentionally excluded by default. WebUI
+    reconciliation feeds this reader straight into the next model context; pulling
+    ``active=0`` archive rows back in resurrects pre-compaction history and can
+    make every later turn re-trigger compression. Pass ``include_inactive=True``
+    only for explicit recovery/audit views.
     """
     try:
         import sqlite3
@@ -6249,11 +6257,15 @@ def get_state_db_session_messages(
                 if since_ts is not None:
                     since_clause = " AND (timestamp IS NULL OR timestamp >= ?)"
                     params.append(since_ts)
+            active_clause = ""
+            if 'active' in available and not include_inactive:
+                active_clause = " AND (active IS NULL OR active != 0)"
             cur.execute(f"""
                 SELECT {', '.join(selected)}, session_id
                 FROM messages
                 WHERE session_id IN ({placeholders})
                 {since_clause}
+                {active_clause}
                 ORDER BY timestamp ASC, id ASC
             """, params)
             msgs = []
