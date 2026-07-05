@@ -160,6 +160,7 @@ _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 # WebUI sidebar polling path is single-process) but must wrap the WHOLE
 # load-modify-write/unlink sequence in both helpers.
 _WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_LOCK = threading.Lock()
+_WEBUI_DELETED_SESSION_TOMBSTONE_LOCK = threading.Lock()
 
 # Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
 # hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
@@ -513,6 +514,8 @@ def prune_session_from_index(session_id: str) -> None:
 
 WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_CAP = 500
 WEBUI_ZERO_MESSAGE_ORPHAN_TOMBSTONE_VERSION = 1
+WEBUI_DELETED_SESSION_TOMBSTONE_CAP = 1000
+WEBUI_DELETED_SESSION_TOMBSTONE_VERSION = 1
 
 
 def _webui_zero_message_orphan_tombstone_file() -> "Path":
@@ -674,6 +677,98 @@ def _clear_webui_zero_message_orphan_tombstone(sid: str) -> None:
                 "Failed to remove empty webui zero-message orphan tombstone",
                 exc_info=True,
             )
+
+
+def _webui_deleted_session_tombstone_file() -> "Path":
+    return SESSION_DIR / "_deleted_webui_sessions.json"
+
+
+def _load_webui_deleted_session_tombstone() -> frozenset[str]:
+    p = _webui_deleted_session_tombstone_file()
+    if not p.exists():
+        return frozenset()
+    try:
+        raw = json.loads(p.read_text(encoding='utf-8'))
+    except Exception:
+        logger.debug("Failed to load webui deleted-session tombstone", exc_info=True)
+        return frozenset()
+    if not isinstance(raw, dict):
+        return frozenset()
+    try:
+        if int(raw.get("version", 0)) != WEBUI_DELETED_SESSION_TOMBSTONE_VERSION:
+            return frozenset()
+    except (TypeError, ValueError):
+        return frozenset()
+    ids = raw.get("ids", [])
+    if not isinstance(ids, list):
+        return frozenset()
+    return frozenset(
+        str(sid).strip() for sid in ids if str(sid or "").strip()
+    )
+
+
+def _save_webui_deleted_session_tombstone(ids) -> None:
+    try:
+        sorted_ids = sorted(set(
+            str(sid).strip() for sid in (ids or []) if str(sid or "").strip()
+        ))
+    except TypeError:
+        return
+    if len(sorted_ids) > WEBUI_DELETED_SESSION_TOMBSTONE_CAP:
+        sorted_ids = sorted_ids[-WEBUI_DELETED_SESSION_TOMBSTONE_CAP:]
+    payload = {
+        "version": WEBUI_DELETED_SESSION_TOMBSTONE_VERSION,
+        "ids": sorted_ids,
+    }
+    p = _webui_deleted_session_tombstone_file()
+    _tmp = None
+    try:
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        _tmp = p.with_suffix(
+            f'.tmp.{os.getpid()}.{threading.current_thread().ident}'
+        )
+        with open(_tmp, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(_tmp, p)
+    except Exception:
+        logger.debug("Failed to save webui deleted-session tombstone", exc_info=True)
+        if _tmp is not None:
+            try:
+                _tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _record_webui_deleted_session_tombstone(sid: str) -> None:
+    sid = str(sid or "").strip()
+    if not sid:
+        return
+    with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
+        current = set(_load_webui_deleted_session_tombstone())
+        if sid in current:
+            return
+        current.add(sid)
+        _save_webui_deleted_session_tombstone(current)
+
+
+def _clear_webui_deleted_session_tombstone(sid: str) -> None:
+    sid = str(sid or "").strip()
+    if not sid:
+        return
+    with _WEBUI_DELETED_SESSION_TOMBSTONE_LOCK:
+        current = set(_load_webui_deleted_session_tombstone())
+        if sid not in current:
+            return
+        current.discard(sid)
+        if current:
+            _save_webui_deleted_session_tombstone(current)
+            return
+        try:
+            _webui_deleted_session_tombstone_file().unlink(missing_ok=True)
+        except Exception:
+            logger.debug("Failed to remove empty webui deleted-session tombstone", exc_info=True)
 
 
 def _active_stream_ids():
@@ -958,6 +1053,7 @@ class Session:
                  last_prompt_tokens=None,
                  truncation_watermark=None,
                  truncation_boundary=None,
+                 clear_generation=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1009,6 +1105,7 @@ class Session:
         self.last_prompt_tokens = last_prompt_tokens
         self.truncation_watermark = truncation_watermark
         self.truncation_boundary = truncation_boundary
+        self.clear_generation = clear_generation
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1079,6 +1176,7 @@ class Session:
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'truncation_watermark',
             'truncation_boundary',
+            'clear_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -1190,9 +1288,10 @@ class Session:
         if self.messages:
             try:
                 _clear_webui_zero_message_orphan_tombstone(self.session_id)
+                _clear_webui_deleted_session_tombstone(self.session_id)
             except Exception:
                 logger.debug(
-                    "Failed to clear webui zero-message orphan tombstone for %s",
+                    "Failed to clear webui tombstone for %s",
                     self.session_id,
                     exc_info=True,
                 )
@@ -3253,9 +3352,10 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     # must never block new-session creation.
     try:
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
+        _clear_webui_deleted_session_tombstone(s.session_id)
     except Exception:
         logger.debug(
-            "Failed to clear webui zero-message orphan tombstone for %s",
+            "Failed to clear webui tombstone for %s",
             s.session_id,
             exc_info=True,
         )
@@ -4741,9 +4841,10 @@ def import_cli_session(
     # an import.
     try:
         _clear_webui_zero_message_orphan_tombstone(s.session_id)
+        _clear_webui_deleted_session_tombstone(s.session_id)
     except Exception:
         logger.debug(
-            "Failed to clear webui zero-message orphan tombstone for %s",
+            "Failed to clear webui tombstone for %s",
             s.session_id,
             exc_info=True,
         )
@@ -5658,6 +5759,16 @@ def _load_cli_sessions_uncached(
         return None
 
     profile_value = _cli_profile or 'default'
+    # A deleted WebUI session is tombstoned (see _record_webui_deleted_session_tombstone)
+    # so recovery/audit/claim treat it as gone. The sidebar's own state.db projection
+    # must honor the same tombstone, or a deleted WebUI session reappears here as an
+    # "Agent" ghost the moment non-WebUI sessions are shown (#5498, second path). Only
+    # suppress genuine WebUI rows with no live sidecar — a re-created/re-imported sid
+    # (live {sid}.json) always beats a stale tombstone.
+    try:
+        _deleted_webui_tombstone = _load_webui_deleted_session_tombstone()
+    except Exception:
+        _deleted_webui_tombstone = frozenset()
     for row in read_importable_agent_session_rows(
         db_path,
         limit=visible_session_limit if visible_session_limit is not None else (
@@ -5676,6 +5787,14 @@ def _load_cli_sessions_uncached(
         profile = profile_value  # CLI DB has no profile column; use active profile
 
         _source = row['source'] or 'cli'
+        # Honor the deleted-WebUI tombstone: a WebUI row the user deleted must
+        # not resurface in this projection (the #5498 ghost). Live sidecar wins.
+        if (
+            _source == 'webui'
+            and sid in _deleted_webui_tombstone
+            and not (SESSION_DIR / f"{sid}.json").exists()
+        ):
+            continue
         _source_meta = normalize_agent_session_source(_source)
         _title = row['title']
         if not _title and _source == 'cron':

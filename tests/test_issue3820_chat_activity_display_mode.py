@@ -286,7 +286,7 @@ def test_transparent_event_row_quiet_metadata_visual_rhythm():
     assert "border-radius:0;" in STYLE_CSS
     assert "margin-top:0;" in STYLE_CSS
     assert "padding:0 8px 6px 27px;" in STYLE_CSS
-    assert ".transparent-event-row .thinking-card.open .thinking-card-body{\n  border-top-color:transparent;\n  padding:0 0 3px;\n}" in STYLE_CSS
+    assert ".transparent-event-row .thinking-card.open .thinking-card-body{\n  border-top-color:transparent;\n  padding:0 0 3px;\n  scrollbar-gutter:stable;\n}" in STYLE_CSS
 
     # Tabs: text-link style with an active underline (no pill background).
     assert ".transparent-detail-mode.active{color:var(--text);opacity:1;font-weight:600;box-shadow:inset 0 -1px 0 var(--accent);}" in STYLE_CSS
@@ -631,6 +631,23 @@ def test_transparent_interrupted_status_on_settled_tools():
     permanent Running shimmer). (Trifecta O-Edge.)"""
     assert "function _transparentToolStatus(tc, settled)" in UI_JS
     assert "settled?'Interrupted':'Running'" in UI_JS
+    start = UI_JS.index("function _anchorSceneTransparentNodeForRow(row, opts){")
+    depth = 0
+    end = None
+    for idx in range(start, len(UI_JS)):
+        char = UI_JS[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    assert end is not None, "_anchorSceneTransparentNodeForRow body did not close"
+    body = UI_JS[start:end]
+    assert "else if(row.role==='tool')" in body
+    assert "_transparentToolStatus(toolCall,settled)" in body
+    assert "_transparentToolStatus(toolCall,true)" not in body
     assert "_transparentToolStatus(event.toolCall,true)" in UI_JS
 
 
@@ -641,9 +658,8 @@ def test_transparent_tool_completion_preserves_expand_state():
 
 
 def test_transparent_entrance_animation_is_live_turn_only():
-    """The entrance animation must be scoped to the live turn so it doesn't
-    replay across the whole transcript on every renderMessages. (Trifecta V9.)"""
-    assert "#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter" in STYLE_CSS
+    """Transparent Stream must not keep the removed entrance animation rule."""
+    assert "transparent-event-enter" not in STYLE_CSS
 
 
 def test_live_worklog_reason_mirror_is_gated_to_compact_mode():

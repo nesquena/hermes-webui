@@ -1,3 +1,7 @@
+import json
+import re
+import subprocess
+import textwrap
 from pathlib import Path
 
 
@@ -5,6 +9,33 @@ SESSIONS_JS = Path("static/sessions.js").read_text(encoding="utf-8")
 UI_JS = Path("static/ui.js").read_text(encoding="utf-8")
 BOOT_JS = Path("static/boot.js").read_text(encoding="utf-8")
 PANELS_JS = Path("static/panels.js").read_text(encoding="utf-8")
+
+
+def _function_body(src: str, name: str) -> str:
+    # Extracted functions intentionally avoid braces in strings so this stays source-light.
+    m = re.search(rf"(?:async\s+)?function\s+{re.escape(name)}\b", src)
+    assert m, f"{name} function not found"
+    sig_end = src.find(")", m.end())
+    assert sig_end != -1, f"{name} function signature not terminated"
+    brace_start = src.find("{", sig_end)
+    assert brace_start != -1, f"{name} function body not found"
+    depth = 0
+    for idx in range(brace_start, len(src)):
+        ch = src[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[m.start():idx + 1]
+    raise AssertionError(f"{name} function body not terminated")
+
+
+def _run_node(script: str) -> dict:
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise AssertionError(f"node failed: {result.stderr}")
+    return json.loads(result.stdout)
 
 
 def test_load_session_supports_force_reload_for_external_refresh():
@@ -79,20 +110,39 @@ def test_active_session_external_refresh_has_focus_and_visibility_hooks():
     assert "ensureActiveSessionExternalRefreshPoll();" in SESSIONS_JS
 
 
+def test_session_time_refresh_has_own_visibility_hook():
+    """Skipped hidden-tab timestamp ticks must refresh immediately on return."""
+    start = SESSIONS_JS.find("function ensureSessionTimeRefreshPoll()")
+    assert start != -1
+    block = SESSIONS_JS[start:start + 900]
+    assert "_sessionTimeRefreshVisibilityHandler" in SESSIONS_JS
+    assert "document.addEventListener('visibilitychange', _sessionTimeRefreshVisibilityHandler);" in block
+    assert "if(!document.hidden) renderSessionListFromCache();" in block
+    assert "startStreamingPoll re-renders the list" not in block
+
+
 def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     """New sessions should refresh the sidebar from server invalidation events."""
     assert "async function refreshSessionList(reason='manual', opts={})" in SESSIONS_JS
+    assert "let _sessionListRefreshPendingRequest = null;" in SESSIONS_JS
+    assert "function _mergeSessionListRefreshOptions(prev, next)" in SESSIONS_JS
+    assert "function _refreshSessionListAfterSidebarResume(reason)" in SESSIONS_JS
+    assert "_sessionEventsNeedsRefreshOnOpen = false" in SESSIONS_JS
+    assert "void refreshSessionList(reason, {force:true})" in SESSIONS_JS
     assert "function ensureSessionEventsSSE()" in SESSIONS_JS
     assert "new EventSource('api/sessions/events')" in SESSIONS_JS
     assert "addEventListener('sessions_changed'" in SESSIONS_JS
-    assert "function _scheduleSessionEventsRefresh(reason)" in SESSIONS_JS
+    assert "function _scheduleSessionEventsRefresh(reason, opts={})" in SESSIONS_JS
+    assert "let _sessionEventsRefreshPendingRequest = null;" in SESSIONS_JS
     assert "_sessionEventsNeedsRefreshOnOpen = true" in SESSIONS_JS
-    assert "void refreshSessionList('reconnect')" in SESSIONS_JS
+    assert "void _refreshSessionListAfterSidebarResume('focus')" in SESSIONS_JS
+    assert "void _refreshSessionListAfterSidebarResume('visible')" in SESSIONS_JS
+    assert "void _refreshSessionListAfterSidebarResume('reconnect')" in SESSIONS_JS
     assert "renderSessionList({deferWhileInteracting:!force})" in SESSIONS_JS
     assert "const refreshActive = !!(opts && opts.refreshActive)" in SESSIONS_JS
     assert "if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list')" in SESSIONS_JS
-    assert "_sessionListRefreshPendingReason = reason || 'session-list'" in SESSIONS_JS
-    assert "if(pendingReason) _scheduleSessionEventsRefresh(pendingReason)" in SESSIONS_JS
+    assert "_sessionListRefreshPendingRequest = {" in SESSIONS_JS
+    assert "_scheduleSessionEventsRefresh(pendingRequest.reason, pendingRequest.opts)" in SESSIONS_JS
     assert "ensureSessionEventsSSE();" in SESSIONS_JS
     assert "document._hermesSessionEventsVisibilityHook" in SESSIONS_JS
     ensure_fn = SESSIONS_JS[SESSIONS_JS.find("function ensureSessionEventsSSE()") :]
@@ -109,6 +159,156 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "function _sessionEventTargetsActiveSession(payload)" in SESSIONS_JS
     assert "typeof payload.session_id === 'string'" in SESSIONS_JS
     assert "eventTargetsActiveSession?'event-active-session':'event'" in ensure_fn
+    assert "_scheduleSessionEventsRefresh(eventTargetsActiveSession?'event-active-session':'event', {force:true, refreshActive:true})" in ensure_fn
+
+
+def test_session_events_refresh_forces_hidden_sidebar_render_from_event_path():
+    """The production sessions_changed path must force the hidden sidebar list render."""
+    merge_body = (
+        _function_body(SESSIONS_JS, "_mergeSessionListRefreshOptions")
+        if "function _mergeSessionListRefreshOptions" in SESSIONS_JS
+        else "function _mergeSessionListRefreshOptions(prev, next){ return {...(prev||{}), ...(next||{})}; }"
+    )
+    functions = "\n\n".join(
+        [
+            merge_body,
+            _function_body(SESSIONS_JS, "refreshSessionList"),
+            _function_body(SESSIONS_JS, "_scheduleSessionEventsRefresh"),
+        ]
+    )
+    script = textwrap.dedent(
+        f"""
+        const record = [];
+        global.document = {{hidden: true}};
+        global.renderSessionList = async (opts) => record.push({{kind: 'render', opts}});
+        global.refreshActiveSessionIfExternallyUpdated = async (reason) => record.push({{kind: 'active', reason}});
+        global.setTimeout = (cb) => {{
+          cb();
+          return 1;
+        }};
+        let _sessionListRefreshInFlight = false;
+        let _sessionListRefreshPendingRequest = null;
+        let _sessionEventsRefreshTimer = 0;
+        let _sessionEventsRefreshPendingRequest = null;
+        {functions}
+        (async() => {{
+          _scheduleSessionEventsRefresh('event-active-session', {{force:true, refreshActive:true}});
+          await Promise.resolve();
+          process.stdout.write(JSON.stringify(record));
+        }})().catch((err) => {{
+          process.stderr.write(String(err.stack || err) + '\\n');
+          process.exit(1);
+        }});
+        """
+    )
+    out = _run_node(script)
+    assert out == [
+        {"kind": "render", "opts": {"deferWhileInteracting": False}},
+        {"kind": "active", "reason": "event-active-session"},
+    ]
+
+
+def test_session_list_external_refresh_forced_resume_survives_hidden_inflight_refresh():
+    """Queued resume refreshes must keep `force:true` even after a hidden invalidation."""
+    functions = "\n\n".join(
+        _function_body(SESSIONS_JS, name)
+        for name in (
+            "_mergeSessionListRefreshOptions",
+            "refreshSessionList",
+            "_scheduleSessionEventsRefresh",
+            "_refreshSessionListAfterSidebarResume",
+        )
+    )
+    script = textwrap.dedent(
+        f"""
+        const record = [];
+        const state = {{hidden: false}};
+        global.document = state;
+        let renderCount = 0;
+        global.renderSessionList = async (opts) => {{
+          record.push({{kind: 'render', opts}});
+          renderCount += 1;
+          if (renderCount === 1) {{
+            state.hidden = true;
+            await refreshSessionList('focus', {{force:true}});
+          }}
+        }};
+        global.refreshActiveSessionIfExternallyUpdated = async (reason) => {{
+          record.push({{kind: 'active', reason}});
+        }};
+        global.setTimeout = (cb) => {{
+          cb();
+          return 1;
+        }};
+        global.clearTimeout = () => {{}};
+        let _sessionListRefreshInFlight = false;
+        let _sessionListRefreshPendingRequest = null;
+        let _sessionEventsRefreshTimer = 0;
+        let _sessionEventsRefreshPendingRequest = null;
+        {functions}
+        (async() => {{
+          await refreshSessionList('event', {{refreshActive:true}});
+          await refreshSessionList('manual');
+          process.stdout.write(JSON.stringify({{
+            record,
+            resumeSrc: _refreshSessionListAfterSidebarResume.toString(),
+          }}));
+        }})().catch((err) => {{
+          process.stderr.write(String(err.stack || err) + '\\n');
+          process.exit(1);
+        }});
+        """
+    )
+    out = _run_node(script)
+    assert out["record"] == [
+        {"kind": "render", "opts": {"deferWhileInteracting": True}},
+        {"kind": "active", "reason": "event"},
+        {"kind": "render", "opts": {"deferWhileInteracting": False}},
+    ]
+    assert "refreshSessionList(reason, {force:true})" in out["resumeSrc"]
+    assert "refreshActive:true" not in out["resumeSrc"]
+
+
+def test_session_events_refresh_timer_merges_pending_force_and_active_options():
+    """The debounce window must not drop force or active-refresh intent."""
+    functions = "\n\n".join(
+        _function_body(SESSIONS_JS, name)
+        for name in (
+            "_mergeSessionListRefreshOptions",
+            "refreshSessionList",
+            "_scheduleSessionEventsRefresh",
+        )
+    )
+    script = textwrap.dedent(
+        f"""
+        const record = [];
+        global.document = {{hidden: true}};
+        global.renderSessionList = async (opts) => record.push({{kind: 'render', opts}});
+        global.refreshActiveSessionIfExternallyUpdated = async (reason) => record.push({{kind: 'active', reason}});
+        let timerCb = null;
+        global.setTimeout = (cb) => {{ timerCb = cb; return 1; }};
+        global.clearTimeout = () => {{}};
+        let _sessionListRefreshInFlight = false;
+        let _sessionListRefreshPendingRequest = null;
+        let _sessionEventsRefreshTimer = 0;
+        let _sessionEventsRefreshPendingRequest = null;
+        {functions}
+        (async() => {{
+          _scheduleSessionEventsRefresh('focus', {{force:true}});
+          _scheduleSessionEventsRefresh('event-active-session', {{refreshActive:true}});
+          timerCb();
+          await Promise.resolve();
+          process.stdout.write(JSON.stringify(record));
+        }})().catch((err) => {{
+          process.stderr.write(String(err.stack || err) + '\\n');
+          process.exit(1);
+        }});
+        """
+    )
+    assert _run_node(script) == [
+        {"kind": "render", "opts": {"deferWhileInteracting": False}},
+        {"kind": "active", "reason": "event-active-session"},
+    ]
 
 
 def test_session_event_profile_filter_tolerates_default_root_aliases():
@@ -120,6 +320,68 @@ def test_session_event_profile_filter_tolerates_default_root_aliases():
     assert "const activeProfileState = await _resolveActiveProfileBootstrapState();" in BOOT_JS
     assert "S.activeProfileIsDefault = activeProfileState.isDefault;" in BOOT_JS
     assert "S.activeProfileIsDefault = !!data.is_default;" in PANELS_JS
+
+
+def test_session_list_render_signature_serializes_full_rows_not_a_narrow_allowlist():
+    """The render-skip signature must serialize the FULL applied rows (+ reference
+    rows), not a curated field subset — a narrow allowlist silently false-skips
+    when a rendered field it omits changes (Codex #5467: it dropped pending/running
+    streaming state, attention dots, and the source/lineage cluster, so an
+    approval/clarify transition or a row starting to stream could keep a stale
+    sidebar). Serializing the whole row objects covers every field the render
+    helpers read, present and future.
+    """
+    start = SESSIONS_JS.find("function _sessionListRenderSignature()")
+    assert start != -1
+    block = SESSIONS_JS[start:start + 900]
+    # Full-object serialization, not a hand-picked allowlist.
+    assert "const sessionKeys = [" not in block, \
+        "signature must not use a narrow field allowlist (it false-skips on omitted fields)"
+    assert "sessionKeys.forEach" not in block
+    assert "_allSessions," in block, "signature must serialize the full applied rows"
+    assert "_sidebarReferenceSessions," in block, \
+        "signature must include the hidden reference/nesting rows the sidebar renders"
+    # Fail-open on serialization failure (never skip on null).
+    assert "catch(_){ return null; }" in block
+
+
+def test_session_list_render_signature_changes_on_pending_running_and_attention():
+    """Regression for the Codex #5467 CORE/SILENT false-skips: because the
+    signature serializes whole rows, a change to pending/running state or the
+    attention dot changes the signature (so the sidebar repaints, not skips).
+    This is a structural guarantee of full-row serialization — assert the
+    signature does not strip those fields back out.
+    """
+    start = SESSIONS_JS.find("function _sessionListRenderSignature()")
+    block = SESSIONS_JS[start:start + 900]
+    # None of the previously-omitted, render-consumed fields may be filtered out.
+    for stripped in (
+        "delete out.active_stream_id",
+        "delete out.attention",
+        "delete out.has_pending_user_message",
+    ):
+        assert stripped not in block, f"signature must not strip {stripped!r}"
+    # The whole-object arrays are passed straight to JSON.stringify.
+    assert "JSON.stringify([" in block
+
+
+def test_session_list_render_signature_does_not_skip_recovering_from_skeleton_or_error():
+    """The render-skip must never fire when recovering from a skeleton or the
+    'Could not load conversations' banner — both are rendered OUTSIDE the
+    signature path, so an identical-signature match (empty/same-shaped profile,
+    or a transient fetch failure healing with identical rows) would leave the
+    skeleton/error DOM on screen instead of the real list. (Codex #5467 re-gate)
+    """
+    start = SESSIONS_JS.find("function _applySessionListPayload(")
+    assert start != -1
+    body = SESSIONS_JS[start:start + 12000]
+    assert "const _hadSessionListSkeleton = _sessionListSkeletonActive;" in body
+    assert "const _hadSessionListLoadError = !!_sessionListLoadError;" in body
+    assert "const _mustForceRender = _hadSessionListSkeleton || _hadSessionListLoadError;" in body
+    assert "!_mustForceRender" in body, "the force flag must gate the identical-signature skip"
+    # captured BEFORE the respective clears
+    assert body.index("const _hadSessionListSkeleton") < body.index("_sessionListSkeletonActive = false;")
+    assert body.index("const _hadSessionListLoadError") < body.index("_sessionListLoadError = null;")
 
 
 def test_pwa_pull_to_refresh_refreshes_session_list_not_page_when_available():

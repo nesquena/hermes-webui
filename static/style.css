@@ -3978,10 +3978,6 @@ body.resizing .sidebar{transition:none!important;}
   box-shadow:none;
   transition:background .18s ease,border-color .18s ease,opacity .22s ease;
 }
-/* Only animate entrance for rows in the LIVE turn — putting the animation on the
-   base row class replayed the whole transcript's shimmer on every renderMessages
-   rebuild. (Trifecta finding V9.) */
-#liveAssistantTurn .transparent-event-row{animation:transparent-event-enter .18s ease-out both;}
 .transparent-event-row[data-event-type="thinking"]{
   background:transparent;
   border-color:transparent;
@@ -4223,6 +4219,7 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row .thinking-card.open .thinking-card-body{
   border-top-color:transparent;
   padding:0 0 3px;
+  scrollbar-gutter:stable;
 }
 .transparent-event-row .tool-card-detail > *,
 .transparent-event-row .thinking-card-body > *{min-height:0;}
@@ -4268,11 +4265,6 @@ body.resizing .sidebar{transition:none!important;}
   .transparent-event-row .thinking-card-header{min-height:30px;padding:5px 8px;}
   .transparent-detail-mode{padding:4px 6px 5px;}
 }
-@keyframes transparent-event-enter{
-  from{opacity:0;transform:translateY(2px);}
-  to{opacity:1;transform:translateY(0);}
-}
-
 /* ── Old-event fading (transparent mode: medium → low) ─────────────── */
 /* ── Old-event fading (transparent mode, LIVE turn only — gated in JS) ───── */
 .transparent-event-row[data-transparent-fade="1"]{opacity:.86;}
@@ -5712,6 +5704,38 @@ main.main > #mainPlugin{display:none;}
 
 /* ── Unified indent rail — every child of a turn lines up on --msg-rail ── */
 .msg-row { padding: 12px 0; }
+
+/* On touch devices (iOS/Android PWA), skip layout/paint for off-screen rows
+   so streaming performance doesn't degrade as the chat grows. WKWebView is
+   especially sensitive: every scrollHeight read forces a full-document re-layout.
+   Scoped to pointer:coarse to preserve find-in-page on desktop.
+
+   contain-intrinsic-size: auto 1px keeps off-screen rows in the accessibility
+   tree (VoiceOver) via content-visibility:auto, while the 1px estimate is small
+   enough to avoid scrollHeight recalculation jumps that kill flick-scroll
+   momentum on iOS. */
+@media (pointer: coarse) {
+  .msg-row { content-visibility: auto; contain-intrinsic-size: auto 1px; contain: layout style; }
+  /* Keep the LIVE streaming turn fully rendered while a response streams. The
+     live turn is always id="liveAssistantTurn" (assigned on every render path:
+     Compact Worklog, Transparent Stream, restored-live, etc.), but ONLY the
+     Transparent Stream path also stamps data-live-assistant-turn="1" — so we
+     target the STABLE #liveAssistantTurn id to cover EVERY mode, plus the
+     data-* attribute/segment forms as belt-and-suspenders. Without the id
+     selector, a normal (non-Transparent-Stream) live turn on touch could be
+     content-visibility:auto-skipped and blank out mid-stream. Keeping it visible
+     also keeps its measured height growing so the new-message scroll cue still
+     appears while a reader is scrolled up during streaming.
+     (A child .assistant-segment carrying the un-suffixed data-live-assistant
+     cannot opt a skipped ancestor subtree back in, so we target the turn row.) */
+  #liveAssistantTurn,
+  .msg-row[data-live-assistant-turn],
+  .msg-row[data-live-assistant],
+  .assistant-segment[data-live-assistant] { content-visibility: visible; }
+  /* NOTE: deliberately NOT setting overflow-anchor:none here — it is inert on iOS
+     WebKit and on Android it re-opens the #4856 / #5338 mobile jump-to-top
+     regression the scroll-anchor work fought hard to close. */
+}
 .msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
 .msg-body code,
 .msg-body pre,

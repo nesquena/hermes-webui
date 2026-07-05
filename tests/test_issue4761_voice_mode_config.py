@@ -1,7 +1,7 @@
-"""Tests for #4761 — configurable voice-mode silence timeout and continuous recognition.
+"""Tests for #4761, configurable voice-mode silence timeout and continuous recognition.
 
-The voice-mode loop currently hardcodes:
-  - SILENCE_MS = 1800 (1.8s pause before auto-send)
+The voice-mode loop used to hardcode:
+  - a startup silence timeout constant (1.8s pause before auto-send)
   - _recognition.continuous = false (mic closes after each utterance)
 
 This module pins the fix: both values are now configurable via localStorage keys
@@ -19,7 +19,7 @@ def _boot_src() -> str:
 
 
 class TestVoiceModeSilenceMsConfig:
-    """SILENCE_MS must read from localStorage with 1800 fallback."""
+    """The silence timeout must read from localStorage with 1800 fallback."""
 
     def test_silence_ms_reads_local_storage_with_fallback(self):
         src = _boot_src()
@@ -29,23 +29,25 @@ class TestVoiceModeSilenceMsConfig:
         assert re.search(
             r"parseInt\s*\(\s*localStorage\.getItem\s*\(\s*'hermes-voice-silence-ms'\s*\)",
             src,
-        ), "SILENCE_MS must read the 'hermes-voice-silence-ms' localStorage key via parseInt."
+        ), "Voice mode must read the 'hermes-voice-silence-ms' localStorage key via parseInt."
         # The 1800 default must remain the fallback for missing/invalid values.
-        assert re.search(r"SILENCE_MS\s*=.*\b1800\b", src), (
-            "SILENCE_MS must keep 1800 as the default fallback so behavior is "
+        assert re.search(r"return\s*\(.*\)\?Math\.max\(200,_silenceMsRaw\):1800", src), (
+            "Voice mode must keep 1800 as the default fallback so behavior is "
             "unchanged when the key is unset or invalid."
         )
-        # A non-positive / mistyped value must not be honored verbatim (no instant
-        # auto-send): the value is guarded by a positivity check and/or a min floor.
+        # A non-positive or mistyped value must not be honored verbatim.
         assert "_silenceMsRaw>0" in src or "Math.max(" in src or "> 0" in src, (
-            "SILENCE_MS must guard against non-positive values (positivity check "
+            "Voice mode must guard against non-positive values (positivity check "
             "or a Math.max floor) so a mistyped tiny/negative value can't make the "
             "recognizer auto-send instantly."
         )
 
-    def test_silence_ms_used_in_timeout(self):
+    def test_silence_ms_read_at_timeout_use_time(self):
         src = _boot_src()
-        assert "SILENCE_MS" in src, "SILENCE_MS must still be referenced in the timeout call."
+        assert "_voiceSilenceMs()" in src, "The silence timeout must be read when scheduling auto-send."
+        assert re.search(r"setTimeout\s*\(\s*\(\)\s*=>\s*\{\s*_voiceModeSend\(\);\s*\}\s*,\s*_voiceSilenceMs\(\)\s*\)", src, re.S), (
+            "Voice mode must call _voiceSilenceMs() inside the setTimeout path so mirrored server settings apply without reload."
+        )
 
 
 class TestVoiceModeContinuousConfig:
@@ -73,11 +75,11 @@ class TestVoiceModeContinuousConfig:
 
 
 class TestBootJsVoiceSectionIntegrity:
-    """Smoke checks — the surrounding voice-mode infrastructure is intact."""
+    """Smoke checks, the surrounding voice-mode infrastructure is intact."""
 
-    def test_voice_mode_declares_silence_ms(self):
+    def test_voice_mode_declares_silence_helper(self):
         src = _boot_src()
-        assert "SILENCE_MS" in src, "SILENCE_MS constant must exist in boot.js"
+        assert "function _voiceSilenceMs()" in src, "The voice silence timeout helper must exist in boot.js"
 
     def test_voice_mode_declares_recognition(self):
         src = _boot_src()

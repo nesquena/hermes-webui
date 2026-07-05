@@ -269,15 +269,23 @@ class TestSendBusyBranchDispatch:
         # The send() function should read window._defaultMessageMode in the busy block
         send_idx = MESSAGES_JS.find("async function send(")
         assert send_idx >= 0
-        # Look in the first ~3000 chars of send() for the busy mode read
-        send_body = MESSAGES_JS[send_idx:send_idx + 3000]
+        # Bound the window to the actual send() body (up to the LIVE_STREAMS decl
+        # that immediately follows it) rather than an arbitrary char count, so
+        # unrelated additions near the top of send() don't push the assertion
+        # target out of a fixed window (#5472 caught this).
+        send_end = MESSAGES_JS.find("const LIVE_STREAMS=", send_idx)
+        assert send_end > send_idx, "could not bound send() body"
+        send_body = MESSAGES_JS[send_idx:send_end]
         assert "_defaultMessageMode" in send_body, (
             "send() must read window._defaultMessageMode in the S.busy branch"
         )
 
     def test_send_calls_cancel_stream_on_interrupt(self):
         send_idx = MESSAGES_JS.find("async function send(")
-        send_body = MESSAGES_JS[send_idx:send_idx + 5000]
+        assert send_idx >= 0
+        send_end = MESSAGES_JS.find("const LIVE_STREAMS=", send_idx)
+        assert send_end > send_idx, "could not bound send() body"
+        send_body = MESSAGES_JS[send_idx:send_end]
         # The interrupt branch must call cancelStream
         assert "cancelStream" in send_body
         # And queue before cancel (otherwise the drain has nothing to pick up)
@@ -302,9 +310,13 @@ class TestSendBusyBranchDispatch:
         assert send_idx >= 0, "send() not found"
         steer_idx = MESSAGES_JS.find("defaultMessageMode==='steer'", send_idx)
         assert steer_idx >= 0, "busy steer branch not found"
-        branch = MESSAGES_JS[steer_idx:steer_idx + 900]
+        branch_end = MESSAGES_JS.find("} else if(defaultMessageMode==='interrupt')", steer_idx)
+        assert branch_end > steer_idx, "busy steer branch end not found"
+        branch = MESSAGES_JS[steer_idx:branch_end]
         assert "const _steerDelivered=await _trySteer" in branch
+        assert "const _steerDraftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in branch
         assert "if(_steerDelivered){S.pendingFiles=[];renderTray();}" in branch
+        assert "_clearComposerDraft(S.session.session_id,text,_steerDraftFiles)" in branch
         assert branch.index("const _steerDelivered=await _trySteer") < branch.index("if(_steerDelivered){S.pendingFiles=[];renderTray();}")
 
 

@@ -793,11 +793,30 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
 
     assert handler.status == 200
     reloaded = Session.load(session.session_id)
-    assert reloaded.context_messages == previous_context + [
+
+    # Stable per-message ids (#context-message-stable-id) are now stamped on
+    # context rows; compare on the semantic fields so the dedup invariant is
+    # still what is under test. Build ``expected`` from fresh literals: the id
+    # stamping mutates the shared result dicts in place, and this test reuses the
+    # same objects for its result and its previous_context.
+    def _no_id(rows):
+        return [{k: v for k, v in m.items() if k != "id"} for m in rows]
+
+    expected = [
+        {"role": "assistant", "content": "cron banner"},
+        {"role": "user", "content": "[Session Arc Summary (d1, node 39)]\n" + "old context\n" * 400},
+        {"role": "assistant", "content": "previous answer"},
         {"role": "user", "content": "simple follow-up"},
         {"role": "assistant", "content": "short answer"},
     ]
-    assert reloaded.context_messages.count(previous_context[0]) == 1
+    assert _no_id(reloaded.context_messages) == expected
+    assert _no_id(reloaded.context_messages).count(expected[0]) == 1
+    # The new turn's rows carry unique stable ids. (This session preloads
+    # id-less legacy rows, which stay id-less until they age out of context;
+    # brand-new sessions get full id coverage since previous_context is empty.)
+    new_ids = [m.get("id") for m in reloaded.context_messages[-2:]]
+    assert all(isinstance(i, int) for i in new_ids)
+    assert len(set(new_ids)) == 2
 
 
 def test_session_context_falls_back_to_display_messages_for_legacy_sessions(tmp_path):

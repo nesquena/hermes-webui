@@ -61,8 +61,8 @@ def test_only_background_refreshes_defer_while_sidebar_is_interacting():
     assert "renderSessionList({deferWhileInteracting:true})" in streaming_poll_block
     assert "renderSessionList({deferWhileInteracting:true})" in gateway_poll_block
     assert "renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render" in gateway_sse_block
-    assert "pfToggle.onclick=()=>{_showAllProfiles=true;renderSessionList();};" in SESSIONS_JS
-    assert "pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionList();};" in SESSIONS_JS
+    assert "pfToggle.onclick=()=>{_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});};" in SESSIONS_JS
+    assert "pfToggle.onclick=()=>{_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});};" in SESSIONS_JS
 
 def test_session_list_pointer_hover_and_scroll_activity_are_tracked():
     interaction_block = _block("function _isSessionListUserInteracting()", "function _schedulePendingSessionListApply")

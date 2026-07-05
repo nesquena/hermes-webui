@@ -679,6 +679,15 @@ function _micToastKeyForRecognitionError(error){
     }
   }
 
+  function _applyRawAudioModePreference(enabled){
+    _rawAudioMode=!!enabled;
+    try{localStorage.setItem('hermes-raw-audio-mode',_rawAudioMode?'true':'false');}catch(_){}
+    const rawAudioCheckbox=document.getElementById('settingsRawAudio');
+    if(rawAudioCheckbox) rawAudioCheckbox.checked=_rawAudioMode;
+    _updateMicTooltip();
+  }
+  window._applyRawAudioModePreference=_applyRawAudioModePreference;
+
   async function _sendRawAudio(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
@@ -921,6 +930,7 @@ function _micToastKeyForRecognitionError(error){
     }
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
+      recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
       recognition.start();
       _setRecording(true);
       return;
@@ -1054,9 +1064,7 @@ function _micToastKeyForRecognitionError(error){
   if(rawAudioCheckbox){
     rawAudioCheckbox.checked = _rawAudioMode;
     rawAudioCheckbox.addEventListener('change', function(){
-      _rawAudioMode = this.checked;
-      localStorage.setItem('hermes-raw-audio-mode', _rawAudioMode ? 'true' : 'false');
-      _updateMicTooltip();
+      _applyRawAudioModePreference(this.checked);
     });
   }
   _updateMicTooltip();
@@ -1214,12 +1222,12 @@ window._hermesTtsSynth=function(id, text, opts){
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
   // Configurable via localStorage keys (set from dev console or a future settings panel).
-  //   hermes-voice-silence-ms   — pause duration before auto-send (ms, default 1800)
-  //   hermes-voice-continuous   — keep mic open across natural pauses ("true"/"false", default false)
-  const _silenceMsRaw=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
-  // Fall back to 1800 for missing/NaN/non-positive values, and floor at 200ms so a
-  // mistyped tiny/negative value can't make the recognizer auto-send instantly.
-  const SILENCE_MS=(Number.isFinite(_silenceMsRaw)&&_silenceMsRaw>0)?Math.max(200,_silenceMsRaw):1800;
+  //   hermes-voice-silence-ms, pause duration before auto-send (ms, default 1800)
+  //   hermes-voice-continuous, keep mic open across natural pauses ("true"/"false", default false)
+  function _voiceSilenceMs(){
+    const _silenceMsRaw=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
+    return (Number.isFinite(_silenceMsRaw)&&_silenceMsRaw>0)?Math.max(200,_silenceMsRaw):1800;
+  }
 
   function _clearBrowserTtsRecovery(){
     if(_browserTtsKeepAlive){
@@ -1304,7 +1312,7 @@ window._hermesTtsSynth=function(id, text, opts){
       if(_finalText){
         _silenceTimer=setTimeout(()=>{
           _voiceModeSend();
-        },SILENCE_MS);
+        },_voiceSilenceMs());
       }
     };
 
@@ -1908,6 +1916,28 @@ $('msg').addEventListener('input',()=>{
     hideCmdDropdown();
   }
 });
+// #5514/#5515: re-pin the transcript on ANY composer height change, not only the
+// ones that route through the input->autoResize path. A multi-line paste
+// (WisprFlow), a draft restore, an attachment tray / selection-chip appearing, a
+// programmatic value set, or a font/reflow can all grow the composer and shrink
+// the flex:1 transcript viewport, stranding a pinned reader above the bottom
+// (reads as a "random" upward jump — #5515). Observe the whole #composerWrap
+// (not just #msg) so tray/chip growth is covered too, at one seam. The re-pin is
+// guarded (only fires when genuinely pinned), so it never fights a reader who
+// scrolled away. First callback fires on observe (initial size) — the guard
+// makes that a cheap no-op.
+(()=>{
+  const _cw=$('composerWrap')||$('msg');
+  if(!_cw || typeof ResizeObserver!=='function' || typeof _repinMessagesAfterComposerResize!=='function') return;
+  let _lastComposerH=_cw.offsetHeight;
+  const _ro=new ResizeObserver(()=>{
+    const h=_cw.offsetHeight;
+    if(h<=_lastComposerH){_lastComposerH=h;return;}   // shrink/no-op: enlarges the viewport, can't strand
+    _lastComposerH=h;
+    _repinMessagesAfterComposerResize();               // grow: re-pin the pinned reader
+  });
+  try{ _ro.observe(_cw); }catch(_){ }
+})();
 // Track IME composition for East Asian input. Safari fires the committing
 // keydown AFTER compositionend with isComposing=false, so we also keep a
 // manual flag and reset it on the next tick to swallow that trailing Enter.
@@ -2738,6 +2768,77 @@ function _applyTitlebarProfileVisibility(){
 }
 window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
 
+function _mirrorSpeechSettingsFromServer(s){
+  if(!s||typeof s!=='object') return;
+  const persistedSpeechKeys = new Set(
+    Array.isArray(s.persisted_speech_keys) ? s.persisted_speech_keys : []
+  );
+  const hasServerValue=(settingKey)=>persistedSpeechKeys.has(settingKey);
+  const defaults={
+    tts_enabled:false,
+    tts_auto_read:false,
+    tts_engine:'browser',
+    tts_voice:'',
+    tts_rate:1,
+    tts_pitch:1,
+    voice_mode_button:false,
+    voice_continuous:false,
+    voice_silence_ms:1800,
+    raw_audio_mode:false,
+  };
+  const cachedValue=(storageKey)=>{
+    try{return localStorage.getItem(storageKey);}catch(_){return null;}
+  };
+  const boolValue=(value)=>value===true||value==='true';
+  const resolveBool=(settingKey,storageKey)=>{
+    const server=hasServerValue(settingKey)?s[settingKey]:defaults[settingKey];
+    const cached=cachedValue(storageKey);
+    if(!hasServerValue(settingKey)&&cached!==null){
+      return boolValue(cached);
+    }
+    return boolValue(server);
+  };
+  const resolveScalar=(settingKey,storageKey)=>{
+    const server=hasServerValue(settingKey)?s[settingKey]:defaults[settingKey];
+    const cached=cachedValue(storageKey);
+    if(!hasServerValue(settingKey)&&cached!==null){
+      return cached;
+    }
+    return server;
+  };
+  const boolKeys=[
+    ['tts_enabled','hermes-tts-enabled'],
+    ['tts_auto_read','hermes-tts-auto-read'],
+    ['voice_mode_button','hermes-voice-mode-button'],
+    ['voice_continuous','hermes-voice-continuous'],
+  ];
+  boolKeys.forEach(([settingKey,storageKey])=>{
+    if(hasServerValue(settingKey)){
+      try{localStorage.setItem(storageKey,resolveBool(settingKey,storageKey)?'true':'false');}catch(_){}
+    }
+  });
+  [
+    ['tts_engine','hermes-tts-engine'],
+    ['tts_voice','hermes-tts-voice'],
+    ['tts_rate','hermes-tts-rate'],
+    ['tts_pitch','hermes-tts-pitch'],
+    ['voice_silence_ms','hermes-voice-silence-ms'],
+  ].forEach(([settingKey,storageKey])=>{
+    if(hasServerValue(settingKey)){
+      try{localStorage.setItem(storageKey,String(resolveScalar(settingKey,storageKey)));}catch(_){}
+    }
+  });
+  if(hasServerValue('raw_audio_mode')){
+    const rawAudioMode=resolveBool('raw_audio_mode','hermes-raw-audio-mode');
+    if(typeof window._applyRawAudioModePreference==='function'){
+      window._applyRawAudioModePreference(rawAudioMode);
+    }else{
+      try{localStorage.setItem('hermes-raw-audio-mode',rawAudioMode?'true':'false');}catch(_){}
+    }
+  }
+}
+window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -2745,6 +2846,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
+    if(typeof checkWebUIVersionSkew==='function'){try{checkWebUIVersionSkew(s);}catch(_){}}
     window._sendKey=s.send_key||'enter';
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
@@ -2887,7 +2989,9 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    _mirrorSpeechSettingsFromServer(s);
     _applyComposerFooterVisibilitySettings();
+    if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
@@ -2982,6 +3086,10 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       return true;
     };
     const redirectToLogin=(nextUrl)=>{
+      // #5578: never nest the login URL into its own next= — if already on a
+      // login-shaped page, reload 'login' bare (the page keeps its inner next).
+      const _p=(window.location.pathname||'').replace(/\/+$/,'');
+      if(/(?:^|\/)login$/.test(_p)){window.location.href='login';return;}
       window.location.href='login?next='+encodeURIComponent(nextUrl);
     };
     return {

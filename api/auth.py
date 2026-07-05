@@ -685,6 +685,46 @@ def parse_cookie(handler) -> str | None:
     return morsel.value if morsel else None
 
 
+def _safe_login_inner_next(query: str | None) -> str:
+    """#5578: extract a SAFE, non-login inner redirect from a login page's query.
+
+    When an expired-auth bounce lands back on the login page (which already
+    carries its own `next` in the query), we want to preserve a legitimate inner
+    destination X across the redirect to the real login route — but only if X is
+    itself safe (path-absolute, not protocol-relative/backslash, no control
+    chars) AND not login-shaped / not itself carrying a nested next param.
+    Anything else collapses to '' (no inner redirect), which kills the
+    self-referential chain. Mirrors _safe_login_redirect_path().
+    """
+    import urllib.parse as _u
+    raw = _u.parse_qs(query or "").get("next", [""])[0]
+    path = str(raw or "").strip()
+    if not path or path[0] != "/" or path[1:2] in {"/", "\\"}:
+        return ""
+    if re.search(r"[\x00-\x1f\x7f\s]", path) or len(path) > 2048:
+        return ""
+    # Collapse only login-route chains — decode a few levels so a nested
+    # `/session/login%3Fnext%3D...` (encoded `?`) is still recognized by its
+    # leading PATH — but preserve a legitimate non-login inner path that merely
+    # carries its own `next=` query key (e.g. `/admin?next=/real/path`).
+    _probe = path
+    for _ in range(8):
+        _p = _probe.split("?", 1)[0].split("#", 1)[0].split("&", 1)[0].rstrip("/")
+        if _p == "/login" or _p.endswith("/login"):
+            return ""
+        _decoded = _u.unquote(_probe)
+        if _decoded == _probe:
+            break
+        _probe = _decoded
+    else:
+        # Still decoding at the cap (pathologically deep encoding) → fail closed.
+        _p = _probe.split("?", 1)[0].split("#", 1)[0].split("&", 1)[0].rstrip("/")
+        if _p == "/login" or _p.endswith("/login"):
+            return ""
+        return ""
+    return path
+
+
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
@@ -727,6 +767,35 @@ def check_auth(handler, parsed) -> bool:
         # the full original URL (the browser auto-decodes once).
         # (Opus pre-release advisor finding for v0.50.258.)
         import urllib.parse as _urlparse
+        # #5578: if the page being redirected is ALREADY login-shaped, do NOT
+        # wrap its full `path?query` into a fresh `next=` — that query already
+        # carries a `next=`, so quoting the whole thing nests the login URL into
+        # itself and re-encodes it on every expired-auth bounce, exploding the
+        # URL until the tab breaks. This guard runs in check_auth() (BEFORE
+        # route handling), the actual source of the server-side loop.
+        #
+        # The login page is served ONLY at the public `/login` route (see
+        # PUBLIC_PATHS + the routes.py `/login` handler); the app's client route
+        # `/session/login` is NOT public, so a bare relative `login` from
+        # `/session/login` resolves to `/session/login` again and re-triggers
+        # check_auth() — an infinite redirect. Resolve to the real login route
+        # with `../login`, which lands on `/login` from a `/session/*` scope and
+        # on `<mount>/login` under a subpath mount (verified via urljoin). Carry
+        # through only a validated, non-login inner `next` so a legitimate
+        # post-login destination still survives a bounce that happened to land
+        # on the login page.
+        _login_path = (parsed.path or '/').rstrip('/')
+        if _login_path == '/login' or _login_path.endswith('/login'):
+            # /login itself is public → check_auth never redirects it; this only
+            # fires for the non-public client login route (e.g. /session/login).
+            _target = '../login' if '/' in _login_path.lstrip('/') else 'login'
+            _inner = _safe_login_inner_next(parsed.query)
+            if _inner:
+                _target += '?next=' + _urlparse.quote(_inner, safe='/')
+            handler.send_header('Location', _target)
+            handler.send_header('Content-Length', '0')
+            handler.end_headers()
+            return False
         _path_with_query = parsed.path or '/'
         if parsed.query:
             _path_with_query += '?' + parsed.query

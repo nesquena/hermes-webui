@@ -1,7 +1,45 @@
 """Tests for issue #4536 — main-model service_tier persistence and guarded forwarding."""
 
+import pytest
+
 
 class TestIssue4536ServiceTier:
+    @pytest.fixture(autouse=True)
+    def _isolate_config_globals(self):
+        """Make these tests hermetic against leaked module-global config caches.
+
+        Two shared caches in api.config can serve a PRIOR test's config into this
+        one, causing a full-suite-only flake (passes in isolation):
+
+        1. `_yaml_file_cache` — memoized YAML parse keyed on
+           (str(config_path), st_mtime_ns, st_size). pytest reuses tmp_path base
+           dirs across the session, so a prior test's config.yaml can share both
+           the path string AND the (mtime_ns, size) of this test's tiny file
+           (same coarse mtime tick) → set_hermes_default_model() reads the STALE
+           cached dict (e.g. an lmstudio config) and writes THAT back, so the
+           on-disk assertion sees the wrong provider. This is the actual root
+           cause of the #4536 service_tier flake.
+        2. `cfg` / `_cfg_fingerprint` — if a prior test rebound `config.cfg`,
+           get_auxiliary_models() reads the stale dict after reload_config().
+
+        Clear both before AND after each test so neither an inherited leak nor
+        our own run can poison a neighbor.
+        """
+        from api import config
+
+        def _reset():
+            with config._cfg_lock:
+                config._cfg_cache.clear()
+                config.cfg = config._cfg_cache
+                config._cfg_fingerprint = None
+                config._cfg_mtime = 0.0
+            with config._yaml_file_cache_lock:
+                config._yaml_file_cache.clear()
+
+        _reset()
+        yield
+        _reset()
+
     def test_main_service_tier_roundtrip_via_auxiliary_endpoint(self, monkeypatch, tmp_path):
         """service_tier set on main model should persist in config and return via /api/model/auxiliary payload."""
         from api import config

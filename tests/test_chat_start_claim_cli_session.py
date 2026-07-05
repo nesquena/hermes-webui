@@ -374,6 +374,30 @@ def test_helper_returns_was_webui_for_deleted_webui_session(
     assert reason == "was_webui"
 
 
+def test_helper_returns_was_webui_for_durable_deleted_tombstone_without_index(
+    routes_module, isolated_state_db
+):
+    """A full WebUI delete tombstone must keep the 404 self-heal contract even
+    after /api/session/delete prunes _index.json before state.db cleanup fails.
+    """
+    import api.models as _models
+
+    sid = "webui-deleted-db-survives"
+    _make_state_db(
+        isolated_state_db["db"],
+        sid,
+        message_count=2,
+        title="Deleted WebUI",
+        source="webui",
+    )
+    _models._record_webui_deleted_session_tombstone(sid)
+
+    sess, reason = routes_module._claim_or_synthesize_cli_session(sid)
+
+    assert sess is None
+    assert reason == "was_webui"
+
+
 def test_helper_keeps_cli_orphan_with_blank_source(
     routes_module, tmp_path, monkeypatch, isolated_state_db
 ):

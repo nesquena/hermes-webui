@@ -121,6 +121,34 @@ def test_profile_model_selection_accepts_provider_qualified_picker_value():
     )
 
 
+def test_profile_model_selection_accepts_model_in_overflow_extra_models():
+    """A default model living in a provider's picker-overflow ``extra_models``
+    bucket (providers past the 15-entry visible cap, issue #3691) must validate
+    — it renders in the dropdown, so it must not fail with a false 400 (#5453)."""
+    catalog = {
+        "groups": [
+            {
+                "provider": "OpenAI Codex",
+                "provider_id": "openai-codex",
+                "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                "extra_models": [
+                    {"id": "gpt-5.5-overflow", "label": "GPT-5.5 Overflow"}
+                ],
+            }
+        ]
+    }
+
+    # Selected default lives only in the overflow bucket — must still validate.
+    profiles._validate_profile_model_selection(
+        "gpt-5.5-overflow",
+        "openai-codex",
+        available_models=catalog,
+    )
+    assert profiles._profile_model_selection_exists(
+        catalog, "gpt-5.5-overflow", "openai-codex"
+    )
+
+
 def test_profile_model_selection_rejects_unknown_model_provider_pair():
     catalog = {
         "groups": [

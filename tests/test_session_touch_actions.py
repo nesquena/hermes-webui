@@ -79,10 +79,10 @@ def test_open_session_menu_consumes_next_row_activation():
     assert "if(_longPressMenuOpened){_gestureState='idle';return true;}" in SESSIONS_JS
     finish_idx = SESSIONS_JS.find("const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{")
     dismiss_idx = SESSIONS_JS.find("if(_sessionActionMenu&&!_sessionActionMenu.contains(target)){", finish_idx)
-    load_idx = SESSIONS_JS.find("await loadSession(s.session_id)", finish_idx)
+    open_idx = SESSIONS_JS.find("await _openSidebarSession(s)", finish_idx)
     pointerup_idx = SESSIONS_JS.find("el.onpointerup=(e)=>{")
-    assert finish_idx > 0 and load_idx > finish_idx
-    assert dismiss_idx > finish_idx and dismiss_idx < load_idx
+    assert finish_idx > 0 and open_idx > finish_idx
+    assert dismiss_idx > finish_idx and dismiss_idx < open_idx
     assert "if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();" in SESSIONS_JS[pointerup_idx:]
 
 
@@ -283,3 +283,33 @@ def test_touch_session_rows_preserve_vertical_scroll():
     assert "user-select:none" in item_rule
     assert "-webkit-user-select:none" in item_rule
     assert "-webkit-touch-callout:none" in item_rule
+
+
+def test_session_gesture_finish_ignores_idle_state():
+    """Test that _finishSessionGesture bails early when _gestureState is 'idle'.
+    
+    This prevents unintended session switches when a drag starts outside the
+    session row and ends on top of it. The gesture must have begun with a
+    pointerdown on the row itself (_gestureState='pressing'), otherwise the
+    pointerup should be ignored.
+    
+    See: https://github.com/nesquena/hermes-webui/issues/5462
+    """
+    # Find the _finishSessionGesture function
+    fn_start = SESSIONS_JS.find("const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{")
+    assert fn_start != -1, "_finishSessionGesture function not found"
+    
+    # Extract the first ~200 characters of the function body
+    fn_body_start = SESSIONS_JS[fn_start:fn_start+200]
+    
+    # Verify the idle-state guard is present at the beginning
+    assert "if(_gestureState==='idle') return false;" in fn_body_start, \
+        "Missing idle-state guard at the beginning of _finishSessionGesture"
+    
+    # Also verify that the fork row handler has the same guard (consistency check)
+    # Fork handler pattern: rowEl.onpointerup followed by pointerType/button check, then idle guard
+    fork_handler_start = SESSIONS_JS.find("rowEl.onpointerup=(e)=>{")
+    assert fork_handler_start != -1, "Fork row pointerup handler not found"
+    fork_handler_snippet = SESSIONS_JS[fork_handler_start:fork_handler_start+200]
+    assert "if(_gestureState==='idle') return;" in fork_handler_snippet, \
+        "Fork row pointerup handler should have idle guard"

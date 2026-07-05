@@ -13,8 +13,8 @@ though the backend was frequently still producing tokens (or the replay file was
 a beat away from becoming visible). The settled response then reappeared later,
 producing the disappear-then-restore flicker.
 
-Fix: replace the single 1.5s probe with a short staged retry window
-(`_retryDelays=[1500,3000,5000,8000]` ms). Each stage re-queries the stream
+Fix: replace the single 1.5s probe with a staged retry window
+(`_retryDelays=[1500,3000,5000,8000,12000,20000]` ms). Each stage re-queries the stream
 status and reconnects/replays if the backend is reachable; the live DOM and
 `S.activeStreamId`/INFLIGHT state are kept INTACT across the whole window, and
 `_handleStreamError` is only reached after every stage has failed. This file
@@ -58,8 +58,8 @@ def _reconnect_block(compact: str) -> str:
 
 
 def test_staged_retry_delays_present():
-    # Four escalating backoff stages replace the old single 1500ms probe.
-    assert "_retryDelays=[1500,3000,5000,8000]" in _compact(MESSAGES_JS)
+    # Six escalating backoff stages replace the old single 1500ms probe.
+    assert "_retryDelays=[1500,3000,5000,8000,12000,20000]" in _compact(MESSAGES_JS)
 
 
 def test_probe_reconnect_helper_defined():
@@ -84,7 +84,7 @@ def test_stage_counter_starts_at_one():
     compact = _compact(MESSAGES_JS)
     assert "setComposerStatus(`Reconnecting…(1/${_retryDelays.length})`);" in compact
     # And the declaration precedes that first status call.
-    decl = compact.find("const_retryDelays=[1500,3000,5000,8000];")
+    decl = compact.find("const_retryDelays=[1500,3000,5000,8000,12000,20000];")
     first_status = compact.find("setComposerStatus(`Reconnecting…(1/${_retryDelays.length})`)")
     assert decl != -1 and first_status != -1
     assert decl < first_status

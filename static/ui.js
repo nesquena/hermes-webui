@@ -201,7 +201,8 @@ else initOfflineMonitor();
 // Redirect to login when the server responds with 401 (auth session expired).
 // Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
 // escaping to the personal site root /login.
-function _redirectIfUnauth(res){if(res&&res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return true;}return false;}
+// #5578: on a login-shaped page, reload 'login' WITHOUT a next (avoid self-nesting).
+function _redirectIfUnauth(res){if(res&&res.status===401){var _p=(window.location.pathname||'').replace(/\/+$/,'');if(/(?:^|\/)login$/.test(_p)){window.location.href='login';}else{window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);}return true;}return false;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
@@ -759,11 +760,35 @@ function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx){
   }
   return -1;
 }
+function _safeEncodeURIComponent(v){
+  try{return encodeURIComponent(String(v));}
+  catch(e){
+    // encodeURIComponent threw URIError -> one or more lone UTF-16 surrogates.
+    // Walk the string as UTF-16 code units: keep valid high(D800-DBFF) +
+    // low(DC00-DFFF) pairs intact (so emoji survive) and drop lone surrogates.
+    // No regex lookbehind/lookahead so this parses on every browser engine
+    // (some older WebViews / Safari <16.4 don't support lookbehind in regex
+    // literals, which would otherwise brick ui.js at parse time).
+    const s=String(v);
+    let cleaned='';
+    for(let i=0;i<s.length;i++){
+      const c=s.charCodeAt(i);
+      if(c>=0xD800&&c<=0xDBFF){
+        const n=(i+1<s.length)?s.charCodeAt(i+1):0;
+        if(n>=0xDC00&&n<=0xDFFF){cleaned+=s[i]+s[i+1];i++;}
+      }else if(c<0xDC00||c>0xDFFF){
+        cleaned+=s[i];
+      }
+    }
+    return encodeURIComponent(cleaned);
+  }
+}
+
 function _messageViewportAnchorKeyForMessage(m){
   if(typeof _compressionMessageAnchorKey!=='function') return '';
   const key=_compressionMessageAnchorKey(m);
   if(!key) return '';
-  return [key.role||'',key.ts??'',key.attachments??0,key.text||''].map(v=>encodeURIComponent(String(v))).join('|');
+  return [key.role||'',key.ts??'',key.attachments??0,key.text||''].map(v=>_safeEncodeURIComponent(v)).join('|');
 }
 function _messageVisibleIndexForAnchorKey(anchorKey, visWithIdx){
   const key=String(anchorKey||'');
@@ -868,13 +893,27 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const container=$('messages');
   if(!container||!anchor) return false;
   const anchorKey=String(anchor.key||'');
-  let row=anchorKey?Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(el=>el&&el.dataset&&el.dataset.messageAnchorKey===anchorKey):null;
-  if(row&&row.getClientRects&&row.getClientRects().length===0) row=null;
-  if(!row&&anchorKey) return false;
   const sessionIdx=Number(anchor.sessionIdx);
   const hasSessionIdx=Number.isFinite(sessionIdx);
+  let row=anchorKey?Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(el=>el&&el.dataset&&el.dataset.messageAnchorKey===anchorKey):null;
+  if(row&&row.getClientRects&&row.getClientRects().length===0) row=null;
+  // The anchor key is content-derived (role|ts|attachments|first-160-chars, built by
+  // _messageViewportAnchorKeyForMessage) so it goes STALE while a live assistant
+  // message is still streaming: every chunk that changes the first 160 chars
+  // recomputes that row's data-message-anchor-key, so a snapshot captured mid-stream
+  // no longer matches by key. We used to concede the moment the keyed lookup missed
+  // (`if(!row&&anchorKey) return false`), and the caller then fell back to an ABSOLUTE
+  // scrollTop=snapshot.top that does NOT compensate the above-viewport height growth
+  // from that same streaming chunk — the residual DESKTOP scroll jump-back. (Desktop
+  // rests at overflow-anchor:none, so #5392's mobile overflow-anchor guard is a no-op
+  // here; this is a distinct code path.) The anchored row is still in the DOM under
+  // its STABLE session-relative index, so recover it via sessionIdx before conceding.
+  // A genuinely removed anchor (message compressed/deleted away) misses key AND
+  // sessionIdx and still returns false. A missing sessionIdx is NOT degraded to the
+  // window-relative rawIdx (which could resolve to a different message), preserving
+  // the original per-tier guard.
   if(!row&&hasSessionIdx) row=container.querySelector(`[data-session-msg-idx="${sessionIdx}"]`);
-  if(!row&&hasSessionIdx) return false;
+  if(!row&&(anchorKey||hasSessionIdx)) return false;
   const targetIdx=Number(anchor.rawIdx)+Number(rawIdxDelta||0);
   if(!row&&Number.isFinite(targetIdx)) row=container.querySelector(`[data-msg-idx="${targetIdx}"]`);
   if(!row) return false;
@@ -1407,7 +1446,7 @@ function _mermaidViewerIcon(kind) {
     zoomOut: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"></circle><path d="M7 10h6"></path><path d="M15 15l4 4"></path></svg>',
     reset: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9V4H1"></path><path d="M1 4l4 4"></path><path d="M10 4a8 8 0 1 1-5.66 13.66"></path></svg>',
     fit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"></path></svg>',
-    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"></path></svg>',
+    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"></path><path d="M4 4l5 5M20 4l-5 5M4 20l5-5M20 20l-5-5"></path></svg>',
   };
   return icons[kind] || '';
 }
@@ -1504,9 +1543,19 @@ function _mountMermaidViewer(svgEl, options = {}) {
   };
   root._mermaidViewer = state;
 
+  function _lightboxViewportEnvelope() {
+    const width = Math.round((window.innerWidth || box.width) * 0.9);
+    const height = Math.round((window.innerHeight || box.height) * 0.9);
+    return {
+      width: Math.max(1, Number.isFinite(width) ? width : 1),
+      height: Math.max(1, Number.isFinite(height) ? height : 1),
+    };
+  }
+
   function _viewportFallbackSize(){
-    const width = mode === 'lightbox' ? Math.round((window.innerWidth || box.width) * 0.9) : Math.round(window.innerWidth || box.width);
-    const height = mode === 'lightbox' ? Math.round((window.innerHeight || box.height) * 0.9) : Math.round((window.innerHeight || box.height) * 0.7);
+    if(mode === 'lightbox') return _lightboxViewportEnvelope();
+    const width = Math.round(window.innerWidth || box.width);
+    const height = Math.round((window.innerHeight || box.height) * 0.7);
     return {
       width: Math.max(1, Number.isFinite(width) ? width : 1),
       height: Math.max(1, Number.isFinite(height) ? height : 1),
@@ -1516,8 +1565,12 @@ function _mountMermaidViewer(svgEl, options = {}) {
   function _viewportSize(){
     const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
     const fallback = _viewportFallbackSize();
-    const width = viewport.clientWidth || (rect && rect.width) || fallback.width;
-    const height = viewport.clientHeight || (rect && rect.height) || fallback.height;
+    const width = mode === 'lightbox'
+      ? fallback.width
+      : (viewport.clientWidth || (rect && rect.width) || fallback.width);
+    const height = mode === 'lightbox'
+      ? fallback.height
+      : (viewport.clientHeight || (rect && rect.height) || fallback.height);
     return {
       width: Math.max(1, Number(width) || box.width || 1),
       height: Math.max(1, Number(height) || box.height || 1),
@@ -1529,10 +1582,10 @@ function _mountMermaidViewer(svgEl, options = {}) {
   }
 
   function _minScale(){
-    // Lightbox keeps master's flat minimum (unchanged zoom-out floor / fit
-    // bounds). Only inline mode uses the readable-height-derived minimum so a
-    // short inline viewport can't shrink the diagram below usability (#5434).
-    if(mode === 'lightbox') return _MERMAID_VIEWER_MIN_SCALE;
+    // Inline stays bounded by readable-height minimum to preserve usability.
+    // Lightbox allows fit-to-screen to shrink below the old 0.25 floor when
+    // the diagram envelope is narrower than 25%.
+    if(mode === 'lightbox') return Math.min(_MERMAID_VIEWER_MIN_SCALE, _rawFitScale(_viewportSize()));
     return Math.min(_MERMAID_VIEWER_MIN_SCALE, _inlineViewportHeight() / Math.max(1, box.height));
   }
 
@@ -1578,8 +1631,28 @@ function _mountMermaidViewer(svgEl, options = {}) {
 
   function _fitViewer(){
     const nextScale = _fitScale();
+    state.fitScale = nextScale;
     state.scale = nextScale;
     _centerForScale(nextScale);
+    _applyTransform();
+  }
+
+  function _resizeToEnvelope(){
+    if(mode !== 'lightbox') return;
+    const hadFitScale = Number.isFinite(state.fitScale);
+    const previousFitScale = hadFitScale ? state.fitScale : _fitScale();
+    const wasAtFit = !hadFitScale || Math.abs(state.scale - previousFitScale) < 1e-9;
+    const envelope = _lightboxViewportEnvelope();
+    viewport.style.width = Math.max(1, Math.round(envelope.width)) + 'px';
+    viewport.style.height = Math.max(1, Math.round(envelope.height)) + 'px';
+    const nextFitScale = _fitScale();
+    state.fitScale = nextFitScale;
+    if(wasAtFit){
+      state.scale = nextFitScale;
+      _centerForScale(state.scale);
+    } else {
+      state.scale = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, state.scale));
+    }
     _applyTransform();
   }
 
@@ -1669,6 +1742,7 @@ function _mountMermaidViewer(svgEl, options = {}) {
   state.zoomOut = _zoomOut;
   state.zoomAt = _setScale;
   state.applyTransform = _applyTransform;
+  state.resizeToEnvelope = _resizeToEnvelope;
   state.openLightbox = openLightbox;
 
   toolbar.appendChild(_createMermaidViewerButton('Zoom in', 'zoomIn', _zoomIn));
@@ -1680,22 +1754,16 @@ function _mountMermaidViewer(svgEl, options = {}) {
   }
 
   if(mode === 'lightbox'){
-    // Preserve master's lightbox initialization exactly: fit-to-screen scale
-    // and a viewport envelope sized to the fitted diagram. The inline readable-
-    // height sizing below must NOT leak into lightbox mode (#5434 gate finding).
-    const initialFit = _fitScale();
-    state.scale = initialFit;
-    viewport.style.width = Math.max(1, Math.round(box.width * initialFit)) + 'px';
-    viewport.style.height = Math.max(1, Math.round(box.height * initialFit)) + 'px';
+    state.resizeToEnvelope();
   } else {
     const initialHeight = _inlineViewportHeight();
     const readableScale = initialHeight / Math.max(1, box.height);
     state.scale = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, readableScale));
     viewport.style.width = '100%';
     viewport.style.height = Math.max(1, Math.round(initialHeight)) + 'px';
+    _centerForScale(state.scale);
+    _applyTransform();
   }
-  _centerForScale(state.scale);
-  _applyTransform();
 
   return root;
 }
@@ -1744,6 +1812,18 @@ function _openMermaidLightbox(svgEl) {
   clone.removeAttribute('width');
   clone.removeAttribute('height');
   const viewer = _mountMermaidViewer(clone, {mode:'lightbox'});
+  if(viewer && viewer._mermaidViewer && typeof viewer._mermaidViewer.resizeToEnvelope === 'function'){
+    lb._mermaidResizeHandler = () => {
+      if(lb._mermaidResizeTimer && typeof clearTimeout === 'function') clearTimeout(lb._mermaidResizeTimer);
+      lb._mermaidResizeTimer = setTimeout(() => {
+        lb._mermaidResizeTimer = null;
+        viewer._mermaidViewer.resizeToEnvelope();
+      }, 120);
+    };
+    if(window && typeof window.addEventListener === 'function'){
+      window.addEventListener('resize', lb._mermaidResizeHandler);
+    }
+  }
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
   cls.setAttribute('aria-label', 'Close');
@@ -1757,6 +1837,7 @@ function _openMermaidLightbox(svgEl) {
   };
   document.body.appendChild(lb);
   document.addEventListener('keydown', lb._keyHandler);
+  return lb;
 }
 function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
@@ -1827,6 +1908,13 @@ function _navigateLightbox(lb, direction) {
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
   document.removeEventListener('keydown', lb._keyHandler);
+  if(lb._mermaidResizeHandler && window && typeof window.removeEventListener === 'function'){
+    window.removeEventListener('resize', lb._mermaidResizeHandler);
+  }
+  if(lb._mermaidResizeTimer && typeof clearTimeout === 'function'){
+    clearTimeout(lb._mermaidResizeTimer);
+    lb._mermaidResizeTimer = null;
+  }
   lb.style.animation = 'lb-in .12s ease reverse';
   setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
 }
@@ -4795,6 +4883,10 @@ if(typeof window!=='undefined'){
       }else if(movedDown&&nearBottom){
         _nearBottomCount=_nearBottomCount+1;
         if(_nearBottomCount>=2){
+          // Only re-pin when the reader has genuinely reached the true bottom
+          // tail (<=80px). nearBottom spans a ~250px band, so proximity alone
+          // must NOT clear the sticky unpin flag (#4295) — a reader scanning the
+          // last lines mid-stream would otherwise get yanked back to the bottom.
           if(!_messageUserUnpinned||bottomDistance<=80){
             _messageUserUnpinned=false;
             _scrollPinned=true;
@@ -5317,6 +5409,26 @@ function _messageBottomDistance(){
   if(!el) return 0;
   return el.scrollHeight-el.scrollTop-el.clientHeight;
 }
+// #5514/#5515: when the composer grows (typing multiple rows, Shift+Enter, a
+// multi-line paste / WisprFlow), the flex:1 `.messages` viewport shrinks by the
+// same delta. A reader pinned to the bottom is then stranded Δpx above it — the
+// transcript appears to "scroll up" one row per composer row, and (the #5515
+// half) it reads as a random upward jump during normal use. autoResize() only
+// resized the textarea; nothing re-pinned the transcript. Re-pin the bottom, but
+// ONLY when the reader is genuinely still pinned (sticky-unpin model: honor
+// _messageUserUnpinned so we never yank a reader who scrolled away, and never
+// fight a stream that already unpinned). Cheap no-op when not pinned.
+function _repinMessagesAfterComposerResize(){
+  if(_messageUserUnpinned || !_scrollPinned) return;
+  const el=$('messages');
+  if(!el) return;
+  // Already at/very near the bottom? nothing to do (avoids needless writes while
+  // idle-reading a short conversation that isn't scrollable).
+  if(_messageBottomDistance()<=1) return;
+  if(typeof _setMessageScrollToBottom==='function') _setMessageScrollToBottom();
+  else { el.scrollTop=el.scrollHeight; }
+}
+if(typeof window!=='undefined') window._repinMessagesAfterComposerResize=_repinMessagesAfterComposerResize;
 function _shouldFollowMessagesOnDomReplace(){
   // Final stream settlement replaces the live DOM with persisted messages. Keep
   // following only for users who are still pinned or effectively at the tail.
@@ -5433,7 +5545,24 @@ function _settleFinalScroll(token){
 }
 function scrollIfPinned(){
   if(!_autoScrollFollow) return;
-  if(_messageUserUnpinned) return;
+  if(_messageUserUnpinned){
+    // Only scrollToBottom() cleared this flag, so one scroll-up permanently
+    // killed auto-follow. Re-pin ONLY when the reader has genuinely returned to
+    // the true bottom tail (<=80px), NOT on mere near-bottom proximity — the
+    // #4295 invariant is that proximity alone (inside the ~250px band) must not
+    // re-pin, or a reader scanning the last few lines gets yanked to the bottom
+    // mid-stream. Also bail on ANY recent message-pane scroll intent (wheel,
+    // key, touch) and non-message intent, so an active scroll-up near the tail
+    // is never overridden. Uses the same _nearBottomCount debounce as the
+    // scroll listener (~4859-4866).
+    if(_recentNonMessageScrollIntent()||_recentMessageScrollIntent()||_recentMessageTouchScrollIntent()||_recentMessageWheelIntent()||_recentMessageKeyScrollIntent()){ _nearBottomCount=0; return; }
+    if(_messageBottomDistance()>80){ _nearBottomCount=0; return; }
+    _nearBottomCount=_nearBottomCount+1;
+    if(_nearBottomCount<2) return;
+    _nearBottomCount=0;
+    _messageUserUnpinned=false;
+    _scrollPinned=true;
+  }
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
   if(_messageBottomDistance()>500) _setMessageScrollToBottom();
@@ -10531,11 +10660,26 @@ function _anchorSceneNodeForRow(row, opts){
   if(row.role==='prose'){
     const text=String(row.text||'').trim();
     if(!text) return null;
-    node=document.createElement('div');
-    node.className='assistant-segment';
-    node.setAttribute('data-anchor-scene-prose','1');
-    node.dataset.rawText=text;
-    node.innerHTML=`<div class="msg-body">${renderMd?renderMd(text):esc(text)}</div>`;
+    // Incremental live rendering: reuse a persistent smd node fed only the delta
+    // instead of re-parsing the whole growing answer on every streamed frame
+    // (O(n^2) -> O(n)). Settled rows and any failure fall through to the full
+    // renderMd path below, which stays the source of truth for the final DOM.
+    const proseKey=row.local_id||row.row_id||'';
+    if(!settled && proseKey && typeof window.__anchorProseIncrementalNode==='function'){
+      const inc=window.__anchorProseIncrementalNode(proseKey,text);
+      // Route the incremental node through the shared row-decoration block below
+      // (data-anchor-scene-row / -row-id / -row-role / -source-event-type) instead
+      // of returning early — otherwise live incremental prose rows lose the
+      // identity attributes the scene reconciler matches on. (Codex gate #5466)
+      if(inc){ node=inc; }
+    }
+    if(!node){
+      node=document.createElement('div');
+      node.className='assistant-segment';
+      node.setAttribute('data-anchor-scene-prose','1');
+      node.dataset.rawText=text;
+      node.innerHTML=`<div class="msg-body">${renderMd?renderMd(text):esc(text)}</div>`;
+    }
   }else if(row.role==='thinking'){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
@@ -10623,7 +10767,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     node=_decorateTransparentEventRow(buildToolCard(toolCall),{
       type:'tool',
       name:toolCall&&toolCall.name,
-      status:_transparentToolStatus(toolCall,true),
+      status:_transparentToolStatus(toolCall,settled),
       toolCall,
       ...meta,
     });
@@ -10945,6 +11089,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   });
   const liveFooter=blocks.querySelector('#liveRunStatus');
   let wrote=false;
+  const targetRenderedRows=[];
   for(const row of rows){
     const node=_anchorSceneTransparentNodeForRow(row,{
       live:true,
@@ -10960,9 +11105,24 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
-    if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(renderedNode,liveFooter);
-    else blocks.appendChild(renderedNode);
+    targetRenderedRows.push(renderedNode);
     wrote=true;
+  }
+  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>!!(
+    node &&
+    node.parentElement===blocks &&
+    node.nextSibling===expectedNextSibling
+  );
+  let expectedNextSibling=(liveFooter&&liveFooter.parentElement===blocks) ? liveFooter : null;
+  for(let i=targetRenderedRows.length-1;i>=0;i--){
+    const renderedNode=targetRenderedRows[i];
+    if(transparentLiveRowAlreadyPositioned(renderedNode,expectedNextSibling)){
+      expectedNextSibling=renderedNode;
+      continue;
+    }
+    if(expectedNextSibling&&expectedNextSibling.parentElement===blocks) blocks.insertBefore(renderedNode,expectedNextSibling);
+    else blocks.appendChild(renderedNode);
+    expectedNextSibling=renderedNode;
   }
   preserveByKey.forEach(stale=>stale.remove());
   if(wrote) _syncTransparentEventControls(turn);
@@ -11029,6 +11189,7 @@ function _rehydrateTransparentLiveRow(existing, node, preservedState){
   if(!existing) return;
   if(node && Object.prototype.hasOwnProperty.call(node, '_tcData')) existing._tcData = node._tcData;
   else if(Object.prototype.hasOwnProperty.call(existing, '_tcData')) delete existing._tcData;
+  try{ delete node._tcData; }catch(_){}
   const header = existing.querySelector ? existing.querySelector('.tool-card-header,.thinking-card-header') : null;
   if(header){
     if(typeof _wireTransparentHeaderToggle === 'function') _wireTransparentHeaderToggle(header);
@@ -11049,6 +11210,26 @@ function _rehydrateTransparentLiveRow(existing, node, preservedState){
   }
 }
 
+function _refreshTransparentThinkingLiveRow(existing, node){
+  if(!existing || !node || !existing.querySelector || !node.querySelector) return false;
+  const existingType = String(existing.getAttribute('data-event-type') || '');
+  const nodeType = String(node.getAttribute('data-event-type') || '');
+  const existingIsThinking = existingType === 'thinking' || (existing.classList&&existing.classList.contains('transparent-thinking-event'));
+  const nodeIsThinking = nodeType === 'thinking' || (node.classList&&node.classList.contains('transparent-thinking-event'));
+  if(!existingIsThinking || !nodeIsThinking) return false;
+  const existingPre = existing.querySelector('.thinking-card-body pre');
+  const nodePre = node.querySelector('.thinking-card-body pre');
+  if(!existingPre || !nodePre) return false;
+  const nextText = String(nodePre.textContent || '');
+  if(existingPre.textContent !== nextText) existingPre.textContent = nextText;
+  const nodePreview = node.querySelector('.transparent-event-thinking-preview');
+  const previewText = nodePreview ? String(nodePreview.textContent || '') : nextText;
+  if(typeof _decorateTransparentEventRow === 'function'){
+    _decorateTransparentEventRow(existing,{type:'thinking',text:nextText,preview:previewText});
+  }
+  return true;
+}
+
 function _refreshTransparentLiveRow(existing, node){
   if(!existing || !node || !existing.getAttribute) return node;
   if(existing===node) return existing;
@@ -11067,7 +11248,13 @@ function _refreshTransparentLiveRow(existing, node){
     existing.setAttribute(name, value);
   }
   existing.className = node.className || '';
-  existing.innerHTML = node.innerHTML || '';
+  if(_refreshTransparentThinkingLiveRow(existing, node)){
+    _rehydrateTransparentLiveRow(existing, node, preservedState);
+    return existing;
+  }
+  const newHtml = node.innerHTML || '';
+  const htmlChanged = existing.innerHTML !== newHtml;
+  if(htmlChanged) existing.innerHTML = newHtml;
   _rehydrateTransparentLiveRow(existing, node, preservedState);
   return existing;
 }
@@ -13255,7 +13442,10 @@ function renderMessages(options){
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
-    const forkBtn  = `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
+    const readOnlySession=typeof _isReadOnlySession==='function'
+      ? _isReadOnlySession(S.session)
+      : !!(S.session&&(S.session.read_only||S.session.is_read_only));
+    const forkBtn  = readOnlySession ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)

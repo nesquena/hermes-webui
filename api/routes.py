@@ -31,7 +31,7 @@ import socket as _socket
 from collections import defaultdict
 from pathlib import Path
 from contextlib import closing
-from urllib.parse import parse_qs, quote, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 from api.agent_sessions import (
@@ -2793,6 +2793,7 @@ from api.config import (
     SESSION_AGENT_LOCKS_LOCK,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
+    persisted_speech_settings_keys,
     save_settings,
     SETTINGS_FILE,
     set_hermes_default_model,
@@ -7145,6 +7146,13 @@ def _session_index_marks_was_webui(sid: str) -> bool:
     return False
 
 
+def _session_deleted_tombstone_marks_was_webui(sid: str) -> bool:
+    try:
+        return sid in _load_webui_deleted_session_tombstone()
+    except Exception:
+        return False
+
+
 def _state_db_session_source(sid: str) -> str:
     """Return the lowercased ``sessions.source`` for ``sid`` from state.db.
 
@@ -7379,13 +7387,29 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
 
     if not is_safe_session_id(sid):
         return None, "invalid_sid"
-    if _session_index_marks_was_webui(sid) and not _is_subagent_child_session_id(sid):
+    if (
+        (
+            _session_index_marks_was_webui(sid)
+            or (
+                _session_deleted_tombstone_marks_was_webui(sid)
+                and _state_db_session_source(sid) in ("", "webui", "fork")
+            )
+        )
+        and not _is_subagent_child_session_id(sid)
+    ):
         # A delegated subagent child (source='subagent' in state.db) can be
         # registered in the WebUI index as a webui/fork/blank-source row (it
         # shares the parent's lineage) yet have no WebUI sidecar of its own.
         # Those must recover their transcript from state.db below rather than
         # 404 as a genuinely-deleted WebUI session (#5307). Every other
         # index-marked-WebUI id keeps the #2782 self-heal 404 contract.
+        #
+        # The durable delete tombstone only 404s a row that is WebUI-owned
+        # (source webui/fork, or blank = a stale URL with no surviving row).
+        # A foreign-source row (messaging/cli/tui/desktop) that happens to
+        # carry a tombstone — e.g. a WebUI delete of an imported session whose
+        # state.db row the external writer later re-created — must still
+        # materialize its transcript, never be self-healed to a 404 (#5504).
         return None, "was_webui"
     if cli_meta is None:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
@@ -7501,6 +7525,21 @@ def _normalize_import_profile_value(value):
     except Exception:
         pass
     return profile
+
+
+def _load_branch_source_or_refuse(handler, sid: str):
+    if _session_is_subagent_view_only(sid):
+        bad(handler, "Subagent sessions are view-only and cannot be branched from WebUI", 400)
+        return None
+    try:
+        return get_session(sid)
+    except KeyError:
+        _foreign_session, _reason = _claim_or_synthesize_cli_session(sid)
+        if _reason == "not_claimable":
+            bad(handler, "Read-only sessions cannot be branched from WebUI", 403)
+            return None
+        bad(handler, "Session not found", 404)
+        return None
 
 
 def _resolve_cli_import_metadata(session_id: str, *, requested_profile=None, allow_all_profiles: bool = False) -> dict:
@@ -8568,6 +8607,8 @@ from api.models import (
     _load_webui_zero_message_orphan_tombstone,
     _record_webui_zero_message_orphan_tombstone,
     _clear_webui_zero_message_orphan_tombstone,
+    _load_webui_deleted_session_tombstone,
+    _record_webui_deleted_session_tombstone,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -9196,6 +9237,37 @@ def _safe_login_redirect_path(raw_path: str | None) -> str:
     if path[1:2] in {"/", "\\"}:
         return "/"
     if re.search(r"[\x00-\x1f\x7f\s]", path):
+        return "/"
+    # #5578: reject a `next` that points back at the login page, so an
+    # expired-auth bounce on the login page can't feed the redirect its own
+    # address and grow the URL exponentially. Length cap is belt-and-suspenders:
+    # a legitimate app path is never this long.
+    if len(path) > 2048:
+        return "/"
+    # Detect a login-route target even through nested percent-encoding: a nested
+    # login-redirect chain looks like `/session/login%3Fnext%3D...`, where the
+    # `?` separating the path from the query is itself encoded, so a plain
+    # split("?") wouldn't isolate the real path. Fully decode (bounded) and check
+    # the leading PATH of EVERY decode level, including the final fully-decoded
+    # form. Only collapse login-route chains — a legitimate non-login path that
+    # merely carries its own `next=` query key (e.g. `/admin?action=foo&next=/x`)
+    # must still round-trip (regression guarded by test_v050258_opus_followups.py).
+    _probe = path
+    for _ in range(8):
+        _path_only = _probe.split("?", 1)[0].split("#", 1)[0].split("&", 1)[0].rstrip("/")
+        if _path_only.endswith("/login") or _path_only == "/login":
+            return "/"
+        _decoded = unquote(_probe)
+        if _decoded == _probe:
+            break
+        _probe = _decoded
+    else:
+        # Loop exhausted the cap while STILL decoding (pathologically deep
+        # encoding): check the final decoded form too, then fail closed — an
+        # 8-level-deep encoded value is never a legitimate redirect.
+        _path_only = _probe.split("?", 1)[0].split("#", 1)[0].split("&", 1)[0].rstrip("/")
+        if _path_only.endswith("/login") or _path_only == "/login":
+            return "/"
         return "/"
     return path
 
@@ -11431,6 +11503,7 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/settings":
         settings = load_settings()
+        settings["persisted_speech_keys"] = persisted_speech_settings_keys()
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
         settings.setdefault("max_tokens", None)
@@ -13025,21 +13098,49 @@ def handle_post(handler, parsed) -> bool:
                 # the new session (#5420).
                 prev_session_id = None
             if prev_session_id:
-                try:
-                    from api.session_lifecycle import commit_session_memory
-                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                    prev_agent = None
-                    with SESSION_AGENT_CACHE_LOCK:
-                        _cached = SESSION_AGENT_CACHE.get(prev_session_id)
-                        if _cached:
-                            prev_agent = _cached[0]
-                    commit_session_memory(prev_session_id, agent=prev_agent)
-                except Exception:
-                    logger.debug(
-                        "Lifecycle commit for prev_session %s failed",
-                        prev_session_id,
-                        exc_info=True,
-                    )
+                # Fire-and-forget: commit_memory_session() can take 1-5+ seconds
+                # (extraction call to the memory provider), and blocking the
+                # response here made "+ New Chat" feel slow/unresponsive.
+                # commit_session_memory() already serialises overlapping commits
+                # for a session via its own in-flight guard, so running it off
+                # the request thread is safe.
+                def _commit_prev_session_memory(_sid=prev_session_id):
+                    try:
+                        from api.session_lifecycle import commit_session_memory
+                        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                        prev_agent = None
+                        with SESSION_AGENT_CACHE_LOCK:
+                            _cached = SESSION_AGENT_CACHE.get(_sid)
+                            if _cached:
+                                prev_agent = _cached[0]
+                        commit_session_memory(_sid, agent=prev_agent)
+                    except Exception:
+                        logger.warning(
+                            "Lifecycle commit for prev_session %s failed",
+                            _sid,
+                            exc_info=True,
+                        )
+                    finally:
+                        # Self-unregister so the background-commit registry does
+                        # not leak completed threads; drain only tracks live ones.
+                        try:
+                            from api.session_lifecycle import _unregister_background_commit_thread
+                            _unregister_background_commit_thread(threading.current_thread())
+                        except Exception:
+                            pass
+
+                t = threading.Thread(
+                    target=_commit_prev_session_memory,
+                    daemon=True,
+                    name=f"commit-memory-{prev_session_id}",
+                )
+                from api.session_lifecycle import _register_background_commit_thread
+                # Refused only if shutdown draining has already begun; in that
+                # window the inline drain commits the pending generation instead,
+                # so skipping the worker start is safe (avoids a late daemon
+                # thread the drain snapshot already missed).
+                if _register_background_commit_thread(t):
+                    t.start()
         s = new_session(
             workspace=workspace,
             model=model,
@@ -13576,15 +13677,25 @@ def handle_post(handler, parsed) -> bool:
             p.relative_to(SESSION_DIR.resolve())
         except Exception:
             return bad(handler, "Invalid session_id", 400)
+        sidecar_deleted = False
         try:
             p.unlink(missing_ok=True)
-            p.with_suffix('.json.bak').unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to unlink session file %s", p)
+        sidecar_deleted = not p.exists()
+        try:
+            p.with_suffix('.json.bak').unlink(missing_ok=True)
+        except Exception:
+            logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
         try:
             prune_session_from_index(sid)
         except Exception:
             logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+        if sidecar_deleted and not is_messaging_session:
+            try:
+                _record_webui_deleted_session_tombstone(sid)
+            except Exception:
+                logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         try:
             from api.upload import _session_attachment_dir
 
@@ -13642,8 +13753,49 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
-            s.messages = []
+            had_sidecar_messages = bool(s.messages or [])
+            # Clear is a full truncate-to-empty: route through the SAME helper the
+            # /api/session/truncate handler uses (single source of truth) so the
+            # display + context arrays are emptied AND the truncation watermark is
+            # set via _truncation_watermark_for([]) == 0.0 — the #2914
+            # truncate-to-empty sentinel that blocks state.db replay. Before this,
+            # /clear wiped s.messages but left the watermark unset, so the
+            # append-only state.db merge treated it as "keep everything" and the
+            # cleared history resurrected on the next /api/session read (#5532).
+            from api.session_ops import truncate_session_at_keep
+            truncate_session_at_keep(s, 0)
             s.tool_calls = []
+            # A compressed-continuation child keeps its archived transcript in a
+            # parent sidecar marked pre_compression_snapshot;
+            # _webui_sidecar_lineage_messages_for_display() stitches that parent
+            # back with truncation_watermark=None, so the 0.0 sentinel on the
+            # CHILD does NOT stop the parent from resurrecting the cleared history
+            # on refresh. Detach the compression lineage (#5532/#5553) — but ONLY
+            # when the parent is actually a pre_compression_snapshot; a genuine
+            # fork parent (session_source="fork" from /api/session/branch) must
+            # keep its link so the child still nests + shows "Forked from"
+            # (sessions.js:5720/5964/7105). Dropping every parent broke that
+            # (#5532 Codex gate).
+            _parent_sid = getattr(s, "parent_session_id", None)
+            if _parent_sid:
+                _parent_is_compression_snapshot = False
+                try:
+                    _parent = get_session(_parent_sid, metadata_only=True)
+                    _parent_is_compression_snapshot = bool(
+                        getattr(_parent, "pre_compression_snapshot", False)
+                    )
+                except Exception:
+                    _parent_is_compression_snapshot = False
+                if _parent_is_compression_snapshot:
+                    s.parent_session_id = None
+                    s.compression_anchor_visible_idx = None
+                    s.compression_anchor_message_key = None
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            s.pending_user_source = None
+            s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
@@ -13651,6 +13803,28 @@ def handle_post(handler, parsed) -> bool:
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, "Untitled")
             s.save()
+            persisted_clear = False
+            try:
+                persisted = json.loads(s.path.read_text(encoding="utf-8"))
+                persisted_clear = (
+                    persisted.get("messages") == []
+                    and persisted.get("context_messages") == []
+                    and persisted.get("truncation_watermark") == 0.0
+                    and persisted.get("truncation_boundary") == 0.0
+                    and persisted.get("active_stream_id") is None
+                    and persisted.get("pending_user_message") is None
+                    and persisted.get("pending_attachments") == []
+                    and persisted.get("pending_started_at") is None
+                    and persisted.get("pending_user_source") is None
+                    and persisted.get("clear_generation") == s.clear_generation
+                )
+            except (OSError, json.JSONDecodeError, ValueError):
+                logger.warning("session clear could not verify persisted empty state for %s", sid, exc_info=True)
+            if had_sidecar_messages and persisted_clear:
+                try:
+                    s.path.with_suffix('.json.bak').unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("session clear could not remove stale backup for %s", sid, exc_info=True)
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
         # I/O must not hold the session mutation lock.
@@ -13715,12 +13889,9 @@ def handle_post(handler, parsed) -> bool:
         # (Opus pre-release follow-up.)
         if not isinstance(body["session_id"], str):
             return bad(handler, "session_id must be a string")
-        if _session_is_subagent_view_only(body["session_id"]):
-            return bad(handler, "Subagent sessions are view-only and cannot be branched from WebUI", 400)
-        try:
-            source = get_session(body["session_id"])
-        except KeyError:
-            return bad(handler, "Session not found", 404)
+        source = _load_branch_source_or_refuse(handler, body["session_id"])
+        if source is None:
+            return True
 
         keep_count = body.get("keep_count")
         if keep_count is not None:
@@ -14309,6 +14480,7 @@ def handle_post(handler, parsed) -> bool:
         from api.config import get_max_tokens_status, set_max_tokens
 
         saved = save_settings(body)
+        saved["persisted_speech_keys"] = persisted_speech_settings_keys()
         if max_tokens_provided:
             max_tokens_status = set_max_tokens(max_tokens_value)
         saved.pop("password_hash", None)  # never expose hash to client
@@ -20143,6 +20315,7 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
+                _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
                 _merge_display_messages_after_agent_result,
                 _restore_display_reasoning_metadata,
@@ -20206,6 +20379,11 @@ def _handle_chat_sync(handler, body):
         _next_context_messages = _restore_reasoning_metadata(
             _previous_context_messages,
             _result_messages,
+        )
+        # Mint ids on the shared result rows BEFORE dedupe deep-copies any
+        # stale-user boundary row, so both arrays share the id (#5564).
+        _assign_stable_message_ids(
+            _result_messages, _previous_messages, _previous_context_messages
         )
         _next_context_messages = _dedupe_replayed_context_messages(
             _previous_context_messages,

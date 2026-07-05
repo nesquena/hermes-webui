@@ -466,6 +466,64 @@ function _syncCronScheduleWarning() {
   warning.style.display = _cronScheduleKindForInput(input.value) === 'once' ? '' : 'none';
 }
 
+const CRON_SCHEDULE_PRESETS = [
+  { id: 'custom', value: '', label: 'cron_schedule_preset_custom', fallback: 'Custom' },
+  { id: 'hourly', value: 'every 1h', label: 'cron_schedule_preset_hourly', fallback: 'Hourly' },
+  { id: 'daily', value: '0 9 * * *', label: 'cron_schedule_preset_daily', fallback: 'Daily' },
+  { id: 'weekdays', value: '0 9 * * 1-5', label: 'cron_schedule_preset_weekdays', fallback: 'Weekdays' },
+  { id: 'weekly', value: '0 9 * * 1', label: 'cron_schedule_preset_weekly', fallback: 'Weekly' },
+  { id: 'monthly', value: '0 9 1 * *', label: 'cron_schedule_preset_monthly', fallback: 'Monthly' },
+];
+
+function _cronSchedulePresetOptionHtml() {
+  return CRON_SCHEDULE_PRESETS
+    .map((preset) => `<option value="${preset.id}">${esc(t(preset.label) || preset.fallback)}</option>`)
+    .join('');
+}
+
+function _cronSchedulePresetIdForValue(value) {
+  const schedule = String(value || '').trim();
+  const preset = CRON_SCHEDULE_PRESETS.find((entry) => entry.value && entry.value === schedule);
+  return preset ? preset.id : 'custom';
+}
+
+function _syncCronSchedulePresetFromInput() {
+  const presetEl = $('cronFormSchedulePreset');
+  const scheduleEl = $('cronFormSchedule');
+  if (!presetEl || !scheduleEl) return;
+  const presetId = _cronSchedulePresetIdForValue(scheduleEl.value);
+  presetEl.value = presetId;
+}
+
+function _syncCronSchedulePresetAndWarning() {
+  _syncCronSchedulePresetFromInput();
+  _syncCronScheduleWarning();
+}
+
+function _applyCronSchedulePresetSelection() {
+  const presetEl = $('cronFormSchedulePreset');
+  const scheduleEl = $('cronFormSchedule');
+  if (!presetEl || !scheduleEl) return;
+  const presetId = presetEl.value;
+  const preset = CRON_SCHEDULE_PRESETS.find((entry) => entry.id === presetId);
+  if (preset && preset.value) {
+    scheduleEl.value = preset.value;
+    _syncCronSchedulePresetAndWarning();
+    return;
+  }
+  _syncCronScheduleWarning();
+}
+
+function _initCronSchedulePresetControls() {
+  const presetEl = $('cronFormSchedulePreset');
+  const scheduleEl = $('cronFormSchedule');
+  if (!presetEl || !scheduleEl) return;
+  presetEl.addEventListener('change', _applyCronSchedulePresetSelection);
+  scheduleEl.addEventListener('input', _syncCronSchedulePresetAndWarning);
+  scheduleEl.addEventListener('change', _syncCronSchedulePresetAndWarning);
+  _syncCronSchedulePresetAndWarning();
+}
+
 function _hasUnlimitedRepeat(job) {
   return !!(job && job.repeat && job.repeat.times == null);
 }
@@ -1312,6 +1370,12 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <input type="text" id="cronFormName" value="${esc(name || '')}" placeholder="${esc(t('cron_name_placeholder') || 'Optional')}" autocomplete="off">
         </div>
         <div class="detail-form-row">
+          <label for="cronFormSchedulePreset">${esc(t('cron_schedule_preset_label') || 'Preset')}</label>
+          <select id="cronFormSchedulePreset">
+            ${_cronSchedulePresetOptionHtml()}
+          </select>
+        </div>
+        <div class="detail-form-row">
           <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Schedule')}</label>
           <input type="text" id="cronFormSchedule" value="${esc(schedule || '')}" placeholder="0 9 * * *  —  every 1h  —  @daily" autocomplete="off" required>
           <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
@@ -1356,12 +1420,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
   _populateCronDeliverOptions(deliver, isEdit);
   _populateCronFormModelSelect(model, provider, isNoAgent);
   if (!isNoAgent) _renderCronSkillTags();
-  const scheduleEl = $('cronFormSchedule');
-  if (scheduleEl) {
-    scheduleEl.addEventListener('input', _syncCronScheduleWarning);
-    scheduleEl.addEventListener('change', _syncCronScheduleWarning);
-    _syncCronScheduleWarning();
-  }
+  _initCronSchedulePresetControls();
   const focusEl = $('cronFormName');
   if (focusEl) focusEl.focus();
 }
@@ -2239,6 +2298,80 @@ async function hardRefreshWebUIClient(){
   } catch(_) {}
   window.location.reload();
 }
+
+function _normalizeWebUIVersion(value){
+  if(!value) return '';
+  const s=String(value).trim();
+  if(!s) return '';
+  // Suppress placeholder / non-version sentinels (case-insensitive) so a real
+  // client version never "mismatches" against a server that couldn't detect its
+  // own version. api/updates.py can emit 'unknown' (git describe failure in a
+  // Docker/CI image); comparing a real version against 'unknown' would FALSELY
+  // fire the stale-client banner. (Codex #5480 gate)
+  const lower=s.toLowerCase();
+  if(lower==='__webui_version__'||lower==='not detected'||lower==='unknown') return '';
+  return s;
+}
+
+function _currentWebUIBundleVersion(){
+  try{
+    const raw=window.__HERMES_WEBUI_BUNDLE_VERSION__;
+    if(!raw) return '';
+    let s=String(raw);
+    try{ s=decodeURIComponent(s.replace(/\+/g,' ')); }catch(_){}
+    return _normalizeWebUIVersion(s);
+  }catch(_){ return ''; }
+}
+
+function _showStaleWebUIClientBanner(clientVersion,serverVersion){
+  const banner=document.getElementById('staleClientBanner');
+  if(!banner) return;
+  const msg=document.getElementById('staleClientMessage');
+  const versions=document.getElementById('staleClientVersions');
+  if(msg) msg.textContent='This tab is running a different WebUI version. Hard refresh to restore full functionality.';
+  if(versions) versions.textContent='Running: '+clientVersion+' → Server: '+serverVersion;
+  banner.style.display='flex';
+}
+
+function checkWebUIVersionSkew(settings){
+  try{
+    if(!settings) return;
+    const client=_currentWebUIBundleVersion();
+    const server=_normalizeWebUIVersion(settings.webui_version);
+    if(!client||!server) return;
+    if(client===server) return;
+    _showStaleWebUIClientBanner(client,server);
+  }catch(_){}
+}
+window.checkWebUIVersionSkew=checkWebUIVersionSkew;
+
+function _startWebUIVersionSkewMonitor(){
+  let _pollTimer=null;
+  function _isBannerVisible(){
+    const banner=document.getElementById('staleClientBanner');
+    return !!(banner&&banner.style.display==='flex');
+  }
+  function _check(){
+    if(_isBannerVisible()) return;
+    Promise.resolve().then(function(){ return api('/api/settings'); }).then(function(s){ checkWebUIVersionSkew(s); }).catch(function(){});
+  }
+  function _startPoll(){
+    if(_pollTimer||document.hidden) return;
+    _pollTimer=setInterval(function(){
+      if(document.hidden){ clearInterval(_pollTimer); _pollTimer=null; return; }
+      if(_isBannerVisible()){ clearInterval(_pollTimer); _pollTimer=null; return; }
+      _check();
+    },60000);
+  }
+  _check();
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden){ _check(); _startPoll(); }
+    else if(_pollTimer){ clearInterval(_pollTimer); _pollTimer=null; }
+  });
+  window.addEventListener('focus',function(){ _check(); });
+  _startPoll();
+}
+_startWebUIVersionSkewMonitor();
 
 function _kanbanLooksLikeStaleClientError(err){
   const msg = String((err && err.message) || err || '').toLowerCase();
@@ -6383,6 +6516,21 @@ window.addEventListener('resize',()=>{
   if(dd&&dd.classList.contains('open')) _positionProfileDropdown();
 });
 
+function _openProfileSwitchSessionBrowser(){
+  try{
+    const isDesktop = (typeof _isDesktopWidth === 'function') ? _isDesktopWidth() : true;
+    if(isDesktop){
+      if(typeof expandSidebar === 'function') expandSidebar();
+      return;
+    }
+    const sidebar=document.querySelector('.sidebar');
+    if(!sidebar)return;
+    try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
+    sidebar.classList.remove('mobile-session-page');
+    sidebar.classList.add('mobile-panel-drawer','mobile-open');
+  }catch(_){}
+}
+
 async function switchToProfile(name) {
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
@@ -6422,6 +6570,7 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
@@ -6442,14 +6591,22 @@ async function switchToProfile(name) {
   // context change where dismissing those transient affordances is correct.
   if (typeof _renamingSid !== 'undefined' && _renamingSid) _renamingSid = null;
   if (typeof closeSessionActionMenu === 'function') closeSessionActionMenu();
-  // Determine whether the current session has any messages.
-  // A session with messages is "in progress" and belongs to the current profile —
-  // we must not retag it.  We'll start a fresh session for the new profile instead.
-  const sessionInProgress = S.session && (
+  // Determine whether the current session must be replaced instead of being
+  // retagged in place. A session with messages/active runtime belongs to the
+  // current profile. After the profile-switch POST returns, we also treat an
+  // otherwise-empty session whose recorded profile does not match the target
+  // profile as replace-only: uploads send S.session.session_id and the backend
+  // correctly rejects old-profile sessions under the new profile cookie.
+  let sessionInProgress = !!(S.session && (
     (S.messages && S.messages.length > 0) ||
     S.session.active_stream_id ||
     S.session.pending_user_message
-  );
+  ));
+  if (_openingExistingSidebarSession && S.session) {
+    // A cross-profile sidebar click is about to load a concrete existing session.
+    // Do not create or retag a blank intermediary session in the destination profile.
+    sessionInProgress = true;
+  }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
@@ -6482,6 +6639,19 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    const targetActiveProfile = S.activeProfile || 'default';
+    let sessionProfileMatchesTarget = true;
+    if (!sessionInProgress && S.session) {
+      const currentSessionProfile = (typeof S.session.profile === 'string' && S.session.profile.trim())
+        ? S.session.profile.trim()
+        : 'default';
+      sessionProfileMatchesTarget = (typeof _profileMatchesActiveProfile === 'function')
+        ? _profileMatchesActiveProfile(currentSessionProfile, targetActiveProfile)
+        : (currentSessionProfile === targetActiveProfile || (currentSessionProfile === 'default' && !!S.activeProfileIsDefault));
+      if (!sessionProfileMatchesTarget) {
+        sessionInProgress = true;
+      }
+    }
     // #4650 review: a profile switch can change agent.reasoning_effort (and other
     // reasoning inputs like base_url) WITHOUT changing the default model/provider,
     // which is all the reasoning-chip cache key tracks. Force exactly one reasoning
@@ -6577,10 +6747,20 @@ async function switchToProfile(name) {
     }
 
     // ── Session ────────────────────────────────────────────────────────────
-    _showAllProfiles = false;
+    // Keep the all-profiles sidebar scope sticky across profile switches. It is
+    // a navigation preference shared by the browser session, not a per-profile flag.
     if (typeof animateNextSessionListRefresh === 'function') animateNextSessionListRefresh();
 
-    if (sessionInProgress) {
+    if (sessionInProgress && _openingExistingSidebarSession) {
+      // The caller will immediately load the clicked session after this profile
+      // cookie switch. Avoid creating/retagging an intermediate blank chat.
+      const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+      await renderSessionList();
+      if (_switchGen !== _profileSwitchGeneration) return;
+      if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
+      showToast(t('profile_switched', name));
+    } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
@@ -6600,6 +6780,7 @@ async function switchToProfile(name) {
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
       if (_switchGen !== _profileSwitchGeneration) return;
+      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
       // (#4662 Opus gate). No-op when a real tree already rendered.
@@ -6622,6 +6803,7 @@ async function switchToProfile(name) {
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
       if (_switchGen !== _profileSwitchGeneration) return;
+      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
       // Refresh workspace file tree so the right panel shows the new
       // profile's workspace, not the previous one (#1214).
@@ -7995,6 +8177,49 @@ function _retryAppearanceAutosave(){
 
 // ── Phase 2: Preferences autosave (Issue #1003) ───────────────────────
 
+const _SETTINGS_SPEECH_STORAGE_KEYS={
+  tts_enabled:'hermes-tts-enabled',
+  tts_auto_read:'hermes-tts-auto-read',
+  tts_engine:'hermes-tts-engine',
+  tts_voice:'hermes-tts-voice',
+  tts_rate:'hermes-tts-rate',
+  tts_pitch:'hermes-tts-pitch',
+  voice_mode_button:'hermes-voice-mode-button',
+  voice_continuous:'hermes-voice-continuous',
+  voice_silence_ms:'hermes-voice-silence-ms',
+  raw_audio_mode:'hermes-raw-audio-mode',
+};
+let _settingsSpeechPersistedKeys=new Set();
+let _settingsSpeechLocalStorageKeys=new Set();
+let _settingsSpeechChangedKeys=new Set();
+
+function _captureSpeechPreferenceOwnership(settings){
+  _settingsSpeechPersistedKeys=new Set(Array.isArray(settings&&settings.persisted_speech_keys)?settings.persisted_speech_keys:[]);
+  _settingsSpeechLocalStorageKeys=new Set();
+  _settingsSpeechChangedKeys=new Set();
+  Object.entries(_SETTINGS_SPEECH_STORAGE_KEYS).forEach(([settingKey,storageKey])=>{
+    try{if(localStorage.getItem(storageKey)!==null) _settingsSpeechLocalStorageKeys.add(settingKey);}catch(_){}
+  });
+}
+
+function _speechPreferenceIsOwned(settingKey){
+  return _settingsSpeechPersistedKeys.has(settingKey)||_settingsSpeechLocalStorageKeys.has(settingKey)||_settingsSpeechChangedKeys.has(settingKey);
+}
+
+function _markSpeechPreferenceChanged(settingKey){
+  _settingsSpeechChangedKeys.add(settingKey);
+}
+
+function _syncSpeechPreferenceCache(settingKey,value){
+  if(!_speechPreferenceIsOwned(settingKey)) return;
+  const storageKey=_SETTINGS_SPEECH_STORAGE_KEYS[settingKey];
+  if(storageKey) localStorage.setItem(storageKey,String(value));
+}
+
+function _setOwnedSpeechPayload(payload,settingKey,value){
+  if(_speechPreferenceIsOwned(settingKey)) payload[settingKey]=value;
+}
+
 function _preferencesPayloadFromUi(){
   const payload={};
   const sendKeySel=$('settingsSendKey');
@@ -8067,6 +8292,31 @@ function _preferencesPayloadFromUi(){
   if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
+  Object.assign(payload,_speechPreferencesPayloadFromUi());
+  return payload;
+}
+
+function _speechPreferencesPayloadFromUi(){
+  const payload={};
+  const ttsEnabledCb=$('settingsTtsEnabled');
+  if(ttsEnabledCb) _setOwnedSpeechPayload(payload,'tts_enabled',ttsEnabledCb.checked);
+  const ttsAutoReadCb=$('settingsTtsAutoRead');
+  if(ttsAutoReadCb) _setOwnedSpeechPayload(payload,'tts_auto_read',ttsAutoReadCb.checked);
+  const ttsEngineSel=$('settingsTtsEngine');
+  if(ttsEngineSel) _setOwnedSpeechPayload(payload,'tts_engine',ttsEngineSel.value||'browser');
+  const ttsVoiceSel=$('settingsTtsVoice');
+  if(ttsVoiceSel) _setOwnedSpeechPayload(payload,'tts_voice',ttsVoiceSel.value||'');
+  const ttsRateSlider=$('settingsTtsRate');
+  if(ttsRateSlider) _setOwnedSpeechPayload(payload,'tts_rate',parseFloat(ttsRateSlider.value));
+  const ttsPitchSlider=$('settingsTtsPitch');
+  if(ttsPitchSlider) _setOwnedSpeechPayload(payload,'tts_pitch',parseFloat(ttsPitchSlider.value));
+  const voiceModeCb=$('settingsVoiceModeEnabled');
+  if(voiceModeCb) _setOwnedSpeechPayload(payload,'voice_mode_button',voiceModeCb.checked);
+  const rawAudioCb=$('settingsRawAudio');
+  _setOwnedSpeechPayload(payload,'raw_audio_mode',rawAudioCb?rawAudioCb.checked:localStorage.getItem('hermes-raw-audio-mode')==='true');
+  _setOwnedSpeechPayload(payload,'voice_continuous',localStorage.getItem('hermes-voice-continuous')==='true');
+  const voiceSilence=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
+  _setOwnedSpeechPayload(payload,'voice_silence_ms',(Number.isFinite(voiceSilence)&&voiceSilence>=200)?voiceSilence:1800);
   return payload;
 }
 
@@ -8209,6 +8459,7 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
+    checkWebUIVersionSkew(settings);
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
     const webuiBadge = $('settings-webui-version-badge');
@@ -8618,24 +8869,56 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       },{once:false});
     }
-    // TTS settings (localStorage-only, no server round-trip needed)
+    if(typeof window._mirrorSpeechSettingsFromServer==='function') window._mirrorSpeechSettingsFromServer(settings);
+    const persistedSpeechKeys = new Set(
+      Array.isArray(settings && settings.persisted_speech_keys)
+        ? settings.persisted_speech_keys
+        : []
+    );
+    _captureSpeechPreferenceOwnership(settings);
+    const _speechSetting=function(key,storageKey,fallback,kind){
+      const stored=localStorage.getItem(storageKey);
+      if(settings&&persistedSpeechKeys.has(key)) return settings[key];
+      return stored===null?fallback:stored;
+    };
+    const _speechBool=function(key,storageKey,fallback){
+      const value=_speechSetting(key,storageKey,fallback,'bool');
+      return value===true||value==='true';
+    };
+    const rawAudioCb=$('settingsRawAudio');
+    if(rawAudioCb){
+      rawAudioCb.checked=_speechBool('raw_audio_mode','hermes-raw-audio-mode',false);
+      rawAudioCb.onchange=function(){
+        _markSpeechPreferenceChanged('raw_audio_mode');
+        if(typeof window._applyRawAudioModePreference==='function') window._applyRawAudioModePreference(this.checked);
+        else localStorage.setItem('hermes-raw-audio-mode',this.checked?'true':'false');
+        _schedulePreferencesAutosave();
+      };
+    }
+    const voiceContinuous=_speechBool('voice_continuous','hermes-voice-continuous',false);
+    _syncSpeechPreferenceCache('voice_continuous',voiceContinuous?'true':'false');
+    const voiceSilence=parseInt(_speechSetting('voice_silence_ms','hermes-voice-silence-ms',1800),10);
+    _syncSpeechPreferenceCache('voice_silence_ms',Number.isFinite(voiceSilence)&&voiceSilence>=200?String(voiceSilence):'1800');
+    // TTS settings use /api/settings as the durable source and localStorage as the runtime cache.
     const ttsEnabledCb=$('settingsTtsEnabled');
-    if(ttsEnabledCb){ttsEnabledCb.checked=localStorage.getItem('hermes-tts-enabled')==='true';ttsEnabledCb.onchange=function(){localStorage.setItem('hermes-tts-enabled',this.checked?'true':'false');_applyTtsEnabled(this.checked);};}
+    if(ttsEnabledCb){ttsEnabledCb.checked=_speechBool('tts_enabled','hermes-tts-enabled',false);ttsEnabledCb.onchange=function(){_markSpeechPreferenceChanged('tts_enabled');localStorage.setItem('hermes-tts-enabled',this.checked?'true':'false');_applyTtsEnabled(this.checked);_schedulePreferencesAutosave();};}
     const ttsAutoReadCb=$('settingsTtsAutoRead');
-    if(ttsAutoReadCb){ttsAutoReadCb.checked=localStorage.getItem('hermes-tts-auto-read')==='true';ttsAutoReadCb.onchange=function(){localStorage.setItem('hermes-tts-auto-read',this.checked?'true':'false');};}
-    // Voice-mode button visibility (#1488). localStorage-only; no server round-trip.
+    if(ttsAutoReadCb){ttsAutoReadCb.checked=_speechBool('tts_auto_read','hermes-tts-auto-read',false);ttsAutoReadCb.onchange=function(){_markSpeechPreferenceChanged('tts_auto_read');localStorage.setItem('hermes-tts-auto-read',this.checked?'true':'false');_schedulePreferencesAutosave();};}
+    // Voice-mode button visibility (#1488).
     // Toggling re-applies immediately via the boot.js helper so the user sees
     // the audio-waveform button appear/disappear without a reload.
     // Also recomputes composer footer visibility so the .composer-divider
     // (which tracks whether all left-group buttons are hidden, see #5451)
     // stays in sync when #btnVoiceMode appears or disappears here.
-    const voiceModeCb=$('settingsVoiceModeEnabled');
+    const voiceModeCb=$("settingsVoiceModeEnabled");
     if(voiceModeCb){
-      voiceModeCb.checked=localStorage.getItem('hermes-voice-mode-button')==='true';
+      voiceModeCb.checked=_speechBool("voice_mode_button","hermes-voice-mode-button",false);
       voiceModeCb.onchange=function(){
-        localStorage.setItem('hermes-voice-mode-button',this.checked?'true':'false');
-        if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
-        if(typeof window._applyComposerFooterVisibilitySettings==='function') window._applyComposerFooterVisibilitySettings();
+        _markSpeechPreferenceChanged("voice_mode_button");
+        localStorage.setItem("hermes-voice-mode-button",this.checked?"true":"false");
+        if(typeof window._applyVoiceModePref==="function") window._applyVoiceModePref();
+        if(typeof window._applyComposerFooterVisibilitySettings==="function") window._applyComposerFooterVisibilitySettings();
+        _schedulePreferencesAutosave();
       };
     }
     // TTS engine selector
@@ -8653,11 +8936,19 @@ async function loadSettingsPanel(){
           }
         });
       }
-      const saved=localStorage.getItem('hermes-tts-engine')||'browser';
+      const saved=String(_speechSetting('tts_engine','hermes-tts-engine','browser')||'browser');
+      if(!ttsEngineSel.querySelector('option[value="'+saved+'"]')){
+        var savedOpt=document.createElement('option');
+        savedOpt.value=saved; savedOpt.textContent=saved;
+        ttsEngineSel.appendChild(savedOpt);
+      }
       ttsEngineSel.value=saved;
+      _syncSpeechPreferenceCache('tts_engine',saved);
       ttsEngineSel.onchange=function(){
+        _markSpeechPreferenceChanged('tts_engine');
         localStorage.setItem('hermes-tts-engine',this.value);
         window._populateTtsVoices();
+        _schedulePreferencesAutosave();
       };
     }
     // Populate voice selector based on engine
@@ -8665,7 +8956,8 @@ async function loadSettingsPanel(){
     window._populateTtsVoices=function(){
       if(!ttsVoiceSel) return;
       const engine=localStorage.getItem('hermes-tts-engine')||'browser';
-      const current=localStorage.getItem('hermes-tts-voice')||'';
+      const current=String(_speechSetting('tts_voice','hermes-tts-voice','')||'');
+      _syncSpeechPreferenceCache('tts_voice',current);
       if(engine==='elevenlabs'){
         ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
       } else if(engine==='openai'){
@@ -8709,24 +9001,26 @@ async function loadSettingsPanel(){
         const engine=localStorage.getItem('hermes-tts-engine')||'browser';
         if(engine==='browser') window._populateTtsVoices();
       },{once:false});
-      ttsVoiceSel.onchange=function(){localStorage.setItem('hermes-tts-voice',this.value);};
+      ttsVoiceSel.onchange=function(){_markSpeechPreferenceChanged('tts_voice');localStorage.setItem('hermes-tts-voice',this.value);_schedulePreferencesAutosave();};
     }
     // TTS rate/pitch sliders
     const ttsRateSlider=$('settingsTtsRate');
     const ttsRateValue=$('settingsTtsRateValue');
     if(ttsRateSlider){
-      const savedRate=localStorage.getItem('hermes-tts-rate');
-      ttsRateSlider.value=savedRate||'1';
+      const savedRate=_speechSetting('tts_rate','hermes-tts-rate',1);
+      ttsRateSlider.value=(savedRate===null||savedRate===undefined)?'1':String(savedRate);
       if(ttsRateValue) ttsRateValue.textContent=parseFloat(ttsRateSlider.value).toFixed(1)+'x';
-      ttsRateSlider.oninput=function(){if(ttsRateValue)ttsRateValue.textContent=parseFloat(this.value).toFixed(1)+'x';localStorage.setItem('hermes-tts-rate',this.value);};
+      _syncSpeechPreferenceCache('tts_rate',ttsRateSlider.value);
+      ttsRateSlider.oninput=function(){_markSpeechPreferenceChanged('tts_rate');if(ttsRateValue)ttsRateValue.textContent=parseFloat(this.value).toFixed(1)+'x';localStorage.setItem('hermes-tts-rate',this.value);_schedulePreferencesAutosave();};
     }
     const ttsPitchSlider=$('settingsTtsPitch');
     const ttsPitchValue=$('settingsTtsPitchValue');
     if(ttsPitchSlider){
-      const savedPitch=localStorage.getItem('hermes-tts-pitch');
-      ttsPitchSlider.value=savedPitch||'1';
+      const savedPitch=_speechSetting('tts_pitch','hermes-tts-pitch',1);
+      ttsPitchSlider.value=(savedPitch===null||savedPitch===undefined)?'1':String(savedPitch);
       if(ttsPitchValue) ttsPitchValue.textContent=parseFloat(ttsPitchSlider.value).toFixed(1);
-      ttsPitchSlider.oninput=function(){if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);localStorage.setItem('hermes-tts-pitch',this.value);};
+      _syncSpeechPreferenceCache('tts_pitch',ttsPitchSlider.value);
+      ttsPitchSlider.oninput=function(){_markSpeechPreferenceChanged('tts_pitch');if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);localStorage.setItem('hermes-tts-pitch',this.value);_schedulePreferencesAutosave();};
     }
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -11650,6 +11944,7 @@ async function saveSettings(andClose){
   const defaultMessageMode=($('settingsDefaultMessageMode')||{}).value||'steer';
   const showBusyPlaceholderHint=!!($('settingsShowBusyPlaceholderHint')||{}).checked;
   const body={};
+  Object.assign(body,_speechPreferencesPayloadFromUi());
 
   if(sendKey) body.send_key=sendKey;
   body.theme=theme;

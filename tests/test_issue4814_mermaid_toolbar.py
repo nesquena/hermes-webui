@@ -20,12 +20,15 @@ const fs = require('fs');
 
 const ui = fs.readFileSync(process.argv[2], 'utf8');
 const helperStart = ui.indexOf('const _MERMAID_VIEWER_MIN_SCALE');
-const helperEnd = ui.indexOf('function _openMermaidLightbox');
+const helperEnd = ui.indexOf("document.addEventListener('click'");
 if (helperStart < 0 || helperEnd < 0) {
   throw new Error('could not locate Mermaid viewer helpers');
 }
 
 const documentListeners = {};
+const windowListeners = {};
+let nextTimerId = 1;
+const pendingTimers = new Map();
 function makeClassList(node) {
   const classes = new Set();
   return {
@@ -100,6 +103,9 @@ function makeElement(tagName) {
     getBoundingClientRect() {
       return {left: 0, top: 0, width: this.clientWidth, height: this.clientHeight};
     },
+    querySelectorAll() {
+      return [];
+    },
     setPointerCapture(pointerId) {
       this.capturedPointerId = pointerId;
     },
@@ -117,6 +123,8 @@ function makeElement(tagName) {
       copy.innerHTML = this.innerHTML;
       copy.clientWidth = this.clientWidth;
       copy.clientHeight = this.clientHeight;
+      if (this.viewBox) copy.viewBox = {baseVal: {...this.viewBox.baseVal}};
+      if (this.getBBox) copy.getBBox = this.getBBox;
       copy.classList = makeClassList(copy);
       for (const cls of String(this.className || '').split(/\s+/).filter(Boolean)) copy.classList.add(cls);
       return copy;
@@ -150,11 +158,53 @@ const document = {
   },
 };
 
-const window = {innerWidth: 1200, innerHeight: 800};
+const window = {
+  innerWidth: 1200,
+  innerHeight: 800,
+  addEventListener(type, handler) {
+    (windowListeners[type] ||= []).push(handler);
+  },
+  removeEventListener(type, handler) {
+    const list = windowListeners[type] || [];
+    const idx = list.indexOf(handler);
+    if (idx >= 0) list.splice(idx, 1);
+  },
+  dispatchEvent(event) {
+    const type = event && event.type;
+    if (!type) return false;
+    const list = windowListeners[type] || [];
+    for (const handler of list) handler(event);
+    return true;
+  },
+};
+
+function triggerWindowResize(width, height) {
+  if (Number.isFinite(width)) window.innerWidth = width;
+  if (Number.isFinite(height)) window.innerHeight = height;
+  if (typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent({type: 'resize'});
+  }
+}
+
+function flushTimers() {
+  const timers = [...pendingTimers.entries()];
+  pendingTimers.clear();
+  for (const [, fn] of timers) fn();
+}
+
 global.document = document;
 global.window = window;
 global.requestAnimationFrame = (fn) => fn();
 global.cancelAnimationFrame = () => {};
+global.setTimeout = (fn) => {
+  const id = nextTimerId;
+  nextTimerId += 1;
+  pendingTimers.set(id, fn);
+  return id;
+};
+global.clearTimeout = (id) => {
+  pendingTimers.delete(id);
+};
 
 eval(ui.slice(helperStart, helperEnd));
 
@@ -233,25 +283,93 @@ function runScenario(payload) {
   }
 
   if (payload.scenario === 'wide-lightbox') {
+    const expectedEnvelopeWidth = Math.round((payload.viewportWidth || 0) * 0.9);
+    const expectedEnvelopeHeight = Math.round((payload.viewportHeight || 0) * 0.9);
     const lightboxSvg = makeSvg(payload.width || 480, payload.height || 320);
     const lightbox = _mountMermaidViewer(lightboxSvg, {mode:'lightbox'});
     const lightboxState = lightbox._mermaidViewer;
-    lightboxState.viewport.clientWidth = payload.viewportWidth || 960;
-    lightboxState.viewport.clientHeight = payload.viewportHeight || 540;
+    lightboxState.viewport.clientWidth = expectedEnvelopeWidth || 960;
+    lightboxState.viewport.clientHeight = expectedEnvelopeHeight || 540;
     lightboxState.viewport.getBoundingClientRect = () => ({left: 0, top: 0, width: lightboxState.viewport.clientWidth, height: lightboxState.viewport.clientHeight});
     const initialScale = lightboxState.scale;
     const initialViewportWidth = lightboxState.viewport.style.width;
     const initialViewportHeight = lightboxState.viewport.style.height;
     lightboxState.fit();
+    const fitScale = lightboxState.scale;
+    lightboxState.zoomOut();
+    const zoomOutScale = lightboxState.scale;
     return {
       initialScale,
-      fitScale: lightboxState.scale,
+      fitScale,
+      zoomOutScale,
+      expectedViewportWidth: expectedEnvelopeWidth,
+      expectedViewportHeight: expectedEnvelopeHeight,
       initialViewportWidth,
       initialViewportHeight,
       viewportWidthAfterFit: lightboxState.viewport.style.width,
       viewportHeightAfterFit: lightboxState.viewport.style.height,
       lightboxLabels: labelsFromToolbar(lightbox),
       mode: lightboxState.mode,
+    };
+  }
+
+  if (payload.scenario === 'lightbox-resize') {
+    const expectedEnvelopeWidth = Math.round((payload.viewportWidth || 0) * 0.9);
+    const expectedEnvelopeHeight = Math.round((payload.viewportHeight || 0) * 0.9);
+    triggerWindowResize(payload.viewportWidth, payload.viewportHeight);
+    const lightboxSvg = makeSvg(payload.width || 480, payload.height || 320);
+    const beforeListenerCount = (windowListeners.resize || []).length;
+    const lightbox = _openMermaidLightbox(lightboxSvg);
+    const lightboxState = lightbox && lightbox.children[0] && lightbox.children[0]._mermaidViewer;
+    if (!lightboxState) throw new Error('unable to access lightbox viewer state');
+    const afterOpenListenerCount = (windowListeners.resize || []).length;
+    lightboxState.viewport.clientWidth = expectedEnvelopeWidth || 960;
+    lightboxState.viewport.clientHeight = expectedEnvelopeHeight || 540;
+    lightboxState.viewport.getBoundingClientRect = () => ({left: 0, top: 0, width: lightboxState.viewport.clientWidth, height: lightboxState.viewport.clientHeight});
+    const beforeViewportWidth = lightboxState.viewport.style.width;
+    const beforeViewportHeight = lightboxState.viewport.style.height;
+    const beforeScale = lightboxState.scale;
+    triggerWindowResize(payload.resizedViewportWidth, payload.resizedViewportHeight);
+    const queuedAfterFirstResize = pendingTimers.size;
+    const preFlushViewportWidth = lightboxState.viewport.style.width;
+    const preFlushViewportHeight = lightboxState.viewport.style.height;
+    triggerWindowResize(payload.resizedViewportWidth + 20, payload.resizedViewportHeight + 20);
+    const queuedAfterSecondResize = pendingTimers.size;
+    flushTimers();
+    const afterViewportWidth = lightboxState.viewport.style.width;
+    const afterViewportHeight = lightboxState.viewport.style.height;
+    const afterScale = lightboxState.scale;
+    lightboxState.zoomIn();
+    const manualZoomScale = lightboxState.scale;
+    triggerWindowResize(payload.zoomedViewportWidth, payload.zoomedViewportHeight);
+    flushTimers();
+    const afterManualZoomResizeScale = lightboxState.scale;
+    const afterManualZoomResizeViewportWidth = lightboxState.viewport.style.width;
+    const afterManualZoomResizeViewportHeight = lightboxState.viewport.style.height;
+    _closeImgLightbox(lightbox);
+    const afterCloseListenerCount = (windowListeners.resize || []).length;
+    return {
+      beforeListenerCount,
+      afterOpenListenerCount,
+      afterCloseListenerCount,
+      queuedAfterFirstResize,
+      queuedAfterSecondResize,
+      beforeViewportWidth,
+      beforeViewportHeight,
+      beforeScale,
+      preFlushViewportWidth,
+      preFlushViewportHeight,
+      afterViewportWidth,
+      afterViewportHeight,
+      afterScale,
+      manualZoomScale,
+      afterManualZoomResizeScale,
+      afterManualZoomResizeViewportWidth,
+      afterManualZoomResizeViewportHeight,
+      expectedViewportWidth: Math.round(((payload.resizedViewportWidth || 0) + 20) * 0.9),
+      expectedViewportHeight: Math.round(((payload.resizedViewportHeight || 0) + 20) * 0.9),
+      expectedZoomedViewportWidth: Math.round((payload.zoomedViewportWidth || 0) * 0.9),
+      expectedZoomedViewportHeight: Math.round((payload.zoomedViewportHeight || 0) * 0.9),
     };
   }
 
@@ -426,14 +544,48 @@ def test_lightbox_wide_diagram_fits_modal_envelope(_driver_path):
         "options": {"mode": "inline"},
     })
 
-    # Lightbox keeps master's contract: the flat min-scale floor (0.25) governs
-    # both mount and fit (a very wide diagram bottoms out at the floor), and the
-    # viewport is sized to the fitted diagram (box * scale). The inline readable-
-    # height sizing must NOT leak into lightbox mode (#5434 gate finding).
+    # Wide lightbox now sizes the viewport to the modal envelope first,
+    # then fits the full diagram into that envelope.
     assert result["mode"] == "lightbox"
-    assert result["initialScale"] == 0.25
-    assert result["fitScale"] == 0.25
-    assert _px(result["initialViewportWidth"]) == round(4000 * result["initialScale"])
-    assert _px(result["initialViewportHeight"]) == round(320 * result["initialScale"])
-    assert _px(result["viewportWidthAfterFit"]) == round(4000 * result["fitScale"])
-    assert _px(result["viewportHeightAfterFit"]) == round(320 * result["fitScale"])
+    assert _px(result["initialViewportWidth"]) == round(360 * 0.9)
+    assert _px(result["initialViewportHeight"]) == round(640 * 0.9)
+    expectedScale = min(result["expectedViewportWidth"] / 4000, result["expectedViewportHeight"] / 320)
+    assert abs(result["initialScale"] - expectedScale) < 1e-9
+    assert abs(result["fitScale"] - expectedScale) < 1e-9
+    assert abs(result["zoomOutScale"] - expectedScale) < 1e-9
+    assert _px(result["initialViewportWidth"]) == _px(result["viewportWidthAfterFit"])
+    assert _px(result["initialViewportHeight"]) == _px(result["viewportHeightAfterFit"])
+
+
+def test_lightbox_resize_recomputes_viewport_and_scale(_driver_path):
+    result = _run_node(_driver_path, {
+        "scenario": "lightbox-resize",
+        "width": 4000,
+        "height": 320,
+        "viewportWidth": 360,
+        "viewportHeight": 640,
+        "resizedViewportWidth": 800,
+        "resizedViewportHeight": 400,
+        "zoomedViewportWidth": 640,
+        "zoomedViewportHeight": 500,
+        "options": {"mode": "inline"},
+    })
+
+    assert _px(result["beforeViewportWidth"]) == round(360 * 0.9)
+    assert _px(result["beforeViewportHeight"]) == round(640 * 0.9)
+    assert _px(result["preFlushViewportWidth"]) == _px(result["beforeViewportWidth"])
+    assert _px(result["preFlushViewportHeight"]) == _px(result["beforeViewportHeight"])
+    assert result["queuedAfterFirstResize"] == 1
+    assert result["queuedAfterSecondResize"] == 1
+    assert _px(result["afterViewportWidth"]) == round((800 + 20) * 0.9)
+    assert _px(result["afterViewportHeight"]) == round((400 + 20) * 0.9)
+    expectedScale = min(result["expectedViewportWidth"] / 4000, result["expectedViewportHeight"] / 320)
+    assert abs(result["afterScale"] - expectedScale) < 1e-9
+    assert result["afterScale"] != result["beforeScale"]
+    assert result["manualZoomScale"] > result["afterScale"]
+    assert abs(result["afterManualZoomResizeScale"] - result["manualZoomScale"]) < 1e-9
+    assert _px(result["afterManualZoomResizeViewportWidth"]) == round(640 * 0.9)
+    assert _px(result["afterManualZoomResizeViewportHeight"]) == round(500 * 0.9)
+    assert result["beforeListenerCount"] == 0
+    assert result["afterOpenListenerCount"] == 1
+    assert result["afterCloseListenerCount"] == 0

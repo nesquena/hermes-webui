@@ -1060,6 +1060,41 @@ def _resolve_secret_scope_module():
     return None
 
 
+# #5567: hermes-agent v0.18.0+ exposes a CONTEXT-LOCAL Hermes-home override
+# (`hermes_constants.set_hermes_home_override`) that `get_hermes_home()` — and
+# therefore `hermes_cli.config.get_config_path()` / `load_config()` — consults
+# BEFORE the process-global `os.environ["HERMES_HOME"]`. Installing it inside the
+# profile worker scope eliminates the cross-profile HERMES_HOME race at the
+# reader (a config read resolves the task-local profile home even if another
+# thread clobbers os.environ mid-body) WITHOUT serializing workers or mutating
+# shared state. Resolved lazily + optionally so OLDER agents (no override symbol)
+# degrade gracefully to the pre-existing os.environ-mirror behavior — unchanged.
+_hermes_home_override_available = None
+
+
+def _resolve_hermes_home_override():
+    """Return the hermes_constants module iff it exposes the v0.18.0+ context-local
+    home override (set/reset), else None. Cached; import-safe on older agents."""
+    global _hermes_home_override_available
+    import sys as _sys
+    if _hermes_home_override_available is False:
+        return None
+    mod = _sys.modules.get('hermes_constants')
+    if mod is None and _hermes_home_override_available is None:
+        try:
+            import hermes_constants as mod  # noqa: F811
+        except Exception:
+            _hermes_home_override_available = False
+            return None
+    if mod is not None and hasattr(mod, 'set_hermes_home_override') and hasattr(
+        mod, 'reset_hermes_home_override'
+    ):
+        _hermes_home_override_available = True
+        return mod
+    _hermes_home_override_available = False
+    return None
+
+
 @contextmanager
 def profile_env_for_background_worker(
     session,
@@ -1117,6 +1152,10 @@ def profile_env_for_background_worker(
     )
     _scope_token = None
     _has_scope = False
+    # #5567: context-local Hermes-home override (hermes-agent v0.18.0+). None on
+    # older agents → graceful no-op (falls back to the os.environ mirror below).
+    _home_override_mod = None
+    _home_override_token = None
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
@@ -1129,6 +1168,20 @@ def profile_env_for_background_worker(
                 _has_scope = True
             except Exception:
                 pass
+        # #5567: install the context-local Hermes-home override so the agent
+        # config reader (get_hermes_home -> get_config_path/load_config) resolves
+        # THIS profile's home from task-local state, immune to a concurrent
+        # cross-profile os.environ["HERMES_HOME"] clobber during the worker body.
+        # No-op on agents < v0.18.0 (resolver returns None) → os.environ mirror
+        # below remains the behavior, exactly as today.
+        _home_override_mod = _resolve_hermes_home_override()
+        if _home_override_mod is not None:
+            try:
+                _home_override_token = _home_override_mod.set_hermes_home_override(
+                    str(profile_home_path)
+                )
+            except Exception:
+                _home_override_token = None
         with _ENV_LOCK:
             old_runtime_env = _apply_profile_env_to_process(
                 os.environ,
@@ -1151,6 +1204,12 @@ def profile_env_for_background_worker(
                 )
         yield
     finally:
+        # #5567: pop the context-local home override first (reverse of setup order).
+        if _home_override_mod is not None and _home_override_token is not None:
+            try:
+                _home_override_mod.reset_hermes_home_override(_home_override_token)
+            except Exception:
+                pass
         if _has_scope and _secret_scope_mod is not None:
             try:
                 _secret_scope_mod.reset_secret_scope(_scope_token)
@@ -2261,7 +2320,8 @@ def _profile_model_selection_exists(
             continue
         if model_provider and provider_id == model_provider:
             provider_seen = True
-        for model in group.get("models", []) or []:
+        all_group_models = (group.get("models") or []) + (group.get("extra_models") or [])
+        for model in all_group_models:
             if not isinstance(model, dict):
                 continue
             model_id = str(model.get("id") or "").strip()

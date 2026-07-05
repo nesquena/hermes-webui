@@ -124,6 +124,8 @@ function buildRuntime() {
   globalThis._clearApprovalForOwner = () => calls.push('clearApprovalForOwner');
   globalThis._clearClarifyForOwner = () => calls.push('clearClarifyForOwner');
   globalThis._streamFadeCleanupReduceMotionListener = () => calls.push('streamFadeCleanup');
+  globalThis._cancelThrottledSnapshotTimer = () => calls.push('cancelThrottledSnapshot');
+  globalThis._clearAnchorProseIncrementalNode = () => calls.push('clearAnchorProse');
   globalThis._cancelAnimationFramePendingStreamRender = () => calls.push('cancelRaf');
   globalThis.finalizeThinkingCard = () => calls.push('finalizeThinkingCard');
   globalThis.syncTopbar = () => calls.push('syncTopbar');

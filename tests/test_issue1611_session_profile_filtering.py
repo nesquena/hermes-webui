@@ -182,7 +182,50 @@ def test_static_sessions_js_marks_all_profiles_imports_with_profile():
     assert "function _externalImportPayload(session)" in src
     assert "payload.all_profiles = true;" in src
     assert "payload.profile = session.profile;" in src
-    assert "JSON.stringify(_externalImportPayload(s))" in src
+    assert "JSON.stringify(_externalImportPayload(s))" in src or "JSON.stringify(_externalImportPayload(session))" in src
+
+
+def test_static_sessions_js_switches_profile_before_opening_all_profiles_row():
+    """Clicking a cross-profile sidebar row must switch the active profile first.
+
+    /api/session intentionally rejects a foreign-profile session_id. The UI must
+    use the row's profile metadata from ?all_profiles=1 before calling loadSession().
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).parent.parent
+    src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+
+    ensure_idx = src.index("async function _ensureSidebarSessionProfile(session)")
+    open_idx = src.index("async function _openSidebarSession(session, loadOpts={})")
+    ensure_body = src[ensure_idx:open_idx]
+    open_body = src[open_idx:src.index("function _isReadOnlySession", open_idx)]
+
+    assert "await switchToProfile(targetProfile);" in ensure_body
+    assert "_profileSwitchOpeningExistingSession=true;" in ensure_body
+    assert open_body.index("await _ensureSidebarSessionProfile(session);") < open_body.index("await loadSession(session.session_id, loadOpts);")
+    assert "await _openSidebarSession(s);" in src
+    assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in src
+    assert "await _openSidebarSession(childSession, {skipLineageResolve:true});" in src
+
+
+def test_static_all_profiles_toggle_is_persisted_and_not_reset_by_profile_switch():
+    """The all-profiles toggle is a shared navigation preference, not per-profile state."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).parent.parent
+    sessions_src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+    panels_src = (repo_root / 'static' / 'panels.js').read_text(encoding='utf-8')
+
+    assert "const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';" in sessions_src
+    assert "localStorage.setItem(SHOW_ALL_PROFILES_STORAGE_KEY" in sessions_src
+    assert "_restoreShowAllProfiles();" in sessions_src
+    assert "_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});" in sessions_src
+    assert "_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});" in sessions_src
+
+    switch_start = panels_src.index("async function switchToProfile(name) {")
+    switch_body = panels_src[switch_start:panels_src.index("function openProfileCreate", switch_start)]
+    assert "_showAllProfiles = false" not in switch_body
 
 
 # ── SHOULD-FIX #2: profile filter must run BEFORE messaging-source dedupe ──

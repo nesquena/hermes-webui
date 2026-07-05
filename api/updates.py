@@ -214,12 +214,60 @@ def _run_git(args, cwd, timeout=10):
         return f'git failed to start: {exc}', False
 
 
+def _windows_git_from_registry():
+    """Best-effort resolve git.exe from the Git-for-Windows registry key.
+
+    Git for Windows records its install root at
+    ``HKLM\\SOFTWARE\\GitForWindows\\InstallPath`` (and the WOW6432Node mirror
+    for a 32-bit install on 64-bit Windows). ``git.exe`` lives under
+    ``<InstallPath>\\cmd\\git.exe``. This is the reliable way to find git when
+    it is installed but NOT on the launching process's PATH — e.g. the WebUI
+    server started from a venv python whose environment does not inherit the
+    interactive shell PATH, which otherwise degrades WEBUI_VERSION to
+    ``'unknown'`` and freezes the ``?v=`` static-asset cache-busting stamp.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None
+    for hive, flag in (
+        (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_64KEY),
+        (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_32KEY),
+        (winreg.HKEY_CURRENT_USER, 0),
+    ):
+        try:
+            with winreg.OpenKey(
+                hive, r'SOFTWARE\GitForWindows', 0,
+                winreg.KEY_READ | flag,
+            ) as key:
+                install_path, _ = winreg.QueryValueEx(key, 'InstallPath')
+        except OSError:
+            continue
+        if not install_path:
+            continue
+        candidate = os.path.join(install_path, 'cmd', 'git.exe')
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def _resolve_git_executable():
     git_executable = shutil.which('git')
     if git_executable:
         return git_executable
     if sys.platform == 'darwin' and os.path.exists('/usr/bin/git'):
         return '/usr/bin/git'
+    if sys.platform == 'win32':
+        from_registry = _windows_git_from_registry()
+        if from_registry:
+            return from_registry
+        for candidate in (
+            os.path.expandvars(r'%ProgramFiles%\Git\cmd\git.exe'),
+            os.path.expandvars(r'%ProgramFiles(x86)%\Git\cmd\git.exe'),
+            os.path.expandvars(r'%LocalAppData%\Programs\Git\cmd\git.exe'),
+        ):
+            if candidate and os.path.exists(candidate):
+                return candidate
     return None
 
 
