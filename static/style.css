@@ -5729,7 +5729,7 @@ main.main > #mainPlugin{display:none;}
    enough to avoid scrollHeight recalculation jumps that kill flick-scroll
    momentum on iOS. */
 @media (pointer: coarse) {
-  .msg-row { content-visibility: auto; contain-intrinsic-size: auto 1px; contain: layout style; }
+  .msg-row { content-visibility: auto; contain-intrinsic-size: auto 400px; contain: layout style; }
   /* Keep the LIVE streaming turn fully rendered while a response streams. The
      live turn is always id="liveAssistantTurn" (assigned on every render path:
      Compact Worklog, Transparent Stream, restored-live, etc.), but ONLY the
