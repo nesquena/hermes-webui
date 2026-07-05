@@ -43126,7 +43126,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_singl
         "https://api.github.com.evil.test/repos/capy/spaces/invitations/701",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_single_invitation_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_single_invitation_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     suffix,
@@ -43177,13 +43177,18 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_singl
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("no-matching-safe-query", limit=5)
-    serialized = json.dumps({"result": result, "search": search, "catalog": source_catalog(limit=5)}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("space-single-invitation-final-url-drift", limit=5)
+    serialized = json.dumps(
+        {"result": result, "search": search, "relevant": relevant, "catalog": source_catalog(limit=5)},
+        sort_keys=True,
+    ).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] in {"refresh fetcher disabled", "refresh failed"}
     assert read_calls == []
     assert search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert drifted_final_url.lower() not in serialized
     for unsafe in (
@@ -43191,11 +43196,16 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_singl
         "drift-invitee",
         "drift-inviter",
         "secret_value_do_not_leak",
+        "?access_token",
         "access_token",
+        "#raw-prompt",
         "raw-prompt",
         "ignore previous instructions",
         "api_key",
+        "api-auth",
+        "renderer",
         "render()",
+        "user@api.github.com",
         "api.github.com.evil",
     ):
         assert unsafe not in serialized
