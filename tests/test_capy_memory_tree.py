@@ -47510,7 +47510,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_si
         ),
     ],
 )
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_single_analysis_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_single_analysis_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     case_name,
@@ -47553,8 +47553,12 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_si
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("single analysis drift body sentinel", limit=5)
+    relevant = relevant_memory_for_space("code-scanning-single-analysis-drift-space", limit=5)
     catalog = source_catalog(limit=5)
-    serialized = json.dumps({"catalog": catalog, "result": result, "search": search}, sort_keys=True).lower()
+    serialized = json.dumps(
+        {"catalog": catalog, "relevant": relevant, "result": result, "search": search},
+        sort_keys=True,
+    ).lower()
 
     assert calls == [{"url": "https://api.github.com/repos/capy/spaces/code-scanning/analyses/101", "timeout": 8, "accept": "application/json"}]
     assert read_calls == []
@@ -47563,6 +47567,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_si
     assert result["jobs"][0]["error"] in {"refresh fetcher disabled", "refresh failed"}
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "single_analysis_drift_body_sentinel",
         "evil-space",
