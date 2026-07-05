@@ -674,6 +674,11 @@ function _scheduleActiveSessionIdleReload(sid) {
   if(!sid) return;
   setTimeout(async () => {
     if(!S||!S.session||S.session.session_id !== sid) return;
+    // #5409: skip idle reload while any loadSession() is in flight — avoids
+    // a race where the idle reload overwrites _loadingSessionId and silently
+    // cancels an in-progress session switch (most visible on iOS PWA with
+    // large sessions where Phase 1 metadata fetch is slow).
+    if(typeof _loadingSessionId !== 'undefined' && _loadingSessionId) return;
     if(S.busy || S.activeStreamId) return;
     if(typeof _isMessageReaderUnpinned==='function'&&_isMessageReaderUnpinned()){
       _deferActiveSessionExternalRefresh('idle-reconcile');
@@ -5079,6 +5084,11 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
       // tradeoffs).
       const _recoveryReasons = {visible:true, focus:true};
       const _keepStaleUntilLoaded = !!_recoveryReasons[String(reason||'')];
+      // #5409: skip force-reload while a different session's loadSession()
+      // is in flight — avoids overwriting _loadingSessionId and silently
+      // cancelling an in-progress session switch. All four call paths
+      // (idle-reconcile, poll, visibility, focus) funnel through here.
+      if(typeof _loadingSessionId !== 'undefined' && _loadingSessionId && _loadingSessionId !== sid) return 'skipped';
       await loadSession(sid, {force:true, externalRefreshReason:reason||'poll', keepStaleUntilLoaded:_keepStaleUntilLoaded});
       if(typeof renderSessionList==='function') void renderSessionList();
       return 'reloaded';
@@ -7337,6 +7347,8 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
+          // #5409: close mobile sidebar synchronously before navigation
+          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
         lineageList.appendChild(row);
@@ -7349,6 +7361,8 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
       const openChildSession=async(childSession)=>{
+        // #5409: close mobile sidebar synchronously before navigation
+        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
@@ -7974,8 +7988,12 @@ function renderSessionListFromCache(){
         if(_renamingSid) return;
         try{
           if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          await _openSidebarSession(s);
+          // #5409: close mobile sidebar synchronously BEFORE awaiting _openSidebarSession
+          // so the user gets instant feedback that navigation is happening, even
+          // for large sessions where loadSession can take 3-15s (metadata fetch +
+          // message load + renderMessages DOM build on slow iOS WKWebView).
           if(typeof closeMobileSidebar==='function')closeMobileSidebar();
+          await _openSidebarSession(s);
         }finally{
           el.classList.remove('loading');
         }
