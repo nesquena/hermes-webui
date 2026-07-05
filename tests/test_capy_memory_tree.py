@@ -60254,7 +60254,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_codeowners_error
     assert "raw_prompt" not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_codeowners_errors_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_codeowners_errors_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     canonical_codeowners_errors_url = "https://api.github.com/repos/capy/spaces/codeowners/errors"
     drift_url = "https://api.github.com/repos/other/private/codeowners/errors?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt"
@@ -60294,7 +60294,8 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_codeowners_error
     catalog = capy_memory.source_catalog(limit=5)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("codeowners errors final url drift", limit=5)
-    serialized = json.dumps({"receipt": receipt, "result": result, "catalog": catalog, "jobs": jobs, "search": search}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("codeowners-errors-drift-space", limit=5)
+    serialized = json.dumps({"receipt": receipt, "result": result, "catalog": catalog, "jobs": jobs, "search": search, "relevant": relevant}, sort_keys=True).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["job_id"] == receipt["job_id"]
@@ -60307,6 +60308,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_codeowners_error
     }]
     assert not (root / "vault" / "github-codeowners-errors-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         drift_url.lower(),
         "repos/other/private",
