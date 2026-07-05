@@ -190,6 +190,32 @@ def _isolate_hermes_config_path():
     os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
 
 
+@pytest.fixture(autouse=True)
+def _reset_password_hash_cache():
+    """Reset the memoized password-hash cache around every test (#5588).
+
+    api.auth.get_password_hash() caches the resolved hash process-wide
+    (_AUTH_HASH_CACHE / _AUTH_HASH_COMPUTED) for perf — it is NOT keyed on the
+    HERMES_WEBUI_PASSWORD env var. A test that sets that env var (e.g.
+    test_session_static_assets.test_session_static_auth_exemption) populates the
+    cache with a real hash; monkeypatch pops the env var on teardown but the
+    cache stays populated, so is_auth_enabled() reads stale True and later tests
+    (e.g. test_issue803's profile-cookie helpers) fail with a spurious
+    "requires a request handler when auth is enabled". Invalidate before AND
+    after each test so neither a pre-existing cached value nor a value this test
+    populates leaks across the isolation boundary. No-op when auth is off.
+    """
+    try:
+        from api.auth import _invalidate_password_hash_cache
+    except Exception:
+        _invalidate_password_hash_cache = None
+    if _invalidate_password_hash_cache:
+        _invalidate_password_hash_cache()
+    yield
+    if _invalidate_password_hash_cache:
+        _invalidate_password_hash_cache()
+
+
 _MISSING = object()  # sentinel: api.profiles module not loaded pre-test
 
 
