@@ -66376,7 +66376,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_private_vulnerab
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_private_vulnerability_reporting_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_private_vulnerability_reporting_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -66419,8 +66419,15 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_private_vulnerab
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("private vulnerability reporting", limit=5)
+    relevant = relevant_memory_for_space("private-vulnerability-reporting-drift-space", limit=5)
     catalog = capy_memory.source_catalog(limit=5)
-    serialized = json.dumps({"catalog": catalog, "receipt": receipt, "result": result, "search": search}, sort_keys=True).lower()
+    serialized = json.dumps({
+        "catalog": catalog,
+        "receipt": receipt,
+        "relevant": relevant,
+        "result": result,
+        "search": search,
+    }, sort_keys=True).lower()
 
     assert calls == [{
         "url": "https://api.github.com/repos/capy/spaces/private-vulnerability-reporting",
@@ -66434,6 +66441,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_private_vulnerab
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / "github-private-vulnerability-reporting-final-url-drift.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "secret_value_do_not_leak",
         "ignore previous instructions",
