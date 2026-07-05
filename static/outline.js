@@ -17,7 +17,7 @@ function _currentSid() {
 }
 
 function _outlineAllowed() {
-  const compact = window.matchMedia && window.matchMedia('(max-width:900px)').matches;
+  const compact = window.matchMedia && window.matchMedia('(max-width:1020px)').matches;
   // The outline is a chat-view affordance only — never show the toggle or panel
   // while another MAIN panel (settings, tasks, insights, …) is active. _currentPanel
   // is owned by panels.js; treat an undefined/absent value as the chat default.

@@ -142,7 +142,7 @@ async function _finalizeComposerPrefillOnBoot(prefillIntent){
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 
 function _isCompactWorkspaceViewport(){
-  return window.matchMedia('(max-width: 900px)').matches;
+  return window.matchMedia('(max-width: 1020px)').matches;
 }
 
 function _isPhoneWidthViewport(){
