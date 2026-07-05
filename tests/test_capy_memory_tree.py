@@ -51156,7 +51156,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_dependabot_alert
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_alerts_final_url_query_fragment_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_alerts_final_url_query_fragment_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -51222,12 +51222,14 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_alert
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("drift-body-sentinel-package", limit=5)
+    relevant = relevant_memory_for_space("dependabot-alerts-drift-space", limit=5)
     vault_path = root / "vault" / "github-dependabot-alerts-final-url-drift.md"
     vault_text = vault_path.read_text(encoding="utf-8").lower() if vault_path.exists() else ""
     public_serialized = json.dumps({
         "receipt": receipt,
         "result": result,
         "search_results": search["results"],
+        "relevant_results": relevant["results"],
     }, sort_keys=True).lower()
 
     assert calls == [{"url": "https://api.github.com/repos/capy/spaces/dependabot/alerts", "timeout": 8, "accept": "application/json"}]
@@ -51237,6 +51239,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_alert
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] in {"refresh failed", "refresh fetcher disabled"}
     assert search["results"] == []
+    assert relevant["results"] == []
     assert not vault_path.exists()
     for unsafe in (
         "secret_value_do_not_leak",
