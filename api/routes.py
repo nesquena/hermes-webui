@@ -5198,25 +5198,33 @@ def apply_cors_preflight_headers(handler) -> None:
 
 def apply_cors_actual_response_headers(handler) -> None:
     """Emit credentialed CORS headers on actual (non-preflight) responses for
-    allowlisted cross-origin front-ends. Called from server.py end_headers so
-    server.py stays a thin dispatcher (mirrors apply_cors_preflight_headers).
+    allowlisted cross-origin front-ends. Called from server.py end_headers on
+    EVERY response so server.py stays a thin dispatcher (mirrors
+    apply_cors_preflight_headers). Skips OPTIONS (the preflight path owns those
+    headers) and no-ops when no allowlist is configured. Guarded so a header
+    hiccup never breaks the response body.
 
     Gated on the explicit HERMES_WEBUI_ALLOWED_ORIGINS allowlist; Allow-Credentials
     additionally requires a Secure (HTTPS) context, matching the cookie gate.
     """
-    if not _allowed_public_origins():
-        return
-    # Vary whenever the allowlist is configured so a shared cache never replays
-    # an Origin-specific response to a different origin.
-    handler.send_header("Vary", "Origin")
-    origin = cors_credentialed_origin(handler)
-    if not origin:
-        return
-    from api.auth import _is_secure_context
+    try:
+        if getattr(handler, "command", None) == "OPTIONS":
+            return
+        if not _allowed_public_origins():
+            return
+        # Vary whenever the allowlist is configured so a shared cache never
+        # replays an Origin-specific response to a different origin.
+        handler.send_header("Vary", "Origin")
+        origin = cors_credentialed_origin(handler)
+        if not origin:
+            return
+        from api.auth import _is_secure_context
 
-    handler.send_header("Access-Control-Allow-Origin", origin)
-    if _is_secure_context(handler):
-        handler.send_header("Access-Control-Allow-Credentials", "true")
+        handler.send_header("Access-Control-Allow-Origin", origin)
+        if _is_secure_context(handler):
+            handler.send_header("Access-Control-Allow-Credentials", "true")
+    except Exception:
+        pass
 
 
 def _csrf_exempt_path(path: str) -> bool:

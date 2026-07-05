@@ -332,14 +332,7 @@ class Handler(BaseHTTPRequestHandler):
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
-        # Credentialed CORS for actual (non-preflight) responses to allowlisted
-        # cross-origin front-ends. OPTIONS is handled by apply_cors_preflight_headers
-        # in do_OPTIONS, so skip it here to avoid a duplicate Allow-Origin.
-        if getattr(self, "command", None) != "OPTIONS":
-            try:
-                apply_cors_actual_response_headers(self)
-            except Exception:
-                pass
+        apply_cors_actual_response_headers(self)  # credentialed CORS (routes.py owns the logic)
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
