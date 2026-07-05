@@ -44714,7 +44714,7 @@ def test_github_code_scanning_alerts_final_url_matches_origin_requires_exact_cle
     ("fragment", "https://api.github.com/repos/capy/spaces/code-scanning/alerts#raw-prompt"),
     ("tail", "https://api.github.com/repos/capy/spaces/code-scanning/alerts/raw"),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_alerts_final_url_drift_before_body_read(tmp_path, monkeypatch, case, drifted_final_url):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_alerts_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch, case, drifted_final_url):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -44773,11 +44773,13 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_al
     jobs = list_source_refresh_jobs(limit=5)
     catalog = capy_memory.source_catalog(limit=5)
     search = search_memory("code scanning alerts final url drift sentinel", limit=5)
+    relevant = relevant_memory_for_space("code-scanning-alerts-drift-space", limit=5)
     serialized = json.dumps({
         "result": result,
         "jobs": jobs,
         "catalog": catalog,
         "search": search,
+        "relevant": relevant,
     }, sort_keys=True).lower()
 
     assert calls == [{"url": clean_origin, "timeout": 8, "accept": "application/json"}]
@@ -44789,6 +44791,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_code_scanning_al
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert memory_status()["chunk_count"] == 0
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         drifted_final_url.lower(),
         "api.github.com/repos/capy/spaces/code-scanning/alerts",
