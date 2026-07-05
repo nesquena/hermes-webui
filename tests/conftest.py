@@ -1058,6 +1058,21 @@ def _invalidate_models_cache_after_test():
         pass
 
 
+@pytest.fixture(autouse=True)
+def _invalidate_auth_password_hash_cache_after_test():
+    try:
+        from api.auth import _invalidate_password_hash_cache
+        _invalidate_password_hash_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        from api.auth import _invalidate_password_hash_cache
+        _invalidate_password_hash_cache()
+    except Exception:
+        pass
+
+
 # ── Per-test session cleanup ──────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
