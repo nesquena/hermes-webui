@@ -5669,14 +5669,14 @@ def _messages_have_final_assistant_for_current_turn(
         # Repeated prompts are common in recovery/retry flows.  When we know the
         # current turn's send time, choose the latest matching user row at/after
         # that boundary so an older identical prompt + answer cannot suppress a
-        # real no_response for the new turn.  Stored timestamps may be integer
-        # seconds while pending_started_at is subsecond, so allow a one-second
-        # floor tolerance.
+        # real no_response for the new turn.  Fail closed on rows before the
+        # anchor; even a same-second older retry is ambiguous and must not hide a
+        # current silent failure.
         for idx, msg in enumerate(turn_messages):
             if not _looks_like_current_user_turn(msg, msg_text):
                 continue
             msg_ts = _message_timestamp_value(msg)
-            if msg_ts is None or msg_ts + 1.0 < min_ts:
+            if msg_ts is None or msg_ts < min_ts:
                 continue
             current_user_idx = idx
     if current_user_idx is None:

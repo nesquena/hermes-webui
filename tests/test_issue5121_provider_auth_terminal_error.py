@@ -563,22 +563,24 @@ def test_repeated_prompt_old_answer_does_not_suppress_current_no_response(tmp_pa
     persisted = Session.load("repeated_prompt_silent_failure")
     assert persisted is not None
     persisted.messages = [
-        {"role": "user", "content": "Repeat this exact request", "timestamp": 1},
-        {"role": "assistant", "content": "Old answer must not satisfy the new turn", "timestamp": 2},
+        {"role": "user", "content": "Repeat this exact request", "timestamp": 1234567890.0},
+        {"role": "assistant", "content": "Old answer must not satisfy the new turn", "timestamp": 1234567890.1},
     ]
     persisted.context_messages = list(persisted.messages)
     persisted.active_stream_id = "stream_repeated_prompt_silent_failure"
     persisted.pending_user_message = "Repeat this exact request"
     persisted.pending_attachments = ["attachment.txt"]
-    persisted.pending_started_at = 1234567890.0
+    persisted.pending_started_at = 1234567890.75
     persisted.save()
 
-    # The in-flight worker is for a newer same-text prompt. Prompt text alone is
-    # ambiguous under retries; because the persisted user row predates this turn,
-    # the guard must fail closed and let the real no_response surface.
+    # The in-flight worker is for a newer same-text prompt in the same integer
+    # second as the older persisted prompt. Prompt text plus a 1s floor tolerance
+    # is still ambiguous under retries; because the persisted user row predates
+    # this turn's exact send anchor, the guard must fail closed and let the real
+    # no_response surface.
     session.messages = []
     session.context_messages = []
-    session.pending_started_at = 1234567890.0
+    session.pending_started_at = 1234567890.75
     models.SESSIONS[session.session_id] = session
 
     class SilentFailureAfterOldRepeatedPromptAgent(MockAgent):
