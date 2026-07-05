@@ -502,8 +502,12 @@ def test_silent_failure_suppressed_when_final_answer_already_persisted(tmp_path,
     persisted = Session.load("silent_failure_already_persisted")
     assert persisted is not None
     persisted.messages = [
-        {"role": "user", "content": "Please use persisted answer", "timestamp": 1},
-        {"role": "assistant", "content": "Already persisted answer", "timestamp": 2},
+        {"role": "user", "content": "Please use persisted answer", "timestamp": 1234567890},
+        {"role": "assistant", "content": "Already persisted answer", "timestamp": 1234567891},
+    ]
+    persisted.context_messages = [
+        {"role": "user", "content": "Please use persisted answer", "timestamp": 1234567890},
+        {"role": "assistant", "content": "Already persisted answer", "timestamp": 1234567891},
     ]
     persisted.active_stream_id = "stream_silent_failure_already_persisted"
     persisted.pending_user_message = "Please use persisted answer"
@@ -545,7 +549,84 @@ def test_silent_failure_suppressed_when_final_answer_already_persisted(tmp_path,
     assert saved.pending_user_source is None
     assert saved.messages[-1]["role"] == "assistant"
     assert saved.messages[-1]["content"] == "Already persisted answer"
+    assert saved.context_messages[-1]["role"] == "assistant"
+    assert saved.context_messages[-1]["content"] == "Already persisted answer"
     assert not any(msg.get("_error") for msg in saved.messages)
+
+
+def test_repeated_prompt_old_answer_does_not_suppress_current_no_response(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "repeated_prompt_silent_failure",
+        "stream_repeated_prompt_silent_failure",
+        pending_user_message="Repeat this exact request",
+    )
+    persisted = Session.load("repeated_prompt_silent_failure")
+    assert persisted is not None
+    persisted.messages = [
+        {"role": "user", "content": "Repeat this exact request", "timestamp": 1},
+        {"role": "assistant", "content": "Old answer must not satisfy the new turn", "timestamp": 2},
+    ]
+    persisted.context_messages = list(persisted.messages)
+    persisted.active_stream_id = "stream_repeated_prompt_silent_failure"
+    persisted.pending_user_message = "Repeat this exact request"
+    persisted.pending_attachments = ["attachment.txt"]
+    persisted.pending_started_at = 1234567890.0
+    persisted.save()
+
+    # The in-flight worker is for a newer same-text prompt. Prompt text alone is
+    # ambiguous under retries; because the persisted user row predates this turn,
+    # the guard must fail closed and let the real no_response surface.
+    session.messages = []
+    session.context_messages = []
+    session.pending_started_at = 1234567890.0
+    models.SESSIONS[session.session_id] = session
+
+    class SilentFailureAfterOldRepeatedPromptAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            return {
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_repeated_prompt_silent_failure",
+        SilentFailureAfterOldRepeatedPromptAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("repeated_prompt_silent_failure")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected no_response for the newer repeated prompt"
+    assert apperrors[-1]["type"] == "no_response"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
+
+
+def test_persisted_final_guard_accepts_already_settled_previous_display():
+    """A stale no_response branch must trust a finished persisted transcript.
+
+    Real WebUI recovery can re-enter the silent-failure branch after the sidecar
+    and state.db already contain the current user turn and final assistant
+    answer. In that case the stale worker's ``previous_display`` may itself be
+    the already-settled transcript; the persisted-truth guard must not reject
+    the answer merely because it falls before that stale boundary.
+    """
+    msg_text = "repeat visible CUA tests"
+    settled = [
+        {"role": "user", "content": msg_text, "timestamp": 1},
+        {"role": "assistant", "content": "Visible CUA tests completed", "timestamp": 2},
+    ]
+
+    assert streaming._messages_have_final_assistant_for_current_turn(
+        settled,
+        msg_text,
+        previous_display=list(settled),
+        min_user_timestamp=1,
+    ) is True
 
 
 def test_completed_assistant_answer_with_stale_partial_flag_settles_done(tmp_path, monkeypatch):

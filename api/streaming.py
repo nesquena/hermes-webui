@@ -5630,11 +5630,22 @@ def _turn_transcript_lacks_final_assistant_answer(
     return _session_lacks_final_assistant_answer(filtered_messages)
 
 
+def _message_timestamp_value(message):
+    if not isinstance(message, dict):
+        return None
+    raw = message.get('_ts') or message.get('timestamp')
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _messages_have_final_assistant_for_current_turn(
     messages,
     msg_text,
     *,
     previous_display=None,
+    min_user_timestamp=None,
 ) -> bool:
     """Return True when *messages* already contain a final answer for this turn.
 
@@ -5647,22 +5658,49 @@ def _messages_have_final_assistant_for_current_turn(
     at the current-turn boundary rather than an older repeated prompt.
     """
     turn_messages = list(messages or [])
-    current_user_idx = _find_current_user_turn(turn_messages, msg_text)
+    min_ts = None
+    try:
+        if min_user_timestamp is not None:
+            min_ts = float(min_user_timestamp)
+    except (TypeError, ValueError):
+        min_ts = None
+    current_user_idx = None
+    if min_ts is not None and min_ts > 0:
+        # Repeated prompts are common in recovery/retry flows.  When we know the
+        # current turn's send time, choose the latest matching user row at/after
+        # that boundary so an older identical prompt + answer cannot suppress a
+        # real no_response for the new turn.  Stored timestamps may be integer
+        # seconds while pending_started_at is subsecond, so allow a one-second
+        # floor tolerance.
+        for idx, msg in enumerate(turn_messages):
+            if not _looks_like_current_user_turn(msg, msg_text):
+                continue
+            msg_ts = _message_timestamp_value(msg)
+            if msg_ts is None or msg_ts + 1.0 < min_ts:
+                continue
+            current_user_idx = idx
+    if current_user_idx is None:
+        if min_ts is not None and min_ts > 0:
+            return False
+        current_user_idx = _find_current_user_turn(turn_messages, msg_text)
     if current_user_idx is None:
         return False
     previous_display = list(previous_display or [])
     if previous_display and current_user_idx < len(previous_display):
         # ``current_user_idx`` belongs to the persisted/reconciled transcript,
         # while ``previous_display`` is the stale worker's pre-turn view. Keep
-        # this boundary check deliberately conservative: returning False can
-        # miss suppression in a pruned/compressed edge case, but relaxing it can
-        # let an older repeated prompt + old answer mask a real current-turn
-        # silent failure.
+        # this boundary check conservative, but do not reject the exact case this
+        # persisted-truth guard exists for: the durable view may already contain
+        # the current user turn AND its final assistant answer when a stale
+        # worker later falls into the no_response path.
         previous_tail_is_current_user = (
             current_user_idx == len(previous_display) - 1
             and _looks_like_current_user_turn(previous_display[-1], msg_text)
         )
-        if not previous_tail_is_current_user:
+        previous_display_already_settled = not _session_lacks_final_assistant_answer(
+            previous_display[current_user_idx:]
+        )
+        if not previous_tail_is_current_user and not previous_display_already_settled:
             return False
     for msg in turn_messages[current_user_idx + 1:]:
         if not isinstance(msg, dict):
@@ -5686,17 +5724,32 @@ def _persisted_final_assistant_messages(
     *,
     previous_display=None,
     profile=None,
-) -> list | None:
-    """Return persisted transcript when it already has this turn's answer.
+    min_user_timestamp=None,
+) -> dict | None:
+    """Return persisted transcript state when it already has this turn's answer.
 
     The streaming worker can reach the silent-failure branch after another
     recovery/settlement path has already written the final assistant answer to
     the sidecar or state.db. Trust persisted transcript truth before appending a
-    synthetic ``No response from provider`` row.
+    synthetic ``No response from provider`` row. Return both visible messages and
+    model-facing ``context_messages`` so the repair cannot make the UI look
+    correct while silently dropping the final answer from the next turn's model
+    context.
     """
     sid = str(session_id or '').strip()
     if not sid or not str(msg_text or '').strip():
         return None
+
+    def _snapshot(messages, context_messages=None):
+        visible = list(messages or [])
+        context = list(context_messages or [])
+        if not context:
+            context = list(visible)
+        return {
+            'messages': visible,
+            'context_messages': context,
+        }
+
     try:
         from api.models import Session as _Session
         persisted = _Session.load(sid)
@@ -5704,12 +5757,14 @@ def _persisted_final_assistant_messages(
         persisted = None
     if persisted is not None:
         sidecar_messages = list(getattr(persisted, 'messages', None) or [])
+        sidecar_context = list(getattr(persisted, 'context_messages', None) or [])
         if _messages_have_final_assistant_for_current_turn(
             sidecar_messages,
             msg_text,
             previous_display=previous_display,
+            min_user_timestamp=min_user_timestamp,
         ):
-            return sidecar_messages
+            return _snapshot(sidecar_messages, sidecar_context)
         try:
             state_messages = get_state_db_session_messages(
                 sid,
@@ -5729,8 +5784,17 @@ def _persisted_final_assistant_messages(
             reconciled,
             msg_text,
             previous_display=previous_display,
+            min_user_timestamp=min_user_timestamp,
         ):
-            return list(reconciled)
+            try:
+                context_reconciled = reconciled_state_db_messages_for_session(
+                    persisted,
+                    prefer_context=True,
+                    state_messages=state_messages,
+                )
+            except Exception:
+                context_reconciled = []
+            return _snapshot(reconciled, context_reconciled)
     else:
         try:
             state_messages = get_state_db_session_messages(
@@ -5744,8 +5808,9 @@ def _persisted_final_assistant_messages(
             state_messages,
             msg_text,
             previous_display=previous_display,
+            min_user_timestamp=min_user_timestamp,
         ):
-            return list(state_messages)
+            return _snapshot(state_messages)
     return None
 
 
@@ -9039,6 +9104,7 @@ def _run_agent_streaming(
                                 msg_text,
                                 previous_display=_previous_messages,
                                 profile=getattr(s, 'profile', None),
+                                min_user_timestamp=getattr(s, 'pending_started_at', None),
                             )
                         if _persisted_final_messages:
                             logger.info(
@@ -9046,8 +9112,10 @@ def _run_agent_streaming(
                                 s.session_id,
                                 stream_id,
                             )
-                            s.messages = list(_persisted_final_messages)
+                            s.messages = list(_persisted_final_messages.get('messages') or [])
+                            s.context_messages = list(_persisted_final_messages.get('context_messages') or [])
                             _stamp_missing_message_timestamps(s.messages)
+                            _stamp_missing_message_timestamps(s.context_messages)
                             s.tool_calls = _extract_tool_calls_from_messages(
                                 s.messages,
                                 live_tool_calls=_live_tool_calls,
