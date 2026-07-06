@@ -4416,6 +4416,16 @@ function _ensureReasoningDropdownOptions(){
     header.textContent=_normalizeReasoningScope(scope)==='session' ? 'This session' : 'Profile default';
     header.style.cssText='padding:6px 10px 4px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;';
     dd.appendChild(header);
+    if(_normalizeReasoningScope(scope)==='session'){
+      // The session override is otherwise a one-way door: the backend clears it
+      // on an empty POST, but nothing else in the UI ever sends that clear.
+      const clearOpt=document.createElement('div');
+      clearOpt.className='reasoning-option';
+      clearOpt.dataset.scope='session';
+      clearOpt.dataset.clear='1';
+      clearOpt.textContent='Use profile default';
+      dd.appendChild(clearOpt);
+    }
     templates.forEach(function(template){
       const opt=document.createElement('div');
       opt.className='reasoning-option';
@@ -4434,6 +4444,10 @@ function _applyReasoningOptions(supportedEfforts){
   if(!dd) return;
   const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    if(opt.dataset.clear){
+      opt.style.display='';
+      return;
+    }
     const effort=opt.dataset.effort;
     if(effort==='none'){
       opt.style.display='';
@@ -4501,7 +4515,7 @@ function _applyReasoningChip(eff){
     chip.setAttribute('aria-label',labelText);
   }
   if(mobileAction) mobileAction.classList.toggle('inactive',!effort||effort==='none');
-  _highlightReasoningOption(effort, scope);
+  _highlightReasoningOption(effort, scope, _currentReasoningStatus);
 }
 
 // Tracks the model/provider identity of the last reasoning fetch so routine
@@ -4567,15 +4581,42 @@ function syncReasoningChip(){
   fetchReasoningChip();
 }
 
-function _highlightReasoningOption(effort, scope){
+function _highlightReasoningOption(effort, scope, meta){
   if(typeof _ensureReasoningDropdownOptions==='function') _ensureReasoningDropdownOptions();
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
+  const normalizeScope=(typeof _normalizeReasoningScope==='function')
+    ? _normalizeReasoningScope
+    : function(s){return s==='session'?'session':'profile';};
+  const normalizeEffort=(typeof _normalizeReasoningEffort==='function')
+    ? _normalizeReasoningEffort
+    : function(e){return String(e||'').trim().toLowerCase();};
+  const status=(meta&&typeof meta==='object')
+    ? meta
+    : ((typeof _currentReasoningStatus!=='undefined' && _currentReasoningStatus) ? _currentReasoningStatus : null);
+  const normScope=normalizeScope(scope);
+  // Highlight each group by its own real value so both stay truthful when a
+  // session override masks the profile default (and vice versa).
+  const hasOverride=status
+    ? !!status.has_session_reasoning_override
+    : normScope==='session';
+  const sessionEffort=(status&&status.session_reasoning_effort!=null)
+    ? normalizeEffort(status.session_reasoning_effort)
+    : (normScope==='session' ? normalizeEffort(effort) : null);
+  const profileEffort=(status&&status.profile_reasoning_effort!=null)
+    ? normalizeEffort(status.profile_reasoning_effort)
+    : (normScope==='profile' ? normalizeEffort(effort) : null);
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
-    opt.classList.toggle(
-      'selected',
-      opt.dataset.effort===effort && _normalizeReasoningScope(opt.dataset.scope)===_normalizeReasoningScope(scope)
-    );
+    const optScope=normalizeScope(opt.dataset.scope);
+    if(opt.dataset.clear){
+      // The clear row is the active session state whenever no override is set.
+      opt.classList.toggle('selected', optScope==='session' && !hasOverride);
+      return;
+    }
+    const on=optScope==='session'
+      ? (hasOverride && opt.dataset.effort===sessionEffort)
+      : (profileEffort!=null && opt.dataset.effort===profileEffort);
+    opt.classList.toggle('selected', on);
   });
 }
 
@@ -4590,7 +4631,7 @@ function toggleReasoningDropdown(){
   closeModelDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
   _ensureReasoningDropdownOptions();
-  _highlightReasoningOption(_currentReasoningEffort, _currentReasoningScope);
+  _highlightReasoningOption(_currentReasoningEffort, _currentReasoningScope, _currentReasoningStatus);
   dd.classList.add('open');
   _positionReasoningDropdown();
   chip.classList.add('active');
@@ -4640,7 +4681,14 @@ function _sendReasoningEffort(scope, effort){
           const applied=fresh||st||{reasoning_scope:normalizedScope};
           const appliedScope=_normalizeReasoningScope((applied&&applied.reasoning_scope)||normalizedScope);
           _applyReasoningChip((applied&&applied.reasoning_effort)||effort, applied);
-          showToast('🧠 Reasoning effort set to '+((applied&&applied.reasoning_effort)||effort)+' ('+_formatReasoningScopeLabel(appliedScope).toLowerCase()+')');
+          if(appliedScope==='session'){
+            // The profile write landed but an active session override still wins,
+            // so name what actually happened instead of announcing the override.
+            const overrideLabel=_formatReasoningEffortLabel((applied&&applied.reasoning_effort)||'');
+            showToast('🧠 Profile default saved: '+_formatReasoningEffortLabel(effort)+'. This conversation keeps its '+overrideLabel+' session override.');
+          }else{
+            showToast('🧠 Reasoning effort set to '+((applied&&applied.reasoning_effort)||effort)+' ('+_formatReasoningScopeLabel(appliedScope).toLowerCase()+')');
+          }
           return applied;
         }).catch(function(){
           const fallbackScope=_normalizeReasoningScope((st&&st.reasoning_scope)||normalizedScope);
@@ -4656,6 +4704,23 @@ function _sendReasoningEffort(scope, effort){
     });
 }
 
+function _clearSessionReasoningEffort(){
+  const sessionId=_activeReasoningSessionId();
+  if(!sessionId){
+    if(typeof showToast==='function') showToast('Select a session before clearing its reasoning override.', 3000, 'warning');
+    return Promise.resolve(null);
+  }
+  const payload=Object.assign({effort:''},_reasoningEffortContext());
+  return api('/api/session/reasoning',{method:'POST',body:JSON.stringify(payload)})
+    .then(function(st){
+      const scope=_normalizeReasoningScope((st&&st.reasoning_scope)||'profile');
+      _applyReasoningChip((st&&st.reasoning_effort)||'', st||{reasoning_scope:scope});
+      const eff=st&&st.reasoning_effort;
+      showToast('🧠 This conversation now follows the profile default'+(eff?' ('+_formatReasoningEffortLabel(eff)+')':''));
+      return st;
+    });
+}
+
 document.addEventListener('click',function(e){
   if(
     !e.target.closest('#composerReasoningChip') &&
@@ -4664,6 +4729,11 @@ document.addEventListener('click',function(e){
   ) closeReasoningDropdown();
   if(e.target.closest('.reasoning-option')){
     const opt=e.target.closest('.reasoning-option');
+    if(opt&&opt.dataset.clear){
+      _clearSessionReasoningEffort().catch(function(){showToast('🧠 Failed to clear session override');});
+      closeReasoningDropdown();
+      return;
+    }
     const effort=opt&&opt.dataset.effort;
     const scope=opt&&opt.dataset.scope;
     if(effort){

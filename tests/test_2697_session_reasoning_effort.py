@@ -160,6 +160,12 @@ class FakeElement {{
     this.attributes[String(name)] = String(value);
     if (name === 'aria-label') this.ariaLabel = String(value);
   }}
+  get className() {{
+    return Array.from(this.classList._set).join(' ');
+  }}
+  set className(value) {{
+    this.classList._set = new Set(String(value ?? '').split(/\\s+/).filter(Boolean));
+  }}
   get textContent() {{
     return this._textContent;
   }}
@@ -327,6 +333,12 @@ class FakeElement {{
   setAttribute(name, value) {{
     this.attributes[String(name)] = String(value);
     if (name === 'aria-label') this.ariaLabel = String(value);
+  }}
+  get className() {{
+    return Array.from(this.classList._set).join(' ');
+  }}
+  set className(value) {{
+    this.classList._set = new Set(String(value ?? '').split(/\\s+/).filter(Boolean));
   }}
   get textContent() {{
     return this._textContent;
@@ -697,6 +709,100 @@ def test_profile_reasoning_write_refetches_session_effective_status_when_overrid
     assert data["label"].startswith("High")
     assert data["label"].endswith("Session")
     assert "session" in data["toast"]["msg"].lower()
+
+
+def test_session_override_can_be_cleared_back_to_profile_default():
+    data = _run_reasoning_ui_script(
+        """
+  responses.push({
+    reasoning_effort: 'high',
+    reasoning_scope: 'session',
+    supported_efforts: ['none', 'medium', 'high'],
+    has_session_reasoning_override: true,
+    session_reasoning_effort: 'high',
+    profile_reasoning_effort: 'medium',
+  });
+  syncReasoningChip();
+  await tick();
+  const clearLabels = dropdown.querySelectorAll('.reasoning-option').filter(opt => opt.dataset.clear).map(opt => opt.textContent);
+  responses.push({
+    reasoning_effort: 'medium',
+    reasoning_scope: 'profile',
+    supported_efforts: ['none', 'medium', 'high'],
+    has_session_reasoning_override: false,
+    session_reasoning_effort: null,
+    profile_reasoning_effort: 'medium',
+  });
+  await _clearSessionReasoningEffort();
+  const clearFetch = fetches[fetches.length - 1];
+  return {
+    clearLabels,
+    clearFetch,
+    label: nodes.composerReasoningLabel.textContent,
+    toast: toasts[toasts.length - 1],
+    clearSelected: dropdown.querySelectorAll('.reasoning-option').filter(opt => opt.dataset.clear && opt.classList.contains('selected')).length,
+  };
+        """
+    )
+
+    assert data["clearLabels"] == ["Use profile default"]
+    assert data["clearFetch"]["url"] == "/api/session/reasoning"
+    body = json.loads(data["clearFetch"]["opts"]["body"])
+    assert body["effort"] == ""
+    assert body["session_id"] == "session-a"
+    assert data["label"] == "Medium"
+    assert "profile default" in data["toast"]["msg"].lower()
+    assert data["clearSelected"] == 1
+
+
+def test_clear_action_requires_a_session():
+    data = _run_reasoning_ui_script(
+        """
+  S.session = null;
+  const before = fetches.length;
+  await _clearSessionReasoningEffort();
+  return { before, after: fetches.length, toast: toasts[toasts.length - 1] };
+        """
+    )
+
+    assert data["before"] == data["after"]
+    assert data["toast"]["type"] == "warning"
+    assert "Select a session" in data["toast"]["msg"]
+
+
+def test_profile_write_under_active_override_reports_masked_save_and_highlights_both_groups():
+    data = _run_reasoning_ui_script(
+        """
+  responses.push({
+    reasoning_effort: 'medium',
+    reasoning_scope: 'profile',
+    supported_efforts: ['none', 'medium', 'high'],
+    has_session_reasoning_override: false,
+  });
+  responses.push({
+    reasoning_effort: 'high',
+    reasoning_scope: 'session',
+    supported_efforts: ['none', 'medium', 'high'],
+    has_session_reasoning_override: true,
+    session_reasoning_effort: 'high',
+    profile_reasoning_effort: 'medium',
+  });
+  await _sendReasoningEffort('profile', 'medium');
+  return {
+    label: nodes.composerReasoningLabel.textContent,
+    toast: toasts[toasts.length - 1],
+    selectedScopes: dropdown.querySelectorAll('.reasoning-option').filter(opt => opt.classList.contains('selected') && !opt.dataset.clear).map(opt => opt.dataset.scope),
+  };
+        """
+    )
+
+    msg = data["toast"]["msg"].lower()
+    assert "profile default saved: medium" in msg
+    assert "high session override" in msg
+    assert data["label"].startswith("High")
+    assert data["label"].endswith("Session")
+    assert "session" in data["selectedScopes"]
+    assert "profile" in data["selectedScopes"]
 
 
 def test_reasoning_slash_status_stays_profile_global_with_active_session():
