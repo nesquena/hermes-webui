@@ -74,6 +74,38 @@ def test_scripts_list_empty():
     assert data["scripts"] == []
 
 
+def test_scripts_list_iterdir_oserror_returns_empty(monkeypatch):
+    """Direct list walk failures should degrade to an empty result, not a 500."""
+    import api.routes as routes
+
+    class _ScriptsDir:
+        def exists(self):
+            return True
+
+        def iterdir(self):
+            raise PermissionError("scripts dir unreadable")
+
+    captured = {}
+
+    monkeypatch.setattr(routes, "_hermes_scripts_dir", lambda: _ScriptsDir())
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200: captured.setdefault(
+            "result", {"handler": handler, "payload": payload, "status": status}
+        ),
+    )
+
+    handler = object()
+    routes._handle_scripts_list(handler)
+
+    assert captured["result"] == {
+        "handler": handler,
+        "payload": {"scripts": []},
+        "status": 200,
+    }
+
+
 def test_scripts_list_with_python_and_shell():
     """GET /api/scripts/list should return .py and .sh files with docstrings."""
     _clear_scripts_dir()
