@@ -4371,7 +4371,9 @@ function _reasoningEffortContext(){
   const ctx={};
   if(model) ctx.model=model;
   if(provider) ctx.provider=provider;
-  const sessionId=_activeReasoningSessionId();
+  const sessionId=typeof _activeReasoningSessionId==='function'
+    ? _activeReasoningSessionId()
+    : ((S&&S.session&&S.session.session_id) ? String(S.session.session_id) : '');
   if(sessionId) ctx.session_id=sessionId;
   return ctx;
 }
@@ -4443,7 +4445,13 @@ function _applyReasoningOptions(supportedEfforts){
 function _applyReasoningChip(eff){
   const meta=arguments[1]||null;
   const effort=_normalizeReasoningEffort(eff);
-  const scope=_normalizeReasoningScope(meta&&meta.reasoning_scope);
+  const normalizeScope=(typeof _normalizeReasoningScope==='function')
+    ? _normalizeReasoningScope
+    : function(scope){return scope==='session'?'session':'profile';};
+  const formatScopeLabel=(typeof _formatReasoningScopeLabel==='function')
+    ? _formatReasoningScopeLabel
+    : function(scope){return scope==='session'?'This session':'Profile default';};
+  const scope=normalizeScope(meta&&meta.reasoning_scope);
   _currentReasoningEffort=effort;
   _currentReasoningScope=scope;
   _currentReasoningStatus=meta&&typeof meta==='object' ? meta : null;
@@ -4471,7 +4479,7 @@ function _applyReasoningChip(eff){
   if(mobileAction) mobileAction.style.display='';
   if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
   const text=_formatReasoningEffortLabel(effort);
-  const scopeText=_formatReasoningScopeLabel(scope);
+  const scopeText=formatScopeLabel(scope);
   const displayText=text+' · '+scopeText;
   label.textContent=displayText;
   if(mobileLabel) mobileLabel.textContent=displayText;
@@ -4538,8 +4546,12 @@ function syncReasoningChip(){
   // response (10 syncs before the first GET resolves must produce ONE request,
   // not ten). Apply the cached chip only once we actually have an effort value.
   if(_lastReasoningFetchKey===key){
-    if(_currentReasoningStatus) _applyReasoningChip(_currentReasoningEffort, _currentReasoningStatus);
-    else if(_currentReasoningEffort!==null) _applyReasoningChip(_currentReasoningEffort, {reasoning_scope:_currentReasoningScope, supported_efforts:_currentReasoningEffortsSupported||[]});
+    const status=(typeof _currentReasoningStatus==='undefined') ? null : _currentReasoningStatus;
+    if(status) _applyReasoningChip(_currentReasoningEffort, status);
+    else if(_currentReasoningEffort!==null) _applyReasoningChip(_currentReasoningEffort, {
+      reasoning_scope:(typeof _currentReasoningScope==='undefined') ? 'profile' : _currentReasoningScope,
+      supported_efforts:_currentReasoningEffortsSupported||[],
+    });
     return;
   }
   fetchReasoningChip();
