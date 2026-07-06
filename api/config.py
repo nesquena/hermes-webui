@@ -3633,22 +3633,31 @@ def get_reasoning_status(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    session=None,
 ) -> dict:
     """Return current reasoning configuration from the active profile's
     config.yaml — the same source of truth the CLI reads from.
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
-      - reasoning_effort: str — from ``agent.reasoning_effort`` ('' = default)
+      - reasoning_effort: str — effective effort after session/profile resolve
     """
     config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
-    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    profile_effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    session_effort_raw = getattr(session, "reasoning_effort", None) if session is not None else None
+    if session_effort_raw is not None:
+        session_effort_raw = str(session_effort_raw).strip().lower() or None
 
     resolve_model = model_id
     resolve_provider = provider_id
+    if session is not None:
+        if not resolve_model:
+            resolve_model = str(getattr(session, "model", "")).strip() or None
+        if not resolve_provider:
+            resolve_provider = str(getattr(session, "model_provider", "")).strip() or None
     resolve_base_url = base_url
     if not resolve_model:
         model_cfg = config_data.get("model") or {}
@@ -3664,15 +3673,24 @@ def get_reasoning_status(
         provider_id=resolve_provider,
         base_url=resolve_base_url,
     )
+    profile_reasoning_effort = coerce_reasoning_effort_for_model(
+        str(profile_effort_raw or "").strip().lower(),
+        resolve_model,
+        provider_id=resolve_provider,
+        base_url=resolve_base_url,
+    )
+    effective_effort_raw = session_effort_raw if session_effort_raw is not None else profile_effort_raw
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
-        # Report the COERCED effort (not the raw config value) so boot/status/chip
-        # read paths agree with what streaming actually sends — e.g. a stale
-        # `reasoning_effort: max` surfaces as `xhigh`, not the now-unsupported `max`.
-        # (Codex review of the drop-max alignment.)
+        "profile_reasoning_effort": profile_reasoning_effort,
+        "session_reasoning_effort": session_effort_raw,
+        "has_session_reasoning_override": session_effort_raw is not None,
+        "reasoning_scope": "session" if session_effort_raw is not None else "profile",
+        # Report the COERCED effective effort so boot/status/chip read paths
+        # agree with what streaming actually sends.
         "reasoning_effort": coerce_reasoning_effort_for_model(
-            str(effort_raw or "").strip().lower(),
+            str(effective_effort_raw or "").strip().lower(),
             resolve_model,
             provider_id=resolve_provider,
             base_url=resolve_base_url,
@@ -3779,6 +3797,18 @@ def set_reasoning_display(show: bool) -> dict:
     return get_reasoning_status()
 
 
+def _normalize_reasoning_effort_input(effort, *, allow_clear: bool = False) -> str | None:
+    raw = str(effort or "").strip().lower()
+    if not raw:
+        return None if allow_clear else ""
+    if raw == "none" or raw in VALID_REASONING_EFFORTS:
+        return raw
+    raise ValueError(
+        f"Unknown reasoning effort '{effort}'. "
+        f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
+    )
+
+
 def set_reasoning_effort(
     effort: str,
     *,
@@ -3792,14 +3822,9 @@ def set_reasoning_effort(
     (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh``).
     Raises ``ValueError`` on an unrecognised level so callers can return 400.
     """
-    raw = str(effort or "").strip().lower()
+    raw = _normalize_reasoning_effort_input(effort)
     if not raw:
         raise ValueError("effort is required")
-    if raw != "none" and raw not in VALID_REASONING_EFFORTS:
-        raise ValueError(
-            f"Unknown reasoning effort '{effort}'. "
-            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
-        )
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
@@ -3811,6 +3836,28 @@ def set_reasoning_effort(
         _save_yaml_config_file(config_path, config_data)
     reload_config()
     return get_reasoning_status(
+        model_id=model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
+def set_session_reasoning_effort(
+    session,
+    effort,
+    *,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> dict:
+    """Persist a per-session ``reasoning_effort`` override to the session sidecar."""
+    if session is None:
+        raise ValueError("session is required")
+    raw = _normalize_reasoning_effort_input(effort, allow_clear=True)
+    session.reasoning_effort = raw
+    session.save()
+    return get_reasoning_status(
+        session=session,
         model_id=model_id,
         provider_id=provider_id,
         base_url=base_url,
