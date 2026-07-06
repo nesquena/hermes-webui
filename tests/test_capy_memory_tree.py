@@ -53940,7 +53940,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_pages_metadata_o
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_pages_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_pages_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -53979,13 +53979,15 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_pages_final_url_
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("benign pages query", limit=5)
-    serialized = json.dumps({"result": result, "jobs": jobs, "search_results": search["results"]}, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("space-github-pages-final-url-drift", limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs, "search_results": search["results"], "relevant": relevant}, sort_keys=True).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["job_id"] == receipt["job_id"]
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert reads == []
+    assert relevant["results"] == []
     assert not (root / "vault" / "github-pages-final-url-drift.md").exists()
     for forbidden in (
         "access_token",
