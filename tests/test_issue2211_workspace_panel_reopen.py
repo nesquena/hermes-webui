@@ -21,7 +21,7 @@ def test_workspace_panel_has_edge_reopen_toggle_outside_hidden_panel():
 def test_workspace_panel_edge_toggle_only_shows_when_panel_closed_on_desktop():
     assert 'html[data-workspace-panel="closed"] .workspace-panel-edge-toggle' in CSS
     assert 'html[data-workspace-panel="open"] .workspace-panel-edge-toggle' in CSS
-    assert '@media(max-width:900px)' in CSS and '.workspace-panel-edge-toggle{display:none!important;}' in CSS
+    assert '@media(max-width:1020px)' in CSS and '.workspace-panel-edge-toggle{display:none!important;}' in CSS
 
 
 def test_workspace_panel_sync_updates_edge_toggle_state_and_accessibility():

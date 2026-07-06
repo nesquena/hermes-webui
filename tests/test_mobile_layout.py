@@ -169,14 +169,14 @@ class _ComposerLeftDropdownParser(HTMLParser):
 
 # ── Mobile breakpoint rules ───────────────────────────────────────────────────
 
-def test_mobile_breakpoint_900px_present():
-    """@media(max-width:900px) must hide the right panel and show mobile-files-btn."""
-    assert "@media(max-width:900px)" in CSS or "@media (max-width: 900px)" in CSS, \
-        "Missing @media(max-width:900px) breakpoint in style.css"
-    # Right panel should be hidden at 900px, replaced by slide-over
+def test_mobile_breakpoint_1020px_present():
+    """@media(max-width:1020px) must hide the right panel and show mobile-files-btn."""
+    assert "@media(max-width:1020px)" in CSS or "@media (max-width: 1020px)" in CSS, \
+        "Missing @media(max-width:1020px) breakpoint in style.css"
+    # Right panel should be hidden at 1020px, replaced by slide-over
     assert ".rightpanel{display:none" in CSS or ".rightpanel {display:none" in CSS or \
-           re.search(r'max-width:900px\).*?\.rightpanel\{display:none', CSS, re.DOTALL), \
-        ".rightpanel must be display:none at max-width:900px (slide-over replaces it)"
+           re.search(r'max-width:1020px\).*?\.rightpanel\{display:none', CSS, re.DOTALL), \
+        ".rightpanel must be display:none at max-width:1020px (slide-over replaces it)"
 
 
 def test_mobile_breakpoint_640px_present():
@@ -575,7 +575,7 @@ def test_mobile_sidebar_opens_as_full_screen_surface_with_panel_rail():
 
 def test_compact_titlebar_keeps_hamburger_available():
     """Compact app chrome must keep the titlebar menu reachable."""
-    compact_css = "\n".join(_max_width_media_blocks(900))
+    compact_css = "\n".join(_max_width_media_blocks(1020))
     assert re.search(r'\.app-titlebar-hamburger,\s*\.app-titlebar-spacer\{[^}]*display:\s*flex', compact_css), (
         "Compact titlebar should expose the hamburger before true phone width"
     )

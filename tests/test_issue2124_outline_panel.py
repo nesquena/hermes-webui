@@ -87,7 +87,7 @@ def test_outline_opt_in_layout_and_render_state_contract():
         "toggle.hidden = !enabled",
         "wrapper.hidden = true",
         "window.applyConversationOutlinePreference",
-        "matchMedia('(max-width:900px)')",
+        "matchMedia('(max-width:1020px)')",
         "--outline-workspace-offset",
         "panel.offsetWidth",
         "data-workspace-panel",
