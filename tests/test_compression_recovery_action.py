@@ -431,6 +431,19 @@ def test_compression_recovery_ui_wires_card_action_and_send_intercept():
     assert "_compressionRecovery:recovery||undefined" in messages
 
 
+def test_compression_recovery_ui_renders_session_level_recovery_on_terminal_message():
+    ui = (ROOT / "static/ui.js").read_text(encoding="utf-8")
+    start = ui.index("const recoveryPayload=(!isUser&&m._compressionRecovery)")
+    end = ui.index("const statusHtml", start)
+    body = ui[start:end]
+
+    assert "? m._compressionRecovery" in body
+    assert "_activeCompressionRecoveryPayload()" in body
+    assert "isLastAssistant&&isTurnFinalAssistant" in body
+    assert "typeof _activeCompressionRecoveryPayload==='function'" in body
+    assert body.index("m._compressionRecovery") < body.index("_activeCompressionRecoveryPayload()")
+
+
 def test_compression_recovery_ui_skips_message_fallback_after_session_clear():
     ui = (ROOT / "static/ui.js").read_text(encoding="utf-8")
     start = ui.index("function _activeCompressionRecoveryPayload(){")
