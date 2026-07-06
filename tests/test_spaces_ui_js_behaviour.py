@@ -974,6 +974,16 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
+      memory_advisory: {
+        metadata_only: true,
+        advisory_context: true,
+        context_authority: 'untrusted_advisory',
+        can_bypass_safety_gates: false,
+        required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+        trusted_system_memory: 'trusted_system_memory',
+        raw_context: 'SECRET_VALUE_DO_NOT_LEAK renderer <script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       output_compaction: {
         original_chars: 24000,
         compacted_chars: 900,
@@ -7503,6 +7513,12 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     assert "Demo progress" in out["rootHtml"]
     assert "run.completed" in out["rootHtml"]
     assert "space-demo:run-all" in out["rootHtml"]
+    suite_html = out["rootHtml"][out["rootHtml"].index("Demo parity smoke suite passed"):]
+    assert "Memory advisory" in suite_html
+    assert "Authority: untrusted_advisory" in suite_html
+    assert "Can bypass safety gates: no" in suite_html
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in suite_html
+    assert suite_html.index("Memory advisory") < suite_html.index("Compaction evidence")
     assert "Original output: 24000 chars" in out["rootHtml"]
     assert "Compacted output: 900 chars" in out["rootHtml"]
     assert "Redaction: redacted" in out["rootHtml"]

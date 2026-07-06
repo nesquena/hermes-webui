@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- Demo-suite run-all browser results now render the Memory Tree advisory/no-authority card inside the suite receipt, between progress and compaction evidence. The checked-out UI shows only metadata-only `untrusted_advisory` authority, gate-bypass false, and required gate labels for `space.demo.run_all`, while hostile raw context/trusted-memory/renderer/source/html/script/data/API-auth, credential, token, and secret-looking fixture values remain omitted.
+
 - Individual demo-smoke receipts now preserve the Memory Tree advisory/no-authority boundary: `space.demo.run` returns a server-generated `memory_advisory` receipt, each output-compaction receipt shows only advisory status, `untrusted_advisory` authority, gate-bypass false, required gate labels, and demo/widget/revision metadata, and the Spaces UI renders the Memory advisory card inside individual demo-smoke results while omitting raw prompts, renderer/source/html/script/data/API-auth fields, credentials, tokens, and secret-looking values.
 
 - Demo-suite run-all receipts now preserve the same Memory Tree advisory/no-authority boundary as the demo catalog: `space.demo.run_all` returns a server-generated `memory_advisory` receipt, and the output-compaction receipt shows only advisory status, `untrusted_advisory` authority, gate-bypass false, required gate labels, and pass/fail counts while omitting raw prompts, renderer/source/html/script/data/API-auth fields, credentials, tokens, and secret-looking values.

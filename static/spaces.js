@@ -1144,6 +1144,7 @@
     const suitePreflight = renderPromptPreflightEvidence(data && data.prompt_preflight);
     const suitePolicy = renderDemoSmokeActionPolicyEvidence(data && data.autonomy_policy);
     const suiteProgress = renderPackageProgressEvidence(data && data.progress_event, 'Demo progress');
+    const suiteMemoryAdvisory = renderMemoryAdvisoryEvidence(data && data.memory_advisory);
     const suiteCompaction = renderCompactionEvidence(data && (data.output_compaction || data.compaction));
     const contextStatus = renderContextLayerStatus(data && (data.context_status || data.contextStatus));
     const rows = results.slice(0, 20).map(function(item){
@@ -1220,7 +1221,7 @@
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +
-      suitePreflight + suitePolicy + suiteProgress + suiteCompaction + contextStatus +
+      suitePreflight + suitePolicy + suiteProgress + suiteMemoryAdvisory + suiteCompaction + contextStatus +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
