@@ -447,6 +447,7 @@ const results = {{}};
 let _showAllCronProfiles = true;
 let _cronOtherProfileCount = 9;
 let _currentPanel = 'chat';
+let _tasksSubtab = 'jobs';
 let skillLoads = 0;
 let memoryLoads = 0;
 let taskLoads = 0;
