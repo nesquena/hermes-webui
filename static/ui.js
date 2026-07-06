@@ -4482,8 +4482,10 @@ function _applyReasoningChip(eff){
   const text=_formatReasoningEffortLabel(effort);
   const scopeText=formatScopeLabel(scope);
   const displayText=hasScopeFormatter ? (text+' · '+scopeText) : text;
-  label.textContent=displayText;
-  if(mobileLabel) mobileLabel.textContent=displayText;
+  label.textContent=text;
+  if(hasScopeFormatter) label.textContent=displayText;
+  if(mobileLabel) mobileLabel.textContent=text;
+  if(mobileLabel&&hasScopeFormatter) mobileLabel.textContent=displayText;
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);

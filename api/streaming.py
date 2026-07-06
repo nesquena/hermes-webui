@@ -40,6 +40,7 @@ from api.config import (
     load_settings,
     get_reasoning_status,
     parse_reasoning_effort,
+    coerce_reasoning_effort_for_model,
     _main_model_request_overrides,
 )
 from api.helpers import redact_session_data, _redact_text
@@ -6336,7 +6337,13 @@ def _resolve_turn_reasoning_config(session, *, model_id=None, provider_id=None, 
             provider_id=provider_id,
             base_url=base_url,
         )
-        return parse_reasoning_effort(status.get('reasoning_effort'))
+        effort = coerce_reasoning_effort_for_model(
+            status.get('reasoning_effort'),
+            model_id,
+            provider_id=provider_id,
+            base_url=base_url,
+        )
+        return parse_reasoning_effort(effort)
     except Exception:
         return None
 
