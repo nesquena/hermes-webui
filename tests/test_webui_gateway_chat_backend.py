@@ -375,6 +375,50 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert all(len(item) == 3 and item[2] for item in events)
 
 
+def test_gateway_chat_worker_uses_session_reasoning_override(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: [DONE]\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = req.data.decode("utf-8")
+        return FakeResponse()
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    s.reasoning_effort = "high"
+    stream_id = "stream-gateway-reasoning-override"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "gpt-5",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    payload = json.loads(captured["body"])
+    assert payload["reasoning_effort"] == "high"
 def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_reasoning(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()

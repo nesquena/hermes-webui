@@ -4612,6 +4612,21 @@ function _sendReasoningEffort(scope, effort){
   }
   return api(_reasoningEndpointForScope(normalizedScope),{method:'POST',body:JSON.stringify(payload)})
     .then(function(st){
+      if(normalizedScope==='profile' && _activeReasoningSessionId()){
+        _lastReasoningFetchKey=null;
+        return api('/api/reasoning'+_reasoningEffortQuery()).then(function(fresh){
+          const applied=fresh||st||{reasoning_scope:normalizedScope};
+          const appliedScope=_normalizeReasoningScope((applied&&applied.reasoning_scope)||normalizedScope);
+          _applyReasoningChip((applied&&applied.reasoning_effort)||effort, applied);
+          showToast('Reasoning effort set to '+((applied&&applied.reasoning_effort)||effort)+' ('+_formatReasoningScopeLabel(appliedScope).toLowerCase()+')');
+          return applied;
+        }).catch(function(){
+          const fallbackScope=_normalizeReasoningScope((st&&st.reasoning_scope)||normalizedScope);
+          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{reasoning_scope:fallbackScope});
+          showToast('Reasoning effort set to '+((st&&st.reasoning_effort)||effort)+' ('+_formatReasoningScopeLabel(fallbackScope).toLowerCase()+')');
+          return st;
+        });
+      }
       const nextScope=_normalizeReasoningScope((st&&st.reasoning_scope)||normalizedScope);
       _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{reasoning_scope:nextScope});
       showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort)+' ('+_formatReasoningScopeLabel(nextScope).toLowerCase()+')');

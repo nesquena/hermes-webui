@@ -17,6 +17,7 @@ import api.config as cfg
 import api.models as models
 import api.routes as routes
 from api.config import get_reasoning_status
+from api.gateway_chat import _gateway_reasoning_effort_for_request
 from api.models import Session
 from api.routes import handle_get, handle_post
 from api.streaming import _resolve_turn_reasoning_config
@@ -395,6 +396,34 @@ def test_duplicate_session_carries_reasoning_effort(isolated_reasoning_env):
     assert Session.load(source.session_id).reasoning_effort == "high"
 
 
+def test_gateway_reasoning_effort_prefers_session_override(isolated_reasoning_env):
+    session = Session(
+        session_id="session-reasoning-gateway",
+        title="Gateway Session",
+        model="gpt-5",
+        model_provider="openai",
+        reasoning_effort="high",
+    )
+    session.save()
+
+    cfg_data = yaml.safe_load(isolated_reasoning_env["config_path"].read_text(encoding="utf-8"))
+    assert _gateway_reasoning_effort_for_request(
+        cfg_data,
+        model="gpt-5",
+        model_provider="openai",
+        session=session,
+    ) == "high"
+
+    session.reasoning_effort = None
+    session.save()
+    assert _gateway_reasoning_effort_for_request(
+        cfg_data,
+        model="gpt-5",
+        model_provider="openai",
+        session=session,
+    ) == "medium"
+
+
 def test_reasoning_chip_cache_is_session_specific_and_session_only_action_requires_session():
     data = _run_reasoning_ui_script(
         """
@@ -442,9 +471,45 @@ def test_reasoning_chip_cache_is_session_specific_and_session_only_action_requir
     )
 
     assert "session_id=session-a" in data["first"]["url"]
-    assert data["first"]["label"] == "High · Session"
+    assert data["first"]["label"].startswith("High")
+    assert data["first"]["label"].endswith("Session")
     assert "session_id=session-b" in data["second"]["url"]
-    assert data["second"]["label"] == "Medium · Profile"
+    assert data["second"]["label"].startswith("Medium")
+    assert data["second"]["label"].endswith("Profile")
     assert data["before"] == data["after"]
     assert data["guardToast"]["type"] == "warning"
     assert "Select a session" in data["guardToast"]["msg"]
+
+
+def test_profile_reasoning_write_refetches_session_effective_status_when_override_exists():
+    data = _run_reasoning_ui_script(
+        """
+  responses.push({
+    reasoning_effort: 'low',
+    reasoning_scope: 'profile',
+    supported_efforts: ['none', 'medium', 'high'],
+    has_session_reasoning_override: false,
+  });
+  responses.push({
+    reasoning_effort: 'high',
+    reasoning_scope: 'session',
+    supported_efforts: ['none', 'medium', 'high'],
+    has_session_reasoning_override: true,
+    session_reasoning_effort: 'high',
+    profile_reasoning_effort: 'low',
+  });
+  await _sendReasoningEffort('profile', 'low');
+  return {
+    fetches,
+    label: nodes.composerReasoningLabel.textContent,
+    toast: toasts[toasts.length - 1],
+  };
+        """
+    )
+
+    assert data["fetches"][0]["url"] == "/api/reasoning"
+    assert "session_id" not in json.loads(data["fetches"][0]["opts"]["body"])
+    assert "session_id=session-a" in data["fetches"][1]["url"]
+    assert data["label"].startswith("High")
+    assert data["label"].endswith("Session")
+    assert "session" in data["toast"]["msg"].lower()
