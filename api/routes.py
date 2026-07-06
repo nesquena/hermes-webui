@@ -11167,6 +11167,20 @@ def _render_index_shell_base() -> str:
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+
+    def _query_alias_value(qs, *names):
+        values = []
+        for name in names:
+            for value in qs.get(name, []):
+                if value is None:
+                    continue
+                value = str(value).strip()
+                if value:
+                    values.append(value)
+        if values and any(value != values[0] for value in values[1:]):
+            raise ValueError("Conflicting Capy Spaces route selector aliases")
+        return values[0] if values else ""
+
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
