@@ -69,6 +69,31 @@ def test_progress_status_returns_bounded_taxonomy_without_echoing_env(monkeypatc
     assert "raw prompt" not in lowered
 
 
+def test_progress_status_exposes_memory_advisory_no_authority_receipt(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_PROGRESS_LABEL", "trusted_system_memory SECRET_VALUE_DO_NOT_LEAK")
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "events.jsonl"))
+
+    status = progress_status(space_id="progress-lab")
+    receipt = status["memory_advisory"]
+    serialized = json.dumps(status, sort_keys=True).lower()
+
+    assert receipt["metadata_only"] is True
+    assert receipt["advisory_context"] is True
+    assert receipt["context_authority"] == "untrusted_advisory"
+    assert receipt["can_bypass_safety_gates"] is False
+    assert receipt["required_gates"] == [
+        "prompt_preflight",
+        "approval",
+        "sandbox_preview",
+        "visual_qa",
+        "rollback_recovery",
+    ]
+    assert "trusted_system_memory" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+
+
 def test_capy_progress_status_route_returns_metadata_only_status(monkeypatch, tmp_path):
     import api.routes as routes
 

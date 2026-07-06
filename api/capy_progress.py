@@ -291,6 +291,22 @@ def _progress_output_compaction(events: list[dict[str, Any]], recent_events: lis
     return receipt
 
 
+def _progress_memory_advisory() -> dict[str, Any]:
+    try:
+        from api.capy_memory import _memory_advisory_envelope
+
+        receipt = _memory_advisory_envelope()
+    except Exception:
+        receipt = {
+            "metadata_only": True,
+            "advisory_context": True,
+            "context_authority": "untrusted_advisory",
+            "can_bypass_safety_gates": False,
+            "required_gates": ["prompt_preflight", "approval", "sandbox_preview", "visual_qa", "rollback_recovery"],
+        }
+    return receipt
+
+
 def progress_status(space_id: str | None = None) -> dict[str, Any]:
     """Return local-only progress event capability/status metadata."""
     scoped_space_id = _normalize_scoped_space_id(space_id) if space_id is not None else ""
@@ -311,6 +327,7 @@ def progress_status(space_id: str | None = None) -> dict[str, Any]:
         "event_families": list(_EVENT_FAMILIES),
         "supported_event_types": list(_SUPPORTED_EVENT_TYPES),
         "redaction_status": "metadata_only",
+        "memory_advisory": _progress_memory_advisory(),
     }
     try:
         output_compaction = _progress_output_compaction(events, recent_events)
