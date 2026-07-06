@@ -290,6 +290,7 @@ async function loadCrons(){ calls.push('crons'); }
 async function loadKanban(){ calls.push('kanban'); }
 async function loadProfilesPanel(){ calls.push('profiles'); }
 async function loadWorkspacesPanel(){ calls.push('workspaces'); }
+function _clearCronDetail(){}
 eval(extractFunc('_profileSwitchPanelLoad'));
 (async () => {
   await _profileSwitchPanelLoad();
