@@ -20177,7 +20177,11 @@ def _handle_scripts_list(handler) -> None:
     if not scripts_dir.exists():
         return j(handler, {"scripts": []})
     scripts = []
-    for p in sorted(scripts_dir.iterdir()):
+    try:
+        entries = sorted(scripts_dir.iterdir())
+    except OSError:
+        return j(handler, {"scripts": []})
+    for p in entries:
         try:
             target = safe_resolve(scripts_dir, p.name)
         except ValueError:
