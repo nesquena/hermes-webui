@@ -163,6 +163,9 @@ def test_message_tool_metadata_empty_assistant_tools_reuse_previous_visible_anch
     assert NODE, "node not on PATH"
     has_visible_fn = _function_source(UI_JS, "_assistantMessageHasVisibleContent")
     empty_placeholder_fn = _function_source(UI_JS, "_isAssistantEmptyPlaceholderContent")
+    tool_metadata_fn = _function_source(UI_JS, "_assistantMessageHasToolMetadata")
+    visible_text_body_fn = _function_source(UI_JS, "_assistantMessageHasVisibleTextBody")
+    historical_toolcall_only_fn = _function_source(UI_JS, "_assistantReasoningPayloadIsHistoricalToolCallOnly")
     has_reasoning_fn = _function_source(UI_JS, "_messageHasReasoningPayload")
     anchor_scene_final_fn = _function_source(UI_JS, "_assistantAnchorSceneFinalAnswerText")
     reasoning_fn = _function_source(UI_JS, "_assistantReasoningPayloadText")
@@ -180,6 +183,9 @@ function msgContent(m){{
 {empty_placeholder_fn}
 {anchor_scene_final_fn}
 {has_visible_fn}
+{tool_metadata_fn}
+{visible_text_body_fn}
+{historical_toolcall_only_fn}
 {reasoning_fn}
 {anchor_fn}
 const messages = [

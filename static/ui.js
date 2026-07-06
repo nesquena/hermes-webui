@@ -10005,8 +10005,40 @@ function _fmtDateSep(d){
   return dStart.toLocaleDateString([], opts);
 }
 const _ERR_MSG_RE=/^(?:\*\*error\b|error:|connection lost|no response received)/i;
+function _assistantMessageHasToolMetadata(m){
+  if(!m||m.role!=='assistant') return false;
+  if(Array.isArray(m.tool_calls)&&m.tool_calls.length) return true;
+  if(Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length) return true;
+  return Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
+}
+function _assistantMessageHasVisibleTextBody(m){
+  if(!m||m.role!=='assistant') return false;
+  const content=m.content;
+  if(typeof content==='string') return !!content.trim();
+  if(!Array.isArray(content)) return false;
+  return content.some(part=>{
+    if(typeof part==='string') return !!part.trim();
+    if(!part||typeof part!=='object') return false;
+    if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
+      return !!String(part.text||part.content||'').trim();
+    }
+    return false;
+  });
+}
+function _assistantReasoningPayloadIsHistoricalToolCallOnly(m){
+  if(!m||m.role!=='assistant') return false;
+  if(!_assistantMessageHasToolMetadata(m)) return false;
+  if(_assistantMessageHasVisibleTextBody(m)) return false;
+  if(m.reasoning_content||m.thinking) return false;
+  if(Array.isArray(m.content)&&m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'))) return false;
+  if(!(m.reasoning||m._reasoning)) return false;
+  if(m._live||m._anchor_activity_scene||m._statusCard||m._partial) return false;
+  if(m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined) return false;
+  return true;
+}
 function _messageHasReasoningPayload(m){
   if(!m||m.role!=='assistant') return false;
+  if(_assistantReasoningPayloadIsHistoricalToolCallOnly(m)) return false;
   if(m.reasoning||m.reasoning_content||m.thinking||m._reasoning) return true;
   if(Array.isArray(m.content)) return m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'));
   if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
@@ -10105,6 +10137,7 @@ function _assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs){
 }
 function _assistantReasoningPayloadText(m){
   if(!m||m.role!=='assistant') return '';
+  if(_assistantReasoningPayloadIsHistoricalToolCallOnly(m)) return '';
   const direct=m.reasoning_content||m.reasoning||m.thinking||m._reasoning||'';
   if(String(direct||'').trim()) return String(direct).trim();
   if(Array.isArray(m.content)){

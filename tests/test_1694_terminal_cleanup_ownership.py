@@ -205,3 +205,30 @@ def test_attach_live_stream_registers_one_source_per_session_stream():
     assert "if(source&&live.source!==source) return;" in close_body
     assert "existingLive&&existingLive.streamId===streamId" in attach_body
     assert "_closeSource(source);" in error_body
+
+
+def test_app_error_and_cancel_terminal_paths_remove_live_stream_owner():
+    """Terminal app-error/cancel paths must not leave stale LIVE_STREAMS entries.
+
+    Directly calling ``source.close()`` closes the transport but leaves
+    ``LIVE_STREAMS[activeSid]`` pointing at a terminal stream. That stale owner
+    can confuse later reconnect/session-switch ownership checks in the same
+    partial/error/done neighbourhood.
+    """
+    for event_name in ("apperror", "cancel"):
+        body = _event_body(event_name)
+        assert "_closeSource(source);" in body, event_name
+        assert "source.close();" not in body, event_name
+
+
+def test_app_error_after_done_is_ignored_before_background_error_tracking():
+    """A late app-error after done must not show a false background error banner."""
+    body = _event_body("apperror")
+    first_stmt = body.strip().splitlines()[0].strip()
+    assert "_streamFinalized" in first_stmt and "return" in first_stmt
+    guard_idx = body.find("if(_streamFinalized) return;")
+    stale_idx = body.find("_bailOutOfTerminalEventsFromStaleStream")
+    bg_error_idx = body.find("trackBackgroundError")
+    assert guard_idx != -1
+    assert stale_idx != -1 and guard_idx < stale_idx
+    assert bg_error_idx != -1 and guard_idx < bg_error_idx
