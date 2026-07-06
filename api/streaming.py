@@ -8698,8 +8698,9 @@ def _run_agent_streaming(
                     _explicit_result_error = bool(getattr(agent, '_last_error', None)) or (
                         'error' in result and result.get('error') not in (None, '')
                     )
+                    _result_status = str(result.get('status') or result.get('state') or '').strip().lower()
                     _result_is_hard_terminal = (
-                        _agent_result_terminal_failure(result)
+                        _result_status in {'failed', 'error', 'compression_exhausted'}
                         or result.get('failed')
                         or result.get('compression_exhausted')
                         or _tool_limit_reached
