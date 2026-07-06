@@ -1044,6 +1044,96 @@
   :root[data-skin="geist-contrast"] textarea#msg{scrollbar-width:none;overflow-y:auto;}
   :root[data-skin="geist-contrast"] textarea#msg::-webkit-scrollbar{display:none;}
 
+  /* ── Skin: OpenUI (minimal light/dark) ──
+     Clean white/near-black surfaces with a green-teal accent (#10a37f).
+     Light: crisp white surfaces, gray-100 sidebar, green-teal accent.
+     Dark: #212121 canvas, #171717 sidebar, green-teal accent. */
+  :root[data-skin="openui"]{
+    color-scheme:light;
+    --bg:#ffffff;--sidebar:#f3f4f6;--surface:#ffffff;
+    --surface-subtle:#f9fafb;--surface-subtle-hover:#f3f4f6;
+    --main-bg:#ffffff;--topbar-bg:rgba(255,255,255,.92);
+    --border:#e5e7eb;--border2:#d1d5db;
+    --border-subtle:#e5e7eb;--border-muted:#d1d5db;
+    --text:#111827;--strong:#030712;--muted:#6b7280;--em:#4b5563;
+    --accent:#10a37f;--accent-hover:#059669;
+    --accent-bg:rgba(16,163,127,.10);--accent-bg-strong:rgba(16,163,127,.18);
+    --accent-text:#047857;
+    --blue:#10a37f;--gold:#10a37f;
+    --focus-ring:rgba(16,163,127,.30);--focus-glow:rgba(16,163,127,.08);
+    --input-bg:rgba(0,0,0,.03);--hover-bg:rgba(0,0,0,.05);
+    --code-bg:#f7f8fa;--code-inline-bg:rgba(0,0,0,.06);
+    --code-text:#374151;--pre-text:#111827;
+    --error:#ef4444;--success:#10a37f;--warning:#f59e0b;--info:#3b82f6;
+    --user-bubble-bg:#f3f4f6;--user-bubble-border:#e5e7eb;
+    --user-bubble-text:#111827;--user-bubble-placeholder:#6b7280;
+    --user-selection-bg:rgba(16,163,127,.22);--user-selection-text:#030712;
+    --radius-sm:6px;--radius-md:8px;--radius-card:10px;--radius-lg:12px;
+    --font-ui:"Segoe UI",-apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;
+    font-family:var(--font-ui);
+  }
+  :root.dark[data-skin="openui"]{
+    color-scheme:dark;
+    --bg:#212121;--sidebar:#171717;--surface:#2a2a2a;
+    --surface-subtle:rgba(255,255,255,.025);
+    --surface-subtle-hover:rgba(255,255,255,.045);
+    --main-bg:#212121;--topbar-bg:rgba(23,23,23,.92);
+    --border:#333333;--border2:rgba(255,255,255,.15);
+    --border-subtle:rgba(255,255,255,.07);
+    --border-muted:rgba(255,255,255,.12);
+    --text:#ececec;--strong:#f5f5f5;--muted:#a0a0a0;--em:#d4d4d4;
+    --accent:#10a37f;--accent-hover:#19c37d;
+    --accent-bg:rgba(16,163,127,.15);--accent-bg-strong:rgba(16,163,127,.25);
+    --accent-text:#19c37d;
+    --blue:#10a37f;--gold:#10a37f;
+    --focus-ring:rgba(16,163,127,.40);--focus-glow:rgba(16,163,127,.12);
+    --input-bg:rgba(255,255,255,.04);--hover-bg:rgba(255,255,255,.06);
+    --code-bg:#1a1a1a;--code-inline-bg:rgba(255,255,255,.08);
+    --code-text:#d4d4d4;--pre-text:#ececec;
+    --error:#ef4444;--success:#10a37f;--warning:#f59e0b;--info:#3b82f6;
+    --user-bubble-bg:#2f2f2f;--user-bubble-border:#3a3a3a;
+    --user-bubble-text:#f5f5f5;--user-bubble-placeholder:#a0a0a0;
+    --user-selection-bg:rgba(16,163,127,.25);--user-selection-text:#f5f5f5;
+  }
+  :root[data-skin="openui"],
+  :root[data-skin="openui"] body{font-family:var(--font-ui)!important;font-weight:400;letter-spacing:0;background:var(--bg);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;}
+  :root[data-skin="openui"] .app-titlebar,
+  :root[data-skin="openui"] .rail,
+  :root[data-skin="openui"] .sidebar,
+  :root[data-skin="openui"] .rightpanel,
+  :root[data-skin="openui"] .topbar,
+  :root[data-skin="openui"] .composer-wrap{background:var(--sidebar)!important;border-color:var(--border)!important;box-shadow:none!important;}
+  :root[data-skin="openui"] .main,
+  :root[data-skin="openui"] .chat,
+  :root[data-skin="openui"] .panel-view{background:var(--bg)!important;}
+  :root[data-skin="openui"] .session-item{border-radius:8px;font-size:13px;line-height:1.45;}
+  :root[data-skin="openui"] .session-meta{font-size:11px;}
+  :root[data-skin="openui"] .session-item.active{
+    position:relative;border:1px solid var(--border2)!important;
+    background:var(--surface-subtle-hover)!important;
+  }
+  :root[data-skin="openui"] .session-item.active::before{
+    content:"";position:absolute;left:6px;top:10px;bottom:10px;
+    width:2px;border-radius:999px;background:var(--accent);
+  }
+  :root[data-skin="openui"] .welcome-prompt{padding:24px 28px;margin:8px 0;}
+  :root[data-skin="openui"] .welcome-prompt .prompt-action{
+    background:var(--surface)!important;border:1px solid var(--border)!important;
+    border-radius:8px;padding:12px 16px;font-size:13px;line-height:1.45;
+    transition:border-color .15s,background .15s;
+  }
+  :root[data-skin="openui"] .welcome-prompt .prompt-action:hover{
+    border-color:var(--accent)!important;
+    background:var(--accent-bg)!important;
+  }
+  :root[data-skin="openui"] .composer-wrap{
+    background:var(--surface)!important;
+  }
+  :root[data-skin="openui"] .composer-wrap.has-focus{
+    border-color:var(--accent)!important;
+    box-shadow:0 0 0 2px var(--focus-glow);
+  }
+
   /* ── Skin: Zeus ──
      OLED-near-black skin: replaces the default dark-blue/navy surfaces with warm
      near-blacks while keeping the gold accent unchanged. Borders are gold-tinted
