@@ -132,8 +132,9 @@ class TestSlashCommandHandlers:
         preserves staged files so the user can choose the next explicit action.
 
         cmdQueue and cmdInterrupt call queueSessionMessage themselves and clear
-        S.pendingFiles directly. cmdSteer delegates to _trySteer. _trySteer no
-        longer clears files on failure because it no longer falls back to
+        S.pendingFiles directly. cmdSteer delegates to _trySteer and clears
+        only when the gateway fallback consumed the captured files. _trySteer
+        no longer clears files on failure because it no longer falls back to
         cancel-and-queue behavior.
         """
         # cmdQueue and cmdInterrupt clear pendingFiles directly
@@ -163,6 +164,13 @@ class TestSlashCommandHandlers:
         assert "S.pendingFiles=[]" not in try_body
         assert failure_idx > clear_idx, "staged files must not be cleared in the failure path"
         assert "renderTray()" in try_body[failure_idx:]
+
+        idx_steer = COMMANDS_JS.find("async function cmdSteer(")
+        assert idx_steer >= 0, "cmdSteer not found"
+        steer_body = COMMANDS_JS[idx_steer:COMMANDS_JS.find("function _steerFailureMessageKey", idx_steer)]
+        assert "queuedFallback" in steer_body
+        assert "S.session.session_id===_steerResult.ownerSid" in steer_body
+        assert "_clearComposerDraft(_steerResult.ownerSid,msg,_steerResult.files)" in steer_body
 
 
 class TestBusySendButton:
@@ -334,10 +342,13 @@ class TestSendBusyBranchDispatch:
         branch_end = MESSAGES_JS.find("} else if(defaultMessageMode==='interrupt')", steer_idx)
         assert branch_end > steer_idx, "busy steer branch end not found"
         branch = MESSAGES_JS[steer_idx:branch_end]
-        assert "await _trySteer(text, /*explicitSteer=*/false)" in branch
-        assert "_trySteer captures the owner session/files before awaiting uploads" in branch
-        assert "_trySteer clears staged files only after /api/chat/steer accepts" in branch
-        assert "_clearComposerDraft(S.session.session_id,text" not in branch
+        assert "const _steerResult=await _trySteer" in branch
+        assert "const _steerDelivered=_steerResult&&_steerResult.handled;" in branch
+        assert "const _steerDraftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in branch
+        assert "S.session.session_id===_steerResult.ownerSid" in branch
+        assert "if(_steerDelivered&&_sameSteerOwner&&_steerFilesStillCurrent){S.pendingFiles=[];renderTray();}" in branch
+        assert "_clearComposerDraft(_steerResult.ownerSid,text,_steerDraftFiles)" in branch
+        assert branch.index("const _steerResult=await _trySteer") < branch.index("if(_steerDelivered&&_sameSteerOwner&&_steerFilesStillCurrent){S.pendingFiles=[];renderTray();}")
         try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         accepted_idx = try_body.find("if(result&&result.accepted)")
         failure_idx = try_body.find("// Do not fall back to interrupt")
@@ -370,15 +381,12 @@ class TestSendBusyBranchDispatch:
         ONLY the delivered files by identity, preserving files staged during the
         upload/API await."""
         try_body = _source_between(COMMANDS_JS, "async function _steerTextWithPendingFiles(", "\nasync function cmdTitle")
-        # (1) upload cache keyed by session + file signature, reused on retry,
-        # invalidated on delivery.
         assert "_steerUploadCache" in try_body
         assert "_steerFilesSignature(" in try_body
         assert "_steerUploadCache={sid:ownerSid,sig,paths}" in try_body
         assert "_steerUploadCache=null" in try_body
-        # (2) identity-based removal of only the delivered snapshot.
-        assert "_delivered=new Set(pendingFilesSnapshot)" in try_body
-        assert "S.pendingFiles=_remaining" in try_body
+        assert "_delivered=new Set(pendingFilesSnapshot)" in COMMANDS_JS
+        assert "S.pendingFiles=_remaining" in COMMANDS_JS
 
 
     def test_slash_commands_intercepted_before_busymode_routing(self):

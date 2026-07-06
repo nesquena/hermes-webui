@@ -1346,7 +1346,13 @@ async function cmdSteer(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
-  await _trySteer(msg, /*explicitSteer=*/true);
+  const _steerResult=await _trySteer(msg, /*explicitSteer=*/true);
+  if(_steerResult&&_steerResult.queuedFallback){
+    const _sameOwner=S.session&&S.session.session_id===_steerResult.ownerSid;
+    const _filesStillCurrent=Array.isArray(S.pendingFiles)&&S.pendingFiles.length===_steerResult.files.length&&S.pendingFiles.every((f,i)=>f===_steerResult.files[i]);
+    if(_sameOwner&&_filesStillCurrent){S.pendingFiles=[];renderTray();}
+    if(_steerResult.ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(_steerResult.ownerSid,msg,_steerResult.files);
+  }
 }
 
 function _steerFailureMessageKey(fallback) {
@@ -1415,8 +1421,7 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
  * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
  *   (vs the busy-mode auto-fallback). Affects draft restore prefix only;
  *   toast wording is determined by the failure reason code.
- * @returns {Promise<boolean>} true when the steer was delivered, false when the
- *   draft was restored and the active stream was left untouched.
+ * @returns {Promise<object>} Outcome for caller-side composer cleanup.
  */
 function _steerUploadedAttachmentPaths(uploaded){
   if(!Array.isArray(uploaded))return[];
@@ -1495,9 +1500,14 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
 }
 
 async function _trySteer(msg, explicitSteer){
+  const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
+  const ownerFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const ownerProfile=S.activeProfile||'default';
+  const ownerModelState=typeof _chatPayloadModelState==='function'
+    ? _chatPayloadModelState()
+    : {model:S.model,model_provider:S.model_provider};
   let result=null;
   const originalMsg=String(msg||'').trim();
-  const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
   const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
   if(!ownerSid){showToast(t('no_active_session'));return false;}
   let steerText=originalMsg;
@@ -1563,22 +1573,19 @@ async function _trySteer(msg, explicitSteer){
       _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
     }
     showToast(t('cmd_steer_delivered'),2500);
-    return true;
+    return {handled:true,queuedFallback:false,ownerSid,files:ownerFiles};
   }
-  if(result&&result.fallback==='gateway_steer_queued'&&S.session&&typeof queueSessionMessage==='function'){
-    const _modelState=typeof _chatPayloadModelState==='function'
-      ? _chatPayloadModelState()
-      : {model:S.model,model_provider:S.model_provider};
-    queueSessionMessage(S.session.session_id,{
+  if(result&&result.fallback==='gateway_steer_queued'&&ownerSid&&typeof queueSessionMessage==='function'){
+    queueSessionMessage(ownerSid,{
       text:msg,
-      files:Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[],
-      model:_modelState.model,
-      model_provider:_modelState.model_provider,
-      profile:S.activeProfile||'default',
+      files:ownerFiles,
+      model:ownerModelState.model,
+      model_provider:ownerModelState.model_provider,
+      profile:ownerProfile,
     });
-    if(typeof updateQueueBadge==='function')updateQueueBadge(S.session.session_id);
+    if(typeof updateQueueBadge==='function')updateQueueBadge(ownerSid);
     showToast(t('steer_leftover_queued'),3000);
-    return true;
+    return {handled:true,queuedFallback:true,ownerSid,files:ownerFiles};
   }
   // Do not fall back to interrupt: Steer failure is not permission to cancel
   // the active run. Restore the draft so the user can explicitly Queue or
@@ -1596,7 +1603,7 @@ async function _trySteer(msg, explicitSteer){
   const fallbackCode = result && result.fallback;
   showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
   if(_steerOwnerIsCurrent(ownerSid)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode);
-  return false;
+  return {handled:false,queuedFallback:false,ownerSid,files:ownerFiles};
 }
 
 async function cmdTitle(args){

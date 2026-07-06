@@ -297,6 +297,8 @@ class TestFrontendWiring:
         assert "result&&result.accepted" in body or "result.accepted" in body
         assert "gateway_steer_queued" in body
         assert "queueSessionMessage" in body
+        assert "ownerSid" in body
+        assert "ownerFiles" in body
         assert "cancelStream" not in body, "fallback path must not cancel the stream"
         assert "inp.value" in body, "fallback path must restore the composer draft"
 
@@ -398,7 +400,8 @@ class TestFrontendWiring:
             eval({json.dumps(steer_src)});
             (async()=>{{
               const delivered = await _trySteer('hint', false);
-              assert.strictEqual(delivered, true);
+              assert.strictEqual(delivered.handled, true);
+              assert.strictEqual(delivered.queuedFallback, false);
               assert.strictEqual(indicatorText, 'hint');
               assert.ok(apiPayload.text.includes('[Attached files for this steer: /tmp/a.pdf]'));
               assert.ok(!indicatorText.includes('Attached files'));
@@ -447,7 +450,8 @@ class TestFrontendWiring:
             eval({json.dumps(steer_src)});
             (async()=>{{
               const delivered = await _trySteer('', false);
-              assert.strictEqual(delivered, true);
+              assert.strictEqual(delivered.handled, true);
+              assert.strictEqual(delivered.queuedFallback, false);
               assert.strictEqual(indicatorText, 'Attached files: a.pdf');
               assert.ok(apiPayload.text.includes('[Attached files for this steer: /tmp/a.pdf]'));
               assert.ok(!indicatorText.includes('file tools/read_file'));
@@ -503,7 +507,8 @@ class TestFrontendWiring:
             eval({json.dumps(steer_src)});
             (async()=>{{
               const delivered = await _trySteer('hint', false);
-              assert.strictEqual(delivered, true);
+              assert.strictEqual(delivered.handled, true);
+              assert.strictEqual(delivered.queuedFallback, false);
               assert.strictEqual(uploadOptions.sessionId, 'A');
               assert.strictEqual(uploadOptions.files.length, 1);
               assert.strictEqual(uploadOptions.files[0].name, 'a.pdf');
@@ -528,7 +533,7 @@ class TestFrontendWiring:
         assert "if(text||S.pendingFiles.length)" in block, (
             "busy send must route file-only composer submissions through queue/interrupt/steer"
         )
-        assert "_trySteer uploads with clearPending=false" in self.msgs
+        assert "a failed steer restores the draft" in self.msgs
 
     def test_upload_pending_files_can_preserve_staged_files_for_steer(self):
         ui = (Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
