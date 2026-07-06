@@ -1347,7 +1347,7 @@ async function cmdSteer(args){
   }
   if(!S.session){showToast(t('no_active_session'));return;}
   const _steerResult=await _trySteer(msg, /*explicitSteer=*/true);
-  _applyQueuedSteerCleanup(msg,_steerResult);
+  if(_steerResult&&_steerResult.handled)_steerFinalizeComposer(_steerResult.ownerSid,msg,_steerResult.files,/*explicitSteer=*/true);
 }
 
 function _steerFailureMessageKey(fallback) {
@@ -1376,36 +1376,49 @@ function _showSteerIndicator(text){
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 
-function _applyQueuedSteerCleanup(msg,result){
-  if(!result||!result.queuedFallback)return;
-  const files=Array.isArray(result.files)?result.files:[];
-  const sameOwner=S.session&&S.session.session_id===result.ownerSid;
-  const filesStillCurrent=Array.isArray(S.pendingFiles)&&S.pendingFiles.length===files.length&&S.pendingFiles.every((f,i)=>f===files[i]);
-  if(sameOwner&&filesStillCurrent){S.pendingFiles=[];renderTray();}
-  if(sameOwner){
+// Steer/recovery composer cleanup. A session's visible textarea, persisted draft,
+// and staged files may be cleared only when the live composer for that owner still
+// holds exactly what was submitted (empty, the same text, or `/steer <text>`) with
+// no replacement files staged; if the user typed or staged new content during the
+// steer await, all three are preserved. Every handled steer/recovery outcome
+// (accepted local steer, gateway-queued fallback, recovery retry) routes cleanup
+// through _steerFinalizeComposer so the three surfaces cannot diverge again.
+function _steerComposerSafeToClear(ownerSid,msg,files){
+  if(!_steerOwnerIsCurrent(ownerSid))return true;
+  const inp=$('msg');
+  if(!inp)return true;
+  const text=String(msg||'');
+  const textSafe=inp.value===''||inp.value===text||(text&&inp.value===`/steer ${text}`);
+  if(!textSafe)return false;
+  // Any file staged during the await that is not part of the submitted set is replacement content.
+  const submitted=new Set(Array.isArray(files)?files:[]);
+  const staged=Array.isArray(S.pendingFiles)?S.pendingFiles:[];
+  return staged.every(f=>submitted.has(f));
+}
+
+function _steerFinalizeComposer(ownerSid,msg,files,explicitSteer){
+  const ownerCurrent=_steerOwnerIsCurrent(ownerSid);
+  const delivered=Array.isArray(files)?files:[];
+  // Evaluate safety against the pre-consume staged set so a replacement file still
+  // blocks the textarea/draft clear even after the delivered files are removed below.
+  const safe=_steerComposerSafeToClear(ownerSid,msg,delivered);
+  // Delivered/queued files are consumed regardless of composer edits — remove them by
+  // object identity so any file staged during the await survives (#5459 gate).
+  if(ownerCurrent&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length&&delivered.length){
+    const _delivered=new Set(delivered);
+    const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
+    if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
+  }
+  if(!safe)return;
+  if(ownerCurrent){
     const inp=$('msg');
-    const text=String(msg||'');
-    if(inp&&(inp.value===text||(text&&inp.value===`/steer ${text}`))){
+    if(inp){
       inp.value='';
       if(typeof autoResize==='function')autoResize();
       if(typeof updateSendBtn==='function')updateSendBtn();
     }
   }
-  _steerClearComposerDraftIfSafe(result.ownerSid,msg,files);
-}
-
-function _steerComposerAllowsDraftClear(ownerSid,msg){
-  if(!(ownerSid&&typeof S!=='undefined'&&S.session&&S.session.session_id===ownerSid))return true;
-  const inp=$('msg');
-  if(!inp)return true;
-  const text=String(msg||'');
-  return inp.value===''||inp.value===text||(text&&inp.value===`/steer ${text}`);
-}
-
-function _steerClearComposerDraftIfSafe(ownerSid,msg,files){
-  if(ownerSid&&typeof _clearComposerDraft==='function'&&_steerComposerAllowsDraftClear(ownerSid,msg)){
-    _clearComposerDraft(ownerSid,msg,files);
-  }
+  if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(msg,explicitSteer),delivered);
 }
 
 function _showSteerRecovery(msg, explicitSteer, fallback) {
@@ -1425,7 +1438,7 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
   retryBtn.addEventListener('click', async () => {
     el.remove();
     const result=await _trySteer(msg, explicitSteer).catch(e=>{console.error(e);return null;});
-    _applyQueuedSteerCleanup(msg,result);
+    if(result&&result.handled)_steerFinalizeComposer(result.ownerSid,msg,result.files,explicitSteer);
   });
   el.appendChild(retryBtn);
   const dismissBtn = document.createElement('button');
@@ -1580,26 +1593,14 @@ async function _trySteer(msg, explicitSteer){
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
-    // The captured files+text were delivered to ownerSid — clear that session's
-    // draft (it may not be the live session anymore if the user switched during
-    // the upload/API await, which is fine: we're clearing the OWNER's draft).
+    // The captured files+text were delivered to ownerSid. Composer cleanup (draft,
+    // textarea, and delivered-file removal) is owned by the caller's
+    // _steerFinalizeComposer so the accepted, gateway-queued, and retry paths share
+    // one content-preservation guard. Only the transient in-chat indicator is shown
+    // here — it must survive the done event's S.messages replacement and self-removes
+    // when the turn completes. Show it only if the user still views the owning session.
     _steerUploadCache=null; // delivered — invalidate the retry cache
-    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
-    // Show a transient steer indicator in the chat (NOT in S.messages — it must
-    // survive the done event's S.messages=d.session.messages replacement).
-    // The indicator self-removes when the turn completes (done/cancel/error
-    // all call renderMessages which rebuilds msgInner). Only mutate the visible
-    // tray/DOM if the user is still looking at the owning session.
-    if(_steerOwnerIsCurrent(ownerSid)){
-      // Remove ONLY the files we captured+delivered, by object identity, so any
-      // files staged during the upload/API await are preserved (#5459 gate).
-      if(typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length&&pendingFilesSnapshot.length){
-        const _delivered=new Set(pendingFilesSnapshot);
-        const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
-        if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
-      }
-      _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
-    }
+    if(_steerOwnerIsCurrent(ownerSid)) _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
     showToast(t('cmd_steer_delivered'),2500);
     return {handled:true,queuedFallback:false,ownerSid,files:ownerFiles};
   }

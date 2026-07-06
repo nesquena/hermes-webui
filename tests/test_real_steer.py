@@ -356,9 +356,13 @@ class TestFrontendWiring:
         assert "body:JSON.stringify({session_id:ownerSid,text:steerText})" in body, (
             "steer endpoint must receive the captured owner session id and attachment-enriched text"
         )
-        assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in body
+        # Composer cleanup (draft clear + delivered-file removal) is owned by the
+        # shared _steerFinalizeComposer guard, not _trySteer itself.
+        assert "_clearComposerDraft(" not in body, "draft clearing must route through _steerFinalizeComposer, not _trySteer"
+        assert "return {handled:true,queuedFallback:false,ownerSid,files:ownerFiles};" in body
         assert "if(_steerOwnerIsCurrent(ownerSid))" in body
-        assert "S.pendingFiles=_remaining" in body, "accepted steer should clear the delivered files (by identity) after paths are injected"
+        finalize = _source_between(cmds, "function _steerFinalizeComposer", "\nfunction _showSteerRecovery")
+        assert "S.pendingFiles=_remaining" in finalize, "the shared guard removes the delivered files by identity"
 
     def test_file_steer_does_not_read_live_session_after_upload_await(self):
         cmds = self.cmds
@@ -501,9 +505,11 @@ class TestFrontendWiring:
             pytest.skip("node not available")
         assert node is not None
 
+        # Include the shared cleanup guard: draft clearing moved out of _trySteer
+        # into _steerFinalizeComposer, which the caller runs after _trySteer returns.
         steer_src = _source_between(
             self.cmds,
-            "function _steerUploadedAttachmentPaths",
+            "function _steerComposerSafeToClear",
             "\nasync function cmdTitle",
         )
         script = textwrap.dedent(
@@ -520,6 +526,8 @@ class TestFrontendWiring:
             function setComposerStatus(){{}}
             function showToast(){{}}
             function renderTray(){{trayRenders += 1;}}
+            function autoResize(){{}}
+            function updateSendBtn(){{}}
             function _showSteerIndicator(){{indicatorCalls += 1;}}
             function _showSteerRecovery(){{}}
             function _clearComposerDraft(sid,text,files){{draftClears.push({{sid,text,files}});}}
@@ -537,6 +545,9 @@ class TestFrontendWiring:
             eval({json.dumps(steer_src)});
             (async()=>{{
               const delivered = await _trySteer('hint', false);
+              // Caller runs the shared cleanup for the captured owner ('A'), which is
+              // no longer the live session ('B') after the mid-upload switch.
+              _steerFinalizeComposer(delivered.ownerSid, 'hint', delivered.files, false);
               assert.strictEqual(delivered.handled, true);
               assert.strictEqual(delivered.queuedFallback, false);
               assert.strictEqual(uploadOptions.sessionId, 'A');
@@ -569,7 +580,7 @@ class TestFrontendWiring:
 
         cleanup_src = _source_between(
             self.cmds,
-            "function _applyQueuedSteerCleanup",
+            "function _steerComposerSafeToClear",
             "\nfunction _showSteerRecovery",
         )
         script = textwrap.dedent(
@@ -586,16 +597,22 @@ class TestFrontendWiring:
             function autoResize(){{resized += 1;}}
             function updateSendBtn(){{sendUpdates += 1;}}
             function _clearComposerDraft(sid,text,files){{draftClears.push({{sid,text,files}});}}
+            function _steerOwnerIsCurrent(sid){{return !!(sid && S && S.session && S.session.session_id===sid);}}
+            function _steerRestoreText(msg,explicit){{return explicit?('/steer '+msg):msg;}}
             eval({json.dumps(cleanup_src)});
-            _applyQueuedSteerCleanup('retry me', {{queuedFallback:true, ownerSid:'A', files:S.pendingFiles}});
+            // Unchanged composer (still holds the submitted `/steer retry me`): all
+            // three surfaces clear.
+            _steerFinalizeComposer('A', 'retry me', S.pendingFiles, false);
             assert.strictEqual(msgEl.value, '');
             assert.strictEqual(S.pendingFiles.length, 0);
             assert.strictEqual(trayRenders, 1);
             assert.strictEqual(resized, 1);
             assert.strictEqual(sendUpdates, 1);
             assert.strictEqual(draftClears.length, 1);
+            // Replacement text typed during the await: textarea AND persisted draft
+            // are both preserved.
             msgEl.value = 'new text';
-            _applyQueuedSteerCleanup('retry me', {{queuedFallback:true, ownerSid:'A', files:[]}});
+            _steerFinalizeComposer('A', 'retry me', [], false);
             assert.strictEqual(msgEl.value, 'new text');
             assert.strictEqual(resized, 1);
             assert.strictEqual(sendUpdates, 1);

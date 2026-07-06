@@ -54,12 +54,19 @@ def test_busy_send_paths_clear_persisted_composer_draft():
     busy_body = _block(MESSAGES_JS, "if(S.busy||compressionRunning){", "  if(S.session&&(S.session.read_only||S.session.is_read_only))")
     assert "_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);" in busy_body
     assert busy_body.count("_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);") >= 2
-    assert "_steerClearComposerDraftIfSafe(_steerResult.ownerSid,text,_steerDraftFiles)" in busy_body, "delivered steer must clear persisted draft only when the visible composer still holds the submitted payload"
-    assert "_clearComposerDraft(S.session.session_id,text" not in busy_body
-    try_steer_body = _block(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
-    assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_steer_body, (
-        "delivered steer must clear the captured owner draft with the submitted payload signature"
+    assert "_steerFinalizeComposer(_steerResult.ownerSid,text,_steerResult.files,/*explicitSteer=*/false)" in busy_body, (
+        "delivered/queued steer must route composer cleanup through the shared guard so a replacement draft is preserved"
     )
+    assert "_clearComposerDraft(S.session.session_id,text" not in busy_body
+    # Draft clearing on the steer path lives only in the shared guard, never inline
+    # in _trySteer, so the accepted-steer path can no longer wipe a replacement draft.
+    try_steer_body = _block(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
+    assert "_clearComposerDraft(" not in try_steer_body, "steer draft clearing must route through _steerFinalizeComposer"
+    finalize_body = _block(COMMANDS_JS, "function _steerFinalizeComposer", "\nfunction _showSteerRecovery")
+    assert "_clearComposerDraft(ownerSid,_steerRestoreText(msg,explicitSteer),delivered)" in finalize_body, (
+        "the shared guard clears the captured owner draft with the submitted payload signature"
+    )
+    assert "if(!safe)return;" in finalize_body, "textarea and draft clears must be gated by the combined text+files+owner predicate"
 
 
 def test_file_signature_survives_server_draft_round_trip():
@@ -137,4 +144,73 @@ def test_file_signature_survives_server_draft_round_trip():
     )
     assert out["differsFromOther"] is True, (
         "a genuinely different draft must NOT collide with the sent signature"
+    )
+
+
+def _run_steer_finalize_harness(body: str) -> None:
+    """Eval the shared steer cleanup guard and run `body` against it under node."""
+    import json
+    import shutil
+    import subprocess
+    import textwrap
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    guard_src = _block(
+        COMMANDS_JS,
+        "function _steerComposerSafeToClear",
+        "\nfunction _showSteerRecovery",
+    )
+    script = textwrap.dedent(
+        """
+        const assert = require('assert');
+        let draftClears = [];
+        function renderTray(){}
+        function autoResize(){}
+        function updateSendBtn(){}
+        function _clearComposerDraft(sid,text,files){draftClears.push({sid,text,files});}
+        function _steerOwnerIsCurrent(sid){return !!(sid && S && S.session && S.session.session_id===sid);}
+        function _steerRestoreText(msg,explicit){return explicit?('/steer '+msg):msg;}
+        eval(%(guard)s);
+        %(body)s
+        """
+    ) % {"guard": json.dumps(guard_src), "body": body}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+
+
+def test_accepted_steer_replacement_text_keeps_persisted_draft():
+    """#5585: an accepted local steer must not wipe the persisted draft when the
+    user typed replacement text during the steer await. Previously an unguarded
+    _clearComposerDraft in _trySteer cleared it; the shared _steerFinalizeComposer
+    guard now skips the clear when the live composer holds replacement text."""
+    _run_steer_finalize_harness(
+        """
+        let S = {session:{session_id:'A'}, pendingFiles:[]};
+        const msgEl = {value:'my replacement'};   // typed during the steer await
+        function $(id){return msgEl;}
+        // Accepted local steer for owner 'A', still the live session.
+        _steerFinalizeComposer('A','hint',[],false);
+        assert.strictEqual(msgEl.value, 'my replacement', 'replacement text must stay in the composer');
+        assert.strictEqual(draftClears.length, 0, 'persisted draft must survive replacement text');
+        """
+    )
+
+
+def test_accepted_steer_replacement_file_keeps_persisted_draft():
+    """#5585: the safe-clear predicate must consider staged files, not just text.
+    An empty textarea with a newly staged replacement file must not clear the draft
+    (the round-6 defect where _steerComposerAllowsDraftClear ignored files)."""
+    _run_steer_finalize_harness(
+        """
+        let S = {session:{session_id:'A'}, pendingFiles:[{name:'new.pdf'}]}; // staged during await
+        const msgEl = {value:''};   // textarea empty
+        function $(id){return msgEl;}
+        // Text-only steer delivered (no files submitted); a replacement file is staged.
+        _steerFinalizeComposer('A','hint',[],false);
+        assert.strictEqual(draftClears.length, 0, 'persisted draft must survive a replacement staged file');
+        assert.strictEqual(S.pendingFiles.length, 1, 'the newly staged file must not be dropped');
+        """
     )

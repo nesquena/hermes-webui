@@ -1372,23 +1372,19 @@ async function send(){
       }
     const defaultMessageMode=window._defaultMessageMode||'steer';
       if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
-        const _steerDraftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
-        // Real steer: clear the input first so the user gets immediate
-        // feedback, then ship the steer payload via /api/chat/steer.
-        // _trySteer captures the owner session/files before awaiting uploads,
-        // restores/persists the draft on failure, and clears the owner draft
-        // only after /api/chat/steer accepts.
+        // Real steer: clear the input first (synchronous, pre-await, so no
+        // replacement content can exist yet) for immediate feedback, then ship the
+        // steer payload via /api/chat/steer. _trySteer captures the owner
+        // session/files before awaiting uploads and restores/persists the draft on
+        // failure.
         $('msg').value='';autoResize();
         // Do NOT clear pendingFiles yet — a failed steer restores the draft and
         // must keep staged files available for the user's next explicit action.
         const _steerResult=await _trySteer(text, /*explicitSteer=*/false);
-        const _steerDelivered=_steerResult&&_steerResult.handled;
-        // After a delivered steer, clear any staged files because the text-only
-        // steer payload has been handled. On failure, keep files staged.
-        const _sameSteerOwner=_steerResult&&S.session&&S.session.session_id===_steerResult.ownerSid;
-        const _steerFilesStillCurrent=_steerResult&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length===_steerResult.files.length&&S.pendingFiles.every((f,i)=>f===_steerResult.files[i]);
-        if(_steerDelivered&&_sameSteerOwner&&_steerFilesStillCurrent){S.pendingFiles=[];renderTray();}
-        if(_steerDelivered&&typeof _steerClearComposerDraftIfSafe==='function') _steerClearComposerDraftIfSafe(_steerResult.ownerSid,text,_steerDraftFiles);
+        // Delivered/queued steer cleanup (draft, textarea, and delivered files) routes
+        // through the shared guard so replacement text or files typed during the await
+        // are preserved on this path exactly as on the /steer and retry paths.
+        if(_steerResult&&_steerResult.handled&&typeof _steerFinalizeComposer==='function') _steerFinalizeComposer(_steerResult.ownerSid,text,_steerResult.files,/*explicitSteer=*/false);
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();

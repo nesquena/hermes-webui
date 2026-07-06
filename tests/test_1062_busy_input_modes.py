@@ -112,7 +112,7 @@ class TestSlashCommandHandlers:
         assert "cancelStream" not in helper_body
         assert "inp.value" in helper_body
         assert "if(result&&result.accepted)" in helper_body
-        assert "S.pendingFiles=_remaining" in helper_body
+        assert "return {handled:true,queuedFallback:false,ownerSid,files:ownerFiles};" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
         assert "_steerFailureMessageKey" in helper_body or "steer_fail_" in helper_body
 
@@ -152,37 +152,42 @@ class TestSlashCommandHandlers:
         # accepted steer, and removes only the delivered files by identity so
         # files staged during the upload await are preserved. The fallback path
         # restores the draft and keeps staged files available.
+        # File removal and draft clearing on accepted steer now live in the shared
+        # _steerFinalizeComposer guard (run by the caller after _trySteer returns).
+        # _trySteer itself must not mutate staged files or the draft.
         try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         accepted_idx = try_body.find("if(result&&result.accepted)")
         failure_idx = try_body.find("// Do not fall back to interrupt")
-        clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
         assert accepted_idx >= 0, "_trySteer must branch on accepted steer responses"
-        assert clear_idx > accepted_idx, "accepted steer should clear the delivered staged files"
-        assert "_delivered=new Set(pendingFilesSnapshot)" in try_body, (
-            "accepted steer must remove only the delivered files by identity, preserving newly staged ones"
-        )
+        assert "S.pendingFiles=_remaining" not in try_body
         assert "S.pendingFiles=[]" not in try_body
-        assert failure_idx > clear_idx, "staged files must not be cleared in the failure path"
-        assert "renderTray()" in try_body[failure_idx:]
+        assert "_clearComposerDraft(" not in try_body, "steer draft clearing must route through the shared guard"
+        assert "renderTray()" in try_body[failure_idx:], "failure path restores the owner tray"
+
+        finalize_body = _source_between(COMMANDS_JS, "function _steerFinalizeComposer", "\nfunction _showSteerRecovery")
+        assert "_delivered=new Set(delivered)" in finalize_body, (
+            "the shared guard removes only the delivered files by identity, preserving newly staged ones"
+        )
+        assert "S.pendingFiles=_remaining" in finalize_body
 
         idx_steer = COMMANDS_JS.find("async function cmdSteer(")
         assert idx_steer >= 0, "cmdSteer not found"
         steer_body = COMMANDS_JS[idx_steer:COMMANDS_JS.find("function _steerFailureMessageKey", idx_steer)]
-        assert "_applyQueuedSteerCleanup(msg,_steerResult)" in steer_body
-        cleanup_body = _source_between(COMMANDS_JS, "function _applyQueuedSteerCleanup", "\nfunction _showSteerRecovery")
-        assert "queuedFallback" in cleanup_body
-        assert "S.session.session_id===result.ownerSid" in cleanup_body
-        assert "inp.value===text" in cleanup_body
-        assert "inp.value===`/steer ${text}`" in cleanup_body
-        assert "updateSendBtn()" in cleanup_body
-        assert "_steerClearComposerDraftIfSafe(result.ownerSid,msg,files)" in cleanup_body
-        assert "function _steerComposerAllowsDraftClear" in COMMANDS_JS
+        assert "_steerFinalizeComposer(_steerResult.ownerSid,msg,_steerResult.files,/*explicitSteer=*/true)" in steer_body
+        predicate_body = _source_between(COMMANDS_JS, "function _steerComposerSafeToClear", "\nfunction _steerFinalizeComposer")
+        assert "inp.value===text" in predicate_body
+        assert "inp.value===`/steer ${text}`" in predicate_body
+        assert "staged.every(f=>submitted.has(f))" in predicate_body, "the safe-clear predicate must consider staged files, not just text"
+        assert "_steerComposerSafeToClear(ownerSid,msg,delivered)" in finalize_body
+        assert "if(!safe)return;" in finalize_body
+        assert "updateSendBtn()" in finalize_body
+        assert "_clearComposerDraft(ownerSid,_steerRestoreText(msg,explicitSteer),delivered)" in finalize_body
 
     def test_steer_recovery_retry_consumes_queued_fallback_cleanup(self):
         recovery_body = _source_between(COMMANDS_JS, "function _showSteerRecovery", "\n/**")
         assert "retryBtn.addEventListener('click', async () => {" in recovery_body
         assert "const result=await _trySteer(msg, explicitSteer).catch" in recovery_body
-        assert "_applyQueuedSteerCleanup(msg,result)" in recovery_body
+        assert "_steerFinalizeComposer(result.ownerSid,msg,result.files,explicitSteer)" in recovery_body
 
 
 class TestBusySendButton:
@@ -355,19 +360,18 @@ class TestSendBusyBranchDispatch:
         assert branch_end > steer_idx, "busy steer branch end not found"
         branch = MESSAGES_JS[steer_idx:branch_end]
         assert "const _steerResult=await _trySteer" in branch
-        assert "const _steerDelivered=_steerResult&&_steerResult.handled;" in branch
-        assert "const _steerDraftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in branch
-        assert "S.session.session_id===_steerResult.ownerSid" in branch
-        assert "if(_steerDelivered&&_sameSteerOwner&&_steerFilesStillCurrent){S.pendingFiles=[];renderTray();}" in branch
-        assert "_steerClearComposerDraftIfSafe(_steerResult.ownerSid,text,_steerDraftFiles)" in branch
-        assert branch.index("const _steerResult=await _trySteer") < branch.index("if(_steerDelivered&&_sameSteerOwner&&_steerFilesStillCurrent){S.pendingFiles=[];renderTray();}")
+        # Busy-send routes delivered/queued cleanup through the shared guard, which only
+        # clears files/textarea/draft when the composer still holds the submitted payload.
+        assert "_steerFinalizeComposer(_steerResult.ownerSid,text,_steerResult.files,/*explicitSteer=*/false)" in branch
+        assert "_steerResult.handled" in branch
+        assert branch.index("const _steerResult=await _trySteer") < branch.index("_steerFinalizeComposer(")
+        # Failed steer (not handled) never reaches the guard, so staged files stay intact.
         try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         accepted_idx = try_body.find("if(result&&result.accepted)")
         failure_idx = try_body.find("// Do not fall back to interrupt")
-        clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
-        assert accepted_idx >= 0 and clear_idx > accepted_idx
-        assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_body
-        assert failure_idx > clear_idx, "failed steer must leave staged files intact"
+        assert accepted_idx >= 0 and failure_idx > accepted_idx
+        assert "S.pendingFiles=_remaining" not in try_body, "file cleanup moved to the shared guard"
+        assert "renderTray()" in try_body[failure_idx:], "failed steer restores the owner tray without clearing files"
 
     def test_reentrant_send_does_not_queue_staged_files_while_steer_uploads(self):
         """Repeated Enter during steer upload must not double-send staged files.
@@ -397,7 +401,7 @@ class TestSendBusyBranchDispatch:
         assert "_steerFilesSignature(" in try_body
         assert "_steerUploadCache={sid:ownerSid,sig,paths}" in try_body
         assert "_steerUploadCache=null" in try_body
-        assert "_delivered=new Set(pendingFilesSnapshot)" in COMMANDS_JS
+        assert "_delivered=new Set(delivered)" in COMMANDS_JS
         assert "S.pendingFiles=_remaining" in COMMANDS_JS
 
 
