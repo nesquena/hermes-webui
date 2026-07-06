@@ -5700,7 +5700,17 @@ def _messages_have_final_assistant_for_current_turn(
         previous_display_already_settled = not _session_lacks_final_assistant_answer(
             previous_display[current_user_idx:]
         )
-        if not previous_tail_is_current_user and not previous_display_already_settled:
+        current_user_ts = _message_timestamp_value(turn_messages[current_user_idx])
+        timestamp_anchors_current_user = (
+            min_ts is not None
+            and current_user_ts is not None
+            and current_user_ts >= min_ts
+        )
+        if (
+            not timestamp_anchors_current_user
+            and not previous_tail_is_current_user
+            and not previous_display_already_settled
+        ):
             return False
     for msg in turn_messages[current_user_idx + 1:]:
         if not isinstance(msg, dict):
@@ -5712,6 +5722,9 @@ def _messages_have_final_assistant_for_current_turn(
         if msg.get('role') != 'assistant':
             continue
         if msg.get('tool_calls'):
+            continue
+        assistant_ts = _message_timestamp_value(msg)
+        if min_ts is not None and assistant_ts is not None and assistant_ts < min_ts:
             continue
         if _message_text(msg.get('content')).strip():
             return True

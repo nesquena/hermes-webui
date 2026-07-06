@@ -82,11 +82,12 @@ def test_eager_chat_start_checkpoints_first_user_message_before_thread(_isolate_
         model=s.model,
         model_provider=s.model_provider,
         stream_id="stream_eager",
-        started_at=456.0,
+        started_at=456.25,
     )
     on_disk = json.loads(s.path.read_text(encoding="utf-8"))
     assert [m["role"] for m in on_disk["messages"]] == ["user"]
     assert on_disk["messages"][0]["content"] == "hello eager"
+    assert on_disk["messages"][0]["timestamp"] == 456.25
     assert on_disk["messages"][0]["attachments"][0]["name"] == "note.txt"
     assert on_disk["pending_user_message"] == "hello eager"
 

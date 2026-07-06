@@ -19973,7 +19973,7 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     if source and source != "webui":
         user_msg["_source"] = source
     if isinstance(started_at, (int, float)) and started_at > 0:
-        user_msg["timestamp"] = int(started_at)
+        user_msg["timestamp"] = float(started_at)
     if attachments:
         user_msg["attachments"] = list(attachments)
     s.messages.append(user_msg)

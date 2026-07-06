@@ -11,6 +11,7 @@ import pytest
 
 import api.config as config
 import api.models as models
+import api.routes as routes
 import api.streaming as streaming
 from api.models import Session
 
@@ -608,6 +609,74 @@ def test_repeated_prompt_old_answer_does_not_suppress_current_no_response(tmp_pa
     assert saved.messages[-1]["_error"] is True
 
 
+def test_eager_checkpointed_final_answer_suppresses_stale_no_response(tmp_path, monkeypatch):
+    """Eager checkpoint timestamps must preserve the current-turn anchor.
+
+    The chat-start eager path writes the current user turn before the streaming
+    worker runs. If that checkpoint truncates ``pending_started_at`` to integer
+    seconds, the strict current-turn guard rejects the real persisted answer and
+    appends the stale no_response this PR is meant to suppress.
+    """
+    msg_text = "Please use eager persisted answer"
+    session = _prepare_session(
+        "eager_checkpointed_final_answer",
+        "stream_eager_checkpointed_final_answer",
+        pending_user_message=msg_text,
+    )
+    session.pending_started_at = 1234567890.75
+    session.pending_user_source = "webui"
+    routes._checkpoint_user_message_for_eager_session_save(
+        session,
+        msg_text,
+        session.pending_attachments,
+        started_at=session.pending_started_at,
+        source=session.pending_user_source,
+    )
+    assert session.messages[0]["timestamp"] == session.pending_started_at
+    session.messages.append(
+        {"role": "assistant", "content": "Eager persisted answer", "timestamp": 1234567891.0}
+    )
+    session.context_messages = list(session.messages)
+    session.save()
+
+    # Simulate a stale in-memory worker that did not see the eager checkpointed
+    # user turn or the persisted final assistant answer.
+    session.messages = []
+    session.context_messages = []
+    models.SESSIONS[session.session_id] = session
+
+    class SilentFailureAfterEagerPersistedAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            return {
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_eager_checkpointed_final_answer",
+        SilentFailureAfterEagerPersistedAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("eager_checkpointed_final_answer")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert saved.active_stream_id is None
+    assert saved.pending_user_message is None
+    assert saved.pending_attachments == []
+    assert saved.pending_started_at is None
+    assert saved.pending_user_source is None
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "Eager persisted answer"
+    assert saved.context_messages[-1]["role"] == "assistant"
+    assert saved.context_messages[-1]["content"] == "Eager persisted answer"
+    assert not any(msg.get("_error") for msg in saved.messages)
+
+
 def test_persisted_final_guard_accepts_already_settled_previous_display():
     """A stale no_response branch must trust a finished persisted transcript.
 
@@ -628,6 +697,58 @@ def test_persisted_final_guard_accepts_already_settled_previous_display():
         msg_text,
         previous_display=list(settled),
         min_user_timestamp=1,
+    ) is True
+
+
+def test_persisted_final_guard_trusts_timestamp_anchor_across_previous_display_drift():
+    """A proven current user timestamp must not be rejected by cross-list indexes."""
+    msg_text = "repeat visible CUA tests"
+    previous_display = [
+        {"role": "user", "content": "older", "timestamp": 1},
+        {"role": "assistant", "content": "older answer", "timestamp": 2},
+        {"role": "user", "content": "different pending view", "timestamp": 3},
+    ]
+    persisted = [
+        {"role": "assistant", "content": "compression marker", "timestamp": 4},
+        {"role": "user", "content": msg_text, "timestamp": 100.8},
+        {"role": "assistant", "content": "Current persisted answer", "timestamp": 101.0},
+    ]
+
+    assert streaming._messages_have_final_assistant_for_current_turn(
+        persisted,
+        msg_text,
+        previous_display=previous_display,
+        min_user_timestamp=100.8,
+    ) is True
+
+
+def test_persisted_final_guard_rejects_pre_anchor_assistant_candidate():
+    msg_text = "repeat visible CUA tests"
+    persisted = [
+        {"role": "user", "content": msg_text, "timestamp": 100.8},
+        {"role": "assistant", "content": "Old out-of-order answer", "timestamp": 100.2},
+    ]
+
+    assert streaming._messages_have_final_assistant_for_current_turn(
+        persisted,
+        msg_text,
+        previous_display=[{"role": "user", "content": msg_text, "timestamp": 100.8}],
+        min_user_timestamp=100.8,
+    ) is False
+
+
+def test_persisted_final_guard_accepts_ts_anchor_alias():
+    msg_text = "repeat visible CUA tests"
+    persisted = [
+        {"role": "user", "content": msg_text, "_ts": 100.8},
+        {"role": "assistant", "content": "Current persisted answer", "_ts": 101.0},
+    ]
+
+    assert streaming._messages_have_final_assistant_for_current_turn(
+        persisted,
+        msg_text,
+        previous_display=[{"role": "user", "content": msg_text, "_ts": 100.8}],
+        min_user_timestamp=100.8,
     ) is True
 
 
