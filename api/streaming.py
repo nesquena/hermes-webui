@@ -8689,6 +8689,42 @@ def _run_agent_streaming(
                         )
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
+                    _streamed_answer_text = ''
+                    if _token_sent:
+                        try:
+                            _streamed_answer_text = str(STREAM_PARTIAL_TEXT.get(stream_id) or '').strip()
+                        except Exception:
+                            _streamed_answer_text = ''
+                    _explicit_result_error = bool(getattr(agent, '_last_error', None)) or (
+                        'error' in result and result.get('error') not in (None, '')
+                    )
+                    _result_is_hard_terminal = (
+                        _agent_result_terminal_failure(result)
+                        or result.get('failed')
+                        or result.get('compression_exhausted')
+                        or _tool_limit_reached
+                    )
+                    if (
+                        _streamed_answer_text
+                        and not _explicit_result_error
+                        and not _result_is_hard_terminal
+                        and not _assistant_reply_added_after_current_turn(
+                            _result_messages,
+                            _previous_context_messages,
+                            msg_text,
+                        )
+                    ):
+                        # Some agent/provider paths emit the full visible answer via
+                        # stream_delta_callback but return only replayed history and
+                        # an empty error field. Treat the streamed text as the final
+                        # assistant answer instead of appending a synthetic
+                        # no_response after text the user already saw.
+                        _result_messages = list(_result_messages or []) + [{
+                            'role': 'assistant',
+                            'content': _streamed_answer_text,
+                        }]
+                        result = dict(result)
+                        result['messages'] = _result_messages
                     if cancel_event.is_set():
                         _finalize_cancelled_turn(s, ephemeral=False)
                         try:

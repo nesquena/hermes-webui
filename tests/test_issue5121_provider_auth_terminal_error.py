@@ -787,6 +787,51 @@ def test_completed_assistant_answer_with_stale_partial_flag_settles_done(tmp_pat
     assert not any(msg.get("_error") for msg in saved.messages)
 
 
+def test_streamed_answer_without_result_message_is_saved_as_final_answer(tmp_path, monkeypatch):
+    """Visible streamed text is a real answer when no terminal error was reported.
+
+    Regression for the live WebUI trace in session 3c748eadef9a: the agent
+    streamed a complete assistant answer via ``stream_delta_callback`` and then
+    returned a result payload that replayed only conversation history plus an
+    empty error field. WebUI must not append ``No response from provider`` after
+    text it already showed to the user.
+    """
+    session = _prepare_session(
+        "streamed_answer_no_result_message",
+        "stream_streamed_answer_no_result_message",
+        pending_user_message="Please ship the CUA patch",
+    )
+
+    class StreamedAnswerNoResultAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Implemented and verified. Ready for review.")
+            return {
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_streamed_answer_no_result_message",
+        StreamedAnswerNoResultAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("streamed_answer_no_result_message")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "Implemented and verified. Ready for review."
+    assert saved.context_messages[-1]["role"] == "assistant"
+    assert saved.context_messages[-1]["content"] == "Implemented and verified. Ready for review."
+    assert not any(msg.get("_partial") for msg in saved.messages)
+    assert not any(msg.get("_error") for msg in saved.messages)
+
+
 def test_stale_partial_with_unfinished_tool_call_still_reports_no_response(tmp_path, monkeypatch):
     session = _prepare_session(
         "unfinished_tool_call_stale_partial",
@@ -912,6 +957,8 @@ def test_non_auth_partial_delivery_persists_error_turn(tmp_path, monkeypatch):
             if self.stream_delta_callback is not None:
                 self.stream_delta_callback("Partial text before failure")
             return {
+                "status": "partial",
+                "partial": True,
                 "messages": list(kwargs.get("conversation_history") or []),
                 "error": "",
             }
@@ -944,6 +991,8 @@ def test_non_auth_seeded_multi_turn_partial_persists_error_turn(tmp_path, monkey
             if self.stream_delta_callback is not None:
                 self.stream_delta_callback("Partial text before failure")
             return {
+                "status": "partial",
+                "partial": True,
                 "messages": list(kwargs.get("conversation_history") or []),
                 "error": "",
             }
