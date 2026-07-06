@@ -118,13 +118,12 @@ def _gateway_reasoning_effort_for_request(
             provider_id=model_provider,
             base_url=base_url,
             session=session,
+            config_data=cfg,
         )
         if isinstance(status, dict):
             effort = status.get("reasoning_effort")
             if effort:
                 return str(effort)
-            if effort == "none":
-                return "none"
     except Exception:
         pass
     try:
@@ -595,9 +594,13 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        from api.config import get_config  # imported lazily to avoid config-cycle churn
+        from api.config import get_config, get_config_for_profile_home  # imported lazily to avoid config-cycle churn
+        from api.profiles import get_hermes_home_for_profile
 
-        cfg = get_config()
+        try:
+            cfg = get_config_for_profile_home(get_hermes_home_for_profile(getattr(s, "profile", None)))
+        except Exception:
+            cfg = get_config()
         base_url = _gateway_base_url(cfg)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,

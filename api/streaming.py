@@ -40,7 +40,6 @@ from api.config import (
     load_settings,
     get_reasoning_status,
     parse_reasoning_effort,
-    coerce_reasoning_effort_for_model,
     _main_model_request_overrides,
 )
 from api.helpers import redact_session_data, _redact_text
@@ -6328,7 +6327,7 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
-def _resolve_turn_reasoning_config(session, *, model_id=None, provider_id=None, base_url=None):
+def _resolve_turn_reasoning_config(session, *, model_id=None, provider_id=None, base_url=None, config_data=None):
     """Return the reasoning_config for the current turn."""
     try:
         status = get_reasoning_status(
@@ -6336,14 +6335,9 @@ def _resolve_turn_reasoning_config(session, *, model_id=None, provider_id=None, 
             model_id=model_id,
             provider_id=provider_id,
             base_url=base_url,
+            config_data=config_data,
         )
-        effort = coerce_reasoning_effort_for_model(
-            status.get('reasoning_effort'),
-            model_id,
-            provider_id=provider_id,
-            base_url=base_url,
-        )
-        return parse_reasoning_effort(effort)
+        return parse_reasoning_effort(status.get('reasoning_effort'))
     except Exception:
         return None
 
@@ -7757,6 +7751,7 @@ def _run_agent_streaming(
                 model_id=resolved_model,
                 provider_id=resolved_provider,
                 base_url=resolved_base_url,
+                config_data=_cfg,
             )
 
             _agent_kwargs = dict(

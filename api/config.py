@@ -3634,17 +3634,17 @@ def get_reasoning_status(
     provider_id: str | None = None,
     base_url: str | None = None,
     session=None,
+    config_data: dict | None = None,
 ) -> dict:
-    """Return current reasoning configuration from the active profile's
-    config.yaml — the same source of truth the CLI reads from.
+    """Return current reasoning configuration from the active or supplied profile config.
 
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
       - reasoning_effort: str — effective effort after session/profile resolve
     """
-    config_data = _load_yaml_config_file(_get_config_path())
-    display_cfg = config_data.get("display") or {}
-    agent_cfg = config_data.get("agent") or {}
+    active_config = config_data if isinstance(config_data, dict) else _load_yaml_config_file(_get_config_path())
+    display_cfg = active_config.get("display") or {}
+    agent_cfg = active_config.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
     profile_effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
     session_effort_raw = getattr(session, "reasoning_effort", None) if session is not None else None
@@ -3660,7 +3660,7 @@ def get_reasoning_status(
             resolve_provider = str(getattr(session, "model_provider", "")).strip() or None
     resolve_base_url = base_url
     if not resolve_model:
-        model_cfg = config_data.get("model") or {}
+        model_cfg = active_config.get("model") or {}
         if isinstance(model_cfg, dict):
             resolve_model = str(model_cfg.get("default") or "").strip() or None
             if not resolve_provider and model_cfg.get("provider"):

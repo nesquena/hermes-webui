@@ -507,6 +507,16 @@ def test_reasoning_status_and_streaming_use_session_first_resolution(isolated_re
     assert other_status["reasoning_effort"] == "medium"
     assert _resolve_turn_reasoning_config(other) == {"enabled": True, "effort": "medium"}
 
+    pinned_cfg = {
+        "model": {"default": "gpt-5", "provider": "openai"},
+        "agent": {"reasoning_effort": "high"},
+    }
+    pinned_status = get_reasoning_status(session=other, config_data=pinned_cfg)
+    assert pinned_status["reasoning_scope"] == "profile"
+    assert pinned_status["profile_reasoning_effort"] == "high"
+    assert pinned_status["reasoning_effort"] == "high"
+    assert _resolve_turn_reasoning_config(other, config_data=pinned_cfg) == {"enabled": True, "effort": "high"}
+
 
 def test_session_reasoning_route_leaves_profile_default_and_global_route_stays_global(isolated_reasoning_env):
     source = Session(
@@ -587,12 +597,16 @@ def test_gateway_reasoning_effort_prefers_session_override(isolated_reasoning_en
 
     session.reasoning_effort = None
     session.save()
+    pinned_cfg = {
+        "model": {"default": "gpt-5", "provider": "openai"},
+        "agent": {"reasoning_effort": "high"},
+    }
     assert _gateway_reasoning_effort_for_request(
-        cfg_data,
+        pinned_cfg,
         model="gpt-5",
         model_provider="openai",
         session=session,
-    ) == "medium"
+    ) == "high"
 
 
 def test_reasoning_chip_cache_is_session_specific_and_session_only_action_requires_session():
@@ -645,8 +659,7 @@ def test_reasoning_chip_cache_is_session_specific_and_session_only_action_requir
     assert data["first"]["label"].startswith("High")
     assert data["first"]["label"].endswith("Session")
     assert "session_id=session-b" in data["second"]["url"]
-    assert data["second"]["label"].startswith("Medium")
-    assert data["second"]["label"].endswith("Profile")
+    assert data["second"]["label"] == "Medium"
     assert data["before"] == data["after"]
     assert data["guardToast"]["type"] == "warning"
     assert "Select a session" in data["guardToast"]["msg"]

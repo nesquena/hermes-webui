@@ -4354,7 +4354,7 @@ function _formatReasoningScopeLabel(scope){
 }
 
 function _reasoningOptionLabel(scope, effortLabel){
-  return (_normalizeReasoningScope(scope)==='session' ? 'This session only: ' : 'Profile default: ') + effortLabel;
+  return effortLabel;
 }
 
 function _activeReasoningSessionId(){
@@ -4411,6 +4411,11 @@ function _ensureReasoningDropdownOptions(){
   });
   dd.innerHTML='';
   ['session','profile'].forEach(function(scope){
+    const header=document.createElement('div');
+    header.className='reasoning-option-group';
+    header.textContent=_normalizeReasoningScope(scope)==='session' ? 'This session' : 'Profile default';
+    header.style.cssText='padding:6px 10px 4px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;';
+    dd.appendChild(header);
     templates.forEach(function(template){
       const opt=document.createElement('div');
       opt.className='reasoning-option';
@@ -4481,7 +4486,7 @@ function _applyReasoningChip(eff){
   if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
   const text=_formatReasoningEffortLabel(effort);
   const scopeText=formatScopeLabel(scope);
-  const displayText=hasScopeFormatter ? (text+' · '+scopeText) : text;
+  const displayText=hasScopeFormatter && scope==='session' ? (text+' · '+scopeText) : text;
   label.textContent=text;
   if(hasScopeFormatter) label.textContent=displayText;
   if(mobileLabel) mobileLabel.textContent=text;
@@ -4635,12 +4640,12 @@ function _sendReasoningEffort(scope, effort){
           const applied=fresh||st||{reasoning_scope:normalizedScope};
           const appliedScope=_normalizeReasoningScope((applied&&applied.reasoning_scope)||normalizedScope);
           _applyReasoningChip((applied&&applied.reasoning_effort)||effort, applied);
-          showToast('Reasoning effort set to '+((applied&&applied.reasoning_effort)||effort)+' ('+_formatReasoningScopeLabel(appliedScope).toLowerCase()+')');
+          showToast('🧠 Reasoning effort set to '+((applied&&applied.reasoning_effort)||effort)+' ('+_formatReasoningScopeLabel(appliedScope).toLowerCase()+')');
           return applied;
         }).catch(function(){
           const fallbackScope=_normalizeReasoningScope((st&&st.reasoning_scope)||normalizedScope);
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{reasoning_scope:fallbackScope});
-          showToast('Reasoning effort set to '+((st&&st.reasoning_effort)||effort)+' ('+_formatReasoningScopeLabel(fallbackScope).toLowerCase()+')');
+          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort)+' ('+_formatReasoningScopeLabel(fallbackScope).toLowerCase()+')');
           return st;
         });
       }
