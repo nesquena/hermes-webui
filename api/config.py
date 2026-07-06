@@ -444,15 +444,19 @@ def _apply_config_defaults(config_data: dict) -> None:
  
 def reload_config_if_stale() -> None:
     """Refresh config.yaml once for concurrent stale read paths."""
+    global cfg
     with _cfg_lock:
         try:
             config_path = _get_config_path()
             current_mtime = config_path.stat().st_mtime
         except OSError:
             current_mtime = 0.0
-        cache_stale = current_mtime != _cfg_mtime or _cfg_path != config_path
-        if not _cfg_cache or (cache_stale and not _cfg_has_in_memory_overrides()):
+        path_changed = _cfg_path != config_path
+        mtime_stale = current_mtime != _cfg_mtime
+        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
+            if path_changed:
+                cfg = _cfg_cache
 
 
 def get_config() -> dict:
@@ -462,8 +466,9 @@ def get_config() -> dict:
         current_mtime = config_path.stat().st_mtime
     except OSError:
         current_mtime = 0.0
-    cache_stale = current_mtime != _cfg_mtime or _cfg_path != config_path
-    if not _cfg_cache or (cache_stale and not _cfg_has_in_memory_overrides()):
+    path_changed = _cfg_path != config_path
+    mtime_stale = current_mtime != _cfg_mtime
+    if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
     # When a test (or runtime caller) has rebound ``cfg`` to a different dict
     # via monkeypatch.setattr(config, "cfg", ...), return that override rather
@@ -5755,10 +5760,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     except OSError:
         _current_path = _get_config_path()
         _current_mtime = 0.0
-    if (
-        (_current_mtime != _cfg_mtime or _current_path != _cfg_path)
-        and not _cfg_has_in_memory_overrides()
-    ):
+    path_changed = _current_path != _cfg_path
+    mtime_stale = _current_mtime != _cfg_mtime
+    if path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to

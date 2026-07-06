@@ -26,6 +26,8 @@ These tests pin both prongs.
 """
 from __future__ import annotations
 
+import os
+
 import api.config as config
 
 
@@ -74,22 +76,30 @@ def test_cfg_has_in_memory_overrides_detects_in_place_mutation(monkeypatch):
         config._cfg_cache.pop("__test_key", None)
 
 
-def test_get_config_does_not_reload_when_only_in_memory_override(monkeypatch, tmp_path):
-    """A test that sets cfg + leaves disk untouched must not trigger reload."""
+def test_get_config_does_not_reload_when_only_in_memory_override_same_path_mtime_only(
+    monkeypatch, tmp_path
+):
+    """same_path cfg overrides must survive mtime-only staleness."""
+    config_path = tmp_path / "config.yaml"
+    base_mtime = 1_700_000_000.0
+    config_path.write_text(
+        "model:\n  provider: openrouter\n  default: test/model-x\n",
+        encoding="utf-8",
+    )
+    os.utime(config_path, (base_mtime, base_mtime))
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
     config.reload_config()
-    # Fake a config path that will have a different mtime than what's cached
-    fake_path = tmp_path / "missing.yaml"
-    monkeypatch.setattr(config, "_get_config_path", lambda: fake_path)
 
-    # Override cfg via attr rebind.
     test_override = {
         "model": {"provider": "openai", "default": "gpt-test"},
         "providers": {},
     }
     monkeypatch.setattr(config, "cfg", test_override, raising=False)
 
-    # The path-aware reload would normally trigger reload (path changed),
-    # but the override-detection should suppress it.
+    os.utime(config_path, (base_mtime + 1.0, base_mtime + 1.0))
+
+    # The same_path mtime-only reload would normally trigger reload, but the
+    # override-detection should suppress it.
     result = config.get_config()
     assert result is test_override
     assert result["model"]["provider"] == "openai"

@@ -30,12 +30,14 @@ class _RestoreCfg:
         import copy
         self._snapshot = copy.deepcopy(config.cfg)
         self._cfg_mtime = config._cfg_mtime
+        self._cfg_path = getattr(config, "_cfg_path", None)
         return self
 
     def __exit__(self, *exc):
         config.cfg.clear()
         config.cfg.update(self._snapshot)
         config._cfg_mtime = self._cfg_mtime
+        config._cfg_path = self._cfg_path
 
 
 def _set_cfg(cfg_dict: dict):
@@ -45,6 +47,7 @@ def _set_cfg(cfg_dict: dict):
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
     except Exception:
         config._cfg_mtime = 0.0
+    config._cfg_path = config._get_config_path()
 
 
 def _groups_by_provider_id(result: dict) -> dict:
