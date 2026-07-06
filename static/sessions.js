@@ -34,6 +34,13 @@ let _draftSaveTimer = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
+// Per-session canonicalized copy of the last non-empty draft persisted to the
+// server. `_composerDraftKnownPayloadSessions` only records THAT a session has a
+// payload; this records WHAT that payload is (text + files), so a clear targeting
+// a session whose composer is not currently visible can be authorized against the
+// owner's actual persisted content instead of the (irrelevant) visible textarea.
+// Empty drafts hold no entry.
+const _composerDraftLastPersistedBySid = new Map();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
 
@@ -237,12 +244,22 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
   const normalizedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _composerDraftKnownPayloadSessions.add(sid);
+    _composerDraftLastPersistedBySid.set(sid, { text: normalizedText, files: _composerDraftFilesForPersist(normalizedFiles) });
   } else {
     _composerDraftKnownPayloadSessions.delete(sid);
+    _composerDraftLastPersistedBySid.delete(sid);
   }
   if (S.session && S.session.session_id === sid) {
     S.session.composer_draft = { text: normalizedText, files: normalizedFiles };
   }
+}
+
+// The owner session's last persisted non-empty draft ({text, files}), or null when
+// nothing non-empty is on record. Lets a clear for a non-visible owner compare
+// against what the server actually holds for that session.
+function _composerDraftLastPersistedForSid(sid) {
+  if (!sid) return null;
+  return _composerDraftLastPersistedBySid.get(sid) || null;
 }
 
 // Immediate save used before session switches.

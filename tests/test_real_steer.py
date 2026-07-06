@@ -305,6 +305,7 @@ class TestFrontendWiring:
         cls.cmds = (Path(__file__).parent.parent / "static" / "commands.js").read_text(encoding="utf-8")
         cls.msgs = (Path(__file__).parent.parent / "static" / "messages.js").read_text(encoding="utf-8")
         cls.i18n = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+        cls.sessions = (Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
 
     def test_cmd_steer_calls_endpoint(self):
         idx = self.cmds.find("async function cmdSteer(")
@@ -330,7 +331,11 @@ class TestFrontendWiring:
         assert "ownerSid" in body
         assert "ownerFiles" in body
         assert "cancelStream" not in body, "fallback path must not cancel the stream"
-        assert "inp.value" in body, "fallback path must restore the composer draft"
+        # Draft restore on failure now routes through the guarded helper so it never
+        # clobbers replacement content typed/staged during the await.
+        assert "_steerRestoreDraftOnFailure(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot)" in body, (
+            "fallback path must restore the composer draft via the guarded helper"
+        )
 
     def test_send_busy_steer_uses_try_steer(self):
         # send() in messages.js: when busyMode === 'steer', should call _trySteer
@@ -512,6 +517,13 @@ class TestFrontendWiring:
             "function _steerComposerSafeToClear",
             "\nasync function cmdTitle",
         )
+        # Real signature helpers so the non-current-owner clear is authorized by the
+        # owner's persisted-draft evidence, exactly as production computes it.
+        sig_src = _source_between(
+            self.sessions,
+            "function _composerDraftFileSignature(file)",
+            "function _composerDraftPayloadSignatureForSid(sid)",
+        )
         script = textwrap.dedent(
             f"""
             const assert = require('assert');
@@ -531,8 +543,17 @@ class TestFrontendWiring:
             function _showSteerIndicator(){{indicatorCalls += 1;}}
             function _showSteerRecovery(){{}}
             function _clearComposerDraft(sid,text,files){{draftClears.push({{sid,text,files}});}}
+            {sig_src}
+            let _persistedDrafts = {{}};
+            function _composerDraftLastPersistedForSid(sid){{
+              return Object.prototype.hasOwnProperty.call(_persistedDrafts, sid) ? _persistedDrafts[sid] : null;
+            }}
             async function uploadPendingFiles(options){{
               uploadOptions = options;
+              // The mid-upload switch A->B runs loadSession, which persists A's live
+              // composer via _saveComposerDraftNow. The busy-send path cleared the
+              // text on submit, so the unedited steer echo is {{text:'', files:[a.pdf]}}.
+              _persistedDrafts['A'] = {{text:'', files:[{{name:'a.pdf'}}]}};
               S.session = {{session_id:'B'}};
               S.pendingFiles = [{{name:'b.pdf'}}];
               return [{{path:'/tmp/a.pdf'}}];

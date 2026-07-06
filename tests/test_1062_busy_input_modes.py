@@ -110,7 +110,7 @@ class TestSlashCommandHandlers:
         helper_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         assert "queueSessionMessage" in helper_body
         assert "cancelStream" not in helper_body
-        assert "inp.value" in helper_body
+        assert "_steerRestoreDraftOnFailure(" in helper_body
         assert "if(result&&result.accepted)" in helper_body
         assert "return {handled:true,queuedFallback:false,ownerSid,files:ownerFiles};" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
@@ -162,7 +162,7 @@ class TestSlashCommandHandlers:
         assert "S.pendingFiles=_remaining" not in try_body
         assert "S.pendingFiles=[]" not in try_body
         assert "_clearComposerDraft(" not in try_body, "steer draft clearing must route through the shared guard"
-        assert "renderTray()" in try_body[failure_idx:], "failure path restores the owner tray"
+        assert "_steerRestoreDraftOnFailure(" in try_body[failure_idx:], "failure path restores the owner draft via the guarded helper"
 
         finalize_body = _source_between(COMMANDS_JS, "function _steerFinalizeComposer", "\nfunction _showSteerRecovery")
         assert "_delivered=new Set(delivered)" in finalize_body, (
@@ -371,7 +371,7 @@ class TestSendBusyBranchDispatch:
         failure_idx = try_body.find("// Do not fall back to interrupt")
         assert accepted_idx >= 0 and failure_idx > accepted_idx
         assert "S.pendingFiles=_remaining" not in try_body, "file cleanup moved to the shared guard"
-        assert "renderTray()" in try_body[failure_idx:], "failed steer restores the owner tray without clearing files"
+        assert "_steerRestoreDraftOnFailure(" in try_body[failure_idx:], "failed steer restores the owner draft without clearing files"
 
     def test_reentrant_send_does_not_queue_staged_files_while_steer_uploads(self):
         """Repeated Enter during steer upload must not double-send staged files.

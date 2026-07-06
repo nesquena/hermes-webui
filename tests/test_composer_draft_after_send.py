@@ -163,6 +163,15 @@ def _run_steer_finalize_harness(body: str) -> None:
         "function _steerComposerSafeToClear",
         "\nfunction _showSteerRecovery",
     )
+    # Real signature functions (file canon + payload signature) so the persisted-draft
+    # comparison is exercised exactly as production computes it. This block spans
+    # _composerDraftFileSignature, _composerDraftFilesForPersist, and
+    # _composerDraftPayloadSignature.
+    sig_src = _block(
+        SESSIONS_JS,
+        "function _composerDraftFileSignature(file)",
+        "function _composerDraftPayloadSignatureForSid(sid)",
+    )
     script = textwrap.dedent(
         """
         const assert = require('assert');
@@ -173,10 +182,21 @@ def _run_steer_finalize_harness(body: str) -> None:
         function _clearComposerDraft(sid,text,files){draftClears.push({sid,text,files});}
         function _steerOwnerIsCurrent(sid){return !!(sid && S && S.session && S.session.session_id===sid);}
         function _steerRestoreText(msg,explicit){return explicit?('/steer '+msg):msg;}
+        %(sig)s
+        // Per-sid persisted drafts the guard reads for a switched-away owner. Tests
+        // populate this to mimic what loadSession/_saveComposerDraftNow recorded.
+        let _persistedDrafts = {};
+        function _composerDraftLastPersistedForSid(sid){
+          return Object.prototype.hasOwnProperty.call(_persistedDrafts, sid) ? _persistedDrafts[sid] : null;
+        }
         eval(%(guard)s);
         %(body)s
         """
-    ) % {"guard": json.dumps(guard_src), "body": body}
+    ) % {
+        "guard": json.dumps(guard_src),
+        "sig": sig_src,
+        "body": body,
+    }
     proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
 
@@ -214,3 +234,243 @@ def test_accepted_steer_replacement_file_keeps_persisted_draft():
         assert.strictEqual(S.pendingFiles.length, 1, 'the newly staged file must not be dropped');
         """
     )
+
+
+# ── Cross-session (switched-away owner) — the round-7 class ────────────────────
+# The owner's replacement content lives only in the server-persisted draft; the
+# visible textarea belongs to another session. The guard must read the owner's
+# persisted-draft signature, not the textarea. One test per representation x
+# context cell that was fixed, plus the current-owner cells re-asserted above.
+
+def test_cross_session_replacement_text_keeps_persisted_draft():
+    """Context B, R3: send steer, type replacement, switch session, finalize.
+    The owner's persisted replacement draft must NOT be wiped."""
+    _run_steer_finalize_harness(
+        """
+        // Visible session is 'B'; owner 'A' is switched away.
+        let S = {session:{session_id:'B'}, pendingFiles:[{name:'B-file.png'}]};
+        const msgEl = {value:'unrelated text in session B'};
+        function $(id){return msgEl;}
+        // loadSession/_saveComposerDraftNow persisted A's replacement text on switch.
+        _persistedDrafts['A'] = {text:'my replacement for A', files:[]};
+        _steerFinalizeComposer('A','hint',[],false);
+        assert.strictEqual(draftClears.length, 0, 'switched-away owner replacement draft must be preserved');
+        assert.strictEqual(msgEl.value, 'unrelated text in session B', 'visible session composer untouched');
+        assert.strictEqual(S.pendingFiles.length, 1, 'visible session staged files untouched');
+        """
+    )
+
+
+def test_cross_session_replacement_file_keeps_persisted_draft():
+    """Context B, R3 with files: owner persisted a draft holding a replacement file
+    not in the delivered steer set. Must be preserved."""
+    _run_steer_finalize_harness(
+        """
+        let S = {session:{session_id:'B'}, pendingFiles:[]};
+        const msgEl = {value:''};
+        function $(id){return msgEl;}
+        // A's persisted draft (text cleared on submit) has a replacement file that
+        // was staged during the await; the steer delivered no files.
+        _persistedDrafts['A'] = {text:'', files:[{name:'replacement.pdf', path:'/r.pdf', size:5, type:'application/pdf'}]};
+        _steerFinalizeComposer('A','hint',[],false);
+        assert.strictEqual(draftClears.length, 0, 'switched-away owner replacement file draft must be preserved');
+        """
+    )
+
+
+def test_cross_session_unedited_echo_clears_stale_draft():
+    """Context B, R3 safe case: owner switched away WITHOUT editing. The composer text
+    is cleared on submit, so its persisted draft is empty text with (at most) the
+    delivered files — the consumed steer. That stale echo must be cleared."""
+    _run_steer_finalize_harness(
+        """
+        const f = {name:'a.pdf', path:'/a.pdf', size:9, type:'application/pdf'};
+        // Unedited file steer: persisted draft is {text:'', files:[delivered]}.
+        let S = {session:{session_id:'B'}, pendingFiles:[]};
+        function $(id){return {value:''};}
+        _persistedDrafts['A'] = {text:'', files:[f]};
+        _steerFinalizeComposer('A','hint',[f],false);
+        assert.strictEqual(draftClears.length, 1, 'unedited file-steer echo (empty text) must be cleared');
+        assert.strictEqual(draftClears[0].sid, 'A', 'the owner draft is the one cleared');
+
+        // Failure-restore echo shape: persisted text equals the bare msg.
+        draftClears = [];
+        _persistedDrafts['A'] = {text:'hint', files:[]};
+        _steerFinalizeComposer('A','hint',[],false);
+        assert.strictEqual(draftClears.length, 1, 'persisted bare-msg echo must be cleared');
+
+        // Explicit steer failure-restore echo: persisted text equals `/steer hint`.
+        draftClears = [];
+        _persistedDrafts['A'] = {text:'/steer hint', files:[]};
+        _steerFinalizeComposer('A','hint',[],true);
+        assert.strictEqual(draftClears.length, 1, 'persisted /steer-echo must be cleared');
+        """
+    )
+
+
+def test_cross_session_no_persisted_draft_is_safe_noop():
+    """Context B, R3: no recorded draft for the owner means nothing non-empty is
+    persisted, so the clear is authorized (harmless no-op) and never blocked."""
+    _run_steer_finalize_harness(
+        """
+        let S = {session:{session_id:'B'}, pendingFiles:[]};
+        function $(id){return {value:''};}
+        // _persistedDrafts empty -> _composerDraftLastPersistedForSid('A') is null.
+        _steerFinalizeComposer('A','hint',[],false);
+        assert.strictEqual(draftClears.length, 1, 'no persisted draft -> safe to clear');
+        """
+    )
+
+
+def test_cross_session_guard_fails_closed_without_persist_helpers():
+    """If the persistence helpers are unavailable, the non-current branch must fail
+    closed (skip the clear) rather than run blind."""
+    import json, shutil, subprocess, textwrap
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    guard_src = _block(COMMANDS_JS, "function _steerComposerSafeToClear", "\nfunction _showSteerRecovery")
+    script = textwrap.dedent(
+        """
+        const assert = require('assert');
+        let draftClears = [];
+        function renderTray(){}
+        function _clearComposerDraft(sid,text,files){draftClears.push({sid});}
+        function _steerOwnerIsCurrent(sid){return !!(sid && S && S.session && S.session.session_id===sid);}
+        function _steerRestoreText(msg,explicit){return explicit?('/steer '+msg):msg;}
+        // Deliberately DO NOT define the persistence helpers the guard needs.
+        eval(%(guard)s);
+        let S = {session:{session_id:'B'}, pendingFiles:[]};
+        function $(id){return {value:''};}
+        _steerFinalizeComposer('A','hint',[],false);
+        assert.strictEqual(draftClears.length, 0, 'no evidence available -> skip the clear, never run blind');
+        """
+    ) % {"guard": json.dumps(guard_src)}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+
+
+def test_failure_restore_preserves_switched_away_replacement_draft():
+    """Steer FAILURE path, switched-away owner: _steerRestoreDraftOnFailure must not
+    overwrite the owner's replacement draft with the steer echo. Only overwrite when
+    the persisted draft is the consumed steer (empty / echo)."""
+    import json, shutil, subprocess, textwrap
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    # Extract the failure helper + the guard it delegates to.
+    guard_src = _block(COMMANDS_JS, "function _steerComposerSafeToClear", "\nfunction _steerFinalizeComposer")
+    restore_src = _block(COMMANDS_JS, "async function _steerRestoreDraftOnFailure", "\n// #5459 gate")
+    sig_src = _block(SESSIONS_JS, "function _composerDraftFileSignature(file)", "function _composerDraftPayloadSignatureForSid(sid)")
+    script = textwrap.dedent(
+        """
+        const assert = require('assert');
+        %(sig)s
+        let _persistedDrafts = {};
+        let persistCalls = [];
+        function _composerDraftLastPersistedForSid(sid){
+          return Object.prototype.hasOwnProperty.call(_persistedDrafts, sid) ? _persistedDrafts[sid] : null;
+        }
+        function _steerOwnerIsCurrent(sid){return !!(sid && S && S.session && S.session.session_id===sid);}
+        function _steerRestoreText(msg,explicit){return explicit?('/steer '+msg):msg;}
+        function autoResize(){}
+        function renderTray(){}
+        function _saveComposerDraftNow(sid,text,files){persistCalls.push({sid,text}); return Promise.resolve();}
+        async function _steerPersistDraftForOwner(sid,msg,explicit,files){
+          if(!sid) return;
+          await _saveComposerDraftNow(sid,_steerRestoreText(msg,explicit),files);
+        }
+        eval(%(guard)s);
+        eval(%(restore)s);
+        (async()=>{
+          // Owner 'A' switched away; its persisted draft is a REPLACEMENT.
+          let S1 = {session:{session_id:'B'}, pendingFiles:[]};
+          globalThis.S = S1;
+          function $(){ return {value:''}; }
+          globalThis.$ = $;
+          _persistedDrafts['A'] = {text:'replacement I typed then switched', files:[]};
+          await _steerRestoreDraftOnFailure('A','fixthis',true,[]);
+          assert.strictEqual(persistCalls.length, 0, 'failure restore must NOT overwrite a replacement draft');
+
+          // Owner 'A' switched away with the consumed steer (empty draft): restore echo.
+          persistCalls = [];
+          _persistedDrafts = {};   // nothing persisted -> safe to restore the failed steer
+          await _steerRestoreDraftOnFailure('A','fixthis',true,[]);
+          assert.strictEqual(persistCalls.length, 1, 'failed steer is restored when no replacement exists');
+          assert.strictEqual(persistCalls[0].text, '/steer fixthis');
+        })().catch(err=>{console.error(err); process.exit(1);});
+        """
+    ) % {"guard": json.dumps(guard_src), "restore": json.dumps(restore_src), "sig": sig_src}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+
+
+def test_failure_restore_preserves_current_owner_replacement_text():
+    """Steer FAILURE path, current owner: do not clobber replacement text the user
+    typed after submit cleared the composer."""
+    import json, shutil, subprocess, textwrap
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+    guard_src = _block(COMMANDS_JS, "function _steerComposerSafeToClear", "\nfunction _steerFinalizeComposer")
+    restore_src = _block(COMMANDS_JS, "async function _steerRestoreDraftOnFailure", "\n// #5459 gate")
+    script = textwrap.dedent(
+        """
+        const assert = require('assert');
+        function _steerOwnerIsCurrent(sid){return !!(sid && S && S.session && S.session.session_id===sid);}
+        function _steerRestoreText(msg,explicit){return explicit?('/steer '+msg):msg;}
+        function autoResize(){}
+        function renderTray(){}
+        function _composerDraftLastPersistedForSid(){return null;}
+        function _composerDraftFilesForPersist(f){return Array.isArray(f)?f:[];}
+        function _composerDraftFileSignature(f){return {v:String((f&&f.name)||f||'')};}
+        async function _steerPersistDraftForOwner(){throw new Error('current owner must not persist');}
+        eval(%(guard)s);
+        eval(%(restore)s);
+        (async()=>{
+          globalThis.S = {session:{session_id:'A'}, pendingFiles:[]};
+          // User typed a replacement after submit cleared the composer.
+          const msgEl = {value:'my replacement'};
+          globalThis.$ = function(){ return msgEl; };
+          await _steerRestoreDraftOnFailure('A','fixthis',true,[]);
+          assert.strictEqual(msgEl.value, 'my replacement', 'replacement text must not be clobbered by the failed steer');
+
+          // Empty composer (normal failure): restore the failed steer for retry.
+          msgEl.value = '';
+          await _steerRestoreDraftOnFailure('A','fixthis',true,[]);
+          assert.strictEqual(msgEl.value, '/steer fixthis', 'failed steer restored into an empty composer');
+        })().catch(err=>{console.error(err); process.exit(1);});
+        """
+    ) % {"guard": json.dumps(guard_src), "restore": json.dumps(restore_src)}
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+
+
+def test_guard_evidence_covers_effect_source_shape():
+    """The non-current-owner branch no longer returns an unconditional true, the
+    per-sid persisted draft (the evidence) is maintained at the single persist choke
+    point, and the failure-restore path routes through one guarded helper."""
+    assert "if(!_steerOwnerIsCurrent(ownerSid))return _steerPersistedDraftSafeToClear(ownerSid,msg,files);" in COMMANDS_JS
+    assert "if(!_steerOwnerIsCurrent(ownerSid))return true;" not in COMMANDS_JS, (
+        "the guard must not authorize a non-current-owner clear without evidence"
+    )
+    assert "function _steerPersistedDraftSafeToClear(ownerSid,msg,files)" in COMMANDS_JS
+    assert "async function _steerRestoreDraftOnFailure(ownerSid,originalMsg,explicitSteer,filesSnapshot)" in COMMANDS_JS
+    # All three failure sites route through the one helper; no inline restore blocks remain.
+    trysteer_body = _block(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
+    assert trysteer_body.count("_steerRestoreDraftOnFailure(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot)") == 3
+    assert "inp.value=_steerRestoreText(originalMsg,explicitSteer)" not in trysteer_body, (
+        "failure restore must not clobber the composer inline; route through the guarded helper"
+    )
+    assert "const _composerDraftLastPersistedBySid = new Map();" in SESSIONS_JS
+    remember_body = _block(
+        SESSIONS_JS,
+        "function _rememberComposerDraftPayloadState(sid, text, files)",
+        "function _composerDraftLastPersistedForSid",
+    )
+    assert "_composerDraftLastPersistedBySid.set(sid, { text: normalizedText, files: _composerDraftFilesForPersist(normalizedFiles) });" in remember_body
+    assert "_composerDraftLastPersistedBySid.delete(sid);" in remember_body
+    assert "function _composerDraftLastPersistedForSid(sid)" in SESSIONS_JS

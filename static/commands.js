@@ -1384,7 +1384,7 @@ function _showSteerIndicator(text){
 // (accepted local steer, gateway-queued fallback, recovery retry) routes cleanup
 // through _steerFinalizeComposer so the three surfaces cannot diverge again.
 function _steerComposerSafeToClear(ownerSid,msg,files){
-  if(!_steerOwnerIsCurrent(ownerSid))return true;
+  if(!_steerOwnerIsCurrent(ownerSid))return _steerPersistedDraftSafeToClear(ownerSid,msg,files);
   const inp=$('msg');
   if(!inp)return true;
   const text=String(msg||'');
@@ -1394,6 +1394,32 @@ function _steerComposerSafeToClear(ownerSid,msg,files){
   const submitted=new Set(Array.isArray(files)?files:[]);
   const staged=Array.isArray(S.pendingFiles)?S.pendingFiles:[];
   return staged.every(f=>submitted.has(f));
+}
+
+// A switched-away owner's replacement content lives only in the server-persisted
+// draft (loadSession/_saveComposerDraftNow saved it on switch); the visible
+// textarea shows another session and is no evidence about it. Mirror the
+// current-owner check against that persisted draft instead of the textarea: the
+// composer text is cleared on submit before the switch, so the consumed steer
+// persists as empty text (or the steer echo on the failure-restore path) with no
+// staged file outside the delivered set. Anything else — replacement text, or a
+// file staged during the await — is preserved. No recorded draft means nothing
+// non-empty is persisted (safe no-op); if the persistence helpers are unavailable,
+// fail closed and skip the clear.
+function _steerPersistedDraftSafeToClear(ownerSid,msg,files){
+  if(typeof _composerDraftLastPersistedForSid!=='function'||typeof _composerDraftFilesForPersist!=='function'||typeof _composerDraftFileSignature!=='function')return false;
+  const draft=_composerDraftLastPersistedForSid(ownerSid);
+  if(draft==null)return true;
+  const text=String(msg||'');
+  const dtext=String(draft.text||'');
+  const textSafe=dtext===''||dtext===text||(text&&dtext===`/steer ${text}`);
+  if(!textSafe)return false;
+  // Persisted files are canonical plain objects, not the original File refs, so a
+  // subset check must compare by signature (mirrors the current-owner identity check).
+  const _sig=f=>JSON.stringify(_composerDraftFileSignature(f));
+  const submitted=new Set(_composerDraftFilesForPersist(Array.isArray(files)?files:[]).map(_sig));
+  const dfiles=_composerDraftFilesForPersist(Array.isArray(draft.files)?draft.files:[]);
+  return dfiles.every(f=>submitted.has(_sig(f)));
 }
 
 function _steerFinalizeComposer(ownerSid,msg,files,explicitSteer){
@@ -1500,6 +1526,28 @@ async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, 
   await _saveComposerDraftNow(ownerSid,_steerRestoreText(originalMsg,explicitSteer),filesSnapshot);
 }
 
+// Steer failed (not accepted, not gateway-queued): restore the steer text so the
+// user can retry, Queue, or Interrupt — but never over replacement content typed or
+// staged during the await. Current owner: read the live textarea. Switched-away
+// owner: read the persisted-draft evidence, the same guard the clear path uses, so
+// a replacement draft loadSession saved on switch is not overwritten by the echo.
+// One helper for all three failure sites (upload error, empty text, non-accept) so
+// the restore mutation cannot diverge across them.
+async function _steerRestoreDraftOnFailure(ownerSid,originalMsg,explicitSteer,filesSnapshot){
+  if(_steerOwnerIsCurrent(ownerSid)){
+    const inp=$('msg');
+    const echo=_steerRestoreText(originalMsg,explicitSteer);
+    if(inp&&(inp.value===''||inp.value===echo)){
+      inp.value=echo;
+      if(typeof autoResize==='function')autoResize();
+    }
+    if(typeof renderTray==='function')renderTray();
+    return;
+  }
+  if(!_steerPersistedDraftSafeToClear(ownerSid,originalMsg,filesSnapshot))return;
+  await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,filesSnapshot);
+}
+
 // #5459 gate: cache successful steer uploads by owner session so a failed-steer
 // RETRY reuses the uploaded paths instead of re-uploading the same File objects.
 // Keyed by ownerSid; invalidated when the staged file set changes or on accepted
@@ -1555,31 +1603,13 @@ async function _trySteer(msg, explicitSteer){
   try{
     steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot);
   }catch(e){
-    if(_steerOwnerIsCurrent(ownerSid)){
-      const inp=$('msg');
-      if(inp){
-        inp.value=_steerRestoreText(originalMsg,explicitSteer);
-        if(typeof autoResize==='function')autoResize();
-      }
-      if(typeof renderTray==='function')renderTray();
-    }else{
-      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
-    }
+    await _steerRestoreDraftOnFailure(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
     _steerSetComposerStatusForOwner(ownerSid,'');
     showToast(`${t('upload_failed')}${e&&e.message?e.message:e}`,3500);
     return false;
   }
   if(!steerText){
-    if(_steerOwnerIsCurrent(ownerSid)){
-      const inp=$('msg');
-      if(inp){
-        inp.value=_steerRestoreText(originalMsg,explicitSteer);
-        if(typeof autoResize==='function')autoResize();
-      }
-      if(typeof renderTray==='function')renderTray();
-    }else{
-      await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
-    }
+    await _steerRestoreDraftOnFailure(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
     showToast(t('cmd_steer_no_msg'));
     return false;
   }
@@ -1619,16 +1649,7 @@ async function _trySteer(msg, explicitSteer){
   // Do not fall back to interrupt: Steer failure is not permission to cancel
   // the active run. Restore the draft so the user can explicitly Queue or
   // Interrupt if that is what they want next. Pending files remain staged.
-  if(_steerOwnerIsCurrent(ownerSid)){
-    const inp=$('msg');
-    if(inp){
-      inp.value=_steerRestoreText(originalMsg,explicitSteer);
-      if(typeof autoResize==='function')autoResize();
-    }
-    if(typeof renderTray==='function')renderTray();
-  }else{
-    await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
-  }
+  await _steerRestoreDraftOnFailure(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
   const fallbackCode = result && result.fallback;
   showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
   if(_steerOwnerIsCurrent(ownerSid)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode);
