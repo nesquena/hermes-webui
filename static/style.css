@@ -6318,6 +6318,8 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-form-row > label{font-size:12px;font-weight:500;color:var(--muted);letter-spacing:.01em;}
 .detail-form-row input[type="text"],
 .detail-form-row input[type="password"],
+.detail-form-row input[type="number"],
+.detail-form-row input[type="time"],
 .detail-form-row input:not([type]),
 .detail-form-row select,
 .detail-form-row textarea{
@@ -6329,10 +6331,23 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 }
 .detail-form-row input[type="text"]:focus,
 .detail-form-row input[type="password"]:focus,
+.detail-form-row input[type="number"]:focus,
 .detail-form-row input:not([type]):focus,
 .detail-form-row select:focus,
 .detail-form-row textarea:focus{border-color:var(--accent,var(--accent-bg-strong,var(--border)));}
 .detail-form-row input:disabled{opacity:.6;cursor:not-allowed;}
+.cron-schedule-preset-shell{display:flex;flex-wrap:wrap;gap:10px;align-items:center;}
+.cron-schedule-preset-shell > select.cron-schedule-preset-select{width:auto;min-width:150px;flex:0 0 auto;}
+.cron-schedule-preset-params{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;min-width:0;}
+.cron-schedule-preset-field{display:inline-flex;flex-direction:row;align-items:center;gap:6px;}
+.cron-schedule-preset-conj{font-size:13px;color:var(--muted);white-space:nowrap;}
+.cron-schedule-preset-field select,.cron-schedule-preset-field input[type="time"]{width:auto;min-width:0;}
+.cron-schedule-preset-field select{min-width:120px;}
+#cronFormScheduleMonthDay{min-width:72px;}
+.cron-schedule-preset-field input[type="time"]{min-width:120px;}
+.cron-schedule-preset-field input[type="number"]{width:64px;}
+.cron-schedule-preset-time-hint{flex-basis:100%;margin-top:2px;}
+.cron-schedule-preview{font-family:'SF Mono',ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text);opacity:.85;}
 .detail-form-row textarea{resize:vertical;font-family:'SF Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;}
 .detail-form-row .detail-form-hint{font-size:11px;color:var(--muted);line-height:1.5;}
 .detail-form-warning{font-size:11px;line-height:1.5;border:1px solid rgba(245,158,11,.35);background:rgba(245,158,11,.1);color:rgba(245,158,11,.98);border-radius:8px;padding:8px 10px;}
