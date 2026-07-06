@@ -63902,7 +63902,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_actions_org_sele
     assert "raw_prompt" not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_selected_actions_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_selected_actions_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch
 ):
     root = tmp_path / "capy-memory"
@@ -63945,11 +63945,14 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_sele
     monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
 
     result = run_source_refresh_jobs(limit=1)
+    search = search_memory("organization selected actions", limit=5)
+    relevant_memory = relevant_memory_for_space("space-actions-org-selected-actions", limit=5)
     public_outputs = {
         "catalog": capy_memory.source_catalog(limit=5),
         "jobs": list_source_refresh_jobs(limit=5),
         "result": result,
-        "search": search_memory("organization selected actions", limit=5),
+        "search": search,
+        "relevant_memory": relevant_memory,
     }
     serialized = json.dumps(public_outputs, sort_keys=True).lower()
 
@@ -63963,7 +63966,8 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_sele
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / f"{public_source_id}.md").exists()
-    assert search_memory("organization selected actions", limit=5)["results"] == []
+    assert search["results"] == []
+    assert relevant_memory["results"] == []
     for unsafe in (
         drifted_final_url.lower(),
         body_sentinel.lower(),
