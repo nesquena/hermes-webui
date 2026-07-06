@@ -7246,6 +7246,78 @@ def _run_agent_streaming(
                         args_snap[k] = s2[:cap] + ('...' if len(s2) > cap else '')
                 return args_snap
 
+            def _tool_progress_value(value, max_len=90):
+                clean = " ".join(str(value or "").split())
+                if not clean:
+                    return ""
+                return clean[: max_len - 1].rstrip() + "…" if len(clean) > max_len else clean
+
+            def _tool_progress_arg(args_snap, *names):
+                if not isinstance(args_snap, dict):
+                    return ""
+                for key in names:
+                    value = _tool_progress_value(args_snap.get(key))
+                    if value:
+                        return value
+                return ""
+
+            def _tool_progress_language():
+                try:
+                    language = str((load_settings() or {}).get('language') or '').strip().lower()
+                except Exception:
+                    language = ''
+                return language
+
+            def _safe_tool_progress_text(name, args_snap):
+                tool_name = _tool_progress_value(name, 64)
+                if not tool_name:
+                    return ""
+                target = _tool_progress_arg(args_snap, 'path', 'file_path', 'url', 'query', 'pattern', 'name')
+                target_md = f" `{target}`" if target else ""
+                if _tool_progress_language().startswith('fr'):
+                    if tool_name == 'skill_view':
+                        return f"Je charge la compétence `{target}`." if target else "Je charge une compétence Hermes."
+                    if tool_name == 'read_file':
+                        return f"Je lis{target_md}." if target else "Je lis un fichier."
+                    if tool_name == 'search_files':
+                        return f"Je recherche{target_md}." if target else "Je recherche dans les fichiers."
+                    if tool_name == 'web_search':
+                        return f"Je recherche sur le web{target_md}." if target else "Je recherche sur le web."
+                    if tool_name == 'web_extract':
+                        return f"Je lis une source web{target_md}." if target else "Je lis une source web."
+                    if tool_name in {'browser_navigate', 'browser_snapshot', 'browser_vision'}:
+                        return "Je vérifie l’affichage dans le navigateur."
+                    if tool_name == 'vision_analyze':
+                        return "J’analyse la capture fournie."
+                    if tool_name == 'terminal':
+                        return "Je lance une commande de diagnostic."
+                    if tool_name == 'execute_code':
+                        return "J’exécute un contrôle automatisé."
+                    if tool_name == 'patch':
+                        return f"Je prépare une modification ciblée sur{target_md}." if target else "Je prépare une modification ciblée."
+                    if tool_name == 'write_file':
+                        return f"J’écris le fichier{target_md}." if target else "J’écris un fichier."
+                    return f"J’utilise l’outil `{tool_name}`."
+                if tool_name == 'terminal':
+                    return "Running a diagnostic command."
+                if tool_name == 'execute_code':
+                    return "Running an automated check."
+                if tool_name == 'vision_analyze':
+                    return "Analyzing the provided image."
+                if target:
+                    return f"Using `{tool_name}` on `{target}`."
+                return f"Using `{tool_name}`."
+
+            def _emit_tool_progress_interim(name, args_snap):
+                visible = _safe_tool_progress_text(name, args_snap)
+                if not visible:
+                    return
+                put('interim_assistant', {
+                    'text': visible,
+                    'already_streamed': False,
+                    'generated_tool_progress': True,
+                })
+
             def _record_live_tool_start(tool_call_id, name, args):
                 if not tool_call_id or tool_call_id in _live_prompt_estimate_seen_ids:
                     return False
@@ -7339,6 +7411,7 @@ def _run_agent_streaming(
                     return
 
                 if event_type in (None, 'tool.started'):
+                    args_snap = _tool_args_snapshot(args)
                     _live_tool_calls.append({
                         'name': name,
                         'args': args if isinstance(args, dict) else {},
@@ -7350,6 +7423,7 @@ def _run_agent_streaming(
                             'args': args if isinstance(args, dict) else {},
                             'done': False,
                         })
+                    _emit_tool_progress_interim(name, args_snap)
                     put('tool', {
                         'event_type': event_type or 'tool.started',
                         'name': name,
@@ -7466,6 +7540,7 @@ def _run_agent_streaming(
                     _record_live_tool_start(tool_call_id, name, args)
                     if tool_call_id and tool_call_id not in _live_tool_event_start_ids:
                         _live_tool_event_start_ids.add(tool_call_id)
+                        args_snap = _tool_args_snapshot(args)
                         _live_tool_calls.append({
                             'name': name,
                             'args': args if isinstance(args, dict) else {},
@@ -7479,11 +7554,12 @@ def _run_agent_streaming(
                                 'done': False,
                                 'tid': tool_call_id,
                             })
+                        _emit_tool_progress_interim(name, args_snap)
                         put('tool', {
                             'event_type': 'tool.started',
                             'name': name,
                             'preview': None,
-                            'args': _tool_args_snapshot(args),
+                            'args': args_snap,
                             'tid': tool_call_id,
                         })
                     _tool_stats = meter().get_stats()
