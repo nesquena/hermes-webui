@@ -1382,6 +1382,15 @@ function _applyQueuedSteerCleanup(msg,result){
   const sameOwner=S.session&&S.session.session_id===result.ownerSid;
   const filesStillCurrent=Array.isArray(S.pendingFiles)&&S.pendingFiles.length===files.length&&S.pendingFiles.every((f,i)=>f===files[i]);
   if(sameOwner&&filesStillCurrent){S.pendingFiles=[];renderTray();}
+  if(sameOwner){
+    const inp=$('msg');
+    const text=String(msg||'');
+    if(inp&&(inp.value===text||(text&&inp.value===`/steer ${text}`))){
+      inp.value='';
+      if(typeof autoResize==='function')autoResize();
+      if(typeof updateSendBtn==='function')updateSendBtn();
+    }
+  }
   if(result.ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(result.ownerSid,msg,files);
 }
 

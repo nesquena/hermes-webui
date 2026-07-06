@@ -556,6 +556,53 @@ class TestFrontendWiring:
         )
         subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
 
+    def test_gateway_queued_cleanup_clears_unchanged_composer_text(self):
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        cleanup_src = _source_between(
+            self.cmds,
+            "function _applyQueuedSteerCleanup",
+            "\nfunction _showSteerRecovery",
+        )
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            let S = {{session:{{session_id:'A'}}, pendingFiles:[{{name:'a.pdf'}}]}};
+            let trayRenders = 0;
+            let resized = 0;
+            let sendUpdates = 0;
+            let draftClears = [];
+            const msgEl = {{value:'/steer retry me'}};
+            function $(id){{assert.strictEqual(id, 'msg'); return msgEl;}}
+            function renderTray(){{trayRenders += 1;}}
+            function autoResize(){{resized += 1;}}
+            function updateSendBtn(){{sendUpdates += 1;}}
+            function _clearComposerDraft(sid,text,files){{draftClears.push({{sid,text,files}});}}
+            eval({json.dumps(cleanup_src)});
+            _applyQueuedSteerCleanup('retry me', {{queuedFallback:true, ownerSid:'A', files:S.pendingFiles}});
+            assert.strictEqual(msgEl.value, '');
+            assert.strictEqual(S.pendingFiles.length, 0);
+            assert.strictEqual(trayRenders, 1);
+            assert.strictEqual(resized, 1);
+            assert.strictEqual(sendUpdates, 1);
+            assert.strictEqual(draftClears.length, 1);
+            msgEl.value = 'new text';
+            _applyQueuedSteerCleanup('retry me', {{queuedFallback:true, ownerSid:'A', files:[]}});
+            assert.strictEqual(msgEl.value, 'new text');
+            assert.strictEqual(resized, 1);
+            assert.strictEqual(sendUpdates, 1);
+            """
+        )
+        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
     def test_send_busy_steer_accepts_file_only_input(self):
         idx = self.msgs.find("if(S.busy||compressionRunning)")
         assert idx >= 0

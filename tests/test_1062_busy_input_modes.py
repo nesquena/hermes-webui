@@ -172,6 +172,9 @@ class TestSlashCommandHandlers:
         cleanup_body = _source_between(COMMANDS_JS, "function _applyQueuedSteerCleanup", "\nfunction _showSteerRecovery")
         assert "queuedFallback" in cleanup_body
         assert "S.session.session_id===result.ownerSid" in cleanup_body
+        assert "inp.value===text" in cleanup_body
+        assert "inp.value===`/steer ${text}`" in cleanup_body
+        assert "updateSendBtn()" in cleanup_body
         assert "_clearComposerDraft(result.ownerSid,msg,files)" in cleanup_body
 
     def test_steer_recovery_retry_consumes_queued_fallback_cleanup(self):
