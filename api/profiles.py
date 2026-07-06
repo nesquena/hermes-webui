@@ -1835,7 +1835,7 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
 
 
 _LIST_PROFILES_CACHE: tuple[list, float] | None = None
-_LIST_PROFILES_CACHE_TTL = 60.0  # seconds — bumped from 4.0 for perf(session-load-latency) Priority 4. Profile rows are static across a session load; a 4s TTL forced the os.walk + skill-tree parse on every poll. Invalidation hooks below (create/delete) clear the cache immediately on real changes.
+_LIST_PROFILES_CACHE_TTL = 4.0  # seconds. Bumped to 60s in the perf PR but reverted: profile-row mutations (defaults/providers/skills/gateway) don't invalidate the cache, so the longer TTL serves stale rows for too long. 4s keeps the os.walk frequent enough that mutation→poll staleness is negligible.
                                 # profiles stay near-live, long enough that rapid
                                 # re-opens of the dropdown are free.
 _LIST_PROFILES_CACHE_LOCK = threading.Lock()

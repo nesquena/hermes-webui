@@ -7574,7 +7574,13 @@ def get_available_models_for_session_visit() -> dict:
     def _mark(name: str) -> None:
         _stagelog.append((name, _time.monotonic()))
     _logger = _logging.getLogger("api.config")
-    _slow_threshold_ms = float(os.environ.get("HERMES_DEBUG_SLOW", "0") or "0") or 500.0
+    _debug_slow_raw = os.environ.get("HERMES_DEBUG_SLOW", "0") or "0"
+    try:
+        _slow_threshold_ms = float(_debug_slow_raw) or 500.0
+    except ValueError:
+        # Non-numeric truthy value (e.g. "true") — log everything,
+        # matching the string-flag treatment at routes.py:11655.
+        _slow_threshold_ms = 0.0
 
     global _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint
     cache_path = _get_models_cache_path()
