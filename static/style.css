@@ -1097,6 +1097,7 @@
   }
   :root[data-skin="gpt"],
   :root[data-skin="gpt"] body{font-family:var(--font-ui)!important;font-weight:400;letter-spacing:0;background:var(--bg);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;}
+  :root[data-skin="gpt"] .app-titlebar,
   :root[data-skin="gpt"] .rail,
   :root[data-skin="gpt"] .sidebar,
   :root[data-skin="gpt"] .rightpanel,

@@ -40,6 +40,20 @@ def test_gpt_skin_in_boot_js():
         js = f.read()
 
     assert "'GPT'" in js or '"GPT"' in js, "Missing GPT entry in _SKINS"
-    assert "#10a37f" in js, "Expected GPT accent color #10a37f"
-    assert "#059669" in js, "Expected GPT hover color #059669"
-    assert "#19c37d" in js, "Expected GPT dark accent #19c37d"
+    assert "#10a37f" in js or "#10A37F" in js, "Expected GPT accent color #10a37f"
+    assert "#059669" in js or "#059669" in js, "Expected GPT hover color #059669"
+    assert "#19c37d" in js or "#19C37D" in js, "Expected GPT dark accent #19c37d"
+
+
+def test_gpt_in_config_settings():
+    """The _SETTINGS_SKIN_VALUES set must include 'gpt'."""
+    with open("api/config.py", encoding="utf-8") as f:
+        py = f.read()
+    assert '"gpt"' in py, "Missing 'gpt' in _SETTINGS_SKIN_VALUES"
+
+
+def test_gpt_in_index_html_inline_skins():
+    """The early-init skin allowlist in index.html must include 'gpt:1'."""
+    with open("static/index.html", encoding="utf-8") as f:
+        html = f.read()
+    assert 'gpt:1' in html, "Missing 'gpt:1' in inline skin whitelist"

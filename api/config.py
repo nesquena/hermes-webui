@@ -8198,6 +8198,7 @@ _SETTINGS_SKIN_VALUES = {
     "charizard",
     "sienna",
     "catppuccin",
+    "gpt",
     "nous",
     "geist-contrast",
     "zeus",
