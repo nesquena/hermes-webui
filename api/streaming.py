@@ -1425,6 +1425,71 @@ def _maybe_inject_max_iteration_summary_fallback(messages, result) -> list:
     return out
 
 
+def _materialize_streamed_answer_result(
+    result,
+    *,
+    token_sent: bool,
+    stream_id: str,
+    previous_context_messages,
+    msg_text: str,
+    agent=None,
+    tool_limit_reached: bool | None = None,
+):
+    """Return ``(result, messages)`` with visible streamed text as final answer.
+
+    Some agent/provider paths deliver the assistant text exclusively through the
+    live ``stream_delta_callback`` and then return only replayed history. That is
+    still a real answer unless the result carries an explicit/hard terminal
+    failure signal. Keep the hard-failure stop-lines here so each settlement path
+    makes the same decision.
+    """
+    if not isinstance(result, dict):
+        return result, list(previous_context_messages or [])
+    result_messages = result.get('messages') or previous_context_messages
+    if tool_limit_reached is None:
+        tool_limit_reached = _agent_result_tool_limit_reached(result)
+    result_messages = _drop_synthetic_max_iteration_summary_requests(
+        result_messages,
+        enabled=bool(tool_limit_reached),
+    )
+    if tool_limit_reached:
+        result_messages = _maybe_inject_max_iteration_summary_fallback(result_messages, result)
+        result = {**result, 'messages': result_messages}
+    streamed_answer_text = ''
+    if token_sent:
+        try:
+            streamed_answer_text = str(STREAM_PARTIAL_TEXT.get(stream_id) or '').strip()
+        except Exception:
+            streamed_answer_text = ''
+    explicit_result_error = bool(getattr(agent, '_last_error', None)) or (
+        'error' in result and result.get('error') not in (None, '')
+    )
+    result_status = str(result.get('status') or result.get('state') or '').strip().lower()
+    result_is_hard_terminal = (
+        result_status in {'failed', 'error', 'compression_exhausted'}
+        or result.get('failed')
+        or result.get('compression_exhausted')
+        or bool(tool_limit_reached)
+    )
+    if (
+        streamed_answer_text
+        and not explicit_result_error
+        and not result_is_hard_terminal
+        and not _assistant_reply_added_after_current_turn(
+            result_messages,
+            previous_context_messages,
+            msg_text,
+        )
+    ):
+        result_messages = list(result_messages or []) + [{
+            'role': 'assistant',
+            'content': streamed_answer_text,
+        }]
+        result = dict(result)
+        result['messages'] = result_messages
+    return result, result_messages
+
+
 def _mark_latest_assistant_tool_limit_status(messages) -> bool:
     """Annotate the latest usable assistant final answer as limit-stopped."""
     for msg in reversed(list(messages or [])):
@@ -8606,24 +8671,69 @@ def _run_agent_streaming(
                 return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
-                _answer = ''
-                for _m in reversed(result.get('messages') or []):
-                    if isinstance(_m, dict) and _m.get('role') == 'assistant':
-                        _answer = str(_m.get('content', ''))
-                        break
-                put('done', {
-                    'session': {'session_id': session_id, 'messages': result.get('messages', [])},
-                    'usage': {'input_tokens': 0, 'output_tokens': 0},
-                    'ephemeral': True,
-                    'answer': _answer,
-                })
+                _ephemeral_tool_limit_reached = _agent_result_tool_limit_reached(result)
+                result, _ephemeral_messages = _materialize_streamed_answer_result(
+                    result,
+                    token_sent=_token_sent,
+                    stream_id=stream_id,
+                    previous_context_messages=_previous_context_messages,
+                    msg_text=msg_text,
+                    agent=agent,
+                    tool_limit_reached=_ephemeral_tool_limit_reached,
+                )
+                _ephemeral_explicit_error = bool(getattr(agent, '_last_error', None)) or (
+                    isinstance(result, dict)
+                    and 'error' in result
+                    and result.get('error') not in (None, '')
+                )
+                _ephemeral_terminal_failure = (
+                    _agent_result_terminal_failure(result)
+                    or _ephemeral_tool_limit_reached
+                )
+                _ephemeral_has_answer = _assistant_reply_added_after_current_turn(
+                    _ephemeral_messages,
+                    _previous_context_messages,
+                    msg_text,
+                )
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
+                if _ckpt_thread is not None:
+                    _ckpt_thread.join(timeout=15)
                 try:
                     import pathlib
                     pathlib.Path(s.path).unlink(missing_ok=True)
                 except Exception:
                     pass
+                if _ephemeral_explicit_error or not _ephemeral_has_answer or (
+                    _ephemeral_terminal_failure and not _ephemeral_has_answer
+                ):
+                    _err_value = result.get('error') if isinstance(result, dict) else None
+                    _err_text = str(_err_value or 'No response from provider')
+                    _classification = _classify_provider_error(
+                        _err_text,
+                        _err_value,
+                        silent_failure=not _ephemeral_explicit_error,
+                    )
+                    _payload = _provider_error_payload(
+                        _err_text,
+                        _classification.get('type') or 'error',
+                        _classification.get('hint') or '',
+                    )
+                    _payload['session_id'] = session_id
+                    _payload['ephemeral'] = True
+                    put('apperror', _payload)
+                    return
+                _answer = ''
+                for _m in reversed(_ephemeral_messages or []):
+                    if isinstance(_m, dict) and _m.get('role') == 'assistant':
+                        _answer = str(_m.get('content', ''))
+                        break
+                put('done', {
+                    'session': {'session_id': session_id, 'messages': _ephemeral_messages or []},
+                    'usage': {'input_tokens': 0, 'output_tokens': 0},
+                    'ephemeral': True,
+                    'answer': _answer,
+                })
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
@@ -8666,66 +8776,15 @@ def _run_agent_streaming(
                         return
                 with _stream_writeback_stage(_writeback_timings, "merge_result"):
                     _tool_limit_reached = _agent_result_tool_limit_reached(result)
-                    _result_messages = result.get('messages') or _previous_context_messages
-                    _result_messages = _drop_synthetic_max_iteration_summary_requests(
-                        _result_messages,
-                        enabled=_tool_limit_reached,
+                    result, _result_messages = _materialize_streamed_answer_result(
+                        result,
+                        token_sent=_token_sent,
+                        stream_id=stream_id,
+                        previous_context_messages=_previous_context_messages,
+                        msg_text=msg_text,
+                        agent=agent,
+                        tool_limit_reached=_tool_limit_reached,
                     )
-                    # #5494 — parity with hermes-agent's handle_max_iterations() return
-                    # value. When the agent produced no usable summary assistant
-                    # message but result['final_response'] carries a graceful fallback
-                    # string, inject it as a final assistant turn so the user sees
-                    # closure text instead of a bare tool_limit_reached error. Apply
-                    # the synthesis to result['messages'] AND _result_messages so the
-                    # downstream _all_result_messages checks (silent-failure detection
-                    # at api/streaming.py:_assistant_reply_added_after_current_turn)
-                    # see the fallback too. `finalize_turn` in the agent always returns
-                    # messages as a list, but we write back unconditionally so the
-                    # contract is "if we built a result-messages list, the silent-failure
-                    # classifier reads the augmented version."
-                    if _tool_limit_reached:
-                        _result_messages = _maybe_inject_max_iteration_summary_fallback(
-                            _result_messages, result
-                        )
-                        if isinstance(result, dict):
-                            result = {**result, 'messages': _result_messages}
-                    _streamed_answer_text = ''
-                    if _token_sent:
-                        try:
-                            _streamed_answer_text = str(STREAM_PARTIAL_TEXT.get(stream_id) or '').strip()
-                        except Exception:
-                            _streamed_answer_text = ''
-                    _explicit_result_error = bool(getattr(agent, '_last_error', None)) or (
-                        'error' in result and result.get('error') not in (None, '')
-                    )
-                    _result_status = str(result.get('status') or result.get('state') or '').strip().lower()
-                    _result_is_hard_terminal = (
-                        _result_status in {'failed', 'error', 'compression_exhausted'}
-                        or result.get('failed')
-                        or result.get('compression_exhausted')
-                        or _tool_limit_reached
-                    )
-                    if (
-                        _streamed_answer_text
-                        and not _explicit_result_error
-                        and not _result_is_hard_terminal
-                        and not _assistant_reply_added_after_current_turn(
-                            _result_messages,
-                            _previous_context_messages,
-                            msg_text,
-                        )
-                    ):
-                        # Some agent/provider paths emit the full visible answer via
-                        # stream_delta_callback but return only replayed history and
-                        # an empty error field. Treat the streamed text as the final
-                        # assistant answer instead of appending a synthetic
-                        # no_response after text the user already saw.
-                        _result_messages = list(_result_messages or []) + [{
-                            'role': 'assistant',
-                            'content': _streamed_answer_text,
-                        }]
-                        result = dict(result)
-                        result['messages'] = _result_messages
                     if cancel_event.is_set():
                         _finalize_cancelled_turn(s, ephemeral=False)
                         try:
@@ -9075,39 +9134,60 @@ def _run_agent_streaming(
                                 # evaluates False on next conceptual pass.
                                 # Since we're in a flat block, directly run the
                                 # post-result merge logic here.
-                                _result_messages = result.get('messages') or _previous_context_messages
-                                _result_messages = _drop_synthetic_max_iteration_summary_requests(
+                                _heal_tool_limit_reached = _agent_result_tool_limit_reached(result)
+                                result, _result_messages = _materialize_streamed_answer_result(
+                                    result,
+                                    token_sent=_token_sent,
+                                    stream_id=stream_id,
+                                    previous_context_messages=_previous_context_messages,
+                                    msg_text=msg_text,
+                                    agent=agent,
+                                    tool_limit_reached=_heal_tool_limit_reached,
+                                )
+                                _heal_explicit_error = bool(getattr(agent, '_last_error', None)) or (
+                                    'error' in result and result.get('error') not in (None, '')
+                                )
+                                _heal_terminal_failure = (
+                                    _agent_result_terminal_failure(result)
+                                    or _heal_tool_limit_reached
+                                )
+                                _heal_has_answer = _assistant_reply_added_after_current_turn(
                                     _result_messages,
-                                    enabled=_agent_result_tool_limit_reached(result),
-                                )
-                                _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages,
-                                    _result_messages,
-                                )
-                                # Mint ids on the shared result rows BEFORE dedupe
-                                # deep-copies any stale-user boundary row, so both
-                                # arrays share the id (#5564).
-                                _assign_stable_message_ids(
-                                    _result_messages, _previous_messages, _previous_context_messages
-                                )
-                                _next_context_messages = _dedupe_replayed_context_messages(
-                                    _previous_context_messages,
-                                    _next_context_messages,
                                     msg_text,
                                 )
-                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
-                                s.messages = _merge_display_messages_after_agent_result(
-                                    _previous_messages,
-                                    _previous_context_messages,
-                                    _restore_reasoning_metadata(_previous_messages, _result_messages),
-                                    msg_text,
-                                    source=getattr(s, 'pending_user_source', None) or 'webui',
-                                )
-                                _advance_truncation_watermark_after_commit(s)  # #3831
-                                # Skip the error block — jump directly to the
-                                # normal post-result persistence path by
-                                # leaving _assistant_added truthy (set below).
-                                _assistant_added = True  # prevent re-entering guard
+                                if _heal_explicit_error or (_heal_terminal_failure and not _heal_has_answer):
+                                    logger.info('[webui] self-heal: retry returned terminal failure')
+                                    _assistant_added = False
+                                else:
+                                    _next_context_messages = _restore_reasoning_metadata(
+                                        _previous_context_messages,
+                                        _result_messages,
+                                    )
+                                    # Mint ids on the shared result rows BEFORE dedupe
+                                    # deep-copies any stale-user boundary row, so both
+                                    # arrays share the id (#5564).
+                                    _assign_stable_message_ids(
+                                        _result_messages, _previous_messages, _previous_context_messages
+                                    )
+                                    _next_context_messages = _dedupe_replayed_context_messages(
+                                        _previous_context_messages,
+                                        _next_context_messages,
+                                        msg_text,
+                                    )
+                                    s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                                    s.messages = _merge_display_messages_after_agent_result(
+                                        _previous_messages,
+                                        _previous_context_messages,
+                                        _restore_reasoning_metadata(_previous_messages, _result_messages),
+                                        msg_text,
+                                        source=getattr(s, 'pending_user_source', None) or 'webui',
+                                    )
+                                    _advance_truncation_watermark_after_commit(s)  # #3831
+                                    # Skip the error block — jump directly to the
+                                    # normal post-result persistence path by
+                                    # leaving _assistant_added truthy (set below).
+                                    _assistant_added = True  # prevent re-entering guard
                         if not _assistant_added:
                             # Self-heal didn't apply or retry failed — emit error
                             _err_label = 'Authentication failed'
@@ -10313,33 +10393,76 @@ def _run_agent_streaming(
                                         getattr(s, 'active_stream_id', None),
                                     )
                                     return
-                                _result_messages = _heal_result.get('messages') or _previous_context_messages
-                                _next_context_messages = _restore_reasoning_metadata(
-                                    _previous_context_messages, _result_messages,
+                                _heal_tool_limit_reached = _agent_result_tool_limit_reached(_heal_result)
+                                _heal_result, _result_messages = _materialize_streamed_answer_result(
+                                    _heal_result,
+                                    token_sent=_token_sent,
+                                    stream_id=stream_id,
+                                    previous_context_messages=_previous_context_messages,
+                                    msg_text=msg_text,
+                                    agent=_heal_agent,
+                                    tool_limit_reached=_heal_tool_limit_reached,
                                 )
-                                # Mint ids on the shared result rows BEFORE dedupe
-                                # deep-copies any stale-user boundary row, so both
-                                # arrays share the id (#5564).
-                                _assign_stable_message_ids(
-                                    _result_messages, _previous_messages, _previous_context_messages
+                                _heal_explicit_error = bool(getattr(_heal_agent, '_last_error', None)) or (
+                                    'error' in _heal_result and _heal_result.get('error') not in (None, '')
                                 )
-                                _next_context_messages = _dedupe_replayed_context_messages(
+                                _heal_terminal_failure = (
+                                    _agent_result_terminal_failure(_heal_result)
+                                    or _heal_tool_limit_reached
+                                )
+                                _heal_has_answer = _assistant_reply_added_after_current_turn(
+                                    _result_messages,
                                     _previous_context_messages,
-                                    _next_context_messages,
                                     msg_text,
                                 )
-                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
-                                s.messages = _merge_display_messages_after_agent_result(
-                                    _previous_messages,
-                                    _previous_context_messages,
-                                    _restore_reasoning_metadata(_previous_messages, _result_messages),
-                                    msg_text,
-                                    source=getattr(s, 'pending_user_source', None) or 'webui',
-                                )
-                                _advance_truncation_watermark_after_commit(s)  # #3831
-                                s.save()
-                        logger.info('[webui] self-heal (except path): retry succeeded')
-                        return  # skip error emission
+                                if _heal_explicit_error or (_heal_terminal_failure and not _heal_has_answer):
+                                    logger.info('[webui] self-heal (except path): retry returned terminal failure')
+                                else:
+                                    _next_context_messages = _restore_reasoning_metadata(
+                                        _previous_context_messages, _result_messages,
+                                    )
+                                    # Mint ids on the shared result rows BEFORE dedupe
+                                    # deep-copies any stale-user boundary row, so both
+                                    # arrays share the id (#5564).
+                                    _assign_stable_message_ids(
+                                        _result_messages, _previous_messages, _previous_context_messages
+                                    )
+                                    _next_context_messages = _dedupe_replayed_context_messages(
+                                        _previous_context_messages,
+                                        _next_context_messages,
+                                        msg_text,
+                                    )
+                                    s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                                    s.messages = _merge_display_messages_after_agent_result(
+                                        _previous_messages,
+                                        _previous_context_messages,
+                                        _restore_reasoning_metadata(_previous_messages, _result_messages),
+                                        msg_text,
+                                        source=getattr(s, 'pending_user_source', None) or 'webui',
+                                    )
+                                    _advance_truncation_watermark_after_commit(s)  # #3831
+                                    _stamp_missing_message_timestamps(s.messages)
+                                    _stamp_missing_message_timestamps(s.context_messages)
+                                    s.tool_calls = _extract_tool_calls_from_messages(
+                                        s.messages,
+                                        live_tool_calls=_live_tool_calls,
+                                    )
+                                    s.active_stream_id = None
+                                    s.pending_user_message = None
+                                    s.pending_attachments = []
+                                    s.pending_started_at = None
+                                    s.pending_user_source = None
+                                    s.save()
+                                    put('done', {
+                                        'session': redact_session_data(
+                                            _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
+                                        ),
+                                        'usage': _live_usage_snapshot(),
+                                    })
+                                    put('stream_end', {'session_id': session_id})
+                                    logger.info('[webui] self-heal (except path): retry succeeded')
+                                    return  # skip error emission
+                        logger.info('[webui] self-heal (except path): retry did not produce a successful answer')
                     except Exception as _retry_exc2:
                         logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
                         # Fall through to emit the original error

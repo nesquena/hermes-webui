@@ -188,7 +188,7 @@ def _build_auth_failure_agent(*, token_text: str | None, success_text: str = "Re
     return AuthFailureAgent
 
 
-def _run_stream(monkeypatch, session, stream_id, agent_cls, *, workspace):
+def _run_stream(monkeypatch, session, stream_id, agent_cls, *, workspace, ephemeral=False):
     fake_queue = queue.Queue()
     streaming.STREAMS[stream_id] = fake_queue
     config.STREAM_PARTIAL_TEXT[stream_id] = ""
@@ -204,6 +204,7 @@ def _run_stream(monkeypatch, session, stream_id, agent_cls, *, workspace):
             model="test-model",
             workspace=workspace,
             stream_id=stream_id,
+            ephemeral=ephemeral,
         )
 
     return fake_queue
@@ -369,6 +370,191 @@ def test_auth_retry_success_does_not_append_error_turn(tmp_path, monkeypatch):
     assert not any(msg.get("_error") for msg in saved.messages)
 
 
+def test_auth_retry_streamed_answer_without_result_message_is_saved_as_final(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "auth_retry_streamed_answer",
+        "stream_auth_retry_streamed_answer",
+        pending_user_message="Please retry and stream",
+    )
+
+    class AuthRetryStreamedAnswerAgent(MockAgent):
+        runs = 0
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            history = list(kwargs.get("conversation_history") or [])
+            if type(self).runs == 1:
+                return {
+                    "messages": history,
+                    "error": _auth_failure_error_payload(),
+                }
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Recovered streamed reply")
+            return {
+                "status": "ok",
+                "messages": history,
+                "error": "",
+            }
+
+    heal_rt = {
+        "provider": "test-provider",
+        "api_key": "fresh-key",
+        "base_url": None,
+    }
+
+    fake_queue = queue.Queue()
+    streaming.STREAMS["stream_auth_retry_streamed_answer"] = fake_queue
+    config.STREAM_PARTIAL_TEXT["stream_auth_retry_streamed_answer"] = ""
+
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=AuthRetryStreamedAnswerAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt):
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text=session.pending_user_message,
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id="stream_auth_retry_streamed_answer",
+        )
+
+    saved = Session.load("auth_retry_streamed_answer")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "Recovered streamed reply"
+    assert saved.context_messages[-1]["role"] == "assistant"
+    assert saved.context_messages[-1]["content"] == "Recovered streamed reply"
+    assert not any(msg.get("_error") for msg in saved.messages)
+
+
+def test_auth_retry_streamed_answer_with_explicit_error_still_errors(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "auth_retry_streamed_explicit_error",
+        "stream_auth_retry_streamed_explicit_error",
+        pending_user_message="Please retry then fail explicitly",
+    )
+
+    class AuthRetryStreamedExplicitErrorAgent(MockAgent):
+        runs = 0
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            history = list(kwargs.get("conversation_history") or [])
+            if type(self).runs == 1:
+                return {
+                    "messages": history,
+                    "error": _auth_failure_error_payload(),
+                }
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Visible retry text before explicit error")
+            return {
+                "status": "ok",
+                "messages": history,
+                "error": "provider failed on retry",
+            }
+
+    heal_rt = {
+        "provider": "test-provider",
+        "api_key": "fresh-key",
+        "base_url": None,
+    }
+
+    fake_queue = queue.Queue()
+    streaming.STREAMS["stream_auth_retry_streamed_explicit_error"] = fake_queue
+    config.STREAM_PARTIAL_TEXT["stream_auth_retry_streamed_explicit_error"] = ""
+
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=AuthRetryStreamedExplicitErrorAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt):
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text=session.pending_user_message,
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id="stream_auth_retry_streamed_explicit_error",
+        )
+
+    saved = Session.load("auth_retry_streamed_explicit_error")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for explicit retry failure"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
+    assert saved.messages[-1]["content"] != "Visible retry text before explicit error"
+
+
+def test_auth_exception_retry_streamed_answer_emits_done_and_saves_final(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "auth_exception_retry_streamed_answer",
+        "stream_auth_exception_retry_streamed_answer",
+        pending_user_message="Please recover from auth exception",
+    )
+
+    class AuthExceptionRetryStreamedAnswerAgent(MockAgent):
+        runs = 0
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            history = list(kwargs.get("conversation_history") or [])
+            if type(self).runs == 1:
+                raise RuntimeError("401 unauthorized: token expired")
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Recovered streamed reply after exception")
+            return {
+                "status": "ok",
+                "messages": history,
+                "error": "",
+            }
+
+    heal_rt = {
+        "provider": "test-provider",
+        "api_key": "fresh-key",
+        "base_url": None,
+    }
+
+    fake_queue = queue.Queue()
+    streaming.STREAMS["stream_auth_exception_retry_streamed_answer"] = fake_queue
+    config.STREAM_PARTIAL_TEXT["stream_auth_exception_retry_streamed_answer"] = ""
+
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=AuthExceptionRetryStreamedAnswerAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_rt):
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text=session.pending_user_message,
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id="stream_auth_exception_retry_streamed_answer",
+        )
+
+    saved = Session.load("auth_exception_retry_streamed_answer")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert any(event == "stream_end" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "Recovered streamed reply after exception"
+    assert saved.context_messages[-1]["role"] == "assistant"
+    assert saved.context_messages[-1]["content"] == "Recovered streamed reply after exception"
+    assert not any(msg.get("_error") for msg in saved.messages)
+
+
 def test_success_repeated_assistant_text_stays_successful_current_turn(tmp_path, monkeypatch):
     session = _prepare_session("repeat_success", "stream_repeat_success", pending_user_message="Please say it again")
     _seed_prior_turn(
@@ -454,6 +640,66 @@ def test_non_auth_silent_failure_still_uses_no_response(tmp_path, monkeypatch):
     assert apperrors[-1]["type"] == "no_response"
     assert apperrors[-1]["type"] != "auth_mismatch"
     assert saved.messages[-1]["_error"] is True
+
+
+def test_ephemeral_explicit_provider_error_emits_apperror(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "ephemeral_explicit_error",
+        "stream_ephemeral_explicit_error",
+        pending_user_message="Please fail ephemerally",
+    )
+
+    class EphemeralExplicitErrorAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            return {
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "provider failed",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_ephemeral_explicit_error",
+        EphemeralExplicitErrorAgent,
+        workspace=str(tmp_path),
+        ephemeral=True,
+    )
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for ephemeral provider failure"
+    assert apperrors[-1]["type"] == "error"
+    assert not any(event == "done" for event, _ in events)
+
+
+def test_ephemeral_empty_result_emits_no_response(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "ephemeral_empty_result",
+        "stream_ephemeral_empty_result",
+        pending_user_message="Please say something ephemerally",
+    )
+
+    class EphemeralEmptyResultAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            return {
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_ephemeral_empty_result",
+        EphemeralEmptyResultAgent,
+        workspace=str(tmp_path),
+        ephemeral=True,
+    )
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected no_response for ephemeral empty result"
+    assert apperrors[-1]["type"] == "no_response"
+    assert not any(event == "done" for event, _ in events)
 
 
 def test_live_settlement_empty_hint_does_not_append_empty_emphasis(tmp_path, monkeypatch):
