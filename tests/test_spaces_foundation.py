@@ -25537,7 +25537,12 @@ def test_spaces_demo_run_all_exposes_safe_output_compaction_receipt(monkeypatch,
     assert 0 < receipt["compacted_chars"] <= receipt["original_chars"]
     assert receipt["compacted"] is True
     assert "cap_section_chars" in receipt["rules_applied"]
-    assert receipt["redaction_status"] in {"none", "redacted"}
+    assert receipt["redaction_status"] in {"metadata_only", "redacted"}
+    assert "advisory_context: true" in receipt["text"]
+    assert "context_authority: untrusted_advisory" in receipt["text"]
+    assert "can_bypass_safety_gates: false" in receipt["text"]
+    assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in receipt["text"]
+    _assert_server_memory_advisory_receipt(suite)
 
     context = suite["context_status"]
     assert context["available"] is True

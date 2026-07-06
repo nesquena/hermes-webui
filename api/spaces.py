@@ -5717,18 +5717,35 @@ def _space_demo_run_body(name: str) -> dict[str, Any]:
     return summary
 
 
-def _space_demo_suite_summary_lines(results: list[dict[str, Any]], *, passed: int, total: int) -> list[str]:
+def _space_demo_suite_summary_lines(
+    results: list[dict[str, Any]],
+    *,
+    passed: int,
+    total: int,
+    memory_advisory: dict[str, Any] | None = None,
+) -> list[str]:
     """Build safe text-only demo-suite lines for compaction receipts.
 
     Do not stringify full result objects here: demo results can contain nested
     Spaces metadata and future fields. Keep this allow-listed so compaction
     evidence never becomes a raw widget/source/prompt leak path.
     """
+    advisory = memory_advisory if isinstance(memory_advisory, dict) else _memory_advisory_public_envelope()
+    raw_required_gates = advisory.get("required_gates")
+    required_gates = [
+        _payload_text_summary(gate, 80)
+        for gate in (raw_required_gates if isinstance(raw_required_gates, list) else [])
+    ]
+    required_gates = [gate for gate in required_gates if gate]
     lines = [
         "Capy Spaces demo suite metadata-only smoke summary",
         f"total: {int(total)}",
         f"passed: {int(passed)}",
         f"failure_count: {int(total) - int(passed)}",
+        f"advisory_context: {str(advisory.get('advisory_context') is True).lower()}",
+        f"context_authority: {_payload_text_summary(advisory.get('context_authority') or 'untrusted_advisory', 80) or 'untrusted_advisory'}",
+        f"can_bypass_safety_gates: {str(advisory.get('can_bypass_safety_gates') is True).lower()}",
+        f"required_gates: {', '.join(required_gates)}",
     ]
     for item in results:
         lines.append(
@@ -5955,13 +5972,24 @@ def space_demo_run_all() -> dict[str, Any]:
         total = len(results)
         from api.capy_compaction import compact_output
 
+        memory_advisory = _memory_advisory_public_envelope()
         output_compaction = compact_output(
-            "\n".join(_space_demo_suite_summary_lines(results, passed=passed, total=total)),
+            "\n".join(
+                _space_demo_suite_summary_lines(
+                    results,
+                    passed=passed,
+                    total=total,
+                    memory_advisory=memory_advisory,
+                )
+            ),
             tool="capy-spaces-demo-suite",
             command="space.demo.run_all",
             exit_status=0 if passed == total else 1,
             max_chars=600,
         )
+        output_compaction["metadata_only"] = True
+        if output_compaction.get("redaction_status") == "none":
+            output_compaction["redaction_status"] = "metadata_only"
         progress_event = _record_space_demo_suite_progress_event("run.completed" if passed == total else "run.failed")
         return {
             "ok": passed == total,
@@ -5973,6 +6001,7 @@ def space_demo_run_all() -> dict[str, Any]:
             "prompt_preflight": _space_demo_required_prompt_preflight_receipt("space.demo.run_all", boundary="space_demo_run_all"),
             "autonomy_policy": _space_demo_action_policy_receipt_for_action("space.demo.run_all"),
             "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
             "output_compaction": output_compaction,
             "context_status": _space_demo_context_status(),
             "results": results,
