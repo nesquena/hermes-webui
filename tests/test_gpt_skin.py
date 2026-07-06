@@ -41,5 +41,5 @@ def test_gpt_skin_in_boot_js():
 
     assert "'GPT'" in js or '"GPT"' in js, "Missing GPT entry in _SKINS"
     assert "#10a37f" in js, "Expected GPT accent color #10a37f"
-    assert "#059669" in js, "Expected GPT hover color #059669"
-    assert "#19c37d" in js, "Expected GPT dark accent #19c37d"
+    assert "#047857" in js, "Expected GPT accent-text #047857"
+    assert "#19C37D" in js or "#19c37d" in js, "Expected GPT dark accent #19c37d"
