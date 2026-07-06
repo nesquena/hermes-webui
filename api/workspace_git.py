@@ -235,6 +235,8 @@ def _run_git(
             for i, (key, value) in enumerate(extra_configs):
                 run_env[f"GIT_CONFIG_KEY_{i}"] = key
                 run_env[f"GIT_CONFIG_VALUE_{i}"] = value
+        from hermes_cli._subprocess_compat import windows_hide_flags
+
         result = subprocess.run(
             _hardened_git_argv(
                 args,
@@ -248,6 +250,7 @@ def _run_git(
             text=True,
             timeout=timeout,
             env=run_env,
+            creationflags=windows_hide_flags(),
         )
     except subprocess.TimeoutExpired as exc:
         raise GitWorkspaceError("Git command timed out", "timeout") from exc
@@ -282,6 +285,8 @@ def _config_names_for_scope(
     *,
     ignore_unsupported: bool = False,
 ) -> set[str]:
+    from hermes_cli._subprocess_compat import windows_hide_flags
+
     result = subprocess.run(
         ["git", "config", "--includes", scope, "--name-only", "--get-regexp", config_pattern],
         cwd=str(cwd),
@@ -290,6 +295,7 @@ def _config_names_for_scope(
         capture_output=True,
         timeout=GIT_TIMEOUT,
         env=env,
+        creationflags=windows_hide_flags(),
     )
     if result.returncode not in {0, 1}:
         if ignore_unsupported:
