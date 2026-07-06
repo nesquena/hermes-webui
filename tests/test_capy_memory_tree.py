@@ -67913,7 +67913,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_environment_secr
     "https://api.github.com/repos/capy/spaces/environments/Production/secrets?access_token=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
     "https://ghp_SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/environments/Production/secrets",
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_secrets_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_secrets_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, drifted_final_url
 ):
     root = tmp_path / "capy-memory"
@@ -67965,12 +67965,14 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_secr
 
     result = run_source_refresh_jobs(limit=1)
     search = search_memory("environment-private-final-url-probe", limit=5)
+    relevant = relevant_memory_for_space("environment-secrets-drift-space", limit=5)
     serialized = json.dumps({
         "receipt": receipt,
         "jobs": list_source_refresh_jobs(limit=5),
         "catalog": capy_memory.source_catalog(limit=5),
         "result": result,
         "search": search,
+        "relevant": relevant,
     }, sort_keys=True).lower()
     text_artifacts = "\n".join(
         path.read_text(encoding="utf-8")
@@ -67989,6 +67991,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_secr
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert search["results"] == []
+    assert relevant["results"] == []
     assert not (root / "vault" / "github-environment-private-final-url-drift.md").exists()
     for unsafe in (
         drifted_final_url.lower(),
