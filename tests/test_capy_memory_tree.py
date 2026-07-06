@@ -75515,7 +75515,7 @@ def test_github_actions_runner_downloads_route_matcher_recognizes_exact_route_an
         "https://api.github.com.evil.test/repos/capy/spaces/actions/runners/downloads",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_downloads_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_downloads_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, case_id, final_url
 ):
     root = tmp_path / "capy-memory"
@@ -75558,9 +75558,15 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_d
     monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
 
     result = run_source_refresh_jobs(limit=1)
-    search = search_memory("hostile-body-text", limit=5)
+    search = search_memory("benign runner downloads", limit=5)
+    relevant = relevant_memory_for_space("runner-downloads-safe-space", limit=5)
     serialized = json.dumps(
-        {"result": result, "jobs": list_source_refresh_jobs(limit=5), "search_results": search["results"]},
+        {
+            "result": result,
+            "jobs": list_source_refresh_jobs(limit=5),
+            "search_results": search["results"],
+            "relevant_memory_results": relevant["results"],
+        },
         sort_keys=True,
     ).lower()
 
@@ -75571,6 +75577,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runner_d
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert memory_status()["chunk_count"] == 0
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "hostile-body-text",
         "secret_value_do_not_leak",
@@ -75851,7 +75858,7 @@ def test_github_actions_org_runner_downloads_route_and_final_url_matchers_accept
         "https://api.github.com.evil.test/orgs/capy/actions/runners/downloads",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runner_downloads_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runner_downloads_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, case_id, final_url
 ):
     root = tmp_path / "capy-memory"
@@ -75894,9 +75901,15 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runn
     monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
 
     result = run_source_refresh_jobs(limit=1)
-    search = search_memory("hostile-body-text", limit=5)
+    search = search_memory("benign organization runner downloads", limit=5)
+    relevant = relevant_memory_for_space("org-runner-downloads-safe-space", limit=5)
     serialized = json.dumps(
-        {"result": result, "jobs": list_source_refresh_jobs(limit=5), "search_results": search["results"]},
+        {
+            "result": result,
+            "jobs": list_source_refresh_jobs(limit=5),
+            "search_results": search["results"],
+            "relevant_memory_results": relevant["results"],
+        },
         sort_keys=True,
     ).lower()
 
@@ -75907,6 +75920,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runn
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert memory_status()["chunk_count"] == 0
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "hostile-body-text",
         "secret_value_do_not_leak",
