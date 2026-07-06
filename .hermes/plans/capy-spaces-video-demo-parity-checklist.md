@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- Big Bang template reset browser results now render the Memory Tree advisory/no-authority card inside the reset receipt, between template-reset progress and compaction evidence. The checked-out UI shows only metadata-only `untrusted_advisory` authority, gate-bypass false, and required gate labels for `space.template.reset`, while hostile trusted-memory/raw-memory/renderer/script/source-HTML/API-auth, credential, token, and secret-looking fixture values remain omitted.
+
 - Demo-suite run-all browser results now render the Memory Tree advisory/no-authority card inside the suite receipt, between progress and compaction evidence. The checked-out UI shows only metadata-only `untrusted_advisory` authority, gate-bypass false, and required gate labels for `space.demo.run_all`, while hostile raw context/trusted-memory/renderer/source/html/script/data/API-auth, credential, token, and secret-looking fixture values remain omitted.
 
 - Individual demo-smoke receipts now preserve the Memory Tree advisory/no-authority boundary: `space.demo.run` returns a server-generated `memory_advisory` receipt, each output-compaction receipt shows only advisory status, `untrusted_advisory` authority, gate-bypass false, required gate labels, and demo/widget/revision metadata, and the Spaces UI renders the Memory advisory card inside individual demo-smoke results while omitting raw prompts, renderer/source/html/script/data/API-auth fields, credentials, tokens, and secret-looking values.

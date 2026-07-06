@@ -132,6 +132,7 @@
       renderPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
       renderPackageProgressEvidence(result && result.progress_event, 'Template reset progress') +
+      renderMemoryAdvisoryEvidence(result && result.memory_advisory) +
       renderCompactionEvidence(result && (result.output_compaction || result.compaction)) +
       '</div>';
   }
