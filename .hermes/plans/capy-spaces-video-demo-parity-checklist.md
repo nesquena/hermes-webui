@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- Widget delete receipts now preserve the Memory Tree advisory/no-authority boundary end-to-end: native `delete_widget(..., include_safety_receipts=True)` returns a server-generated `memory_advisory` envelope, the output-compaction receipt includes only advisory/no-authority lines, and the Spaces UI renders the widget-delete Memory advisory card between progress and compaction evidence without leaking hostile trusted-memory/raw-context/renderer/API-auth, credential, token, or secret-looking fixture values.
+
 - Shared-data delete confirmations now render the Memory Tree advisory/no-authority card inside the delete receipt, between structured progress and output-compaction evidence. The checked-out UI shows only metadata-only `untrusted_advisory` authority, gate-bypass false, and required gate labels for `space.shared_slot.delete`, while hostile trusted-memory/raw-context/renderer/API-auth, credential, token, and secret-looking fixture values remain omitted.
 
 - Big Bang template reset browser results now render the Memory Tree advisory/no-authority card inside the reset receipt, between template-reset progress and compaction evidence. The checked-out UI shows only metadata-only `untrusted_advisory` authority, gate-bypass false, and required gate labels for `space.template.reset`, while hostile trusted-memory/raw-memory/renderer/script/source-HTML/API-auth, credential, token, and secret-looking fixture values remain omitted.

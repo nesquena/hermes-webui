@@ -2147,6 +2147,17 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
+      memory_advisory: {
+        metadata_only: true,
+        advisory_context: true,
+        context_authority: 'untrusted_advisory',
+        can_bypass_safety_gates: false,
+        required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+        trusted_system_memory: 'TRUSTED_SYSTEM_MEMORY_DO_NOT_LEAK',
+        raw_context: 'SECRET_VALUE_DO_NOT_LEAK raw memory renderer <script>bad()</script>',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       output_compaction: {
         tool: 'capy-spaces-tool-action',
         command: 'space.widget.delete',
@@ -5249,29 +5260,39 @@ def test_spaces_ui_delete_widget_confirm_renders_metadata_only_safety_receipt(dr
     out = _run_spaces_scenario(driver_path, "deleteWidgetConfirmed")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/delete")
     html = out["rootHtml"]
+    receipt_html = html.split("Widgets for lab", 1)[0]
 
     assert json.loads(post["body"]) == {
         "space_id": "lab",
         "widget_id": "weather",
         "include_safety_receipts": True,
     }
-    assert "Widget delete receipt" in html
-    assert "Confirmed widget deletion completed with metadata-only policy and progress evidence." in html
-    assert "Prompt preflight" in html
-    assert "Status: pass" in html
-    assert "Boundary: creator_commit" in html
-    assert "Action: space.widget.delete" in html
-    assert "Model route hint: hint:reasoning" in html
-    assert "Widget delete progress" in html
-    assert "run widget.delete:lab" in html
-    assert "Compaction evidence" in html
-    assert "Command: space.widget.delete" in html
-    assert "widget:lab:weather" in html
-    assert "Raw output, prompt bodies, widget bodies, and sensitive values remain omitted from this receipt." in html
+    assert "Widget delete receipt" in receipt_html
+    assert "Confirmed widget deletion completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence." in receipt_html
+    assert "Prompt preflight" in receipt_html
+    assert "Status: pass" in receipt_html
+    assert "Boundary: creator_commit" in receipt_html
+    assert "Action: space.widget.delete" in receipt_html
+    assert "Model route hint: hint:reasoning" in receipt_html
+    assert "Widget delete progress" in receipt_html
+    assert "run widget.delete:lab" in receipt_html
+    assert "Memory advisory" in receipt_html
+    assert "Authority: untrusted_advisory" in receipt_html
+    assert "Advisory context: yes" in receipt_html
+    assert "Can bypass safety gates: no" in receipt_html
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in receipt_html
+    assert "Compaction evidence" in receipt_html
+    assert receipt_html.index("Memory advisory") < receipt_html.index("Compaction evidence")
+    assert "Command: space.widget.delete" in receipt_html
+    assert "widget:lab:weather" in receipt_html
+    assert "Raw output, prompt bodies, widget bodies, memory context, and sensitive values remain omitted from this receipt." in receipt_html
     assert "<script>" not in html
     assert "renderer" not in html.lower()
     assert "api_key" not in html.lower()
     assert "SECRET" not in html
+    assert "trusted_system_memory" not in html
+    assert "raw_context" not in html
+    assert "raw_prompt" not in html
 
 
 def test_spaces_ui_edit_widget_prefills_safe_metadata_form_without_fetching_renderer(driver_path):

@@ -2750,10 +2750,15 @@ def test_native_widget_mutations_can_return_metadata_only_safety_receipts(monkey
     assert deleted["prompt_preflight"]["boundary"] == "creator_commit"
     assert deleted["autonomy_policy"]["action"] == "space.widget.delete"
     assert deleted["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
+    _assert_server_memory_advisory_receipt(deleted)
     assert deleted["output_compaction"]["command"] == "space.widget.delete"
     assert deleted["output_compaction"]["metadata_only"] is True
     assert deleted["output_compaction"]["redaction_status"] == "metadata_only"
     assert f"space_id: {created['space_id']}" in deleted["output_compaction"]["text"]
+    assert "advisory_context: true" in deleted["output_compaction"]["text"]
+    assert "context_authority: untrusted_advisory" in deleted["output_compaction"]["text"]
+    assert "can_bypass_safety_gates: false" in deleted["output_compaction"]["text"]
+    assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in deleted["output_compaction"]["text"]
     assert f"progress_run_id: widget.delete:{created['space_id']}" in deleted["output_compaction"]["text"]
     assert deleted["deleted"] is True
 

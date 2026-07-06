@@ -12670,8 +12670,10 @@ def delete_widget(space_id: str, widget_id: str, *, include_safety_receipts: boo
             "space.widget.delete",
             prompt_preflight_receipt,
         )
+        memory_advisory = _memory_advisory_public_envelope()
         result["progress_event"] = progress_event
         result["autonomy_policy"] = autonomy_policy
+        result["memory_advisory"] = memory_advisory
         result["output_compaction"] = _space_tool_action_output_compaction_receipt(
             action="space.widget.delete",
             space_id=sid,
@@ -12680,6 +12682,8 @@ def delete_widget(space_id: str, widget_id: str, *, include_safety_receipts: boo
             revision_event_id=result.get("revision_event_id"),
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
         )
     return result
 
