@@ -148,6 +148,10 @@ global.fetch = async function(path, opts = {}) {
             { id: 'bad-widget', kind: 'html', title: 'Bad <Widget>', disabled: false, renderer: '<script>bad()</script>', queued_event_count: 1, latest_queued_event: { event_id: 'evt-repair', event_name: 'agent.repair', status: 'queued', prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK', payload_summary: { api_key: 'SECRET' } } },
             { id: 'disabled-widget', kind: 'markdown', title: 'Disabled Widget', disabled: true, disabled_reason: 'render failed' },
           ],
+          revisions: [
+            { event_id: 'rev-before-break', event_type: 'widget.recovery_disabled', created_at: 1710000200, details: { widget_id: 'bad-widget', reason: 'Authorization: Bearer SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+            { event_id: 'rev-space-updated', event_type: 'space.updated', created_at: 1710000100, details: { name: 'Broken <Space>' } },
+          ],
         }
       ],
     });

@@ -66,6 +66,7 @@ _SPACE_DEMO_RUNS = [
     {"demo": "demo_stock_chart", "template": "stock", "title": "Stock chart"},
     {"demo": "demo_snake_iterative_repair", "template": "game", "title": "Snake repair loop"},
     {"demo": "demo_step_sequencer_piano_roll", "template": "music", "title": "Step sequencer"},
+    {"demo": "demo_provider_setup", "template": "model-setup", "title": "Provider setup"},
     {"demo": "demo_big_bang_onboarding", "template": "big-bang", "title": "Big Bang onboarding"},
     {"demo": "demo_time_travel_restore", "template": "weather", "title": "Time travel restore"},
     {"demo": "demo_safe_admin_recovery", "template": "weather", "title": "Admin recovery"},
@@ -247,6 +248,12 @@ def _widget_summary(widget: dict[str, Any]) -> dict[str, Any]:
         "title": clean_widget["title"],
         "layout": clean_widget["layout"],
     }
+    metadata = widget.get("metadata") if isinstance(widget.get("metadata"), dict) else {}
+    if metadata:
+        summary["metadata"] = _payload_summary(metadata)
+    metadata_summary = widget.get("metadata_summary") if isinstance(widget.get("metadata_summary"), dict) else metadata.get("metadata_summary") if isinstance(metadata.get("metadata_summary"), dict) else {}
+    if metadata_summary:
+        summary["metadata_summary"] = _payload_summary(metadata_summary)
     system = widget.get("system") if isinstance(widget.get("system"), dict) else {}
     panel = str(system.get("panel") or "").strip()
     if clean_widget["kind"] == "system" and panel in _TRUSTED_SYSTEM_WIDGETS:
@@ -553,6 +560,117 @@ def list_space_demo_runs() -> list[dict[str, Any]]:
         }
         for item in _SPACE_DEMO_RUNS
     ]
+
+
+def _research_source_rows(sources: Any) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    if not isinstance(sources, list):
+        return rows
+    for item in sources[:20]:
+        if isinstance(item, dict):
+            title = _payload_text_summary(item.get("title") or item.get("name") or "Source", 160)
+            url = _payload_text_summary(item.get("url") or item.get("href") or "", 240)
+            notes = _payload_text_summary(item.get("notes") or item.get("summary") or "", 240)
+        else:
+            title = _payload_text_summary(item, 160)
+            url = ""
+            notes = ""
+        if not title or title == "[REDACTED]":
+            title = "Source"
+        rows.append({"title": title, "url": url, "notes": notes})
+    return rows
+
+
+def _research_note_items(notes: Any) -> list[str]:
+    if isinstance(notes, list):
+        raw_items = notes[:20]
+    elif notes is None:
+        raw_items = []
+    else:
+        raw_items = [notes]
+    return [_payload_text_summary(item, 300) for item in raw_items]
+
+
+def set_research_progress(
+    space_id: str,
+    *,
+    phase: Any,
+    message: Any,
+    sources: Any | None = None,
+    notes: Any | None = None,
+) -> dict[str, Any]:
+    """Update Research Harness live-progress widgets as safe metadata."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    safe_phase = _payload_text_summary(phase or "working", 120)
+    safe_message = _payload_text_summary(message or "Research progress updated.", 240)
+    if not safe_phase or safe_phase == "[REDACTED]":
+        safe_phase = "working"
+    if not safe_message:
+        safe_message = "Research progress updated."
+
+    plan_result = patch_widget(
+        sid,
+        "research-plan",
+        {"metadata": {"status": {"phase": safe_phase, "message": safe_message, "progress": "updated"}}},
+    )
+    source_rows = _research_source_rows(sources)
+    sources_result = patch_widget(
+        sid,
+        "research-sources",
+        {"metadata": {"table": {"columns": ["title", "url", "notes"], "rows": source_rows, "source_count": len(source_rows)}}},
+    )
+    note_items = _research_note_items(notes)
+    notes_result = patch_widget(
+        sid,
+        "research-notes",
+        {"metadata": {"notes": {"status": "updated", "items": note_items, "item_count": len(note_items)}}},
+    )
+    return {
+        "space_id": sid,
+        "widgets": {
+            "plan": read_widget_detail(sid, "research-plan"),
+            "sources": read_widget_detail(sid, "research-sources"),
+            "notes": read_widget_detail(sid, "research-notes"),
+        },
+        "revision_event_id": notes_result["revision_event_id"],
+        "updated_revision_event_ids": [
+            plan_result["revision_event_id"],
+            sources_result["revision_event_id"],
+            notes_result["revision_event_id"],
+        ],
+    }
+
+
+def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str, Any]:
+    """Record a Research Harness markdown artifact as safe metadata."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    safe_title = _payload_text_summary(title or "Research summary", 180)
+    safe_markdown = _payload_text_summary(markdown or "", 1200)
+    if not safe_title or safe_title == "[REDACTED]":
+        safe_title = "Research summary"
+    if safe_markdown == "[REDACTED]":
+        safe_markdown = ""
+    result = patch_widget(
+        sid,
+        "research-summary",
+        {
+            "title": safe_title,
+            "metadata": {"markdown_status": "ready"},
+            "metadata_summary": {
+                "export_pdf": "ready-for-user-request",
+                "character_count": len(safe_markdown),
+            },
+        },
+    )
+    return {
+        "space_id": sid,
+        "artifact": read_widget_detail(sid, "research-summary"),
+        "revision_event_id": result["revision_event_id"],
+    }
 
 
 def _space_demo_run_summary(demo: str, template: str, space_id: str, *, action: str) -> dict[str, Any]:
@@ -1239,6 +1357,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
         "layout",
         "description",
         "metadata",
+        "metadata_summary",
         "permissions",
         "recovery",
         "event_bridge",
@@ -1255,11 +1374,11 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
     changed_fields: list[str] = []
     for key, value in (patch or {}).items():
         safe_key = str(key or "")
-        if safe_key not in allowed or not _payload_key_is_safe(safe_key):
+        if safe_key not in allowed or (safe_key not in {"metadata", "metadata_summary"} and not _payload_key_is_safe(safe_key)):
             continue
         if safe_key == "layout":
             widget["layout"] = _normalize_widget_layout(value)
-        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "chart", "table", "notes", "browser", "kanban", "markdown"}:
+        elif safe_key in {"metadata", "metadata_summary", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "chart", "table", "notes", "browser", "kanban", "markdown"}:
             if isinstance(value, dict):
                 widget[safe_key] = _payload_summary(value)
             else:

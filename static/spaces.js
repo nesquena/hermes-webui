@@ -23,6 +23,13 @@
     if (!root) return;
     ensureCapySpacesHandlers();
     try {
+      let demos = [];
+      try {
+        const demoData = await postSpacesJson('api/spaces/tool', {action: 'space.demo.list'});
+        demos = Array.isArray(demoData && demoData.demos) ? demoData.demos : [];
+      } catch (_demoErr) {
+        demos = [];
+      }
       const data = await fetchSpacesJson('api/spaces');
       if (!data.enabled) {
         root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces disabled</h3><div class="capy-spaces-muted">Set HERMES_WEBUI_SPACES_ENABLED=1 to enable the foundation shell.</div></div>';
@@ -30,7 +37,7 @@
       }
       root.dataset.editingSpaceId = '';
       const spaces = data.spaces || [];
-      root.innerHTML = renderSpacesList(spaces);
+      root.innerHTML = renderSpacesList(spaces, demos);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div></div>';
     }
@@ -50,7 +57,7 @@
       '</div>';
   }
 
-  function renderSpacesList(spaces){
+  function renderSpacesList(spaces, demos){
     const activeSpaceId = currentActiveSpaceId();
     const cards = spaces.length ? spaces.map(function(s){
       const spaceId = s.space_id || '';
@@ -949,6 +956,8 @@
       const name = s.name || spaceId || 'Untitled';
       const description = s.description || '';
       const widgets = Array.isArray(s.widgets) ? s.widgets : [];
+      const revisions = Array.isArray(s.revisions) ? s.revisions : [];
+      const revisionRows = renderRecoveryRevisionRows(spaceId, revisions.length ? revisions : (s.revision_event_id ? [{event_id: s.revision_event_id, event_type: 'widget.recovery_disabled', created_at: s.updated_at, details: {space_id: spaceId}}, {event_id: s.revision_event_id, event_type: 'space.updated', created_at: s.updated_at, details: {space_id: spaceId}}] : []));
       const widgetRows = widgets.length ? '<div class="capy-spaces-widget-list">'+widgets.map(function(w){
         const widgetId = w && w.id ? String(w.id) : '';
         const title = w && w.title ? String(w.title) : widgetId || 'Untitled widget';
@@ -961,12 +970,13 @@
           '</div>' +
           '<div class="capy-spaces-actions">' +
           (disabled ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Enable widget</button>' : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Disable widget</button>') +
+          '<button type="button" class="capy-spaces-btn" data-capy-action="askCapyRepairWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Ask Capy to repair</button>' +
           '</div></div>';
       }).join('')+'</div>' : '<div class="capy-spaces-muted">No widget metadata available for this space.</div>';
       return '<div class="capy-spaces-widget" data-space-id="'+escapeHtml(spaceId)+'"><div><strong>'+escapeHtml(name)+'</strong>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
         '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div>' +
-        widgetRows + '</div></div>';
+        widgetRows + '<div class="capy-spaces-widget-list">'+revisionRows+'</div></div></div>';
     }).join('') : '<div class="capy-spaces-muted">No spaces found in recovery metadata.</div>';
     return '<div class="capy-spaces-card"><h3>Safe recovery</h3>' +
       '<div class="capy-spaces-muted">Generated widgets rendered: '+String(!!data.generated_widgets_rendered)+'. This panel lists metadata only so broken generated UI cannot execute here.</div>' +
