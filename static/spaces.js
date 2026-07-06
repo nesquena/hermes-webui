@@ -1660,11 +1660,12 @@
     const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
     const policy = renderActionPolicyEvidence(result.autonomy_policy);
     const progress = renderPackageProgressEvidence(result.progress_event, 'Shared data delete progress');
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
     const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
-    if (!preflight && !policy && !progress && !compaction) return '';
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
     return '<div class="capy-spaces-card" role="status"><h3>Shared data delete receipt</h3>' +
-      '<div class="capy-spaces-muted">Confirmed shared data slot deletion completed with metadata-only policy and progress evidence. Raw slot values, prompts, implementation fields, and secrets stay omitted.</div>' +
-      preflight + policy + progress + compaction + '</div>';
+      '<div class="capy-spaces-muted">Confirmed shared data slot deletion completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence. Raw slot values, prompts, memory context, implementation fields, and secrets stay omitted.</div>' +
+      preflight + policy + progress + advisory + compaction + '</div>';
   }
 
   function prependSharedDataDeleteReceipt(data){

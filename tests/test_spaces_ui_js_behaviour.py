@@ -2212,6 +2212,17 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
+      memory_advisory: {
+        metadata_only: true,
+        advisory_context: true,
+        context_authority: 'untrusted_advisory',
+        can_bypass_safety_gates: false,
+        required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+        trusted_system_memory: 'TRUSTED_SYSTEM_MEMORY_DO_NOT_LEAK',
+        raw_context: 'SECRET_VALUE_DO_NOT_LEAK raw memory renderer <script>bad()</script>',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       output_compaction: {
         tool: 'capy-spaces-tool-action',
         command: 'space.shared_slot.delete',
@@ -8364,15 +8375,21 @@ def test_spaces_ui_delete_shared_data_confirm_posts_key_only_and_refreshes_detai
     assert out["calls"][-2]["path"] == "api/spaces/memory?space_id=lab"
     assert out["calls"][-1]["path"] == "api/capy-progress/status?space_id=lab"
     assert "Shared data delete receipt" in out["rootHtml"]
-    assert "space.shared_slot.delete" in out["rootHtml"]
-    assert "Model route hint: hint:summarize" in out["rootHtml"]
-    assert "Shared data delete progress" in out["rootHtml"]
-    assert "run shared-slot.delete:lab" in out["rootHtml"]
-    assert "Compaction evidence" in out["rootHtml"]
-    assert "Original output: 512 chars" in out["rootHtml"]
-    assert "Artifacts: 2" in out["rootHtml"]
-    assert "space · space:lab · Space action metadata" in out["rootHtml"]
-    assert "shared_data_slot · shared-data:lab:research-summary · Shared data slot metadata" in out["rootHtml"]
+    receipt_html = out["rootHtml"][: out["rootHtml"].index("Current Space")]
+    assert "space.shared_slot.delete" in receipt_html
+    assert "Model route hint: hint:summarize" in receipt_html
+    assert "Shared data delete progress" in receipt_html
+    assert "run shared-slot.delete:lab" in receipt_html
+    assert "Memory advisory" in receipt_html
+    assert "Authority: untrusted_advisory" in receipt_html
+    assert "Can bypass safety gates: no" in receipt_html
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in receipt_html
+    assert "Compaction evidence" in receipt_html
+    assert receipt_html.index("Memory advisory") < receipt_html.index("Compaction evidence")
+    assert "Original output: 512 chars" in receipt_html
+    assert "Artifacts: 2" in receipt_html
+    assert "space · space:lab · Space action metadata" in receipt_html
+    assert "shared_data_slot · shared-data:lab:research-summary · Shared data slot metadata" in receipt_html
     assert "shared-data:lab:script" not in out["rootHtml"]
     assert "shared-data:lab:source-code" not in out["rootHtml"]
     assert "shared-data:lab:token" not in out["rootHtml"]
@@ -8382,6 +8399,8 @@ def test_spaces_ui_delete_shared_data_confirm_posts_key_only_and_refreshes_detai
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
+    assert "trusted_system_memory" not in out["rootHtml"]
+    assert "raw_context" not in out["rootHtml"]
     assert "raw_prompt" not in out["rootHtml"]
 
 
