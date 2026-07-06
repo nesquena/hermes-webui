@@ -4044,9 +4044,21 @@ def _build_agent_context_unchecked(space_id: str | None) -> str:
 
 def _space_current_context_prompt_preflight_receipt(context: str) -> dict[str, Any] | None:
     """Return metadata-only preflight evidence for active Space context."""
-    if not str(context or "").strip():
-        return None
     from api.capy_policy import prompt_preflight
+
+    if not str(context or "").strip():
+        return {
+            "available": True,
+            "action": "capy.prompt_preflight",
+            "boundary": "memory_context",
+            "status": "required",
+            "severity": "none",
+            "categories": [],
+            "checks": ["memory_context_read", "prompt_injection_preflight_required"],
+            "metadata_only": True,
+            "raw_prompt_stored": False,
+            "local_only": True,
+        }
 
     receipt = prompt_preflight(context, boundary="memory_context")
     receipt.setdefault("checks", list(receipt.get("categories") or []))
@@ -4084,6 +4096,7 @@ def _space_current_context_action_policy_receipt(action: str, preflight_receipt:
         prompt_preflight_status=status,
         model_route_hint="hint:reasoning",
     )
+
 
 
 def _space_current_instruction_prompt_preflight_receipt(instructions: str) -> dict[str, Any]:
@@ -8263,6 +8276,29 @@ def _record_widget_sdk_helper_progress_event(action: str) -> dict[str, Any]:
         }
 
 
+def _record_space_current_context_no_space_progress_event() -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for no-active-space context reads."""
+    run_id = "context:none"
+    try:
+        from api.capy_progress import record_progress_event
+
+        event = record_progress_event({"event_type": "tool.completed", "run_id": run_id})
+    except Exception:
+        event = {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+    event["metadata_only"] = True
+    event["redaction_status"] = "metadata_only"
+    event.pop("space_id", None)
+    return event
+
+
 def _space_path_helper_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
     """Return metadata-only evidence that logical path helpers require browser/development preflight."""
     safe_action = _context_value(action, 120) or "space.spaces.buildspacepath"
@@ -8613,11 +8649,30 @@ def _space_current_context_memory_advisory_lines(memory_advisory: dict[str, Any]
 def _space_current_context_output_compaction(
     context: str,
     memory_advisory: dict[str, Any] | None = None,
+    *,
+    prompt_preflight: dict[str, Any] | None = None,
+    autonomy_policy: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return product-visible compaction evidence for active Space context tool output."""
     from api.capy_compaction import compact_output
 
     compaction_lines = _space_current_context_memory_advisory_lines(memory_advisory)
+    if isinstance(prompt_preflight, dict):
+        compaction_lines.append(
+            f"prompt_preflight_status: {_payload_text_summary(prompt_preflight.get('status') or 'required', 40) or 'required'}"
+        )
+    if isinstance(autonomy_policy, dict):
+        compaction_lines.append(
+            f"autonomy_action: {_payload_text_summary(autonomy_policy.get('action') or 'space.current.context', 120) or 'space.current.context'}"
+        )
+        compaction_lines.append(
+            f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:reasoning', 80) or 'hint:reasoning'}"
+        )
+    if isinstance(progress_event, dict):
+        compaction_lines.append(
+            f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or 'context:none', 160) or 'context:none'}"
+        )
     if context:
         compaction_lines.append(context)
     compaction_text = "\n".join(compaction_lines)
@@ -8836,6 +8891,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         context_status = _space_demo_context_status()
         memory_advisory = _memory_advisory_public_envelope()
         if not current_id:
+            prompt_preflight = _space_current_context_prompt_preflight_receipt("")
+            autonomy_policy = _space_current_context_action_policy_receipt(name, prompt_preflight)
+            progress_event = _record_space_current_context_no_space_progress_event()
             return {
                 "ok": True,
                 "action": name,
@@ -8843,14 +8901,24 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "metadata_only": True,
                 "local_only": True,
                 "context": "",
+                "prompt_preflight": prompt_preflight,
+                "autonomy_policy": autonomy_policy,
                 "memory_advisory": memory_advisory,
-                "output_compaction": _space_current_context_output_compaction("", memory_advisory),
+                "output_compaction": _space_current_context_output_compaction(
+                    "",
+                    memory_advisory,
+                    prompt_preflight=prompt_preflight,
+                    autonomy_policy=autonomy_policy,
+                    progress_event=progress_event,
+                ),
                 "context_status": context_status,
+                "progress_event": progress_event,
             }
         space_id = validate_space_id(current_id)
         unchecked_context = _build_agent_context_unchecked(space_id)
         prompt_preflight = _space_current_context_prompt_preflight_receipt(unchecked_context)
         context = _space_current_context_after_preflight(space_id, unchecked_context, prompt_preflight)
+        autonomy_policy = _space_current_context_action_policy_receipt(name, prompt_preflight)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="context")
         return {
             "ok": True,
@@ -8860,9 +8928,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "local_only": True,
             "context": context,
             "prompt_preflight": prompt_preflight,
-            "autonomy_policy": _space_current_context_action_policy_receipt(name, prompt_preflight),
+            "autonomy_policy": autonomy_policy,
             "memory_advisory": memory_advisory,
-            "output_compaction": _space_current_context_output_compaction(context, memory_advisory),
+            "output_compaction": _space_current_context_output_compaction(
+                context,
+                memory_advisory,
+                prompt_preflight=prompt_preflight,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
             "context_status": context_status,
             "progress_event": progress_event,
         }

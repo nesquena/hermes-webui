@@ -15198,7 +15198,7 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
     from api.capy_progress import progress_status
 
     scoped_progress = progress_status(space_id=created["space_id"])
-    serialized = json.dumps(result).lower()
+    serialized = json.dumps({"result": result, "no_current": no_current}, sort_keys=True).lower()
 
     assert result["ok"] is True
     assert result["action"] == "space.current.context"
@@ -15252,6 +15252,22 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
     assert no_current["output_compaction"]["original_chars"] > 0
     assert no_current["output_compaction"]["compacted_chars"] > 0
     _assert_server_memory_advisory_receipt(no_current)
+    assert no_current["prompt_preflight"]["boundary"] == "memory_context"
+    assert no_current["prompt_preflight"]["status"] == "required"
+    assert no_current["prompt_preflight"]["metadata_only"] is True
+    assert no_current["prompt_preflight"]["raw_prompt_stored"] is False
+    assert no_current["autonomy_policy"]["action"] == "space.current.context"
+    assert no_current["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert no_current["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+    assert no_current["progress_event"]["event_type"] == "tool.completed"
+    assert no_current["progress_event"]["run_id"] == "context:none"
+    assert no_current["progress_event"]["redaction_status"] == "metadata_only"
+    assert no_current["progress_event"]["metadata_only"] is True
+    assert "space_id" not in no_current["progress_event"]
+    assert "prompt_preflight_status: required" in no_current["output_compaction"]["text"]
+    assert "autonomy_action: space.current.context" in no_current["output_compaction"]["text"]
+    assert "progress_run_id: context:none" in no_current["output_compaction"]["text"]
+    assert "space_id:" not in no_current["output_compaction"]["text"]
     assert no_current["context_status"]["metadata_only"] is True
     assert "investigate secret_value_do_not_leak" not in serialized
     assert "steal" not in serialized
