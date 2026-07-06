@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- Recovery widget repair queue receipts now preserve the Memory Tree advisory/no-authority boundary: `queue_recovery_widget_repair_event(...)` and `/api/spaces/recovery/repair-widget` return a server-generated `memory_advisory` receipt in the public queue response, persisted widget-event summary, recovery snapshot latest-event metadata, and output-compaction evidence. The public envelope shows only metadata-only `untrusted_advisory`, gate-bypass false, and required gate labels while omitting hostile trusted-memory, renderer/source/html/API-auth, raw prompt/session, generated-body, credential, token, and secret-looking fixture values.
+
 - Structured progress status now preserves the Memory Tree advisory/no-authority boundary: `progress_status(space_id=...)` returns a server-generated `memory_advisory` receipt beside bounded local progress taxonomy, recent-event metadata, and output-compaction evidence. The public envelope shows only metadata-only `untrusted_advisory`, gate-bypass false, and required gate labels while omitting hostile trusted-memory and secret-looking fixture values.
 
 - Recovery space/widget enable-disable receipts now have explicit backend evidence for the Memory Tree advisory/no-authority boundary: public responses and output-compaction receipts expose only metadata-only `untrusted_advisory`, gate-bypass false, and required gate labels while omitting recovery reason text, renderer/source/API-auth, bearer strings, credentials, tokens, and secret-looking fixture values.

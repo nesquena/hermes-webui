@@ -187,7 +187,7 @@ def _assert_active_space_lifecycle_receipts(response, *, action, run_id, space_i
     _assert_server_memory_advisory_receipt(response)
 
 
-def _assert_server_memory_advisory_receipt(response):
+def _assert_server_memory_advisory_envelope(response):
     assert response["memory_advisory"] == {
         "metadata_only": True,
         "advisory_context": True,
@@ -201,6 +201,10 @@ def _assert_server_memory_advisory_receipt(response):
             "rollback_recovery",
         ],
     }
+
+
+def _assert_server_memory_advisory_receipt(response):
+    _assert_server_memory_advisory_envelope(response)
     compaction_text = response["output_compaction"]["text"]
     assert "advisory_context: true" in compaction_text
     assert "context_authority: untrusted_advisory" in compaction_text
@@ -1096,13 +1100,17 @@ def test_repair_events_return_metadata_only_preflight_and_policy_receipts(monkey
         sort_keys=True,
     ).lower()
 
-    _assert_server_memory_advisory_receipt(space_repair)
-
     for result, action in (
         (space_repair, "space.repair.queue"),
         (widget_repair, "space.widget.repair.queue"),
         (module_repair, "space.module.repair.queue"),
     ):
+        _assert_server_memory_advisory_receipt(result)
+        assert result["output_compaction"]["metadata_only"] is True
+        compaction_text = json.dumps(result["output_compaction"], sort_keys=True).lower()
+        assert "advisory_context" in compaction_text
+        assert "untrusted_advisory" in compaction_text
+        assert "can_bypass_safety_gates: false" in compaction_text
         assert result["prompt_preview"] == "[REDACTED]"
         assert result["prompt_preflight"]["boundary"] == "space_repair_prompt"
         assert result["prompt_preflight"]["status"] == "pass"
@@ -19396,7 +19404,9 @@ def test_recovery_snapshot_includes_safe_widget_event_status_without_prompt_or_p
         "event_id": queued["event_id"],
         "event_name": "agent.repair",
         "status": "queued",
+        "memory_advisory": queued["memory_advisory"],
     }
+    _assert_server_memory_advisory_envelope(widget["latest_queued_event"])
     assert "prompt_preview" not in serialized
     assert "payload_summary" not in serialized
     assert "authorization" not in serialized
@@ -27553,6 +27563,9 @@ def test_recovery_repair_widget_route_queues_metadata_only_event_for_disabled_wi
     assert body["progress_event"]["family"] == "tool"
     assert body["progress_event"]["run_id"] == "recovery.widget.repair:repair-widget-route"
     assert body["progress_event"]["space_id"] == created["space_id"]
+    _assert_server_memory_advisory_receipt(body)
+    assert body["output_compaction"]["metadata_only"] is True
+    assert "untrusted_advisory" in json.dumps(body["output_compaction"], sort_keys=True).lower()
 
     from api.capy_progress import progress_status
 
@@ -27593,6 +27606,7 @@ def test_recovery_repair_widget_route_queues_metadata_only_event_for_disabled_wi
     assert repair_widget["queued_event_count"] == 1
     assert repair_widget["latest_queued_event"]["event_name"] == "agent.repair"
     assert repair_widget["latest_queued_event"]["status"] == "queued"
+    assert repair_widget["latest_queued_event"]["memory_advisory"] == body["memory_advisory"]
     serialized_recovery = json.dumps(recovery).lower()
     assert "breakwidgetrepair" not in serialized_recovery
     assert "secret_value_do_not_leak" not in serialized_recovery

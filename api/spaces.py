@@ -15964,6 +15964,8 @@ def queue_recovery_widget_repair_event(
         event_details["prompt_preflight"] = copy.deepcopy(preflight_receipt)
     if autonomy_policy_receipt:
         event_details["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
+    memory_advisory = _memory_advisory_public_envelope()
+    event_details["memory_advisory"] = copy.deepcopy(memory_advisory)
     event_id = _record_event(
         sid,
         "widget.event.queued",
@@ -15981,6 +15983,7 @@ def queue_recovery_widget_repair_event(
         autonomy_policy_receipt=autonomy_policy_receipt,
         progress_event=progress_event,
         payload=payload,
+        memory_advisory=memory_advisory,
     )
     return {
         "queued": True,
@@ -15991,6 +15994,7 @@ def queue_recovery_widget_repair_event(
         "event_id": event_id,
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
+        "memory_advisory": copy.deepcopy(memory_advisory),
         "progress_event": progress_event,
         "output_compaction": output_compaction,
         **({"prompt_preflight": copy.deepcopy(preflight_receipt)} if preflight_receipt else {}),
@@ -16095,11 +16099,15 @@ def recovery_snapshot() -> dict[str, Any]:
                 latest = widget_events[0]
                 counts["queued_event_count"] += len(widget_events)
                 widget_summary["queued_event_count"] = len(widget_events)
-                widget_summary["latest_queued_event"] = {
+                latest_queued_event: dict[str, Any] = {
                     "event_id": _context_value(latest.get("event_id"), 120),
                     "event_name": _context_value(latest.get("event_name"), 120),
                     "status": _context_value(latest.get("status") or "queued", 80),
                 }
+                latest_memory_advisory = latest.get("memory_advisory")
+                if isinstance(latest_memory_advisory, dict):
+                    latest_queued_event["memory_advisory"] = _memory_advisory_public_summary(latest_memory_advisory)
+                widget_summary["latest_queued_event"] = latest_queued_event
             revisions = list_revision_events(summary["space_id"], 5)
             summary["widgets"] = widget_summaries
             summary["revisions"] = revisions
