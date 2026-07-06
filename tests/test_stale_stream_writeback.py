@@ -1,3 +1,4 @@
+import json
 import queue
 import threading
 import time
@@ -211,3 +212,130 @@ def test_outer_exception_path_checks_stream_ownership_before_error_writeback():
     assert block.index(guard) < block.index("_materialize_pending_user_turn_before_error(s)")
     assert block.index(guard) < block.index("s.active_stream_id = None")
     assert block.index(guard) < block.index("s.messages.append(_error_message)")
+
+
+def test_core_transcript_sync_restores_context_messages(tmp_path):
+    sid = "core_sync_context_repair"
+    core_path = tmp_path / "core.json"
+    core_messages = [
+        {"role": "user", "content": "repair this", "timestamp": 1000.25},
+        {"role": "assistant", "content": "repaired answer", "timestamp": 1001.75},
+    ]
+    core_path.write_text(json.dumps({"messages": core_messages}), encoding="utf-8")
+    s = Session(
+        session_id=sid,
+        title="Core sync context repair",
+        messages=[],
+        context_messages=[{"role": "user", "content": "stale context"}],
+    )
+    s.active_stream_id = "dead-stream"
+    s.pending_user_message = "repair this"
+    s.pending_started_at = 1000.25
+    s.save()
+    models.SESSIONS[sid] = s
+
+    assert models._apply_core_sync_or_error_marker(
+        s,
+        core_path,
+        stream_id_for_recheck="dead-stream",
+        require_stream_dead=False,
+    ) is True
+
+    assert [m["content"] for m in s.messages] == ["repair this", "repaired answer"]
+    assert [m["content"] for m in s.context_messages] == ["repair this", "repaired answer"]
+
+
+def test_recovered_user_timestamps_preserve_fractional_pending_boundary():
+    s = Session(session_id="fractional_recovered_user", messages=[])
+    s.pending_user_message = "current prompt"
+    s.pending_started_at = 1234.567
+
+    recovered = models._append_recovered_pending_turn(s, timestamp=s.pending_started_at)
+
+    assert recovered is not None
+    assert recovered["timestamp"] == 1234.567
+    assert s.messages[-1]["timestamp"] == 1234.567
+
+
+def test_error_path_recovered_user_timestamp_preserves_fractional_pending_boundary():
+    s = Session(session_id="fractional_error_recovered_user", messages=[])
+    s.pending_user_message = "current prompt"
+    s.pending_started_at = 456.789
+
+    assert streaming._materialize_pending_user_turn_before_error(s) is True
+
+    assert s.messages[-1]["timestamp"] == 456.789
+
+
+def test_recovered_pending_turn_seeds_context_from_visible_history():
+    s = Session(
+        session_id="recovered_context_keeps_history",
+        messages=[
+            {"role": "user", "content": "old prompt", "timestamp": 10.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 11.0},
+        ],
+        context_messages=[],
+    )
+    s.pending_user_message = "current prompt"
+    s.pending_started_at = 1000.25
+
+    recovered = models._append_recovered_pending_turn(s, timestamp=s.pending_started_at)
+
+    assert recovered is not None
+    assert [m["content"] for m in s.messages] == ["old prompt", "old answer", "current prompt"]
+    assert [m["content"] for m in s.context_messages] == [
+        "old prompt",
+        "old answer",
+        "current prompt",
+    ]
+    assert all("timestamp" not in m for m in s.context_messages)
+
+
+def test_no_response_suppression_uses_turn_start_anchor():
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+    call_start = src.index("_persisted_final_messages = _persisted_final_assistant_messages(")
+    call = src[call_start:call_start + 500]
+
+    assert "min_user_timestamp=_turn_started_at" in call
+    assert "min_user_timestamp=getattr(s, 'pending_started_at', None)" not in call
+
+
+def test_persisted_final_suppression_backfills_stale_context_messages():
+    sid = "persisted_final_stale_context_repair"
+    previous = [
+        {"role": "user", "content": "old prompt", "timestamp": 10.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 11.0},
+    ]
+    messages = previous + [
+        {"role": "user", "content": "current prompt", "timestamp": 1000.25},
+        {"role": "assistant", "content": "current final answer", "timestamp": 1001.5},
+    ]
+    s = Session(
+        session_id=sid,
+        title="Persisted final stale context repair",
+        messages=messages,
+        context_messages=list(previous),
+    )
+    s.save()
+    models.SESSIONS[sid] = s
+
+    repaired = streaming._persisted_final_assistant_messages(
+        sid,
+        "current prompt",
+        previous_display=previous,
+        min_user_timestamp=1000.25,
+    )
+
+    assert repaired is not None
+    assert [m["content"] for m in repaired["messages"]] == [
+        "old prompt",
+        "old answer",
+        "current prompt",
+        "current final answer",
+    ]
+    assert [m["content"] for m in repaired["context_messages"]] == [
+        "old prompt",
+        "old answer",
+        "current prompt",
+        "current final answer",
+    ]

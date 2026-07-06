@@ -260,7 +260,7 @@ class TestDraftRecovery:
         assert len(user_msgs) == 1
         assert user_msgs[0]["content"] == "My important question"
         assert user_msgs[0].get("_recovered") is True
-        assert user_msgs[0]["timestamp"] == int(_ts), (
+        assert user_msgs[0]["timestamp"] == _ts, (
             f"Recovered turn timestamp should match pending_started_at ({_ts}), "
             f"got {user_msgs[0]['timestamp']}"
         )

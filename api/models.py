@@ -799,8 +799,18 @@ def _active_stream_ids():
 
 def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     context_messages = getattr(session, 'context_messages', None)
-    if not isinstance(context_messages, list) or not context_messages:
-        return
+    if not isinstance(context_messages, list):
+        context_messages = []
+        session.context_messages = context_messages
+    if not context_messages:
+        visible_messages = getattr(session, 'messages', None)
+        if isinstance(visible_messages, list):
+            for msg in visible_messages:
+                if not isinstance(msg, dict):
+                    continue
+                if not msg.get('role'):
+                    continue
+                context_messages.append({k: v for k, v in msg.items() if k != 'timestamp'})
     role = str(recovered.get('role') or '')
     recovered_text = " ".join(str(recovered.get('content') or '').split())
     if not recovered_text and not recovered.get('tool_call_id') and not recovered.get('tool_calls'):
@@ -816,13 +826,13 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     context_messages.append(context_entry)
 
 
-def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
+def _append_recovered_pending_turn(session, *, timestamp: int | float | None = None) -> dict | None:
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
-    recovered_ts = int(time.time())
+    recovered_ts = float(time.time())
     if isinstance(timestamp, (int, float)) and timestamp > 0:
-        recovered_ts = int(timestamp)
+        recovered_ts = float(timestamp)
     recovered: dict = {
         'role': 'user',
         'content': session.pending_user_message,
@@ -2856,9 +2866,9 @@ def _apply_core_sync_or_error_marker(
                     _last_text = " ".join(str(_last_msg.get('content') or "").split())
                     _already_checkpointed = _last_text == _pending_text
                     break
-        _recovered_ts = int(time.time())
+        _recovered_ts = float(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-            _recovered_ts = int(session.pending_started_at)
+            _recovered_ts = float(session.pending_started_at)
         _stream_id = stream_id_for_recheck or session.active_stream_id
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
@@ -2924,6 +2934,7 @@ def _apply_core_sync_or_error_marker(
         if core_messages:
             _stream_id = stream_id_for_recheck or session.active_stream_id
             session.messages = core_messages
+            session.context_messages = list(core_messages)
             session.tool_calls = core.get('tool_calls', [])
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
                 if core.get(field) is not None:
@@ -2941,9 +2952,9 @@ def _apply_core_sync_or_error_marker(
                 and not _already_checkpointed
                 and _run_journal_has_visible_output(session, _stream_id)
             ):
-                _recovered_ts = int(time.time())
+                _recovered_ts = float(time.time())
                 if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-                    _recovered_ts = int(session.pending_started_at)
+                    _recovered_ts = float(session.pending_started_at)
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             recovered_output = _append_journaled_partial_output(
                 session,
@@ -2989,9 +3000,9 @@ def _apply_core_sync_or_error_marker(
     if session.pending_user_message:
         # Use the original send time if available so the recovered turn
         # appears in the correct chronological position.
-        _recovered_ts = int(time.time())
+        _recovered_ts = float(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-            _recovered_ts = int(session.pending_started_at)
+            _recovered_ts = float(session.pending_started_at)
         _append_recovered_pending_turn(session, timestamp=_recovered_ts)
     recovered_output = _append_journaled_partial_output(
         session,

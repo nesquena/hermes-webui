@@ -1279,7 +1279,12 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
             'type': 'compression_exhausted',
             'hint': 'The conversation context is too large to compress safely. Start a new conversation or retry with a narrower task.',
         }
-    if silent_failure:
+    _normalized_error_text = ' '.join(_err_lower.replace('.', ' ').split())
+    _is_synthetic_no_response = _normalized_error_text in {
+        'no response from provider',
+        'no response from provider no response from provider',
+    }
+    if silent_failure or _is_synthetic_no_response:
         return {
             'label': 'No response from provider',
             # Preserve the existing no_response event type (#373) while making
@@ -1461,9 +1466,13 @@ def _materialize_streamed_answer_result(
             streamed_answer_text = str(STREAM_PARTIAL_TEXT.get(stream_id) or '').strip()
         except Exception:
             streamed_answer_text = ''
-    explicit_result_error = bool(getattr(agent, '_last_error', None)) or (
-        'error' in result and result.get('error') not in (None, '')
+    raw_result_error = getattr(agent, '_last_error', None) or result.get('error') or ''
+    error_classification = _classify_provider_error(
+        str(raw_result_error) if raw_result_error else '',
+        raw_result_error,
+        silent_failure=not bool(raw_result_error),
     )
+    explicit_result_error = bool(raw_result_error) and error_classification['type'] != 'no_response'
     result_status = str(result.get('status') or result.get('state') or '').strip().lower()
     result_is_hard_terminal = (
         result_status in {'failed', 'error', 'compression_exhausted'}
@@ -5823,6 +5832,18 @@ def _persisted_final_assistant_messages(
         context = list(context_messages or [])
         if not context:
             context = list(visible)
+        elif _messages_have_final_assistant_for_current_turn(
+            visible,
+            msg_text,
+            previous_display=previous_display,
+            min_user_timestamp=min_user_timestamp,
+        ) and not _messages_have_final_assistant_for_current_turn(
+            context,
+            msg_text,
+            previous_display=previous_display,
+            min_user_timestamp=min_user_timestamp,
+        ):
+            context = list(visible)
         return {
             'messages': visible,
             'context_messages': context,
@@ -6270,10 +6291,10 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
             existing_text = " ".join(str(existing.get('content') or '').split())
             if existing_text == normalized_pending:
                 return False
-    recovered_ts = int(time.time())
+    recovered_ts = float(time.time())
     pending_started_at = getattr(session, 'pending_started_at', None)
     if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
-        recovered_ts = int(pending_started_at)
+        recovered_ts = float(pending_started_at)
     recovered = {
         'role': 'user',
         'content': pending_text,
@@ -9029,6 +9050,17 @@ def _run_agent_streaming(
                     and not _saved_transcript_lacks_final_answer
                 ):
                     _terminal_failure = False
+                if (
+                    _terminal_failure
+                    and _classification['type'] == 'no_response'
+                    and _assistant_added
+                    and _token_sent
+                    and _result_status not in {'failed', 'error', 'compression_exhausted'}
+                    and not result.get('failed')
+                    and not result.get('compression_exhausted')
+                    and not _tool_limit_reached
+                ):
+                    _terminal_failure = False
                 if _terminal_failure:
                     _assistant_added = False
                 elif _tool_limit_reached and not _session_lacks_final_assistant_answer(s.messages):
@@ -9097,6 +9129,9 @@ def _run_agent_streaming(
                             # Retry the conversation once with fresh credentials
                             _self_healed = True
                             _token_sent = False
+                            with STREAMS_LOCK:
+                                if stream_id in STREAM_PARTIAL_TEXT:
+                                    STREAM_PARTIAL_TEXT[stream_id] = ''
                             try:
                                 _heal_kwargs = dict(
                                     user_message=user_message,
@@ -9234,7 +9269,7 @@ def _run_agent_streaming(
                                 msg_text,
                                 previous_display=_previous_messages,
                                 profile=getattr(s, 'profile', None),
-                                min_user_timestamp=getattr(s, 'pending_started_at', None),
+                                min_user_timestamp=_turn_started_at,
                             )
                         if _persisted_final_messages:
                             logger.info(
@@ -9258,7 +9293,7 @@ def _run_agent_streaming(
                             try:
                                 s.save()
                             except Exception:
-                                logger.debug("Failed to save persisted-final no_response suppression", exc_info=True)
+                                logger.warning("Failed to save persisted-final no_response suppression", exc_info=True)
                             put('done', {
                                 'session': redact_session_data(
                                     _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
@@ -10360,6 +10395,9 @@ def _run_agent_streaming(
                         _SAC2.move_to_end(session_id)
                     # Retry the conversation
                     _token_sent = False
+                    with STREAMS_LOCK:
+                        if stream_id in STREAM_PARTIAL_TEXT:
+                            STREAM_PARTIAL_TEXT[stream_id] = ''
                     try:
                         _heal_kwargs2 = dict(
                             user_message=user_message,
@@ -11067,9 +11105,9 @@ def cancel_stream(stream_id: str) -> bool:
                                 if _pending_user == _last_content or _pending_user in _last_content:
                                     _already_persisted = True
                         if not _already_persisted:
-                            _recovered_ts = int(time.time())
+                            _recovered_ts = float(time.time())
                             if isinstance(_pending_started, (int, float)) and _pending_started > 0:
-                                _recovered_ts = int(_pending_started)
+                                _recovered_ts = float(_pending_started)
                             _user_turn: dict = {
                                 'role': 'user',
                                 'content': _pending_user,

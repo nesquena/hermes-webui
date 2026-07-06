@@ -384,6 +384,8 @@ def test_auth_retry_streamed_answer_without_result_message_is_saved_as_final(tmp
             type(self).runs += 1
             history = list(kwargs.get("conversation_history") or [])
             if type(self).runs == 1:
+                if self.stream_delta_callback is not None:
+                    self.stream_delta_callback("Stale first-attempt text")
                 return {
                     "messages": history,
                     "error": _auth_failure_error_payload(),
@@ -428,8 +430,10 @@ def test_auth_retry_streamed_answer_without_result_message_is_saved_as_final(tmp
     assert not any(event == "apperror" for event, _ in events)
     assert saved.messages[-1]["role"] == "assistant"
     assert saved.messages[-1]["content"] == "Recovered streamed reply"
+    assert "Stale first-attempt text" not in saved.messages[-1]["content"]
     assert saved.context_messages[-1]["role"] == "assistant"
     assert saved.context_messages[-1]["content"] == "Recovered streamed reply"
+    assert "Stale first-attempt text" not in saved.context_messages[-1]["content"]
     assert not any(msg.get("_error") for msg in saved.messages)
 
 
@@ -640,6 +644,51 @@ def test_non_auth_silent_failure_still_uses_no_response(tmp_path, monkeypatch):
     assert apperrors[-1]["type"] == "no_response"
     assert apperrors[-1]["type"] != "auth_mismatch"
     assert saved.messages[-1]["_error"] is True
+
+
+def test_streamed_answer_with_no_response_error_is_saved_as_final_answer(tmp_path, monkeypatch):
+    """A streamed visible answer must win over a synthetic no_response label.
+
+    Regression for live session bf2df88ac95a: thousands of token events produced
+    a complete visible answer, then the agent surfaced ``No response from
+    provider`` instead of returning a final assistant row. That is not the same
+    as a hard provider exception; WebUI should persist the visible streamed
+    answer and emit ``done``.
+    """
+    session = _prepare_session(
+        "streamed_answer_with_no_response_error",
+        "stream_streamed_answer_with_no_response_error",
+        pending_user_message="Please stream and then return no_response",
+    )
+
+    class StreamedNoResponseAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Visible answer before no_response label.")
+            self._last_error = "No response from provider."
+            return {
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "No response from provider.",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_streamed_answer_with_no_response_error",
+        StreamedNoResponseAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("streamed_answer_with_no_response_error")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "Visible answer before no_response label."
+    assert saved.context_messages[-1]["role"] == "assistant"
+    assert saved.context_messages[-1]["content"] == "Visible answer before no_response label."
+    assert not any(msg.get("_error") for msg in saved.messages)
 
 
 def test_ephemeral_explicit_provider_error_emits_apperror(tmp_path, monkeypatch):
