@@ -67364,7 +67364,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_environment_depl
         ),
     ],
 )
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_deployment_branch_policy_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_deployment_branch_policy_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     source_id,
@@ -67418,9 +67418,11 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_depl
     jobs = list_source_refresh_jobs(limit=5)
     catalog = capy_memory.source_catalog(limit=5)
     search = search_memory(search_query, limit=5)
+    relevant = relevant_memory_for_space("environment-deployment-branch-policy-drift-space", limit=5)
     serialized = json.dumps({
         "catalog": catalog,
         "jobs": jobs,
+        "relevant": relevant,
         "result": result,
         "search": search,
     }, sort_keys=True).lower()
@@ -67439,6 +67441,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_environment_depl
     assert not any(job.get("status") == "completed" for job in result["jobs"])
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert search["results"] == []
+    assert relevant["results"] == []
     assert drifted_final_url.lower() not in serialized
     assert drifted_final_url.lower() not in text_artifacts
     for unsafe in (
