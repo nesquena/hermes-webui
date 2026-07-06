@@ -37,6 +37,7 @@ BACKEND_CODES = {
     "not_running",
     "stream_dead",
     "steer_error",
+    "gateway_steer_queued",
 }
 
 FRONTEND_NETWORK_CODE = "network_error"

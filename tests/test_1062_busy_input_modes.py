@@ -102,19 +102,27 @@ class TestSlashCommandHandlers:
         idx = COMMANDS_JS.find("async function cmdSteer(")
         assert idx >= 0
         body = COMMANDS_JS[idx:idx + 800]
-        # cmdSteer delegates to _trySteer; fallback must not queue+cancel.
+        # cmdSteer delegates to _trySteer; fallback must not cancel the stream.
         assert "_trySteer" in body, "cmdSteer must call _trySteer to use the real /api/chat/steer endpoint"
         # The shared helper must contain the non-destructive fallback path.
         helper_idx = COMMANDS_JS.find("async function _trySteer(")
         assert helper_idx >= 0, "_trySteer helper must exist"
         helper_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
-        assert "queueSessionMessage" not in helper_body
+        assert "queueSessionMessage" in helper_body
         assert "cancelStream" not in helper_body
         assert "inp.value" in helper_body
         assert "if(result&&result.accepted)" in helper_body
         assert "S.pendingFiles=_remaining" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
         assert "_steerFailureMessageKey" in helper_body or "steer_fail_" in helper_body
+
+    def test_try_steer_queues_gateway_fallback(self):
+        helper_idx = COMMANDS_JS.find("async function _trySteer(")
+        assert helper_idx >= 0
+        helper_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
+        assert "gateway_steer_queued" in helper_body
+        assert "queueSessionMessage" in helper_body
+        assert "cancelStream" not in helper_body
 
 
 # ── send() busy branch ───────────────────────────────────────────────────
@@ -140,19 +148,19 @@ class TestSlashCommandHandlers:
                 f"{fn_name} must call renderTray() after clearing pendingFiles"
             )
         # cmdSteer delegates to _trySteer; the helper clears files only on
-        # accepted steer, and (post-#5459-gate) removes ONLY the delivered files
-        # by identity so files staged during the upload await are preserved. The
-        # fallback path restores the draft and keeps staged files available.
+        # accepted steer, and removes only the delivered files by identity so
+        # files staged during the upload await are preserved. The fallback path
+        # restores the draft and keeps staged files available.
         try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         accepted_idx = try_body.find("if(result&&result.accepted)")
         failure_idx = try_body.find("// Do not fall back to interrupt")
-        # Identity-based removal of the delivered snapshot on accepted steer.
         clear_idx = try_body.find("S.pendingFiles=_remaining", accepted_idx)
         assert accepted_idx >= 0, "_trySteer must branch on accepted steer responses"
         assert clear_idx > accepted_idx, "accepted steer should clear the delivered staged files"
         assert "_delivered=new Set(pendingFilesSnapshot)" in try_body, (
             "accepted steer must remove only the delivered files by identity, preserving newly staged ones"
         )
+        assert "S.pendingFiles=[]" not in try_body
         assert failure_idx > clear_idx, "staged files must not be cleared in the failure path"
         assert "renderTray()" in try_body[failure_idx:]
 

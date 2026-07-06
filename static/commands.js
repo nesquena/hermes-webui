@@ -1565,6 +1565,21 @@ async function _trySteer(msg, explicitSteer){
     showToast(t('cmd_steer_delivered'),2500);
     return true;
   }
+  if(result&&result.fallback==='gateway_steer_queued'&&S.session&&typeof queueSessionMessage==='function'){
+    const _modelState=typeof _chatPayloadModelState==='function'
+      ? _chatPayloadModelState()
+      : {model:S.model,model_provider:S.model_provider};
+    queueSessionMessage(S.session.session_id,{
+      text:msg,
+      files:Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[],
+      model:_modelState.model,
+      model_provider:_modelState.model_provider,
+      profile:S.activeProfile||'default',
+    });
+    if(typeof updateQueueBadge==='function')updateQueueBadge(S.session.session_id);
+    showToast(t('steer_leftover_queued'),3000);
+    return true;
+  }
   // Do not fall back to interrupt: Steer failure is not permission to cancel
   // the active run. Restore the draft so the user can explicitly Queue or
   // Interrupt if that is what they want next. Pending files remain staged.

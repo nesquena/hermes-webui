@@ -8,12 +8,8 @@ text to the next tool-result message — no interruption.
 Falls back to {"accepted": false, "fallback": "<reason>"} when the agent
 isn't running, isn't cached, or doesn't support steer (older agent versions).
 The frontend uses the fallback signal to restore the draft without cancelling
-the active run.
-
-Plus a leftover-delivery flow: if the agent finishes its turn before the
-steer is consumed (no tool-call boundary), _drain_pending_steer is called
-after run_conversation returns and a `pending_steer_leftover` SSE event is
-emitted so the frontend can queue the leftover text as a next-turn message.
+the active run. Gateway-owned runs have no cached WebUI agent, so their
+fallback tells the frontend to queue the text as the next turn.
 """
 import sys
 import os
@@ -121,6 +117,31 @@ class TestHandleChatSteerFallbacks:
         body = _captured_response(handler)
         assert body["accepted"] is False
         assert body["fallback"] == "no_cached_agent"
+
+    def test_gateway_run_steer_queues_without_cached_agent(self, _clear_caches):
+        from api.config import STREAMS, STREAMS_LOCK
+        from api.gateway_chat import _STREAM_RUN_IDS
+        from api.streaming import _handle_chat_steer
+        import queue as _q
+        sid, stream_id = "sid_gateway", "stream_gateway"
+        _STREAM_RUN_IDS[stream_id] = "run abc/1"
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+
+        try:
+            with patch("api.streaming.get_session", return_value=sess):
+                handler = _make_handler()
+                _handle_chat_steer(handler, {"session_id": sid, "text": "Use Python instead"})
+        finally:
+            _STREAM_RUN_IDS.pop(stream_id, None)
+
+        assert _captured_response(handler) == {
+            "accepted": False,
+            "fallback": "gateway_steer_queued",
+            "stream_id": stream_id,
+        }
 
     def test_agent_lacks_steer_method(self, _clear_caches):
         from api.streaming import _handle_chat_steer
@@ -272,9 +293,10 @@ class TestFrontendWiring:
     def test_try_steer_handles_fallback_without_cancelling(self):
         idx = self.cmds.find("async function _trySteer(")
         body = _source_between(self.cmds, "async function _trySteer(", "\nasync function cmdTitle")
-        # Must check result.accepted and surface fallback without queueing or cancelling.
+        # Must check result.accepted and surface fallback without cancelling.
         assert "result&&result.accepted" in body or "result.accepted" in body
-        assert "queueSessionMessage" not in body
+        assert "gateway_steer_queued" in body
+        assert "queueSessionMessage" in body
         assert "cancelStream" not in body, "fallback path must not cancel the stream"
         assert "inp.value" in body, "fallback path must restore the composer draft"
 

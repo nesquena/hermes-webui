@@ -9893,11 +9893,10 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     of the tool output on its next iteration. The user's stream is NOT
     interrupted.
 
-    If no agent is cached, the agent is too old to support steer, or no
+    If no local agent is cached, the agent is too old to support steer, or no
     stream is active, return {"accepted": False, "fallback": "<reason>"}.
-    The frontend must surface that failure without cancelling the active run;
-    Steer is active-run guidance, not implicit permission to Queue, Interrupt,
-    or Stop-and-send.
+    Gateway-owned streams have no WebUI-local agent to steer, so the frontend
+    queues the text as the next turn instead of dropping it behind a cache miss.
 
     Returns 200 with {"accepted": bool, "fallback": str|None,
     "stream_id": str|None}.
@@ -9931,6 +9930,24 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         except Exception:
             logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
     if not cached:
+        try:
+            s = get_session(sid)
+            active_stream_id = getattr(s, "active_stream_id", None) or None
+        except KeyError:
+            active_stream_id = None
+        if active_stream_id:
+            with _cfg.STREAMS_LOCK:
+                stream_alive = active_stream_id in _cfg.STREAMS
+            if stream_alive:
+                try:
+                    from api.gateway_chat import _STREAM_RUN_IDS
+                    gateway_run_id = _STREAM_RUN_IDS.get(str(active_stream_id or ""))
+                except Exception as exc:
+                    gateway_run_id = None
+                    logger.debug("Gateway run lookup failed for session=%s stream_id=%s: %s", sid, active_stream_id, exc)
+                if gateway_run_id:
+                    return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
+                                       "stream_id": active_stream_id})
         # No active agent for this session — caller surfaces a steer failure
         # without cancelling the active run.
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
