@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- Individual demo-smoke receipts now preserve the Memory Tree advisory/no-authority boundary: `space.demo.run` returns a server-generated `memory_advisory` receipt, each output-compaction receipt shows only advisory status, `untrusted_advisory` authority, gate-bypass false, required gate labels, and demo/widget/revision metadata, and the Spaces UI renders the Memory advisory card inside individual demo-smoke results while omitting raw prompts, renderer/source/html/script/data/API-auth fields, credentials, tokens, and secret-looking values.
+
 - Demo-suite run-all receipts now preserve the same Memory Tree advisory/no-authority boundary as the demo catalog: `space.demo.run_all` returns a server-generated `memory_advisory` receipt, and the output-compaction receipt shows only advisory status, `untrusted_advisory` authority, gate-bypass false, required gate labels, and pass/fail counts while omitting raw prompts, renderer/source/html/script/data/API-auth fields, credentials, tokens, and secret-looking values.
 
 - No-active-space current-context reads now preserve the same metadata-only trust envelope as active context reads: `space.current.context`, `space.context`, and `space.current.prompt_context` return required `memory_context` prompt-preflight, `space.current.context` autonomy-policy receipts, `context:none` structured progress, Memory Tree advisory/no-authority evidence, and output-compaction metadata while keeping the context body empty and omitting raw memory/source/widget content plus prompt/renderer/source/html/script/data/API-auth/credential/token fixtures.

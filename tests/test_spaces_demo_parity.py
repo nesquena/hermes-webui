@@ -78,6 +78,23 @@ def test_demo_parity_smoke_runner_launches_each_demo_metadata_only(monkeypatch, 
     assert all(result["rollback_point"] for result in results)
     assert all(result["persistence_checked"] is True for result in results)
     assert all(result["persisted_widget_count"] == result["widget_count"] for result in results)
+    for result in results:
+        advisory = result["memory_advisory"]
+        assert advisory["metadata_only"] is True
+        assert advisory["advisory_context"] is True
+        assert advisory["context_authority"] == "untrusted_advisory"
+        assert advisory["can_bypass_safety_gates"] is False
+        assert advisory["required_gates"] == [
+            "prompt_preflight",
+            "approval",
+            "sandbox_preview",
+            "visual_qa",
+            "rollback_recovery",
+        ]
+        compaction_text = result["output_compaction"]["text"]
+        assert "advisory_context: true" in compaction_text
+        assert "context_authority: untrusted_advisory" in compaction_text
+        assert "can_bypass_safety_gates: false" in compaction_text
     assert len(spaces.list_spaces()) == len(DEMO_NAMES)
     _assert_safe_payload(results)
 

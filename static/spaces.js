@@ -1113,6 +1113,7 @@
     const actionPolicy = renderDemoSmokeActionPolicyEvidence(data && data.autonomy_policy);
     const promptPreflight = renderPromptPreflightEvidence(data && data.prompt_preflight);
     const progressPreview = renderPackageProgressEvidence(data && data.progress_event, 'Demo progress');
+    const memoryAdvisory = renderMemoryAdvisoryEvidence(data && data.memory_advisory);
     const compactionPreview = renderCompactionEvidence(data && (data.output_compaction || data.compaction));
     const contextStatus = renderContextLayerStatus(data && (data.context_status || data.contextStatus));
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
@@ -1132,7 +1133,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+promptPreflight+actionPolicy+progressPreview+compactionPreview+contextStatus+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+promptPreflight+actionPolicy+progressPreview+memoryAdvisory+compactionPreview+contextStatus+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){

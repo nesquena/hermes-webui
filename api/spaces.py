@@ -5121,6 +5121,14 @@ def _space_demo_output_compaction_lines(summary: dict[str, Any]) -> list[str]:
     space: dict[str, Any] = raw_space if isinstance(raw_space, dict) else {}
     raw_widgets = summary.get("widgets")
     widgets: list[Any] = raw_widgets if isinstance(raw_widgets, list) else []
+    raw_advisory = summary.get("memory_advisory")
+    advisory = raw_advisory if isinstance(raw_advisory, dict) else _memory_advisory_public_envelope()
+    raw_required_gates = advisory.get("required_gates")
+    required_gates = [
+        _payload_text_summary(gate, 80)
+        for gate in (raw_required_gates if isinstance(raw_required_gates, list) else [])
+    ]
+    required_gates = [gate for gate in required_gates if gate]
     lines = [
         "Capy Spaces individual demo metadata-only smoke summary",
         f"demo={str(summary.get('demo') or '')[:120]}",
@@ -5135,6 +5143,10 @@ def _space_demo_output_compaction_lines(summary: dict[str, Any]) -> list[str]:
         f"persisted={bool(summary.get('persistence_checked') is True)}",
         f"rollback={bool(summary.get('rollback_point') is True)}",
         f"revision_count={int(summary.get('revision_event_count') or 0)}",
+        f"advisory_context: {str(advisory.get('advisory_context') is True).lower()}",
+        f"context_authority: {_payload_text_summary(advisory.get('context_authority') or 'untrusted_advisory', 80) or 'untrusted_advisory'}",
+        f"can_bypass_safety_gates: {str(advisory.get('can_bypass_safety_gates') is True).lower()}",
+        f"required_gates: {', '.join(required_gates)}",
     ]
     for widget in widgets[:8]:
         if not isinstance(widget, dict):
@@ -5712,6 +5724,7 @@ def _space_demo_run_body(name: str) -> dict[str, Any]:
     summary.update(extra)
     summary["prompt_preflight"] = _space_demo_required_prompt_preflight_receipt(f"space.demo.run.{demo}")
     summary["autonomy_policy"] = _space_demo_action_policy_receipt(demo)
+    summary["memory_advisory"] = _memory_advisory_public_envelope()
     summary["output_compaction"] = _space_demo_output_compaction(summary)
     summary["context_status"] = _space_demo_context_status()
     return summary
