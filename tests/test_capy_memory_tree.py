@@ -71554,7 +71554,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_actions_runners_
         assert unsafe not in persisted
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runners_final_url_drift_before_body_read(tmp_path, monkeypatch):
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runners_final_url_drift_before_body_read_relevant_memory_empty(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
     monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
@@ -71590,10 +71590,14 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runners_
     monkeypatch.setattr(capy_memory, "_refresh_open", fake_open)
 
     result = run_source_refresh_jobs(limit=1)
+    search = search_memory("benign actions runners drift", limit=5)
+    relevant = relevant_memory_for_space("actions-runners-drift-space", limit=5)
     serialized = json.dumps({
         "result": result,
         "jobs": list_source_refresh_jobs(limit=5),
         "catalog": capy_memory.source_catalog(limit=5),
+        "search_results": search["results"],
+        "relevant_memory_results": relevant["results"],
     }, sort_keys=True).lower()
 
     assert calls == [{
@@ -71607,6 +71611,9 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_runners_
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert not (root / "vault" / "github-actions-runners-final-url-drift.md").exists()
+    assert memory_status()["chunk_count"] == 0
+    assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "secret_value_do_not_leak",
         "access_token",
