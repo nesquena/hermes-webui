@@ -688,7 +688,8 @@ function _micToastKeyForRecognitionError(error){
     _setButtonTooltipAndKey(btn, on ? (_rawAudioMode ? 'voice_recording_active' : 'voice_dictate_active') : (_rawAudioMode ? 'voice_send_raw' : 'voice_dictate'));
     status.style.display=on?'':'none';
     if(statusText) statusText.textContent=on?'Listening':'Listening';
-    if(on){ _acquireWakeLock(); }else{ _releaseWakeLock(); _finalText=''; _prefix=''; }
+    if(!on){ _finalText=''; _prefix=''; }
+    if(on){ _acquireWakeLock(); } else { _releaseWakeLock(); }
   }
 
   function _updateMicTooltip(){
@@ -833,6 +834,7 @@ function _micToastKeyForRecognitionError(error){
     };
 
     sr.onend=()=>{
+      _isRecording=false;
       const committed=_finalText
         ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
             ? _prefix+' '+_finalText.trimStart()
