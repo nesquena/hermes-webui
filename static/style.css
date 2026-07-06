@@ -1109,8 +1109,8 @@
   :root[data-skin="openui"] .session-item{border-radius:8px;font-size:13px;line-height:1.45;}
   :root[data-skin="openui"] .session-meta{font-size:11px;}
   :root[data-skin="openui"] .session-item.active{
-    position:relative;border:1px solid var(--border2)!important;
-    background:var(--surface-subtle-hover)!important;
+    position:relative;padding:10px 12px 10px 18px;
+    background:var(--surface-subtle-hover)!important;border:1px solid var(--border2)!important;
   }
   :root[data-skin="openui"] .session-item.active::before{
     content:"";position:absolute;left:6px;top:10px;bottom:10px;
@@ -1128,10 +1128,6 @@
   }
   :root[data-skin="openui"] .composer-wrap{
     background:var(--surface)!important;
-  }
-  :root[data-skin="openui"] .composer-wrap.has-focus{
-    border-color:var(--accent)!important;
-    box-shadow:0 0 0 2px var(--focus-glow);
   }
 
   /* ── Skin: Zeus ──
