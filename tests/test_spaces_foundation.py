@@ -7192,6 +7192,7 @@ def test_space_recovery_toggle_outputs_include_compaction_receipts_metadata_only
         (disabled, "space.recovery.disable"),
         (enabled, "space.recovery.enable"),
     ]:
+        _assert_server_memory_advisory_receipt(result)
         compaction = result["output_compaction"]
         assert compaction["tool"] == "capy-spaces-recovery-toggle"
         assert compaction["command"] == action
@@ -7205,6 +7206,10 @@ def test_space_recovery_toggle_outputs_include_compaction_receipts_metadata_only
         assert "space_id: space-recovery-compaction-lab" in text
         assert "target_kind: space" in text
         assert "raw_prompt_stored: false" in text
+        assert "advisory_context: true" in text
+        assert "context_authority: untrusted_advisory" in text
+        assert "can_bypass_safety_gates: false" in text
+        assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in text
         assert "broken renderer" not in text
         assert "safe after" not in text
         handles = compaction["retained_artifact_handles"]
@@ -7472,6 +7477,7 @@ def test_widget_recovery_toggle_outputs_include_compaction_receipts_metadata_onl
         (disabled, "space.widget.recovery.disable"),
         (enabled, "space.widget.recovery.enable"),
     ]:
+        _assert_server_memory_advisory_receipt(result)
         compaction = result["output_compaction"]
         assert compaction["tool"] == "capy-spaces-recovery-toggle"
         assert compaction["command"] == action
@@ -7485,6 +7491,10 @@ def test_widget_recovery_toggle_outputs_include_compaction_receipts_metadata_onl
         assert "space_id: widget-recovery-compaction-lab" in text
         assert "target_id: broken-panel" in text
         assert "raw_prompt_stored: false" in text
+        assert "advisory_context: true" in text
+        assert "context_authority: untrusted_advisory" in text
+        assert "can_bypass_safety_gates: false" in text
+        assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in text
         assert "broken renderer" not in text
         assert "safe after" not in text
         handles = compaction["retained_artifact_handles"]
