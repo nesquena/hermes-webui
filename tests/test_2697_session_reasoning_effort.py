@@ -25,6 +25,7 @@ from api.streaming import _resolve_turn_reasoning_config
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS_PATH = ROOT / "static" / "ui.js"
+COMMANDS_JS_PATH = ROOT / "static" / "commands.js"
 NODE = shutil.which("node")
 
 
@@ -238,6 +239,176 @@ main().then(result => {{
 """
     env = os.environ.copy()
     env["UI_JS_PATH"] = str(UI_JS_PATH)
+    result = subprocess.run(
+        ["node", "-e", harness],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _run_reasoning_command_script(script: str) -> dict:
+    if NODE is None:
+        pytest.skip("node is required for the reasoning command harness")
+
+    harness = f"""
+const fs = require('fs');
+const uiSrc = fs.readFileSync(process.env.UI_JS_PATH, 'utf8');
+const commandsSrc = fs.readFileSync(process.env.COMMANDS_JS_PATH, 'utf8');
+function extractBlock(src, startMarker, endMarker) {{
+  const start = src.indexOf(startMarker);
+  if (start < 0) throw new Error('start marker not found: ' + startMarker);
+  const end = src.indexOf(endMarker, start);
+  if (end < 0) throw new Error('end marker not found: ' + endMarker);
+  return src.slice(start, end);
+}}
+function extractFunction(src, name) {{
+  const rx = new RegExp('function\\\\s+' + name + '\\\\b[\\\\s\\\\S]*?(?=^function\\\\s|\\\\Z)', 'm');
+  const match = src.match(rx);
+  if (!match) throw new Error('function not found: ' + name);
+  return match[0];
+}}
+class FakeClassList {{
+  constructor(owner) {{
+    this.owner = owner;
+    this._set = new Set();
+  }}
+  add(...names) {{ names.forEach(name => this._set.add(name)); }}
+  remove(...names) {{ names.forEach(name => this._set.delete(name)); }}
+  contains(name) {{ return this._set.has(name); }}
+  toggle(name, force) {{
+    if (force === true) {{ this._set.add(name); return true; }}
+    if (force === false) {{ this._set.delete(name); return false; }}
+    if (this._set.has(name)) {{ this._set.delete(name); return false; }}
+    this._set.add(name);
+    return true;
+  }}
+}}
+class FakeElement {{
+  constructor(tagName='div') {{
+    this.tagName = String(tagName).toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.dataset = Object.create(null);
+    this.style = Object.create(null);
+    this.attributes = Object.create(null);
+    this.classList = new FakeClassList(this);
+    this.id = '';
+    this.title = '';
+    this.ariaLabel = '';
+    this._textContent = '';
+    this._innerHTML = '';
+    this.offsetWidth = 200;
+  }}
+  appendChild(child) {{
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }}
+  querySelectorAll(selector) {{
+    if (selector !== '.reasoning-option') return [];
+    const out = [];
+    const walk = node => {{
+      for (const child of node.children) {{
+        if (child.classList && child.classList.contains('reasoning-option')) out.push(child);
+        walk(child);
+      }}
+    }};
+    walk(this);
+    return out;
+  }}
+  getBoundingClientRect() {{
+    return {{ left: 0 }};
+  }}
+  setAttribute(name, value) {{
+    this.attributes[String(name)] = String(value);
+    if (name === 'aria-label') this.ariaLabel = String(value);
+  }}
+  get textContent() {{
+    return this._textContent;
+  }}
+  set textContent(value) {{
+    this._textContent = String(value ?? '');
+    this._innerHTML = this._textContent;
+    this.children = [];
+  }}
+  get innerHTML() {{
+    return this._innerHTML;
+  }}
+  set innerHTML(value) {{
+    this._innerHTML = String(value ?? '');
+    this._textContent = this._innerHTML;
+    this.children = [];
+  }}
+}}
+const nodes = Object.create(null);
+function bind(id, node) {{
+  node.id = id;
+  nodes[id] = node;
+  return node;
+}}
+const dropdown = bind('composerReasoningDropdown', new FakeElement('div'));
+['None', 'Minimal', 'Low', 'Medium', 'High', 'Extra High'].forEach((label, idx) => {{
+  const opt = new FakeElement('div');
+  opt.classList.add('reasoning-option');
+  opt.dataset.effort = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'][idx];
+  opt.textContent = label;
+  dropdown.appendChild(opt);
+}});
+bind('composerReasoningWrap', new FakeElement('div'));
+bind('composerReasoningLabel', new FakeElement('div'));
+bind('composerReasoningChip', new FakeElement('div'));
+bind('composerMobileReasoningLabel', new FakeElement('div'));
+bind('composerMobileReasoningAction', new FakeElement('div'));
+bind('modelSelect', {{ value: 'gpt-5' }});
+global.window = {{}};
+global.document = {{
+  readyState: 'complete',
+  addEventListener: () => {{}},
+  querySelector: () => null,
+  createElement: tag => new FakeElement(tag),
+}};
+global.$ = id => nodes[id] || null;
+global.t = key => key;
+global.removeThinking = () => {{}};
+global.renderMessages = () => {{}};
+const toasts = [];
+const fetches = [];
+const responses = [];
+global.showToast = (msg, ms, type) => toasts.push({{ msg, ms, type }});
+global.api = (url, opts) => {{
+  fetches.push({{ url, opts: opts ? {{ method: opts.method, body: opts.body }} : null }});
+  const next = responses.length ? responses.shift() : null;
+  return Promise.resolve(typeof next === 'function' ? next(url, opts) : next);
+}};
+global.S = {{ session: {{ session_id: 'session-a', model: 'gpt-5', model_provider: 'openai' }} }};
+eval(extractBlock(uiSrc, '// ── Reasoning effort chip ────────────────────────────────────────────────────', '// ── Session toolsets chip (#493) ───────────────────────────────────────────'));
+eval(extractFunction(commandsSrc, 'cmdReasoning'));
+async function tick() {{
+  await new Promise(resolve => setImmediate(resolve));
+}}
+async function main() {{
+{script}
+}}
+main().then(result => {{
+  const snapshot = {{
+    fetches,
+    toasts,
+    label: nodes.composerReasoningLabel.textContent,
+  }};
+  process.stdout.write(JSON.stringify(Object.assign(snapshot, result && typeof result === 'object' ? result : {{}})));
+}}).catch(err => {{
+  process.stderr.write(String(err && err.stack || err));
+  process.exit(1);
+}});
+"""
+    env = os.environ.copy()
+    env["UI_JS_PATH"] = str(UI_JS_PATH)
+    env["COMMANDS_JS_PATH"] = str(COMMANDS_JS_PATH)
     result = subprocess.run(
         ["node", "-e", harness],
         cwd=ROOT,
@@ -513,3 +684,58 @@ def test_profile_reasoning_write_refetches_session_effective_status_when_overrid
     assert data["label"].startswith("High")
     assert data["label"].endswith("Session")
     assert "session" in data["toast"]["msg"].lower()
+
+
+def test_reasoning_slash_status_stays_profile_global_with_active_session():
+    data = _run_reasoning_command_script(
+        """
+  responses.push({
+    reasoning_effort: 'medium',
+    show_reasoning: true,
+  });
+  cmdReasoning('');
+  await tick();
+  return {
+    fetches,
+    toast: toasts[toasts.length - 1],
+  };
+        """
+    )
+
+    assert data["fetches"][0]["url"] == "/api/reasoning"
+    assert "Reasoning effort: medium" in data["toast"]["msg"]
+
+
+def test_reasoning_slash_write_refetches_active_session_chip_after_profile_save():
+    data = _run_reasoning_command_script(
+        """
+  responses.push({
+    reasoning_effort: 'low',
+    reasoning_scope: 'profile',
+    supported_efforts: ['none', 'medium', 'high'],
+    has_session_reasoning_override: false,
+  });
+  responses.push({
+    reasoning_effort: 'high',
+    reasoning_scope: 'session',
+    supported_efforts: ['none', 'medium', 'high'],
+    has_session_reasoning_override: true,
+    session_reasoning_effort: 'high',
+    profile_reasoning_effort: 'low',
+  });
+  cmdReasoning('low');
+  await tick();
+  await tick();
+  return {
+    fetches,
+    label: nodes.composerReasoningLabel.textContent,
+    toast: toasts[toasts.length - 1],
+  };
+        """
+    )
+
+    assert data["fetches"][0]["url"] == "/api/reasoning"
+    assert data["fetches"][1]["url"].endswith("session_id=session-a")
+    assert data["label"].startswith("High")
+    assert data["label"].endswith("Session")
+    assert "Reasoning effort: low" in data["toast"]["msg"]

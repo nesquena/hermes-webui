@@ -1735,8 +1735,7 @@ function cmdReasoning(args){
   }
   if(!arg){
     // Status — read from the same config.yaml keys the CLI uses.
-    const q=(typeof _reasoningEffortQuery==='function')?_reasoningEffortQuery():'';
-    api('/api/reasoning'+q).then(function(st){showToast(_fmtStatus(st));})
+    api('/api/reasoning').then(function(st){showToast(_fmtStatus(st));})
       .catch(function(){showToast(BRAIN+' /reasoning — status unavailable');});
     return true;
   }
@@ -1764,7 +1763,18 @@ function cmdReasoning(args){
       .then(function(st){
         const eff=(st && st.reasoning_effort)||arg;
         showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
-        if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff, st||{});
+        if(typeof _applyReasoningChip!=='function') return;
+        const q=(typeof _reasoningEffortQuery==='function')?_reasoningEffortQuery():'';
+        if(!q){
+          _applyReasoningChip(eff, st||{});
+          return;
+        }
+        api('/api/reasoning'+q).then(function(fresh){
+          const next=(fresh && fresh.reasoning_effort)||eff;
+          _applyReasoningChip(next, fresh||st||{});
+        }).catch(function(){
+          _applyReasoningChip(eff, st||{});
+        });
       })
       .catch(function(e){
         showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));
