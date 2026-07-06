@@ -71940,7 +71940,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_actions_org_runn
         "https://api.github.com.evil.test/orgs/capy/actions/runners",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runners_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runners_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch, case_id, final_url
 ):
     root = tmp_path / "capy-memory"
@@ -71994,8 +71994,14 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runn
     result = run_source_refresh_jobs(limit=1)
     jobs = list_source_refresh_jobs(limit=5)
     search = search_memory("hostile-body-text", limit=5)
+    relevant = relevant_memory_for_space("actions-org-runners-drift-space", limit=5)
     serialized = json.dumps(
-        {"result": result, "jobs": jobs, "search_results": search["results"]},
+        {
+            "result": result,
+            "jobs": jobs,
+            "search_results": search["results"],
+            "relevant": relevant,
+        },
         sort_keys=True,
     ).lower()
 
@@ -72006,6 +72012,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_runn
     assert not (root / "vault" / f"{source_id}.md").exists()
     assert memory_status()["chunk_count"] == 0
     assert search["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         "actions-org-runner-hostile-body-text",
         "hostile-body-text",
