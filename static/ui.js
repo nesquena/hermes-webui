@@ -4445,10 +4445,11 @@ function _applyReasoningOptions(supportedEfforts){
 function _applyReasoningChip(eff){
   const meta=arguments[1]||null;
   const effort=_normalizeReasoningEffort(eff);
+  const hasScopeFormatter=typeof _formatReasoningScopeLabel==='function';
   const normalizeScope=(typeof _normalizeReasoningScope==='function')
     ? _normalizeReasoningScope
     : function(scope){return scope==='session'?'session':'profile';};
-  const formatScopeLabel=(typeof _formatReasoningScopeLabel==='function')
+  const formatScopeLabel=hasScopeFormatter
     ? _formatReasoningScopeLabel
     : function(scope){return scope==='session'?'This session':'Profile default';};
   const scope=normalizeScope(meta&&meta.reasoning_scope);
@@ -4480,13 +4481,15 @@ function _applyReasoningChip(eff){
   if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
   const text=_formatReasoningEffortLabel(effort);
   const scopeText=formatScopeLabel(scope);
-  const displayText=text+' · '+scopeText;
+  const displayText=hasScopeFormatter ? (text+' · '+scopeText) : text;
   label.textContent=displayText;
   if(mobileLabel) mobileLabel.textContent=displayText;
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText='Reasoning effort: '+text+' ('+scopeText.toLowerCase()+' scope)';
+    const labelText=hasScopeFormatter
+      ? ('Reasoning effort: '+text+' ('+scopeText.toLowerCase()+' scope)')
+      : ('Reasoning effort: '+text);
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
@@ -4558,7 +4561,7 @@ function syncReasoningChip(){
 }
 
 function _highlightReasoningOption(effort, scope){
-  _ensureReasoningDropdownOptions();
+  if(typeof _ensureReasoningDropdownOptions==='function') _ensureReasoningDropdownOptions();
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
