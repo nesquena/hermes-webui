@@ -54,7 +54,7 @@ def test_busy_send_paths_clear_persisted_composer_draft():
     busy_body = _block(MESSAGES_JS, "if(S.busy||compressionRunning){", "  if(S.session&&(S.session.read_only||S.session.is_read_only))")
     assert "_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);" in busy_body
     assert busy_body.count("_clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);") >= 2
-    assert "_clearComposerDraft(_steerResult.ownerSid,text,_steerDraftFiles)" in busy_body, "delivered steer must clear persisted draft with the submitted payload signature"
+    assert "_steerClearComposerDraftIfSafe(_steerResult.ownerSid,text,_steerDraftFiles)" in busy_body, "delivered steer must clear persisted draft only when the visible composer still holds the submitted payload"
     assert "_clearComposerDraft(S.session.session_id,text" not in busy_body
     try_steer_body = _block(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
     assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in try_steer_body, (

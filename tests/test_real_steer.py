@@ -599,6 +599,7 @@ class TestFrontendWiring:
             assert.strictEqual(msgEl.value, 'new text');
             assert.strictEqual(resized, 1);
             assert.strictEqual(sendUpdates, 1);
+            assert.strictEqual(draftClears.length, 1);
             """
         )
         subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)

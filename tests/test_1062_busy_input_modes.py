@@ -175,7 +175,8 @@ class TestSlashCommandHandlers:
         assert "inp.value===text" in cleanup_body
         assert "inp.value===`/steer ${text}`" in cleanup_body
         assert "updateSendBtn()" in cleanup_body
-        assert "_clearComposerDraft(result.ownerSid,msg,files)" in cleanup_body
+        assert "_steerClearComposerDraftIfSafe(result.ownerSid,msg,files)" in cleanup_body
+        assert "function _steerComposerAllowsDraftClear" in COMMANDS_JS
 
     def test_steer_recovery_retry_consumes_queued_fallback_cleanup(self):
         recovery_body = _source_between(COMMANDS_JS, "function _showSteerRecovery", "\n/**")
@@ -358,7 +359,7 @@ class TestSendBusyBranchDispatch:
         assert "const _steerDraftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in branch
         assert "S.session.session_id===_steerResult.ownerSid" in branch
         assert "if(_steerDelivered&&_sameSteerOwner&&_steerFilesStillCurrent){S.pendingFiles=[];renderTray();}" in branch
-        assert "_clearComposerDraft(_steerResult.ownerSid,text,_steerDraftFiles)" in branch
+        assert "_steerClearComposerDraftIfSafe(_steerResult.ownerSid,text,_steerDraftFiles)" in branch
         assert branch.index("const _steerResult=await _trySteer") < branch.index("if(_steerDelivered&&_sameSteerOwner&&_steerFilesStillCurrent){S.pendingFiles=[];renderTray();}")
         try_body = _source_between(COMMANDS_JS, "async function _trySteer(", "\nasync function cmdTitle")
         accepted_idx = try_body.find("if(result&&result.accepted)")

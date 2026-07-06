@@ -1391,7 +1391,21 @@ function _applyQueuedSteerCleanup(msg,result){
       if(typeof updateSendBtn==='function')updateSendBtn();
     }
   }
-  if(result.ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(result.ownerSid,msg,files);
+  _steerClearComposerDraftIfSafe(result.ownerSid,msg,files);
+}
+
+function _steerComposerAllowsDraftClear(ownerSid,msg){
+  if(!(ownerSid&&typeof S!=='undefined'&&S.session&&S.session.session_id===ownerSid))return true;
+  const inp=$('msg');
+  if(!inp)return true;
+  const text=String(msg||'');
+  return inp.value===''||inp.value===text||(text&&inp.value===`/steer ${text}`);
+}
+
+function _steerClearComposerDraftIfSafe(ownerSid,msg,files){
+  if(ownerSid&&typeof _clearComposerDraft==='function'&&_steerComposerAllowsDraftClear(ownerSid,msg)){
+    _clearComposerDraft(ownerSid,msg,files);
+  }
 }
 
 function _showSteerRecovery(msg, explicitSteer, fallback) {

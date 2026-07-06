@@ -1388,7 +1388,7 @@ async function send(){
         const _sameSteerOwner=_steerResult&&S.session&&S.session.session_id===_steerResult.ownerSid;
         const _steerFilesStillCurrent=_steerResult&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length===_steerResult.files.length&&S.pendingFiles.every((f,i)=>f===_steerResult.files[i]);
         if(_steerDelivered&&_sameSteerOwner&&_steerFilesStillCurrent){S.pendingFiles=[];renderTray();}
-        if(_steerDelivered&&_steerResult.ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(_steerResult.ownerSid,text,_steerDraftFiles);
+        if(_steerDelivered&&typeof _steerClearComposerDraftIfSafe==='function') _steerClearComposerDraftIfSafe(_steerResult.ownerSid,text,_steerDraftFiles);
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();
