@@ -63680,7 +63680,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_perm
     assert "raw-prompt" not in serialized
 
 
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_permissions_final_url_drift_before_body_read(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_permissions_final_url_drift_before_body_read_relevant_memory_empty(
     tmp_path, monkeypatch
 ):
     root = tmp_path / "capy-memory"
@@ -63731,9 +63731,11 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_perm
     result = run_source_refresh_jobs(limit=1)
     search_by_route = search_memory("actions organization permissions", limit=5)
     search_by_sentinel = search_memory("ORG_PERMISSIONS_DRIFT_SENTINEL", limit=5)
+    relevant = relevant_memory_for_space("actions-org-permissions-drift-space", limit=5)
     public_outputs = {
         "catalog": capy_memory.source_catalog(limit=5),
         "jobs": list_source_refresh_jobs(limit=5),
+        "relevant": relevant,
         "result": result,
         "search_by_route": search_by_route,
         "search_by_sentinel_results": search_by_sentinel["results"],
@@ -63748,6 +63750,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_actions_org_perm
     assert not (root / "vault" / "github-actions-org-permissions-final-url-drift.md").exists()
     assert search_by_route["results"] == []
     assert search_by_sentinel["results"] == []
+    assert relevant["results"] == []
     for unsafe in (
         drift_final_url.lower(),
         "org_permissions_drift_sentinel",
