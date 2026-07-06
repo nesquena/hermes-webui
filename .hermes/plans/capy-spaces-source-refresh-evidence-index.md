@@ -36,6 +36,18 @@ Snapshot generated from the checked-out `tests/test_capy_memory_tree.py` on 2026
 | `def test_.*relevant_memory_empty` | 129 | Regressions that also prove Spaces relevant-memory remains empty after hostile drift. |
 | `def test_.*ingests_github.*metadata_only` | 154 | Positive metadata-only GitHub ingestion regressions. |
 
+### Lag-scan status
+
+The 2026-07-06 04:56 CDT autonomous sprint selector reran the three local-only relevant-memory lag scans from `capy-spaces-development/references/relevant-memory-name-count-lag-scan.md` against the checked-out `tests/test_capy_memory_tree.py` and found no remaining candidates:
+
+| Scan | Result | Meaning |
+| --- | ---: | --- |
+| Strict name/count lag: existing `relevant_memory_for_space(...)` call and `relevant["results"] == []` assertion, but no `_relevant_memory_empty` name | 0 | No route-specific GitHub drift regression already proving relevant-memory-empty is missing the mechanical name/count marker. |
+| Missing-assert variant: existing `relevant_memory_for_space(...)` call but no explicit `relevant["results"] == []` assertion | 0 | No drift regression with a relevant-memory lookup still needs the empty-results assertion added. |
+| No-relevant-call variant: no-body-read + no-search drift regression without a `relevant_memory_for_space(...)` lookup | 0 | No obvious older GitHub drift regression remains in this evidence-alignment backlog. |
+
+Future autonomous sprints should avoid re-running this lane as the default work queue unless new route families are added. Prefer the canonical roadmap's next implementation slices: remaining prompt-preflight/advisory-memory enforcement, broader compaction producers, source-refresh scheduling/fetcher coverage, progress producer expansion, and model-route invocation plumbing.
+
 ### Regeneration recipe
 
 Use this local-only Python snippet from the repository root to refresh the mechanical counts above before any future index update. It parses test function names only; it does not execute tests, open network connections, or inspect private vault content.
