@@ -36,14 +36,24 @@ def _restore_auth_sessions():
 
 @pytest.fixture
 def _clear_caches():
-    """Snapshot SESSION_AGENT_CACHE and STREAMS so tests don't bleed."""
-    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+    """Snapshot live-run caches so tests don't bleed."""
+    from api.config import (
+        ACTIVE_RUNS,
+        ACTIVE_RUNS_LOCK,
+        SESSION_AGENT_CACHE,
+        SESSION_AGENT_CACHE_LOCK,
+        STREAMS,
+        STREAMS_LOCK,
+    )
     with SESSION_AGENT_CACHE_LOCK:
         cache_snap = dict(SESSION_AGENT_CACHE)
         SESSION_AGENT_CACHE.clear()
     with STREAMS_LOCK:
         streams_snap = dict(STREAMS)
         STREAMS.clear()
+    with ACTIVE_RUNS_LOCK:
+        active_runs_snap = dict(ACTIVE_RUNS)
+        ACTIVE_RUNS.clear()
     yield
     with SESSION_AGENT_CACHE_LOCK:
         SESSION_AGENT_CACHE.clear()
@@ -51,6 +61,9 @@ def _clear_caches():
     with STREAMS_LOCK:
         STREAMS.clear()
         STREAMS.update(streams_snap)
+    with ACTIVE_RUNS_LOCK:
+        ACTIVE_RUNS.clear()
+        ACTIVE_RUNS.update(active_runs_snap)
 
 
 def _make_handler():
@@ -119,29 +132,46 @@ class TestHandleChatSteerFallbacks:
         assert body["fallback"] == "no_cached_agent"
 
     def test_gateway_run_steer_queues_without_cached_agent(self, _clear_caches):
-        from api.config import STREAMS, STREAMS_LOCK
-        from api.gateway_chat import _STREAM_RUN_IDS
+        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
         from api.streaming import _handle_chat_steer
         import queue as _q
         sid, stream_id = "sid_gateway", "stream_gateway"
-        _STREAM_RUN_IDS[stream_id] = "run abc/1"
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "gateway"}
         with STREAMS_LOCK:
             STREAMS[stream_id] = _q.Queue()
         sess = MagicMock()
         sess.active_stream_id = stream_id
 
-        try:
-            with patch("api.streaming.get_session", return_value=sess):
-                handler = _make_handler()
-                _handle_chat_steer(handler, {"session_id": sid, "text": "Use Python instead"})
-        finally:
-            _STREAM_RUN_IDS.pop(stream_id, None)
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "Use Python instead"})
 
         assert _captured_response(handler) == {
             "accepted": False,
             "fallback": "gateway_steer_queued",
             "stream_id": stream_id,
         }
+
+    def test_legacy_gateway_stream_without_run_id_still_queues(self, _clear_caches):
+        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
+        from api.gateway_chat import _STREAM_RUN_IDS
+        from api.streaming import _handle_chat_steer
+        import queue as _q
+        sid, stream_id = "sid_gateway_legacy", "stream_gateway_legacy"
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "gateway"}
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_steer(handler, {"session_id": sid, "text": "Use Python instead"})
+
+        assert _captured_response(handler)["fallback"] == "gateway_steer_queued"
 
     def test_agent_lacks_steer_method(self, _clear_caches):
         from api.streaming import _handle_chat_steer

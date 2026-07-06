@@ -168,9 +168,17 @@ class TestSlashCommandHandlers:
         idx_steer = COMMANDS_JS.find("async function cmdSteer(")
         assert idx_steer >= 0, "cmdSteer not found"
         steer_body = COMMANDS_JS[idx_steer:COMMANDS_JS.find("function _steerFailureMessageKey", idx_steer)]
-        assert "queuedFallback" in steer_body
-        assert "S.session.session_id===_steerResult.ownerSid" in steer_body
-        assert "_clearComposerDraft(_steerResult.ownerSid,msg,_steerResult.files)" in steer_body
+        assert "_applyQueuedSteerCleanup(msg,_steerResult)" in steer_body
+        cleanup_body = _source_between(COMMANDS_JS, "function _applyQueuedSteerCleanup", "\nfunction _showSteerRecovery")
+        assert "queuedFallback" in cleanup_body
+        assert "S.session.session_id===result.ownerSid" in cleanup_body
+        assert "_clearComposerDraft(result.ownerSid,msg,files)" in cleanup_body
+
+    def test_steer_recovery_retry_consumes_queued_fallback_cleanup(self):
+        recovery_body = _source_between(COMMANDS_JS, "function _showSteerRecovery", "\n/**")
+        assert "retryBtn.addEventListener('click', async () => {" in recovery_body
+        assert "const result=await _trySteer(msg, explicitSteer).catch" in recovery_body
+        assert "_applyQueuedSteerCleanup(msg,result)" in recovery_body
 
 
 class TestBusySendButton:

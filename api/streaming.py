@@ -9940,12 +9940,13 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                 stream_alive = active_stream_id in _cfg.STREAMS
             if stream_alive:
                 try:
-                    from api.gateway_chat import _STREAM_RUN_IDS
-                    gateway_run_id = _STREAM_RUN_IDS.get(str(active_stream_id or ""))
+                    with _cfg.ACTIVE_RUNS_LOCK:
+                        active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id or "")) or {})
+                    gateway_owned = active_run.get("backend") == "gateway"
                 except Exception as exc:
-                    gateway_run_id = None
-                    logger.debug("Gateway run lookup failed for session=%s stream_id=%s: %s", sid, active_stream_id, exc)
-                if gateway_run_id:
+                    gateway_owned = False
+                    logger.debug("Gateway ownership lookup failed for session=%s stream_id=%s: %s", sid, active_stream_id, exc)
+                if gateway_owned:
                     return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
                                        "stream_id": active_stream_id})
         # No active agent for this session — caller surfaces a steer failure

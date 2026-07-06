@@ -1347,12 +1347,7 @@ async function cmdSteer(args){
   }
   if(!S.session){showToast(t('no_active_session'));return;}
   const _steerResult=await _trySteer(msg, /*explicitSteer=*/true);
-  if(_steerResult&&_steerResult.queuedFallback){
-    const _sameOwner=S.session&&S.session.session_id===_steerResult.ownerSid;
-    const _filesStillCurrent=Array.isArray(S.pendingFiles)&&S.pendingFiles.length===_steerResult.files.length&&S.pendingFiles.every((f,i)=>f===_steerResult.files[i]);
-    if(_sameOwner&&_filesStillCurrent){S.pendingFiles=[];renderTray();}
-    if(_steerResult.ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(_steerResult.ownerSid,msg,_steerResult.files);
-  }
+  _applyQueuedSteerCleanup(msg,_steerResult);
 }
 
 function _steerFailureMessageKey(fallback) {
@@ -1381,6 +1376,15 @@ function _showSteerIndicator(text){
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 
+function _applyQueuedSteerCleanup(msg,result){
+  if(!result||!result.queuedFallback)return;
+  const files=Array.isArray(result.files)?result.files:[];
+  const sameOwner=S.session&&S.session.session_id===result.ownerSid;
+  const filesStillCurrent=Array.isArray(S.pendingFiles)&&S.pendingFiles.length===files.length&&S.pendingFiles.every((f,i)=>f===files[i]);
+  if(sameOwner&&filesStillCurrent){S.pendingFiles=[];renderTray();}
+  if(result.ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(result.ownerSid,msg,files);
+}
+
 function _showSteerRecovery(msg, explicitSteer, fallback) {
   const inner = document.getElementById('msgInner');
   if (!inner) return;
@@ -1395,9 +1399,10 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
   const retryBtn = document.createElement('button');
   retryBtn.className = 'steer-recovery-retry';
   retryBtn.textContent = t('steer_recovery_retry');
-  retryBtn.addEventListener('click', () => {
+  retryBtn.addEventListener('click', async () => {
     el.remove();
-    void _trySteer(msg, explicitSteer).catch(console.error);
+    const result=await _trySteer(msg, explicitSteer).catch(e=>{console.error(e);return null;});
+    _applyQueuedSteerCleanup(msg,result);
   });
   el.appendChild(retryBtn);
   const dismissBtn = document.createElement('button');
