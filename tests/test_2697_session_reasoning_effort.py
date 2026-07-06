@@ -589,6 +589,50 @@ def test_duplicate_session_carries_reasoning_effort(isolated_reasoning_env):
     assert Session.load(source.session_id).reasoning_effort == "high"
 
 
+def test_branch_session_carries_reasoning_effort(isolated_reasoning_env):
+    source = Session(
+        session_id="session-reasoning-branch-source",
+        title="Source Session",
+        model="gpt-5",
+        model_provider="openai",
+        reasoning_effort="high",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    source.save()
+
+    handler = _DummyHandler({"session_id": source.session_id})
+    handle_post(handler, urlparse("http://localhost/api/session/branch"))
+    assert handler.status == 200
+    payload = handler.payload()
+    branched = Session.load(payload["session_id"])
+    assert branched is not None
+    assert branched.reasoning_effort == "high"
+
+
+def test_compression_continuation_carries_reasoning_effort(isolated_reasoning_env):
+    source = Session(
+        session_id="session-reasoning-compression-source",
+        title="Source Session",
+        model="gpt-5",
+        model_provider="openai",
+        reasoning_effort="high",
+    )
+    source.compression_recovery = {
+        "terminal_state": "compression_exhausted",
+        "recommended_action": "start_focused_continuation",
+        "source_session_id": source.session_id,
+    }
+    source.save()
+
+    handler = _DummyHandler({"session_id": source.session_id})
+    routes._handle_session_compression_recovery_start(handler, {"session_id": source.session_id})
+    assert handler.status == 200
+    payload = handler.payload()["session"]
+    continued = Session.load(payload["session_id"])
+    assert continued is not None
+    assert continued.reasoning_effort == "high"
+
+
 def test_gateway_reasoning_effort_prefers_session_override(isolated_reasoning_env):
     session = Session(
         session_id="session-reasoning-gateway",

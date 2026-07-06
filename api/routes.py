@@ -14053,6 +14053,7 @@ def handle_post(handler, parsed) -> bool:
             project_id=getattr(source, "project_id", None),
             personality=getattr(source, "personality", None),
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
+            reasoning_effort=getattr(source, "reasoning_effort", None),
             context_length=getattr(source, "context_length", None),
             threshold_tokens=getattr(source, "threshold_tokens", None),
             # context_messages — truncated to fork prefix (not full parent copy)
@@ -19989,6 +19990,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 session_source="fork",
                 personality=getattr(source, "personality", None),
                 enabled_toolsets=copy.deepcopy(getattr(source, "enabled_toolsets", None)),
+                reasoning_effort=getattr(source, "reasoning_effort", None),
                 context_length=getattr(source, "context_length", None),
                 threshold_tokens=getattr(source, "threshold_tokens", None),
                 gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
