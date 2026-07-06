@@ -832,6 +832,114 @@ def test_streamed_answer_without_result_message_is_saved_as_final_answer(tmp_pat
     assert not any(msg.get("_error") for msg in saved.messages)
 
 
+def test_streamed_answer_with_explicit_provider_error_still_errors(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "streamed_answer_explicit_error",
+        "stream_streamed_answer_explicit_error",
+        pending_user_message="Please stream then fail explicitly",
+    )
+
+    class StreamedAnswerExplicitErrorAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Visible text before explicit provider error")
+            return {
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "provider failed after streaming",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_streamed_answer_explicit_error",
+        StreamedAnswerExplicitErrorAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("streamed_answer_explicit_error")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for explicit provider error"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
+    assert saved.messages[-1]["content"] != "Visible text before explicit provider error"
+
+
+def test_streamed_answer_with_compression_exhausted_still_errors(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "streamed_answer_compression_exhausted",
+        "stream_streamed_answer_compression_exhausted",
+        pending_user_message="Please stream then exhaust compression",
+    )
+
+    class StreamedAnswerCompressionExhaustedAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Visible text before compression exhaustion")
+            return {
+                "status": "failed",
+                "failed": True,
+                "partial": True,
+                "compression_exhausted": True,
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "Context length exceeded: cannot compress further.",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_streamed_answer_compression_exhausted",
+        StreamedAnswerCompressionExhaustedAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("streamed_answer_compression_exhausted")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for compression exhaustion"
+    assert apperrors[-1]["type"] == "compression_exhausted"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
+    assert saved.messages[-1]["content"] != "Visible text before compression exhaustion"
+
+
+def test_streamed_answer_with_tool_limit_still_errors(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "streamed_answer_tool_limit",
+        "stream_streamed_answer_tool_limit",
+        pending_user_message="Please stream then hit tool limit",
+    )
+
+    class StreamedAnswerToolLimitAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Visible text before tool limit")
+            return {
+                "turn_exit_reason": "max_iterations_reached",
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_streamed_answer_tool_limit",
+        StreamedAnswerToolLimitAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("streamed_answer_tool_limit")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for tool-limit result without final answer"
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
+    assert saved.messages[-1]["content"] != "Visible text before tool limit"
+
+
 def test_stale_partial_with_unfinished_tool_call_still_reports_no_response(tmp_path, monkeypatch):
     session = _prepare_session(
         "unfinished_tool_call_stale_partial",
