@@ -4,6 +4,7 @@ from api.compression_anchor import visible_messages_for_anchor
 from api.models import Session
 from api.streaming import (
     _is_fallback_lifecycle_message,
+    _message_text,
     _prune_context_tool_results_after_compression,
 )
 
@@ -71,6 +72,136 @@ def test_post_compression_context_prunes_tail_tool_results_with_active_compresso
     assert compressor.calls == [{"protect_tail_count": 20, "protect_tail_tokens": 4096}]
     assert pruned[1]["content"] == "[browser_navigate] opened page (large snapshot summarized)"
     assert context_messages[1]["content"] == "x" * 5000
+
+
+def test_post_compression_context_hard_prunes_protected_tail_tool_payload():
+    class NoopCompressor:
+        protect_last_n = 20
+        tail_token_budget = 1024
+        threshold_tokens = 4096
+
+        def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens=None):
+            return messages, 0
+
+    compressor = NoopCompressor()
+    agent = type("Agent", (), {"context_compressor": compressor})()
+    recent_payload = ("recent protected payload\n" * 1800) + "RECENT_TOOL_PAYLOAD_END"
+    session = Session(
+        session_id="budgetproof1",
+        title="Budget proof",
+        workspace="/tmp",
+        model="gpt-4o",
+        messages=[
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call_recent"}]},
+            {"role": "tool", "tool_call_id": "call_recent", "content": recent_payload},
+            {"role": "assistant", "content": "Final answer"},
+        ],
+        context_messages=[
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "call_recent"}]},
+            {"role": "tool", "tool_call_id": "call_recent", "content": recent_payload},
+            {"role": "assistant", "content": "Final answer"},
+        ],
+    )
+
+    session.context_messages = _prune_context_tool_results_after_compression(
+        agent,
+        session.context_messages,
+    )
+
+    visible_tool = session.messages[1]["content"]
+    context_tool = session.context_messages[1]["content"]
+    context_tool_tokens = (len(_message_text(context_tool)) + 3) // 4
+
+    assert visible_tool == recent_payload
+    assert "RECENT_TOOL_PAYLOAD_END" in visible_tool
+    assert context_tool != recent_payload
+    assert "RECENT_TOOL_PAYLOAD_END" not in context_tool
+    assert "WebUI compressed-context budget" in context_tool
+    assert context_tool_tokens <= compressor.tail_token_budget
+
+
+def test_post_compression_context_note_only_replacement_consumes_residual_budget():
+    class NoopCompressor:
+        protect_last_n = 20
+        tail_token_budget = 1024
+        threshold_tokens = 4096
+
+        def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens=None):
+            return messages, 0
+
+    compressor = NoopCompressor()
+    agent = type("Agent", (), {"context_compressor": compressor})()
+    old_small_payload = "s" * 80
+    old_oversize_payload = "h" * 2000
+    recent_payload = "r" * 4000
+    context_messages = [
+        {"role": "tool", "tool_call_id": "call_old_small", "content": old_small_payload},
+        {"role": "tool", "tool_call_id": "call_old_oversize", "content": old_oversize_payload},
+        {"role": "tool", "tool_call_id": "call_recent", "content": recent_payload},
+    ]
+
+    pruned = _prune_context_tool_results_after_compression(agent, context_messages)
+
+    assert pruned[2]["content"] == recent_payload
+    assert pruned[1]["content"] != old_oversize_payload
+    assert "WebUI compressed-context budget" in pruned[1]["content"]
+    assert pruned[0]["content"] != old_small_payload
+    assert "WebUI compressed-context budget" in pruned[0]["content"]
+    assert context_messages[0]["content"] == old_small_payload
+
+
+def test_post_compression_context_hard_prune_is_idempotent():
+    class NoopCompressor:
+        protect_last_n = 20
+        tail_token_budget = 1024
+        threshold_tokens = 4096
+
+        def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens=None):
+            return messages, 0
+
+    compressor = NoopCompressor()
+    agent = type("Agent", (), {"context_compressor": compressor})()
+    context_messages = [
+        {"role": "tool", "tool_call_id": f"call_{idx}", "content": (f"tool {idx} payload\n" * 350)}
+        for idx in range(4)
+    ]
+
+    once = _prune_context_tool_results_after_compression(agent, context_messages)
+    twice = _prune_context_tool_results_after_compression(agent, once)
+
+    assert [msg["content"] for msg in twice] == [msg["content"] for msg in once]
+    assert any("WebUI compressed-context budget" in str(msg.get("content") or "") for msg in once)
+    assert context_messages[0]["content"] != once[0]["content"]
+
+
+def test_post_compression_context_raw_marker_collision_still_prunes():
+    class NoopCompressor:
+        protect_last_n = 20
+        tail_token_budget = 1024
+        threshold_tokens = 4096
+
+        def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens=None):
+            return messages, 0
+
+    compressor = NoopCompressor()
+    agent = type("Agent", (), {"context_compressor": compressor})()
+    raw_payload = (
+        "tool echoed marker text: [WebUI compressed-context budget: not a generated summary]\n"
+        + ("raw collision payload\n" * 600)
+        + "RAW_COLLISION_END"
+    )
+    context_messages = [
+        {"role": "tool", "tool_call_id": "call_collision", "content": raw_payload},
+    ]
+
+    once = _prune_context_tool_results_after_compression(agent, context_messages)
+    twice = _prune_context_tool_results_after_compression(agent, once)
+
+    assert once[0]["content"] != raw_payload
+    assert "RAW_COLLISION_END" not in once[0]["content"]
+    assert "WebUI compressed-context budget" in once[0]["content"]
+    assert twice[0]["content"] == once[0]["content"]
+    assert context_messages[0]["content"] == raw_payload
 
 
 def test_auto_compression_running_sse_uses_active_session_running_card():

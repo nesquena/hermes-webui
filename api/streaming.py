@@ -4269,6 +4269,113 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
     return stamped
 
 
+_POST_COMPRESSION_TOOL_RESULT_TOTAL_TOKENS = 4096
+_POST_COMPRESSION_TOOL_RESULT_MIN_SNIPPET_TOKENS = 256
+_POST_COMPRESSION_TOOL_RESULT_MARKER = "[WebUI compressed-context budget:"
+_POST_COMPRESSION_TOOL_RESULT_NOTE_RE = re.compile(
+    r"^\[WebUI compressed-context budget: omitted \d+(?: of \d+)? chars "
+    r"\(~\d+ rough tokens\) from this tool result; "
+    r"the full output remains in the visible transcript/tool log\.\]$"
+)
+_ROUGH_TOKEN_CHARS = 4
+
+
+def _positive_int_value(value, default: int = 0) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _rough_text_token_count(text: str) -> int:
+    text = str(text or "")
+    if not text:
+        return 0
+    return max(1, (len(text) + (_ROUGH_TOKEN_CHARS - 1)) // _ROUGH_TOKEN_CHARS)
+
+
+def _post_compression_tool_result_budget(compressor) -> int:
+    budget = _positive_int_value(
+        getattr(compressor, 'tail_token_budget', None),
+        _POST_COMPRESSION_TOOL_RESULT_TOTAL_TOKENS,
+    )
+    threshold = _positive_int_value(getattr(compressor, 'threshold_tokens', None), 0)
+    if threshold:
+        budget = min(budget, max(512, threshold // 2))
+    return max(512, budget)
+
+
+def _compressed_context_tool_result_summary(text: str, *, original_tokens: int, keep_tokens: int) -> str:
+    text = str(text or "")
+    keep_chars = max(0, int(keep_tokens or 0) * _ROUGH_TOKEN_CHARS)
+    note_prefix = f"{_POST_COMPRESSION_TOOL_RESULT_MARKER} omitted "
+    note_suffix = (
+        f" (~{int(original_tokens or 0)} rough tokens) from this tool result; "
+        "the full output remains in the visible transcript/tool log.]"
+    )
+    if keep_chars < (_POST_COMPRESSION_TOOL_RESULT_MIN_SNIPPET_TOKENS * _ROUGH_TOKEN_CHARS):
+        return f"{note_prefix}{len(text)} chars{note_suffix}"
+    note_len_for_budget = len(f"{note_prefix}{len(text)} of {len(text)} chars{note_suffix}")
+    snippet_limit = max(0, keep_chars - note_len_for_budget - 2)
+    snippet = text[:snippet_limit].rstrip()
+    if not snippet:
+        return f"{note_prefix}{len(text)} chars{note_suffix}"
+    omitted_chars = max(0, len(text) - len(snippet))
+    note = f"{note_prefix}{omitted_chars} of {len(text)} chars{note_suffix}"
+    return f"{snippet}\n\n{note}"
+
+
+def _is_compressed_context_tool_result_summary(text: str) -> bool:
+    text = str(text or "").strip()
+    if not text:
+        return False
+    if _POST_COMPRESSION_TOOL_RESULT_NOTE_RE.fullmatch(text):
+        return True
+    _snippet, separator, note = text.rpartition("\n\n")
+    return bool(separator and _POST_COMPRESSION_TOOL_RESULT_NOTE_RE.fullmatch(note.strip()))
+
+
+def _hard_prune_post_compression_tool_results(messages, *, compressor=None):
+    if not messages:
+        return messages, 0
+    budget = _post_compression_tool_result_budget(compressor)
+    raw_tool_tokens = 0
+    replacements = []
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if not isinstance(msg, dict) or msg.get('role') != 'tool':
+            continue
+        text = _message_text(msg.get('content', ''))
+        if not text:
+            continue
+        token_count = _rough_text_token_count(text)
+        if _is_compressed_context_tool_result_summary(text):
+            raw_tool_tokens += token_count
+            continue
+        remaining = max(0, budget - raw_tool_tokens)
+        if token_count <= remaining:
+            raw_tool_tokens += token_count
+            continue
+        replacements.append((idx, text, token_count, remaining))
+        # Once a tool row exceeds the residual budget, older tool rows should
+        # not be allowed to spend that same residual budget again.
+        raw_tool_tokens = budget
+
+    if not replacements:
+        return messages, 0
+
+    pruned = copy.deepcopy(list(messages))
+    for idx, text, token_count, keep_tokens in replacements:
+        msg = pruned[idx]
+        msg['content'] = _compressed_context_tool_result_summary(
+            text,
+            original_tokens=token_count,
+            keep_tokens=keep_tokens,
+        )
+    return pruned, len(replacements)
+
+
 def _prune_context_tool_results_after_compression(agent, context_messages):
     """Run the active compressor's cheap tool-result pruning on model context.
 
@@ -4276,28 +4383,35 @@ def _prune_context_tool_results_after_compression(agent, context_messages):
     before producing the final answer. Those completed tail tool results are
     model-facing context, but they were produced after the compression pass and
     therefore did not go through the compressor's tool-output pruning. Apply the
-    same cheap pruning once more after a confirmed compression event. This keeps
-    the visible transcript untouched while preventing the next turn from seeing
-    raw post-compression tool dumps.
+    same cheap pruning once more after a confirmed compression event, then apply
+    a WebUI hard cap to retained tool-result payloads. This keeps the visible
+    transcript untouched while preventing the next turn from seeing raw
+    post-compression tool dumps that the compressor protected as recent tail.
     """
     if not context_messages:
         return context_messages
     compressor = getattr(agent, 'context_compressor', None)
     prune = getattr(compressor, '_prune_old_tool_results', None)
-    if not callable(prune):
-        return context_messages
-    try:
-        pruned_messages, pruned_count = prune(
-            copy.deepcopy(context_messages),
-            protect_tail_count=getattr(compressor, 'protect_last_n', 20),
-            protect_tail_tokens=getattr(compressor, 'tail_token_budget', None),
-        )
-    except Exception:
-        logger.debug("post-compression context tool-result pruning failed", exc_info=True)
-        return context_messages
-    if not pruned_count:
-        return context_messages
-    return _deduplicate_context_messages(pruned_messages)
+    pruned_messages = context_messages
+    if callable(prune):
+        try:
+            candidate_messages, pruned_count = prune(
+                copy.deepcopy(context_messages),
+                protect_tail_count=getattr(compressor, 'protect_last_n', 20),
+                protect_tail_tokens=getattr(compressor, 'tail_token_budget', None),
+            )
+            if pruned_count:
+                pruned_messages = _deduplicate_context_messages(candidate_messages)
+        except Exception:
+            logger.debug("post-compression context tool-result pruning failed", exc_info=True)
+
+    hard_pruned_messages, hard_pruned_count = _hard_prune_post_compression_tool_results(
+        pruned_messages,
+        compressor=compressor,
+    )
+    if hard_pruned_count:
+        return _deduplicate_context_messages(hard_pruned_messages)
+    return pruned_messages
 
 
 def _restore_reasoning_metadata(previous_messages, updated_messages):
