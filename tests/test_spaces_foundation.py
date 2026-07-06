@@ -1482,7 +1482,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert 'id="capyActiveSpaceClear"' in index_html
     assert 'data-panel="capy-spaces"' in index_html
     assert "switchPanel('capy-spaces')" in index_html
-    assert "'capy-spaces': 'Capy Spaces'" in panels_js
+    assert "MAIN_VIEW_PANELS" in panels_js
     assert "'capy-spaces'" in panels_js
     assert "loadCapySpaces()" in panels_js
     assert "loadCapySpacesRecovery()" in panels_js
@@ -2392,7 +2392,7 @@ def test_streaming_agent_prompt_includes_active_space_context(monkeypatch, tmp_p
     session = SimpleNamespace(workspace=str(tmp_path), active_space_id="lab")
     user_message, system_message = _build_agent_prompt_inputs(session, "Update the source list")
 
-    assert user_message.startswith(f"[Workspace: {tmp_path}]")
+    assert user_message.startswith(f"[Workspace::v1: {tmp_path}]")
     assert "[Capy Space: lab]" in user_message
     assert "Update the source list" in user_message
     assert "## Active Capy Space" in system_message
