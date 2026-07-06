@@ -206,3 +206,61 @@ class TestSetCustomProviderModels:
         model_ids = {m["id"] for m in gw[0]["models"]}
         assert model_ids == {"fast-model", "big-model"}, f"Got: {model_ids}"
         assert gw[0]["models_total"] == 2
+
+    def test_list_of_dict_round_trip(self, monkeypatch, tmp_path):
+        """List-of-dict models must round-trip without data-loss: read normalises
+        dict entries → UI sees real IDs → save preserves label metadata."""
+        self._setup(monkeypatch, tmp_path, {
+            "model": {"provider": "custom:testgw"},
+            "custom_providers": [
+                {
+                    "name": "testgw",
+                    "base_url": "http://gw:8080/v1",
+                    "models": [
+                        {"id": "model-a", "label": "Alpha model"},
+                        {"id": "model-b", "label": "Beta model"},
+                        {"id": "model-c", "label": "Gamma model"},
+                    ],
+                }
+            ],
+        })
+
+        from api.providers import get_providers, set_custom_provider_models
+
+        # Step 1: get_providers must surface real IDs, not stringified dicts
+        result = get_providers()
+        gw = [p for p in result["providers"] if p["id"] == "custom:testgw"][0]
+        assert gw["models_total"] == 3, f"Expected 3, got {gw['models_total']}"
+        model_ids = {m["id"] for m in gw["models"]}
+        assert model_ids == {"model-a", "model-b", "model-c"}, f"Got: {model_ids}"
+        # Labels must be surfaced too
+        for m in gw["models"]:
+            assert m["id"] in ("model-a", "model-b", "model-c")
+            if m["id"] == "model-a":
+                assert m["label"] == "Alpha model", f"Got label: {m['label']}"
+
+        # Step 2: save a subset (remove model-c)
+        save_result = set_custom_provider_models("custom:testgw", ["model-a", "model-b"])
+        assert save_result["ok"] is True, f"Save failed: {save_result.get('error')}"
+
+        # Step 3: re-read config.yaml — list-of-dict with labels must be preserved
+        cfg_path = config._get_config_path()
+        with open(cfg_path) as f:
+            raw = yaml.safe_load(f)
+        cp = raw["custom_providers"][0]
+        assert isinstance(cp["models"], list), f"Expected list, got {type(cp['models'])}"
+        assert len(cp["models"]) == 2
+        # Check dict entries are preserved with their labels
+        for entry in cp["models"]:
+            assert isinstance(entry, dict), f"Expected dict entry, got {type(entry)}: {entry}"
+            assert entry["id"] in ("model-a", "model-b")
+            if entry["id"] == "model-a":
+                assert entry["label"] == "Alpha model"
+            if entry["id"] == "model-b":
+                assert entry["label"] == "Beta model"
+
+        # Step 4: get_providers() must still work correctly after the save
+        result2 = get_providers()
+        gw2 = [p for p in result2["providers"] if p["id"] == "custom:testgw"][0]
+        assert gw2["models_total"] == 2
+        assert {m["id"] for m in gw2["models"]} == {"model-a", "model-b"}

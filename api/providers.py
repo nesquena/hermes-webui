@@ -2604,10 +2604,17 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models from `models` dict/list or `model` single
+            # Collect models `models` dict/list or `model` single
             cp_models = []
             if isinstance(cp.get("models"), list):
-                cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"]]
+                # List can hold plain strings or dicts with id/label keys
+                for m in cp["models"]:
+                    if isinstance(m, dict):
+                        mid = str(m.get("id") or m.get("model") or m.get("name") or "").strip()
+                        if mid:
+                            cp_models.append({"id": mid, "label": str(m.get("label") or mid)})
+                    else:
+                        cp_models.append({"id": str(m), "label": str(m)})
             elif isinstance(cp.get("models"), dict):
                 # Dict-form stores per-model metadata; use dict keys as model IDs
                 cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"].keys()]
@@ -2879,7 +2886,21 @@ def set_custom_provider_models(provider_id: str, models: list[str]) -> dict[str,
                             cp.pop("models", None)
                     else:
                         if models:
-                            cp["models"] = list(models)
+                            # Preserve label metadata from existing list-of-dict entries
+                            existing_list = existing_models if isinstance(existing_models, list) else []
+                            existing_map = {}
+                            for em in existing_list:
+                                if isinstance(em, dict):
+                                    eid = str(em.get("id") or em.get("model") or em.get("name") or "").strip()
+                                    if eid:
+                                        existing_map[eid] = em
+                            if existing_map:
+                                cp["models"] = [
+                                    dict(existing_map.get(m, {"id": m, "label": m}))
+                                    for m in models
+                                ]
+                            else:
+                                cp["models"] = list(models)
                         else:
                             cp.pop("models", None)
                     found = True
