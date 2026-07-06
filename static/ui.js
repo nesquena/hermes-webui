@@ -7653,53 +7653,85 @@ function _playServerTts(text, opts){
   opts = opts || {};
   var btn = opts.btn || null;
   var onComplete = opts.onComplete || null;
+  var chunks = _splitForTTS(text, opts.maxChars || 4500);
+  if (!chunks.length) {
+    if (onComplete) onComplete();
+    return Promise.resolve();
+  }
+  _ttsChunkQueue = chunks;
+  _ttsChunkIndex = 0;
   _ttsSpeaking = true;
   if (btn) btn.dataset.speaking = '1';
   var gen = ++_ttsPlayGeneration;
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text: text})
-  })
-  .then(function(r){
-    if (gen !== _ttsPlayGeneration) throw new Error('stale');
-    if (!r.ok) {
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j && j.error) || ('TTS request failed: ' + r.status));
-      });
-    }
-    return r.json();
-  })
-  .then(function(j){
-    if (gen !== _ttsPlayGeneration) return;
-    if (!j.audio) throw new Error('TTS response missing audio');
-    var audio = new Audio(j.audio);
-    _playingEdgeAudio = audio;
-    // Apply saved rate preference via playbackRate (works for both
-    // browser and server TTS regardless of provider).
-    var savedRate = parseFloat(localStorage.getItem('hermes-tts-rate'));
-    if (!isNaN(savedRate)) audio.playbackRate = Math.min(2, Math.max(0.5, savedRate));
-    function done(){
-      _playingEdgeAudio = null;
-      _ttsSpeaking = false;
-      if (btn) btn.dataset.speaking = '0';
-      if (onComplete) onComplete();
-    }
-    audio.onended = done;
-    audio.onerror = done;
-    audio.play().catch(function(e){
-      done();
-      if (typeof showToast === 'function') showToast('TTS play error: ' + (e && e.message || e));
-    });
-  })
-  .catch(function(e){
-    if (gen !== _ttsPlayGeneration) return;
-    _ttsSpeaking = false;
+  var savedRate = parseFloat(localStorage.getItem('hermes-tts-rate'));
+
+  function reset(){
     _playingEdgeAudio = null;
+    _ttsSpeaking = false;
+    _ttsChunkQueue = [];
+    _ttsChunkIndex = 0;
     if (btn) btn.dataset.speaking = '0';
+  }
+
+  function fetchChunk(chunk){
+    return fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: chunk})
+    }).then(function(r){
+      if (gen !== _ttsPlayGeneration) throw new Error('stale');
+      if (!r.ok) {
+        return r.json().catch(function(){return {};}).then(function(j){
+          throw new Error((j && j.error) || ('TTS request failed: ' + r.status));
+        });
+      }
+      return r.json();
+    });
+  }
+
+  function playChunk(j){
+    if (gen !== _ttsPlayGeneration) throw new Error('stale');
+    if (!j.audio) throw new Error('TTS response missing audio');
+    return new Promise(function(resolve, reject){
+      var audio = new Audio(j.audio);
+      _playingEdgeAudio = audio;
+      // Apply saved rate preference via playbackRate (works for both
+      // browser and server TTS regardless of provider).
+      if (!isNaN(savedRate)) audio.playbackRate = Math.min(2, Math.max(0.5, savedRate));
+      audio.onended = function(){
+        if (_playingEdgeAudio === audio) _playingEdgeAudio = null;
+        _ttsChunkIndex++;
+        resolve();
+      };
+      audio.onerror = function(){
+        if (_playingEdgeAudio === audio) _playingEdgeAudio = null;
+        reject(new Error('TTS playback error'));
+      };
+      audio.play().catch(function(e){
+        if (_playingEdgeAudio === audio) _playingEdgeAudio = null;
+        reject(e);
+      });
+    });
+  }
+
+  var chain = Promise.resolve();
+  chunks.forEach(function(chunk){
+    chain = chain.then(function(){
+      if (gen !== _ttsPlayGeneration) throw new Error('stale');
+      return fetchChunk(chunk).then(playChunk);
+    });
+  });
+  chain = chain.then(function(){
+    if (gen !== _ttsPlayGeneration) return;
+    reset();
+    if (onComplete) onComplete();
+  }).catch(function(e){
+    if (gen !== _ttsPlayGeneration) return;
+    reset();
     if (onComplete) onComplete();
     if (typeof showToast === 'function') showToast('TTS failed: ' + (e && e.message || e));
   });
+  return chain;
 }
 window._playServerTts = _playServerTts;
 
@@ -7717,7 +7749,7 @@ function speakMessage(btn){
   const clean=_stripForTTS(text);
   if(!clean) return;
 
-  const engine=localStorage.getItem('hermes-tts-engine')||'server';
+  const engine=localStorage.getItem('hermes-tts-engine')||'browser';
   if(engine==='browser'){
     if(!('speechSynthesis' in window)){
       showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
@@ -7781,6 +7813,7 @@ function _playAudioBuf(arrayBuffer, btn, label){
   });
 }
 function stopTTS(){
+  _ttsPlayGeneration++;
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
@@ -7805,7 +7838,7 @@ function stopTTS(){
 }
 
 function autoReadLastAssistant(){
-  const engine=localStorage.getItem('hermes-tts-engine')||'server';
+  const engine=localStorage.getItem('hermes-tts-engine')||'browser';
   if(engine==='browser'&&!('speechSynthesis' in window)) return;
   const pref=localStorage.getItem('hermes-tts-auto-read');
   if(pref!=='true') return;

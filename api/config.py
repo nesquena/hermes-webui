@@ -748,10 +748,50 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
+    payload = _yaml.safe_dump(
+        _config_for_yaml_save(config_data),
+        sort_keys=False,
+        allow_unicode=True,
     )
+    try:
+        existing_mode = config_path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        existing_mode = 0o600
+    import tempfile as _tempfile
+
+    fd, tmp_name = _tempfile.mkstemp(
+        prefix=f".{config_path.name}.",
+        suffix=".tmp",
+        dir=str(config_path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            fd = None
+            tmp_file.write(payload)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.chmod(tmp_name, existing_mode)
+        os.replace(tmp_name, config_path)
+        try:
+            dir_fd = os.open(str(config_path.parent), os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
     # Invalidate the memoized parse for this path so the next read re-parses the
     # bytes we just wrote. mtime_ns+size keying normally catches edits, but a
     # WebUI save that preserves size with a coarse/unchanged mtime could otherwise

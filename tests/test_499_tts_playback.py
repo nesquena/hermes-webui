@@ -404,15 +404,18 @@ class TestTtsEdgeCases:
             "client-side via playbackRate. Remove it."
         )
 
-    def test_capability_endpoint_public(self):
-        """The /api/tts/capability endpoint must be in PUBLIC_PATHS (no auth)."""
+    def test_capability_endpoint_requires_auth_when_auth_enabled(self):
+        """The /api/tts/capability endpoint must not bypass auth."""
         auth_path = os.path.join(REPO_DIR, 'api', 'auth.py')
         if not os.path.exists(auth_path):
             return  # test skipped if auth.py not present
         auth_src = open(auth_path).read()
-        assert '/api/tts/capability' in auth_src, (
-            "/api/tts/capability must be in PUBLIC_PATHS so the settings "
-            "page can fetch provider info without authentication"
+        public_idx = auth_src.find('PUBLIC_PATHS')
+        assert public_idx != -1, "auth.py must define PUBLIC_PATHS"
+        public_block = auth_src[public_idx:auth_src.find('})', public_idx)]
+        assert '/api/tts/capability' not in public_block, (
+            "/api/tts/capability leaks provider/config/credential availability "
+            "and must stay behind normal WebUI auth"
         )
 
     def test_no_multilingual_voices_in_dropdown(self):

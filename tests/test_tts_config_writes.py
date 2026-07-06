@@ -7,6 +7,8 @@ reload_config() to invalidate the in-process cache. The tests verify:
   3. The lock is released (no deadlock)
   4. Edge cases: None values, empty strings, missing keys
 """
+import io
+import json
 import os
 import tempfile
 import threading
@@ -204,3 +206,151 @@ def test_both_calls_use_same_lock(temp_config):
         content = f.read()
     assert "provider: edge" in content
     assert "voice: en-US-GuyNeural" in content
+
+
+def test_yaml_config_save_is_atomic_and_durable(tmp_path, monkeypatch):
+    """Config writes use temp-file fsync + os.replace, not direct truncation."""
+    import api.config as cfg_mod
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("tts:\n  provider: edge\n", encoding="utf-8")
+    replace_calls = []
+    fsync_calls = []
+    orig_replace = cfg_mod.os.replace
+    orig_fsync = cfg_mod.os.fsync
+
+    def spy_replace(src, dst):
+        replace_calls.append((str(src), str(dst), os.path.exists(src)))
+        return orig_replace(src, dst)
+
+    def spy_fsync(fd):
+        fsync_calls.append(fd)
+        return orig_fsync(fd)
+
+    monkeypatch.setattr(cfg_mod.os, "replace", spy_replace)
+    monkeypatch.setattr(cfg_mod.os, "fsync", spy_fsync)
+
+    cfg_mod._save_yaml_config_file(config_path, {"tts": {"provider": "mistral"}})
+
+    assert replace_calls, "_save_yaml_config_file must publish via os.replace()"
+    assert replace_calls[0][1] == str(config_path)
+    assert replace_calls[0][2] is True, "replace source should be an existing temp file"
+    assert len(fsync_calls) >= 2, "must fsync file contents and parent directory"
+    assert "provider: mistral" in config_path.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob(".config.yaml.*.tmp"))
+
+
+class _FakeHandler:
+    def __init__(self, body: bytes, command="POST", headers=None, client="127.0.0.1"):
+        self.command = command
+        self.rfile = io.BytesIO(body)
+        self.wfile = io.BytesIO()
+        self.headers = headers or {}
+        self.headers.setdefault("Content-Length", str(len(body)))
+        self.client_address = (client, 12345)
+        self.status = None
+        self.sent_headers = {}
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.sent_headers[key] = value
+
+    def end_headers(self):
+        pass
+
+    def payload(self):
+        try:
+            return json.loads(self.wfile.getvalue().decode("utf-8"))
+        except Exception:
+            return None
+
+
+def _post(body, **kw):
+    return _FakeHandler(json.dumps(body).encode(), **kw)
+
+
+def _reset_tts_config_limiters(routes):
+    for owner in (routes._handle_tts_provider, routes._handle_tts_edge_voice):
+        if hasattr(owner, "_tts_config_limiter"):
+            delattr(owner, "_tts_config_limiter")
+
+
+def _disable_route_auth(monkeypatch):
+    import api.auth as auth_mod
+    monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: False)
+
+
+def test_tts_provider_endpoint_rate_limits_repeated_config_writes(temp_config, monkeypatch):
+    """Rapid repeated provider writes are rejected before hammering config.yaml."""
+    import api.config as cfg_mod
+    import api.routes as routes
+
+    _reset_tts_config_limiters(routes)
+    _disable_route_auth(monkeypatch)
+    try:
+        with patch.object(cfg_mod, "reload_config"):
+            first = _post({"provider": "mistral"}, client="10.0.0.1")
+            routes._handle_tts_provider(first, None)
+            second = _post({"provider": "edge"}, client="10.0.0.1")
+            routes._handle_tts_provider(second, None)
+
+        assert first.status == 200
+        assert second.status == 429
+        assert "rate limit" in (second.payload() or {}).get("error", "")
+        with open(temp_config) as f:
+            content = f.read()
+        assert "provider: mistral" in content
+        assert "provider: edge" not in content
+    finally:
+        _reset_tts_config_limiters(routes)
+
+
+def test_tts_edge_voice_endpoint_rate_limits_repeated_config_writes(temp_config, monkeypatch):
+    """Rapid repeated Edge voice writes are rejected before hammering config.yaml."""
+    import api.config as cfg_mod
+    import api.routes as routes
+
+    _reset_tts_config_limiters(routes)
+    _disable_route_auth(monkeypatch)
+    try:
+        with patch.object(cfg_mod, "reload_config"):
+            first = _post({"voice": "en-US-GuyNeural"}, client="10.0.0.2")
+            routes._handle_tts_edge_voice(first, None)
+            second = _post({"voice": "en-US-AriaNeural"}, client="10.0.0.2")
+            routes._handle_tts_edge_voice(second, None)
+
+        assert first.status == 200
+        assert second.status == 429
+        assert "rate limit" in (second.payload() or {}).get("error", "")
+        with open(temp_config) as f:
+            content = f.read()
+        assert "voice: en-US-GuyNeural" in content
+        assert "voice: en-US-AriaNeural" not in content
+    finally:
+        _reset_tts_config_limiters(routes)
+
+
+def test_tts_provider_and_edge_voice_endpoints_have_separate_limiters(temp_config, monkeypatch):
+    """Normal settings flow can save provider then voice without cross-endpoint blocking."""
+    import api.config as cfg_mod
+    import api.routes as routes
+
+    _reset_tts_config_limiters(routes)
+    _disable_route_auth(monkeypatch)
+    try:
+        with patch.object(cfg_mod, "reload_config"):
+            provider = _post({"provider": "edge"}, client="10.0.0.3")
+            routes._handle_tts_provider(provider, None)
+            voice = _post({"voice": "en-US-GuyNeural"}, client="10.0.0.3")
+            routes._handle_tts_edge_voice(voice, None)
+
+        assert provider.status == 200
+        assert voice.status == 200
+        with open(temp_config) as f:
+            content = f.read()
+        assert "provider: edge" in content
+        assert "voice: en-US-GuyNeural" in content
+    finally:
+        _reset_tts_config_limiters(routes)

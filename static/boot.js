@@ -1348,7 +1348,7 @@ window._defaultMessageMode=_readPersistedDefaultMessageMode();
         .trim();
     }
     if(!clean){ _startListening(); return; }
-    const engine=localStorage.getItem("hermes-tts-engine")||"server";
+    const engine=localStorage.getItem("hermes-tts-engine")||"browser";
     if(engine==="browser"){
       const utter=new SpeechSynthesisUtterance(clean);
 

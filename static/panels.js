@@ -8328,41 +8328,67 @@ function _speechPreferencesPayloadFromUi(){
 
 
 function _ttsProviderLabel(provider){
-  const safe=String(provider||'').replace(/[^a-z0-9_]/g,'_');
+  const safe=String(provider||'').toLowerCase().replace(/[^a-z0-9_]/g,'_');
   const key='tts_provider_'+safe;
   const translated=t(key);
   if(translated&&translated!==key) return translated;
   return String(provider||'');
 }
 
+function _normalizeTtsEngineValue(value){
+  const raw=String(value||'').trim();
+  if(!raw) return 'browser';
+  if(raw==='browser'||raw==='server'||raw.startsWith('server:')) return raw;
+  // Migrate legacy direct provider ids (edge/openai/elevenlabs/etc.) to the
+  // delegated server-provider shape without losing the user's selection.
+  return 'server:'+raw;
+}
+
 function _setTtsProviderSelectFromCapability(ttsEngineSel,cap){
   if(!ttsEngineSel) return cap;
   window._ttsCapabilityData=cap;
   const providers=Array.isArray(cap&&cap.available_providers)?cap.available_providers:[];
+  const serverAvailable=providers.length>0 || !!(cap&&cap.available===true);
   ttsEngineSel.querySelectorAll('option[value^="server"], option[value^="browser:"]').forEach(o=>o.remove());
   providers.forEach(p=>{
+    const provider=String(p||'').trim();
+    if(!provider) return;
     const opt=document.createElement('option');
-    opt.value='server:'+p;
-    opt.textContent=_ttsProviderLabel(p)+' (server)';
+    opt.value='server:'+provider;
+    opt.textContent=_ttsProviderLabel(provider)+' (server)';
     ttsEngineSel.appendChild(opt);
   });
   // Inject the config provider as a synthetic option if it's not in the
-  // allowlist (handles custom command and plugin providers).
-  const configProvider=(cap&&cap.provider)||'browser';
+  // allowlist (handles custom command and plugin providers), but only when the
+  // agent reports server TTS capability. With no capability, Browser must remain
+  // selected so Listen does not route to a guaranteed 500.
+  const configProvider=String((cap&&cap.provider)||'browser').trim()||'browser';
   const allowlistHasProvider=v=>providers.indexOf(v)!==-1;
-  if(configProvider!=='browser'&&!allowlistHasProvider(configProvider)){
+  if(serverAvailable&&configProvider!=='browser'&&!allowlistHasProvider(configProvider)){
     const opt=document.createElement('option');
     opt.value='server:' + configProvider;
     opt.textContent=configProvider+' (from config.yaml)';
     ttsEngineSel.appendChild(opt);
   }
-  const configOption=configProvider==='browser'?'browser':'server:'+configProvider;
-  if(ttsEngineSel.querySelector('option[value="'+configOption+'"]')){
-    ttsEngineSel.value=configOption;
-  }else{
+  if(!serverAvailable){
+    const opt=document.createElement('option');
+    opt.value='server:unavailable';
+    opt.textContent='Server TTS unavailable on agent';
+    opt.disabled=true;
+    ttsEngineSel.appendChild(opt);
     ttsEngineSel.value='browser';
+    localStorage.setItem('hermes-tts-engine','browser');
+    return cap;
   }
-  localStorage.setItem('hermes-tts-engine',ttsEngineSel.value);
+  const optionForValue=value=>Array.from(ttsEngineSel.options||[]).find(o=>o.value===value);
+  const current=_normalizeTtsEngineValue(localStorage.getItem('hermes-tts-engine')||ttsEngineSel.value||'browser');
+  const configOption=configProvider==='browser'?'browser':'server:'+configProvider;
+  let desired=current==='server'?configOption:current;
+  if(!optionForValue(desired)){
+    desired=optionForValue(configOption)?configOption:'browser';
+  }
+  ttsEngineSel.value=desired;
+  localStorage.setItem('hermes-tts-engine',desired);
   return cap;
 }
 
@@ -8392,7 +8418,7 @@ function _fetchTtsCapability(ttsEngineSel,onSettled){
 
 function _renderTtsVoiceOptions(ttsVoiceSel,speechSetting){
   if(!ttsVoiceSel) return;
-  const engine=localStorage.getItem('hermes-tts-engine')||'server';
+  const engine=localStorage.getItem('hermes-tts-engine')||'browser';
   const current=String(speechSetting('tts_voice','hermes-tts-voice','')||'');
   if(engine==='server:edge'){
     // Edge TTS: show the voice allowlist so the user can pick. Multilingual

@@ -11594,7 +11594,9 @@ def handle_get(handler, parsed) -> bool:
         return handle_transcribe_capability(handler)
 
     if parsed.path == "/api/tts/capability":
-        return _handle_tts_capability(handler)
+        from api.profiles import profile_env_for_active_request_readonly
+        with profile_env_for_active_request_readonly("/api/tts/capability", logger_override=logger):
+            return _handle_tts_capability(handler)
 
     if parsed.path == "/api/reasoning":
         # Current reasoning config (shared source of truth with the CLI —
@@ -12960,13 +12962,19 @@ def handle_post(handler, parsed) -> bool:
         return handle_transcribe(handler)
 
     if parsed.path == "/api/tts":
-        return _handle_tts(handler, parsed)
+        from api.profiles import profile_env_for_active_request
+        with profile_env_for_active_request("/api/tts", logger_override=logger):
+            return _handle_tts(handler, parsed)
 
     if parsed.path == "/api/tts/provider":
-        return _handle_tts_provider(handler, parsed)
+        from api.profiles import profile_env_for_active_request
+        with profile_env_for_active_request("/api/tts/provider", logger_override=logger):
+            return _handle_tts_provider(handler, parsed)
 
     if parsed.path == "/api/tts/edge/voice":
-        return _handle_tts_edge_voice(handler, parsed)
+        from api.profiles import profile_env_for_active_request
+        with profile_env_for_active_request("/api/tts/edge/voice", logger_override=logger):
+            return _handle_tts_edge_voice(handler, parsed)
 
     if parsed.path == "/api/client-events/log":
         if diag:
@@ -16636,10 +16644,88 @@ _TTS_PROVIDER_CHECKS = {
 }
 
 
+class _TtsRateLimiter:
+    def __init__(self, window_seconds=2.0, prune_interval=50):
+        self.window = window_seconds
+        self.prune_interval = prune_interval
+        self._hits = {}
+        self._lock = threading.Lock()
+        self._checks = 0
+
+    def _get_client_key(self, h):
+        trust_proxy = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "").strip().lower()
+        if trust_proxy in ("1", "true", "yes", "on"):
+            for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
+                val = h.headers.get(hdr)
+                if val:
+                    ip = val.split(",")[0].strip().split(";")[0].strip()
+                    if ip:
+                        return ip
+        return getattr(h, "client_address", ("unknown",))[0]
+
+    def check(self, handler, session_cookie=None):
+        key = self._get_client_key(handler)
+        if session_cookie and "." in str(session_cookie):
+            key = str(session_cookie).split(".", 1)[0]
+        now = time.time()
+        with self._lock:
+            self._checks += 1
+            if self._checks % self.prune_interval == 0:
+                cutoff = now - (self.window * 10)
+                self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
+            last = self._hits.get(key, 0)
+            if now - last < self.window:
+                return False
+            self._hits[key] = now
+            return True
+
+
+def _get_tts_limiter(owner, attr_name="_tts_limiter", window_seconds=2.0):
+    limiter = getattr(owner, attr_name, None)
+    if limiter is None:
+        limiter = _TtsRateLimiter(window_seconds=window_seconds)
+        setattr(owner, attr_name, limiter)
+    return limiter
+
+
+def _tts_content_type_for_path(path):
+    ext = Path(str(path)).suffix.lower().lstrip(".")
+    return {
+        "mp3": "audio/mpeg",
+        "mpeg": "audio/mpeg",
+        "wav": "audio/wav",
+        "ogg": "audio/ogg",
+        "oga": "audio/ogg",
+        "opus": "audio/ogg",
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "m4a": "audio/mp4",
+        "webm": "audio/webm",
+    }.get(ext, "audio/mpeg")
+
+
+def _tts_config_rate_limit(handler, owner):
+    """Rate-limit config-writing TTS endpoints per client/session."""
+    from api.auth import is_auth_enabled, parse_cookie
+
+    cv = parse_cookie(handler) if is_auth_enabled() else None
+    limiter = _get_tts_limiter(owner, "_tts_config_limiter", window_seconds=1.0)
+    if limiter.check(handler, cv):
+        return None
+    logger.warning("TTS config write rate limit hit for client=%s", limiter._get_client_key(handler))
+    from api.helpers import bad
+    bad(handler, "rate limit exceeded — please wait", 429)
+    return True
+
+
 def _handle_tts_provider(handler, parsed):
     """Set the active agent TTS provider. POST /api/tts/provider"""
     from api.helpers import j, bad, read_body
     from api.config import set_hermes_tts_provider
+
+    limited = _tts_config_rate_limit(handler, _handle_tts_provider)
+    if limited:
+        return limited
 
     try:
         body = read_body(handler)
@@ -16658,6 +16744,10 @@ def _handle_tts_edge_voice(handler, parsed):
     """Set the Edge TTS voice in agent config. POST /api/tts/edge/voice"""
     from api.helpers import j, bad, read_body
     from api.config import set_hermes_edge_voice
+
+    limited = _tts_config_rate_limit(handler, _handle_tts_edge_voice)
+    if limited:
+        return limited
 
     try:
         body = read_body(handler)
@@ -16707,48 +16797,9 @@ def _handle_tts(handler, parsed):
             return _bad(handler, "unauthorized", 401)
 
     # Per-client rate limit (2s window)
-    if not hasattr(_handle_tts, "_tts_limiter"):
-        import time as _time, threading as _threading
-        class _TtsRateLimiter:
-            def __init__(self, window_seconds=2.0, prune_interval=50):
-                self.window = window_seconds
-                self.prune_interval = prune_interval
-                self._hits = {}
-                self._lock = _threading.Lock()
-                self._checks = 0
-
-            def _get_client_key(self, h):
-                trust_proxy = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "").strip().lower()
-                if trust_proxy in ("1", "true", "yes", "on"):
-                    for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
-                        val = h.headers.get(hdr)
-                        if val:
-                            ip = val.split(",")[0].strip().split(";")[0].strip()
-                            if ip:
-                                return ip
-                return getattr(h, "client_address", ("unknown",))[0]
-
-            def check(self, handler, session_cookie=None):
-                key = self._get_client_key(handler)
-                if session_cookie and "." in str(session_cookie):
-                    key = str(session_cookie).split(".", 1)[0]
-                now = _time.time()
-                with self._lock:
-                    self._checks += 1
-                    if self._checks % self.prune_interval == 0:
-                        cutoff = now - (self.window * 10)
-                        self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
-                    last = self._hits.get(key, 0)
-                    if now - last < self.window:
-                        return False
-                    self._hits[key] = now
-                    return True
-
-        _handle_tts._tts_limiter = _TtsRateLimiter(window_seconds=2.0)
-
-    if not _handle_tts._tts_limiter.check(handler, cv):
-        logger.warning("TTS rate limit hit for client=%s",
-                       _handle_tts._tts_limiter._get_client_key(handler))
+    limiter = _get_tts_limiter(_handle_tts, window_seconds=2.0)
+    if not limiter.check(handler, cv):
+        logger.warning("TTS rate limit hit for client=%s", limiter._get_client_key(handler))
         return _bad(handler, "rate limit exceeded — please wait", 429)
 
     import base64, json as _json, tempfile
@@ -16760,6 +16811,7 @@ def _handle_tts(handler, parsed):
     tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
     tmp_path = tmp.name
     tmp.close()
+    _fpath = None
     try:
         _result = _json.loads(text_to_speech_tool(text=text, output_path=tmp_path))
         if not isinstance(_result, dict):
@@ -16772,7 +16824,7 @@ def _handle_tts(handler, parsed):
 
         with open(_fpath, "rb") as _f:
             _audio_data = _f.read()
-        _ct = "audio/mpeg" if str(_fpath).endswith(".mp3") else "audio/wav"
+        _ct = _tts_content_type_for_path(_fpath)
         _b64 = base64.b64encode(_audio_data).decode("ascii")
         return j(handler, {
             "audio": f"data:{_ct};base64,{_b64}",
@@ -16785,10 +16837,13 @@ def _handle_tts(handler, parsed):
         logger.exception("TTS generation failed")
         return _bad(handler, f"TTS generation failed: {type(e).__name__}: {e}", 500)
     finally:
-        try:
-            os.unlink(tmp_path)
-        except (FileNotFoundError, OSError):
-            pass
+        for _cleanup in dict.fromkeys([tmp_path, _fpath]):
+            if not _cleanup:
+                continue
+            try:
+                os.unlink(_cleanup)
+            except (FileNotFoundError, OSError):
+                pass
 
 
 def _html_preview_with_blank_base(raw: bytes) -> bytes:
