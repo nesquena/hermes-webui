@@ -1291,19 +1291,42 @@ function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
 function _estimateUserRowIntrinsicHeight(rawText){
   const t=String(rawText||'');
   if(!t) return 96;
-  // ~48 chars/line at the mobile user-bubble width (≈90% of a phone viewport), ~22px per
-  // line + ~24px row chrome; floored at the stylesheet's 96px so a short row never reserves
-  // LESS than today (estimate can only add reserved height for tall rows, never regress).
+  // ~48 half-width chars/line at the mobile user-bubble width (≈90% of a phone viewport),
+  // ~22px per line + ~24px row chrome; floored at the stylesheet's 96px so a short row never
+  // reserves LESS than today (estimate can only add reserved height for tall rows, never
+  // regress). CJK / full-width characters occupy ~2 columns each, so a Chinese/Japanese/
+  // Korean paste wraps at ~24 chars/line — counting them as 1 badly UNDER-estimates the
+  // height (a 3k-char CJK paste is ~2x taller than the naive length/48 guess). Weight wide
+  // characters as 2 columns so the fresh-row reserve is close to reality even for a row the
+  // reader has never scrolled into view (content-visibility:auto reports only the reserve
+  // for a never-painted row, so a good estimate is the only backstop there). Uses a Unicode
+  // range test (no \p{} — keep the RegExp engine-portable across the supported browsers).
   const explicitLines=(t.match(/\n/g)||[]).length+1;
-  const wrapLines=Math.ceil(t.length/48);
+  let columns=0;
+  for(let i=0;i<t.length;i++){
+    const c=t.charCodeAt(i);
+    // CJK Unified + Ext-A, Hiragana/Katakana, Hangul, CJK symbols/punctuation, full-width forms.
+    const wide=(c>=0x1100&&c<=0x115F)||(c>=0x2E80&&c<=0xA4CF)||(c>=0xAC00&&c<=0xD7A3)||
+               (c>=0xF900&&c<=0xFAFF)||(c>=0xFE30&&c<=0xFE4F)||(c>=0xFF00&&c<=0xFF60)||(c>=0xFFE0&&c<=0xFFE6);
+    columns+=wide?2:1;
+  }
+  const wrapLines=Math.ceil(columns/48);
   const lines=Math.max(explicitLines, wrapLines);
   return Math.max(96, Math.round(lines*22+24));
 }
 function _applyUserRowIntrinsicHeight(row, rawText){
   if(!row||!row.style||!row.dataset) return;
   const key=Number(row.dataset.sessionMsgIdx);
-  let h=Number.isFinite(key)?_userRowIntrinsicHeightBySessionIdx[key]:0;
-  if(!(h>0)) h=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText);
+  const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
+  const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText);
+  // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
+  // height can be a PARTIAL paint: a user row taller than the viewport that only ever had its
+  // top slice scrolled through content-visibility:auto reports just the painted portion, not
+  // its full height — persisting that would under-reserve and let scrollHeight collapse on the
+  // next rebuild (the jump-back). Taking the max means a good estimate floors the reserve even
+  // when the measurement under-read, while a full measurement (row shorter than the viewport,
+  // fully painted) still wins when it exceeds the estimate.
+  const h=Math.max(remembered, estimate);
   if(h>0) row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
 }
 function _measureMessageVirtualRow(inner, entry){
@@ -1359,6 +1382,70 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
   }else{
     _markMessageVirtualMeasurementsSettled(virtualWindow);
+  }
+}
+// #5638 follow-up — the non-virtualized transcript path (the #4325 opt-out, where
+// _virtualizeTranscript===false renders every row with no windowing) never runs the
+// virtualized measure pass above, so a user row's real height is never remembered.
+// content-visibility:auto on user rows then collapses a freshly-rebuilt off-screen tall
+// user row to its flat contain-intrinsic-size estimate on every renderMessages() rebuild
+// (each streaming frame does inner.innerHTML='' then rebuilds all rows as FRESH elements
+// that have never painted at full size). scrollHeight shrinks by (realHeight-estimate),
+// the browser force-clamps scrollTop, and the viewport jumps backward — the desktop/mobile
+// jump-back, with JS=none because the clamp is the browser's own.
+//
+// The reliable moment to read a user row's REAL height is JUST BEFORE the wipe: the old
+// rows are still in the DOM, laid out at full height (content-visibility:auto reports the
+// true rect height once an element has painted, at any scroll position — verified: a tall
+// off-screen user row still measures its real height pre-wipe). A POST-render read is
+// unreliable because a freshly-rebuilt off-screen row reports its collapsed reserve, not
+// its real size, so it would persist the wrong (small) value. Capture pre-wipe, keyed by
+// the stable session-relative index, so the rebuild's _applyUserRowIntrinsicHeight reserves
+// the real off-screen height and scrollHeight stays stable across the rebuild.
+// Desktop rests at content-visibility:visible (intrinsic-size ignored) → inert there.
+function _rememberRenderedUserRowIntrinsicHeights(){
+  const container=$('messages');
+  const inner=$('msgInner');
+  if(!container||!inner) return;
+  const rows=inner.querySelectorAll('.msg-row[data-role="user"][data-msg-idx]');
+  if(!rows.length) return;
+  const cRect=container.getBoundingClientRect();
+  // Only trust a row that is currently WITHIN (or straddling) the viewport: such a row has
+  // been painted at full size, so getBoundingClientRect().height is its REAL height. A row
+  // that content-visibility:auto is skipping (fully off-screen and never painted this
+  // session) reports only its contain-intrinsic-size reserve — persisting THAT would poison
+  // the remembered height with the collapsed value and defeat the estimate backstop for a
+  // never-seen row. The viewport intersection test is the reliable "has this row painted?"
+  // signal (an off-screen row that WAS painted earlier keeps its real height too, but we
+  // don't need it here — it either was captured on a prior in-view pass or the estimate
+  // covers it). Small margin so a row just above/below the fold still counts as painted.
+  const margin=Math.max(0, cRect.height||0);
+  for(let i=0;i<rows.length;i++){
+    const row=rows[i];
+    if(!row||!row.dataset||!row.style) continue;
+    const r=row.getBoundingClientRect();
+    const measured=Math.max(0, r.height||0);
+    if(!(measured>0)) continue;
+    // In-viewport (with a one-screen margin) ⇒ painted ⇒ height is trustworthy — but only
+    // for a row that FITS the viewport. A row taller than the viewport only ever paints the
+    // intersecting slice under content-visibility:auto, so its measured height is a PARTIAL
+    // value, not the full row. Floor every persisted height at the content estimate so a
+    // partial paint can never lower the reserve below a reasonable full-row guess; a full
+    // paint (short row) still wins when it exceeds the estimate.
+    const inView=(r.bottom>=cRect.top-margin)&&(r.top<=cRect.bottom+margin);
+    if(!inView) continue;
+    const estimate=(typeof _estimateUserRowIntrinsicHeight==='function')
+      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText) : 0;
+    const h=Math.max(measured, estimate);
+    if(!(h>0)) continue;
+    const key=Number(row.dataset.sessionMsgIdx);
+    const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
+    // Keep the tallest reserve seen — a row mid-collapse (rebuild transient) can report a
+    // shrunken size; never let that overwrite a good taller remembered value.
+    if(h>=remembered && typeof _rememberUserRowIntrinsicHeight==='function'){
+      _rememberUserRowIntrinsicHeight(row.dataset.sessionMsgIdx, h);
+      row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
+    }
   }
 }
 function _scheduleMessageVirtualizedRender(force){
@@ -13974,6 +14061,15 @@ function renderMessages(options){
     if(!_m) return false;
     return (_m.scrollHeight-_m.scrollTop-_m.clientHeight)<=8;
   })();
+  // Pre-wipe capture: read the still-laid-out user rows' REAL heights before the wipe below
+  // destroys them, and persist so the rebuild reserves the real off-screen height. This is
+  // the non-virtualized analog of #5638's virtualized measure pass (which never runs when
+  // _virtualizeTranscript===false). Without it, a fresh off-screen tall user row reserves
+  // only the flat contain-intrinsic-size estimate, scrollHeight shrinks, and the browser
+  // clamps scrollTop → the jump-back. Reading pre-wipe (not post-render) is what makes the
+  // measurement reliable — the old elements have painted, so their rect height is real even
+  // off-screen; a post-render read of a fresh off-screen row returns its collapsed reserve.
+  if(typeof _rememberRenderedUserRowIntrinsicHeights==='function') _rememberRenderedUserRowIntrinsicHeights();
   // The DOM wipe can briefly collapse #msgInner to zero height, causing the
   // browser to clamp #messages.scrollTop to 0 and emit a scroll event.  That
   // event is a render artifact, not user intent; if the scroll listener sees it
