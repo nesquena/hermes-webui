@@ -1208,11 +1208,18 @@ function _cloneHermesExtensionEventPayload(value){
   try{ return JSON.parse(JSON.stringify(value===undefined?{}:value)); }
   catch(_){ return {}; }
 }
-function _hermesExtensionHasEventPermission(){
+function _currentHermesExtensionId(){
+  const script=typeof document==='undefined'?null:document.currentScript;
+  if(!script||typeof script.getAttribute!=='function') return '';
+  return String(script.getAttribute('data-hermes-extension-id')||'').trim();
+}
+function _hermesExtensionHasEventPermission(extensionId){
+  if(!extensionId) return false;
   const cfg=window.__HERMES_EXTENSION_CONFIG__;
   const extensions=cfg&&Array.isArray(cfg.extensions)?cfg.extensions:[];
   for(const ext of extensions){
     if(!ext||typeof ext!=='object') continue;
+    if(ext.id!==extensionId) continue;
     if(ext.enabled===false||ext.effective_enabled===false||ext.user_disabled===true||ext.manifest_enabled===false) continue;
     if(ext.status==='user_disabled'||ext.status==='manifest_disabled') continue;
     const observability=ext.permissions&&ext.permissions.observability;
@@ -1241,27 +1248,31 @@ function _normalizeHermesExtensionEventTypes(types){
 function _publishHermesExtensionEvent(type, payload){
   try{
     if(!_HERMES_EXTENSION_EVENT_TYPES.has(type)) return false;
-    if(!_hermesExtensionHasEventPermission()) return false;
     const event={
       type:type,
       timestamp:new Date().toISOString(),
       session_id:(payload&&payload.session_id)||null,
       payload:_cloneHermesExtensionEventPayload(payload||{}),
     };
+    let delivered=false;
     for(const subscriber of _HERMES_EXTENSION_EVENT_SUBSCRIBERS){
       if(subscriber.types&&subscriber.types.size&&!subscriber.types.has(type)) continue;
+      if(!_hermesExtensionHasEventPermission(subscriber.extensionId)) continue;
       try{ subscriber.handler(_cloneHermesExtensionEventPayload(event)); }catch(_){}
+      delivered=true;
     }
-    return true;
+    return delivered;
   }catch(_){ return false; }
 }
 window.HermesExtensionEvents={
   subscribe:function(types, handler){
     try{
       if(typeof handler!=='function') return false;
+      const extensionId=_currentHermesExtensionId();
+      if(!_hermesExtensionHasEventPermission(extensionId)) return false;
       const normalized=_normalizeHermesExtensionEventTypes(types);
       if(normalized===false) return false;
-      const subscriber={types:normalized,handler};
+      const subscriber={extensionId,types:normalized,handler};
       _HERMES_EXTENSION_EVENT_SUBSCRIBERS.add(subscriber);
       return function(){ _HERMES_EXTENSION_EVENT_SUBSCRIBERS.delete(subscriber); };
     }catch(_){ return false; }

@@ -499,8 +499,9 @@ Extensions can subscribe to a read-only live event stream with `window.HermesExt
 
 - `types` accepts a string, an array of strings, or `null` / empty for all supported event types.
 - The handler receives cloned event objects with `type`, `timestamp`, `session_id`, and `payload`.
-- `subscribe()` returns an unsubscribe function on success.
-- Delivery requires an enabled extension manifest entry with `{"permissions":{"observability":{"events":true}}}`.
+- `subscribe()` returns an unsubscribe function on success, and `false` when the caller is not a manifest extension with permission.
+- Call `subscribe()` during the extension script's startup so WebUI can bind the subscriber to that manifest extension's injected script tag.
+- Delivery requires the calling enabled extension manifest entry to declare `{"permissions":{"observability":{"events":true}}}`.
 - Phase 1 covers live stream events only. Metrics access is a separate slice.
 
 ## Extension authoring guidance

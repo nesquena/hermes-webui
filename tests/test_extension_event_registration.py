@@ -18,7 +18,8 @@ MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 
 def test_public_event_api_present():
     assert "const _HERMES_EXTENSION_EVENT_TYPES=new Set(['tool','tool_complete','approval','clarify','done','stream_end','apperror','cancel'])" in BOOT_JS
-    assert "function _hermesExtensionHasEventPermission()" in BOOT_JS
+    assert "function _currentHermesExtensionId()" in BOOT_JS
+    assert "function _hermesExtensionHasEventPermission(extensionId)" in BOOT_JS
     assert "window.HermesExtensionEvents={" in BOOT_JS
     assert "subscribe:function(types, handler)" in BOOT_JS
     assert "window._publishHermesExtensionEvent=_publishHermesExtensionEvent" in BOOT_JS
@@ -39,6 +40,11 @@ def test_live_stream_handlers_publish_selected_events():
     for event_type in ("tool", "tool_complete", "approval", "clarify", "done", "stream_end", "apperror", "cancel"):
         assert f"publishExtensionEvent('{event_type}'" in MESSAGES_JS
     assert "publishExtensionEvent('metering'" not in MESSAGES_JS
+    for event_type in ("approval", "clarify"):
+        listener = MESSAGES_JS.index(f"source.addEventListener('{event_type}'")
+        publish = MESSAGES_JS.index(f"publishExtensionEvent('{event_type}'", listener)
+        guard = MESSAGES_JS.index("if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;", listener)
+        assert guard < publish
 
 
 def test_runtime_config_injects_observability_permission(tmp_path, monkeypatch):
@@ -66,6 +72,7 @@ def test_runtime_config_injects_observability_permission(tmp_path, monkeypatch):
     injected = inject_extension_tags("<html><head></head><body></body></html>")
 
     assert '"permissions":{"observability":{"events":true}}' in injected
+    assert 'data-hermes-extension-id="events-ok"' in injected
     assert injected.index("window.__HERMES_EXTENSION_CONFIG__") < injected.index("/extensions/events.js")
 
 
@@ -80,44 +87,57 @@ def test_subscription_behavior_and_permission_gate():
         const assert = require('assert');
         const results = {{}};
         global.window = {{}};
-        global.document = {{ getElementById: () => null }};
+        global.document = {{ currentScript: null, getElementById: () => null }};
         {region}
 
         const publish = (type, payload) => window._publishHermesExtensionEvent(type, payload);
+        const setCurrentExtension = id => {{
+          document.currentScript = id ? {{ getAttribute: name => name === 'data-hermes-extension-id' ? id : null }} : null;
+        }};
 
         results.apiPresent = !!window.HermesExtensionEvents && typeof window.HermesExtensionEvents.subscribe === 'function';
         results.badHandlerRejected = window.HermesExtensionEvents.subscribe('tool', null) === false;
         results.unknownTypeRejected = window.HermesExtensionEvents.subscribe('metering', () => {{}}) === false;
-        results.noConfigSubscribe = typeof window.HermesExtensionEvents.subscribe('tool', () => {{}}) === 'function';
+        setCurrentExtension('events-ok');
+        results.noConfigSubscribeRejected = window.HermesExtensionEvents.subscribe('tool', () => {{}}) === false;
 
         delete window.__HERMES_EXTENSION_CONFIG__;
         const noConfigEvents = [];
-        const noConfigUnsub = window.HermesExtensionEvents.subscribe('tool', event => noConfigEvents.push(event));
+        window.HermesExtensionEvents.subscribe('tool', event => noConfigEvents.push(event));
         results.noConfigPublishFalse = publish('tool', {{session_id: 'sid-no-config'}}) === false;
         results.noConfigNoDelivery = noConfigEvents.length === 0;
-        noConfigUnsub();
 
         window.__HERMES_EXTENSION_CONFIG__ = {{
           extensions: [{{
+            id: 'denied',
             effective_enabled: true,
             status: 'enabled',
             permissions: {{storage: {{owned: true}}}}
           }}]
         }};
         const deniedEvents = [];
-        const deniedUnsub = window.HermesExtensionEvents.subscribe('tool', event => deniedEvents.push(event));
+        setCurrentExtension('denied');
+        results.deniedSubscribeRejected = window.HermesExtensionEvents.subscribe('tool', event => deniedEvents.push(event)) === false;
         results.missingPermissionFalse = publish('tool', {{session_id: 'sid-denied'}}) === false;
         results.missingPermissionNoDelivery = deniedEvents.length === 0;
-        deniedUnsub();
 
         window.__HERMES_EXTENSION_CONFIG__ = {{
           extensions: [{{
+            id: 'events-ok',
             effective_enabled: true,
             status: 'enabled',
             permissions: {{observability: {{events: true}}}}
+          }}, {{
+            id: 'denied',
+            effective_enabled: true,
+            status: 'enabled',
+            permissions: {{storage: {{owned: true}}}}
           }}]
         }};
 
+        setCurrentExtension('denied');
+        results.deniedWithPermittedPeerRejected = window.HermesExtensionEvents.subscribe('tool', () => {{}}) === false;
+        setCurrentExtension('events-ok');
         const toolEvents = [];
         const arrayEvents = [];
         const allEvents = [];
@@ -183,11 +203,13 @@ def test_subscription_behavior_and_permission_gate():
     assert out["apiPresent"] is True
     assert out["badHandlerRejected"] is True
     assert out["unknownTypeRejected"] is True
-    assert out["noConfigSubscribe"] is True
+    assert out["noConfigSubscribeRejected"] is True
     assert out["noConfigPublishFalse"] is True
     assert out["noConfigNoDelivery"] is True
+    assert out["deniedSubscribeRejected"] is True
     assert out["missingPermissionFalse"] is True
     assert out["missingPermissionNoDelivery"] is True
+    assert out["deniedWithPermittedPeerRejected"] is True
     assert out["toolPublishTrue"] is True
     assert out["toolFilter"] is True
     assert out["toolTimestamp"] is True

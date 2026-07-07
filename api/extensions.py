@@ -1282,6 +1282,39 @@ def _extension_runtime_entries(
     return extensions
 
 
+def _extension_script_owners(manifest: object, disabled_ids: Optional[Set[str]] = None) -> Dict[str, str]:
+    """Return manifest script URL to extension id ownership for runtime script tags."""
+    disabled_ids = disabled_ids or set()
+    owners: Dict[str, str] = {}
+    seen_ids: Set[str] = set()
+    for _source, _index, entry in _manifest_extension_entries(manifest):
+        raw_id = _manifest_entry_text(entry, "id")
+        if not _valid_extension_id(raw_id):
+            continue
+        ext_id = raw_id.strip()
+        if ext_id in seen_ids:
+            continue
+        seen_ids.add(ext_id)
+        if entry.get("enabled", True) is False or ext_id in disabled_ids:
+            continue
+        asset_base = str(entry.get("_asset_base", "") or "")
+        for value in _entry_asset_values(entry, "scripts"):
+            url = _manifest_asset_url(value, asset_base)
+            if url and _is_safe_asset_url(url) and url not in owners:
+                owners[url] = ext_id
+    return owners
+
+
+def _current_extension_script_owners() -> Dict[str, str]:
+    root = _extension_root()
+    if root is None:
+        return {}
+    state = _load_extension_state()
+    disabled_ids = set(state.get("disabled_extensions") or [])
+    manifest, _manifest_status = _load_manifest_with_status(root)
+    return _extension_script_owners(manifest, disabled_ids) if manifest is not None else {}
+
+
 def _read_manifest_urls_with_diagnostics(
     root: Path,
     diagnostics: Optional[Dict[str, Any]] = None,
@@ -1938,10 +1971,17 @@ def inject_extension_tags(index_html: str) -> str:
         '<link rel="stylesheet" href="{}">'.format(html.escape(url, quote=True))
         for url in config["stylesheet_urls"]
     ]
-    script_tags = [
-        '<script src="{}" defer></script>'.format(html.escape(url, quote=True))
-        for url in config["script_urls"]
-    ]
+    script_owners = _current_extension_script_owners()
+    script_tags = []
+    for url in config["script_urls"]:
+        owner = script_owners.get(url) if isinstance(script_owners, dict) else None
+        owner_attr = (
+            ' data-hermes-extension-id="{}"'.format(html.escape(owner, quote=True))
+            if owner else ""
+        )
+        script_tags.append(
+            '<script src="{}" defer{}></script>'.format(html.escape(url, quote=True), owner_attr)
+        )
     runtime_config = {
         "extensions": config.get("extensions", []),
     }

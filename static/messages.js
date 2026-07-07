@@ -5147,6 +5147,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
+      if(_terminalStateReached||_streamFinalized) return;
+      if(d.session_id&&d.session_id!==activeSid) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       publishExtensionEvent('approval',d);
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, 1);
@@ -5156,6 +5159,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
+      if(_terminalStateReached||_streamFinalized) return;
+      if(d.session_id&&d.session_id!==activeSid) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       publishExtensionEvent('clarify',d);
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
