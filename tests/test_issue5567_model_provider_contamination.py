@@ -156,6 +156,27 @@ const results = {};
   results.repair_bare = { changed: changed, provider_after: s.model_provider };
 }
 
+// --- Scenario 8: a HEALTHY Nous session must never be repaired. Nous is an
+//     aggregator (hermes-agent _AGGREGATOR_PROVIDERS) whose sessions persist the
+//     RESOLVED pair: resolve_model_provider('@nous:anthropic/claude-opus-4.6')
+//     unpacks to model 'anthropic/claude-opus-4.6' + provider 'nous' before the
+//     session write. Treating the vendor prefix as a contradiction would null a
+//     correct provider and re-route the session (e.g. to openrouter).
+{
+  const s = { model: 'anthropic/claude-opus-4.6', model_provider: 'nous' };
+  const changed = _repairContaminatedSessionModelProvider(s);
+  results.repair_nous = { changed: changed, provider_after: s.model_provider };
+}
+
+// --- Scenario 9: kilocode (also an aggregator) owns kilo/vendor/model ids; the
+//     'kilo' prefix is not the literal string 'kilocode' but is NOT a
+//     contradiction — the stored provider must survive the load repair.
+{
+  const s = { model: 'kilo/minimax/minimax-m3', model_provider: 'kilocode' };
+  const changed = _repairContaminatedSessionModelProvider(s);
+  results.repair_kilocode = { changed: changed, provider_after: s.model_provider };
+}
+
 process.stdout.write(JSON.stringify(results));
 """
 
@@ -199,3 +220,14 @@ def test_model_provider_resolution_behavior():
     # Scenario 7 — bare model name is never repaired.
     assert r["repair_bare"]["changed"] is False
     assert r["repair_bare"]["provider_after"] == "ollama"
+
+    # Scenario 8 — a healthy Nous aggregator session (persisted resolved shape:
+    # vendor-prefixed model + provider 'nous') is NEVER repaired; nulling it
+    # would let the backend re-route the session to a different provider.
+    assert r["repair_nous"]["changed"] is False
+    assert r["repair_nous"]["provider_after"] == "nous"
+
+    # Scenario 9 — kilocode aggregator session keeps its stored provider even
+    # though the 'kilo' prefix is not the literal provider id.
+    assert r["repair_kilocode"]["changed"] is False
+    assert r["repair_kilocode"]["provider_after"] == "kilocode"

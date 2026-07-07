@@ -2693,7 +2693,16 @@ function _repairContaminatedSessionModelProvider(session){
     if(/^[a-z][a-z0-9+.-]*:\/\//i.test(model)) return false;
     const storedLower=stored.toLowerCase();
     // Providers that legitimately route slash-prefixed vendor ids — leave alone.
-    if(storedLower==='custom'||storedLower.startsWith('custom:')||storedLower==='openrouter') return false;
+    // This must cover the FULL aggregator set (hermes-agent model_normalize.py
+    // _AGGREGATOR_PROVIDERS: openrouter, nous, kilocode — "providers whose APIs
+    // consume vendor/model slugs") plus named custom providers. A healthy Nous
+    // session persists the RESOLVED pair (model 'anthropic/claude-opus-4.6',
+    // provider 'nous') — resolve_model_provider() unpacks '@nous:vendor/model'
+    // to exactly that shape before the session write — so treating the vendor
+    // prefix as a contradiction here would null a correct provider and let the
+    // backend re-route the session (e.g. to openrouter): the very failure class
+    // this repair exists to fix.
+    if(storedLower==='custom'||storedLower.startsWith('custom:')||storedLower==='openrouter'||storedLower==='nous'||storedLower==='kilocode') return false;
     const aliases={'claude':'anthropic','gpt':'openai','gemini':'google'};
     const norm=p=>aliases[p]||p;
     const inferred=norm(model.slice(0,slash).toLowerCase());
