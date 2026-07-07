@@ -173,23 +173,63 @@ def test_realign_allows_on_desktop_no_native_anchor():
 # ---- fallback guard (_restoreMessageScrollSnapshotSameFrame) ---------------------
 
 def _fallback_harness(*, snapshot_scroll_height, cur_scroll_height, snapshot_top,
-                      active_intent: bool = False, touch_like: bool = True) -> str:
+                      active_intent: bool = False, touch_like: bool = True,
+                      init_scroll_top: int = 90030,
+                      anchor=None, anchor_row_content_pos=None, container_top: int = 0,
+                      top_pad_now=None) -> str:
+    """Node harness for the absolute-fallback path of _restoreMessageScrollSnapshotSameFrame.
+
+    SCROLL-DEPENDENT geometry (round-3 gate-cert requirement): the anchor row's
+    getBoundingClientRect().top is computed LIVE as `rowContentPos - scrollTop + container_top`
+    — exactly how a real browser reports it — NOT a fixed constant. So after the fix
+    writes `el.scrollTop += delta`, a subsequent rect read reflects the new position, and
+    a certified hold number is physically realizable.
+
+    anchor: dict for snapshot.anchor (with key/sessionIdx/topOffset[/topPadBefore]) or None.
+    anchor_row_content_pos: the row's ABSOLUTE content position (document-space top). Its
+      live viewport offset is rowContentPos - scrollTop. When None, the row lookup returns
+      nothing (genuinely-gone anchor -> topPad-delta or raw).
+    top_pad_now: current virtual top-spacer height (for the genuinely-gone topPad-delta path).
+    """
     js = UI_JS_PATH.read_text(encoding="utf-8")
     intent_js = "true" if active_intent else "false"
     touch_js = "true" if touch_like else "false"
     sh = "null" if snapshot_scroll_height is None else str(snapshot_scroll_height)
+    anchor_js = "null" if anchor is None else json.dumps(anchor)
+    row_present = anchor is not None and anchor_row_content_pos is not None
+    row_pos_js = "0" if anchor_row_content_pos is None else str(anchor_row_content_pos)
+    pad_now_js = "null" if top_pad_now is None else str(top_pad_now)
     return _extract_func_script(js) + f"""
 let writes = [];
-let stTop = 90030;
+let stTop = {init_scroll_top};
+const CONTAINER_TOP = {container_top};
+const ROW_CONTENT_POS = {row_pos_js};
+const ROW_PRESENT = {"true" if row_present else "false"};
+const TOP_PAD_NOW = {pad_now_js};
+// A real browser's rect.top for a row is (rowContentPos - scrollTop) relative to the
+// document, so its offset below the container top is ROW_CONTENT_POS - scrollTop.
+const _anchorRow = ROW_PRESENT ? {{
+  getBoundingClientRect(){{ return {{ top: CONTAINER_TOP + (ROW_CONTENT_POS - stTop) }}; }},
+  getClientRects(){{ return [{{}}]; }},
+}} : null;
+const _topSpacer = (TOP_PAD_NOW === null) ? null : {{
+  style: {{ height: TOP_PAD_NOW + 'px' }},
+}};
 const el = {{
   get scrollTop(){{ return stTop; }}, set scrollTop(v){{ writes.push(Math.round(v)); stTop = v; }},
   scrollHeight: {cur_scroll_height}, clientHeight: 427,
+  getBoundingClientRect(){{ return {{ top: CONTAINER_TOP, bottom: CONTAINER_TOP + 427 }}; }},
+  querySelector(sel){{
+    if (sel === '[data-virtual-spacer="before"]') return _topSpacer;
+    return _anchorRow;
+  }},
+  querySelectorAll(sel){{ return _anchorRow ? [_anchorRow] : []; }},
 }};
 function $(id){{ return id === 'messages' ? el : null; }}
 function _recentMessageScrollIntent(){{ return {intent_js}; }}
 function _recentMessageTouchScrollIntent(){{ return {intent_js}; }}
 function _isTouchLikeMessageViewport(){{ return {touch_js}; }}
-// realign path fails (no anchor) so execution reaches the absolute fallback
+// realign path fails (no anchor restore) so execution reaches the absolute fallback
 function _restorePinnedMessageScrollSnapshot(){{ return false; }}
 function _restoreMessageViewportAnchor(){{ return false; }}
 function _remountMessageViewportAnchor(){{ return false; }}
@@ -200,12 +240,13 @@ const performance = {{ now(){{ return 1; }} }};
 function _deferClearProgrammaticScroll(){{}}
 function requestAnimationFrame(cb){{ cb(); }}
 function setTimeout(cb){{ cb(); return 1; }}
-const snapshot = {{ anchor: null, top: {snapshot_top}, bottom: 40,
+const snapshot = {{ anchor: {anchor_js}, top: {snapshot_top}, bottom: 40,
   scrollHeight: {sh}, pinned: false, userUnpinned: false }};
+eval(extractFunc('_desktopAnchorRealignDelta'));
 eval(extractFunc('_restoreMessageScrollSnapshotSameFrame'));
 _restoreMessageScrollSnapshotSameFrame(snapshot);
 console.log(JSON.stringify({{ wrote: writes.length, writes,
-  messageUserUnpinned: _messageUserUnpinned, scrollPinned: _scrollPinned }}));
+  messageUserUnpinned: _messageUserUnpinned, scrollPinned: _scrollPinned, finalScrollTop: Math.round(stTop) }}));
 """
 
 
@@ -257,9 +298,10 @@ def test_fallback_allows_snapshot_top_on_desktop_no_native_anchor():
     """Desktop regression (#5637 gate cert): the exact stale-snapshot case (content grew,
     reader not pinned, no intent, absolute write would move >8px) but on a
     hover+fine-pointer viewport where `.messages` is `overflow-anchor:none`. With no
-    native anchoring layer to hold the reader, the fallback MUST keep its absolute
-    snapshot.top restore rather than refuse and latch userUnpinned — otherwise the
-    desktop reader is left at the wrong absolute position and force-unpinned.
+    native anchoring layer to hold the reader, the fallback MUST still WRITE rather than
+    refuse-and-latch userUnpinned. With NO anchor on the snapshot (and no top-spacer
+    geometry) there is nothing to realign against, so it keeps the raw snapshot.top —
+    the same authoritative absolute write as before.
     Mutation: drop the `_fbTouchHold&&` term from the fallback guard and this FAILS
     (the write is wrongly refused and userUnpinned is latched on desktop)."""
     m = json.loads(_run_node(_fallback_harness(
@@ -270,7 +312,102 @@ def test_fallback_allows_snapshot_top_on_desktop_no_native_anchor():
     assert m["messageUserUnpinned"] is False and m["scrollPinned"] is True
 
 
-# ---- predicate stability (_isTouchLikeMessageViewport) ---------------------------
+# ---- round-3 desktop anchor-realign (PR #5742): app's own scrollTop += delta idiom -----
+# These use SCROLL-DEPENDENT rect mocks (rect.top = rowContentPos - scrollTop), so the
+# certified hold numbers are physically realizable in a real browser — the round-2
+# gate-cert requirement that fixed-rect mocks violated.
+
+def test_realign_holds_reader_on_above_viewport_growth_desktop():
+    """Reader parked up in history on desktop; above-viewport content grew since capture.
+    The anchor row was captured at topOffset 1000; the reader has ALREADY been carried
+    down by the browser to scrollTop 1480 (partial), and the row's content position is
+    2000 so its live offset is 2000-1480=520. The app idiom writes
+    scrollTop += (currentOffset - capturedOffset) = 1480 + (520 - 1000) = 1000, landing
+    the row back at its captured 1000px offset (2000 - 1000 = 1000). That HOLD is
+    physically realizable: after the write, rect.top = 2000 - 1000 = 1000 = capturedOffset.
+    Mutation: revert `_fbTarget` to the raw `target` (snapshot.top=1200) and this FAILS
+    (the reader is left at 1200, a 200px drift from the held content position)."""
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90000, cur_scroll_height=90600, snapshot_top=1200,
+        active_intent=False, touch_like=False,
+        anchor={"key": "k1", "sessionIdx": 5, "topOffset": 1000},
+        anchor_row_content_pos=2000, container_top=0, init_scroll_top=1480,
+    )))
+    # scrollTop += (currentOffset - capturedOffset) = 1480 + ((2000-1480) - 1000) = 1000
+    assert m["writes"] == [1000]
+    # and the row is now held at its captured offset — physically consistent
+    assert m["finalScrollTop"] == 1000
+    assert m["messageUserUnpinned"] is False and m["scrollPinned"] is True
+
+
+def test_realign_is_noop_when_already_aligned_desktop():
+    """No arbiter: when the reader is already at the captured offset (row content pos 2000,
+    scrollTop 1000 -> live offset 1000 == captured 1000), the realign delta is 0 and no
+    move happens (delta < clamp is still written as the same value, i.e. a no-op write to
+    the same scrollTop). Proves the idiom does not perturb an already-correct position."""
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90000, cur_scroll_height=90600, snapshot_top=1200,
+        active_intent=False, touch_like=False,
+        anchor={"key": "k1", "sessionIdx": 5, "topOffset": 1000},
+        anchor_row_content_pos=2000, container_top=0, init_scroll_top=1000,
+    )))
+    # currentOffset = 2000 - 1000 = 1000 == captured 1000 -> delta 0 -> scrollTop stays 1000
+    assert m["finalScrollTop"] == 1000
+    assert m["writes"] == [1000]
+
+
+def test_realign_does_not_drift_on_below_viewport_tail_growth_desktop():
+    """Below-viewport (tail) growth: the anchor row ABOVE the reader did NOT move
+    (content pos 2000, scrollTop 1000 -> offset 1000 == captured 1000), only content
+    below grew (scrollHeight 90000 -> 95000). The realign delta is 0 -> the reader is
+    NOT pulled downward. This is the conveyor-belt drift the round-2 arbiter formula
+    reintroduced; the app idiom cannot, because it keys on the ABOVE-viewport anchor row,
+    whose offset is unchanged by tail growth.
+    Mutation: a `snapshot.top + totalGrowth` formula would write 1000 + 5000 = 6000 and
+    drift the reader down 5000px; this asserts the held 1000."""
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90000, cur_scroll_height=95000, snapshot_top=1000,
+        active_intent=False, touch_like=False,
+        anchor={"key": "k1", "sessionIdx": 5, "topOffset": 1000},
+        anchor_row_content_pos=2000, container_top=0, init_scroll_top=1000,
+    )))
+    assert m["finalScrollTop"] == 1000
+    assert m["writes"] == [1000]
+
+
+def test_realign_genuinely_gone_anchor_uses_toppad_delta_desktop():
+    """Anchor row genuinely gone (lookup returns null), but the snapshot carries
+    topPadBefore and the current virtual top-spacer is measurable. Mirror the topPad-delta
+    idiom: shift scrollTop by (padNow - padBefore) so the reader is held by the same
+    amount the content above moved. padBefore=800, padNow=1300 -> +500 from scrollTop 1000
+    -> 1500.
+    Mutation: drop the topPad-delta branch and it keeps raw snapshot.top (1200), a
+    300px drift from the topPad-held 1500."""
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90000, cur_scroll_height=90500, snapshot_top=1200,
+        active_intent=False, touch_like=False,
+        anchor={"key": "gone", "sessionIdx": 999, "topOffset": 1000, "topPadBefore": 800},
+        anchor_row_content_pos=None, container_top=0, init_scroll_top=1000,
+        top_pad_now=1300,
+    )))
+    assert m["finalScrollTop"] == 1500
+    assert m["writes"] == [1500]
+
+
+def test_realign_genuinely_gone_anchor_no_geometry_keeps_raw_desktop():
+    """Anchor row gone AND no topPad geometry available -> keep the raw snapshot.top
+    (no guessing with an arbiter). snapshot.top=1200 -> writes 1200."""
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90000, cur_scroll_height=90500, snapshot_top=1200,
+        active_intent=False, touch_like=False,
+        anchor={"key": "gone", "sessionIdx": 999, "topOffset": 1000},
+        anchor_row_content_pos=None, container_top=0, init_scroll_top=1000,
+        top_pad_now=None,
+    )))
+    assert m["writes"] == [1200]
+
+
+
 
 def _predicate_harness(*, pointer_coarse, computed_overflow_anchor, has_matchmedia=True,
                        inline_overflow_anchor="", ua="Mozilla/5.0 (Linux; Android 13)",

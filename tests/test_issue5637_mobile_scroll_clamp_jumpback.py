@@ -108,14 +108,14 @@ def test_restore_same_frame_holds_position_for_unpinned_reader():
     )
     # The guard must sit BEFORE the absolute-top scrollTop write and short-circuit it.
     guard_idx = fn.index("snapshot.userUnpinned===true&&snapshot.pinned!==true")
-    # the absolute-top write in the fallback
-    write_idx = fn.index("el.scrollTop=Math.max(0,Math.min(target,maxTop))")
+    # the desktop fallback scrollTop write (round-3: realigned _fbTarget, not raw snapshot.top)
+    write_idx = fn.index("el.scrollTop=_fbTarget")
     assert guard_idx < write_idx, (
-        "The unpinned guard must precede (and return before) the absolute-top "
+        "The unpinned guard must precede (and return before) the fallback "
         "scrollTop write so it is never reached for an unpinned reader (#5637)."
     )
     # Between the guard and the write there must be an early return.
     between = fn[guard_idx:write_idx]
     assert "return;" in between, (
-        "The unpinned guard must `return` before the absolute-top write (#5637)."
+        "The unpinned guard must `return` before the fallback write (#5637)."
     )
