@@ -50,7 +50,9 @@ def test_live_stream_handlers_publish_selected_events():
 def test_runtime_config_injects_observability_permission(tmp_path, monkeypatch):
     root = tmp_path / "extensions"
     root.mkdir()
-    (root / "manifest.json").write_text(
+    bundle = root / "events-bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(
         """
         {
           "extensions": [
@@ -65,7 +67,7 @@ def test_runtime_config_injects_observability_permission(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
-    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "manifest.json")
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_MANIFEST", "events-bundle/manifest.json")
 
     from api.extensions import inject_extension_tags
 
@@ -73,7 +75,7 @@ def test_runtime_config_injects_observability_permission(tmp_path, monkeypatch):
 
     assert '"permissions":{"observability":{"events":true}}' in injected
     assert 'data-hermes-extension-id="events-ok"' in injected
-    assert injected.index("window.__HERMES_EXTENSION_CONFIG__") < injected.index("/extensions/events.js")
+    assert injected.index("window.__HERMES_EXTENSION_CONFIG__") < injected.index("/extensions/events-bundle/events.js")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")

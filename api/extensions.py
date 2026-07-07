@@ -1282,7 +1282,9 @@ def _extension_runtime_entries(
     return extensions
 
 
-def _extension_script_owners(manifest: object, disabled_ids: Optional[Set[str]] = None) -> Dict[str, str]:
+def _extension_script_owners(
+    manifest: object, disabled_ids: Optional[Set[str]] = None, asset_base: str = ""
+) -> Dict[str, str]:
     """Return manifest script URL to extension id ownership for runtime script tags."""
     disabled_ids = disabled_ids or set()
     owners: Dict[str, str] = {}
@@ -1297,7 +1299,6 @@ def _extension_script_owners(manifest: object, disabled_ids: Optional[Set[str]] 
         seen_ids.add(ext_id)
         if entry.get("enabled", True) is False or ext_id in disabled_ids:
             continue
-        asset_base = str(entry.get("_asset_base", "") or "")
         for value in _entry_asset_values(entry, "scripts"):
             url = _manifest_asset_url(value, asset_base)
             if url and _is_safe_asset_url(url) and url not in owners:
@@ -1311,8 +1312,9 @@ def _current_extension_script_owners() -> Dict[str, str]:
         return {}
     state = _load_extension_state()
     disabled_ids = set(state.get("disabled_extensions") or [])
-    manifest, _manifest_status = _load_manifest_with_status(root)
-    return _extension_script_owners(manifest, disabled_ids) if manifest is not None else {}
+    manifest, manifest_status = _load_manifest_with_status(root)
+    asset_base = str(manifest_status.get("_asset_base", "") or "")
+    return _extension_script_owners(manifest, disabled_ids, asset_base) if manifest is not None else {}
 
 
 def _read_manifest_urls_with_diagnostics(
