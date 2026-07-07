@@ -99,6 +99,12 @@ def test_chat_activity_display_mode_supports_three_values():
     assert "window._simplifiedToolCalling=true" in PANELS_JS
 
 
+def test_chat_activity_display_mode_picker_uses_three_desktop_columns():
+    assert INDEX_HTML.count('class="chat-activity-mode-btn') == 3
+    assert "#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));" in STYLE_CSS
+    assert "#mainSettings .chat-activity-mode-toggle{grid-template-columns:1fr;}" in STYLE_CSS
+
+
 def test_chat_activity_display_mode_resolver_and_live_early_out():
     script = f"""
 const fs = require('fs');
