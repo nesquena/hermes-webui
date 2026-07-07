@@ -3,7 +3,9 @@ from pathlib import Path
 from api.compression_anchor import visible_messages_for_anchor
 from api.models import Session
 from api.streaming import (
+    _compressed_context_tool_result_summary,
     _is_fallback_lifecycle_message,
+    _merge_display_messages_after_agent_result,
     _message_text,
     _prune_context_tool_results_after_compression,
 )
@@ -172,6 +174,117 @@ def test_post_compression_context_hard_prune_is_idempotent():
     assert [msg["content"] for msg in twice] == [msg["content"] for msg in once]
     assert any("WebUI compressed-context budget" in str(msg.get("content") or "") for msg in once)
     assert context_messages[0]["content"] != once[0]["content"]
+
+
+def test_post_compression_context_hard_prune_preserves_old_summary_after_new_tool_rows():
+    class NoopCompressor:
+        protect_last_n = 20
+        tail_token_budget = 1024
+        threshold_tokens = 4096
+
+        def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens=None):
+            return messages, 0
+
+    compressor = NoopCompressor()
+    agent = type("Agent", (), {"context_compressor": compressor})()
+    context_messages = [
+        {"role": "tool", "tool_call_id": f"call_{idx}", "content": (f"tool {idx} payload\n" * 350)}
+        for idx in range(4)
+    ]
+
+    once = _prune_context_tool_results_after_compression(agent, context_messages)
+    old_summary = once[-1]["content"]
+    assert "\n\n[WebUI compressed-context budget:" in old_summary
+    assert f"of {len(context_messages[-1]['content'])} chars" in old_summary
+
+    with_new_tool = once + [
+        {
+            "role": "tool",
+            "tool_call_id": "call_new",
+            "content": "newer over-budget payload\n" * 700,
+        }
+    ]
+    twice = _prune_context_tool_results_after_compression(agent, with_new_tool)
+
+    assert twice[-2]["content"] == old_summary
+    assert f"of {len(context_messages[-1]['content'])} chars" in twice[-2]["content"]
+
+
+def test_post_compression_context_hard_prune_counts_raw_tool_whitespace():
+    class NoopCompressor:
+        protect_last_n = 20
+        tail_token_budget = 1024
+        threshold_tokens = 4096
+
+        def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens=None):
+            return messages, 0
+
+    compressor = NoopCompressor()
+    agent = type("Agent", (), {"context_compressor": compressor})()
+    whitespace_padded_payload = ("x" + (" " * 79)) * 1000
+    context_messages = [
+        {"role": "tool", "tool_call_id": "call_padded", "content": whitespace_padded_payload},
+    ]
+
+    once = _prune_context_tool_results_after_compression(agent, context_messages)
+
+    assert once[0]["content"] != whitespace_padded_payload
+    assert "WebUI compressed-context budget" in once[0]["content"]
+    assert context_messages[0]["content"] == whitespace_padded_payload
+
+
+def test_post_compression_context_hard_prune_keeps_idless_twin_summaries():
+    class NoopCompressor:
+        protect_last_n = 20
+        tail_token_budget = 512
+        threshold_tokens = 1024
+
+        def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens=None):
+            return messages, 0
+
+    compressor = NoopCompressor()
+    agent = type("Agent", (), {"context_compressor": compressor})()
+    payload = "same idless payload\n" * 300
+    context_messages = [{"role": "tool", "content": payload} for _ in range(3)]
+
+    once = _prune_context_tool_results_after_compression(agent, context_messages)
+
+    assert len(once) == 3
+    assert sum("WebUI compressed-context budget" in msg["content"] for msg in once) == 3
+
+
+def test_post_compression_context_pruned_tool_summary_does_not_backfill_into_display():
+    full_tool_output = "full visible output\n" * 200
+    summary = _compressed_context_tool_result_summary(
+        full_tool_output,
+        original_tokens=(len(full_tool_output) + 3) // 4,
+        keep_tokens=0,
+    )
+    previous_display = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_big"}]},
+        {"role": "tool", "tool_call_id": "call_big", "content": full_tool_output},
+        {"role": "assistant", "content": "Final answer"},
+    ]
+    previous_context = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_big"}]},
+        {"role": "tool", "tool_call_id": "call_big", "content": summary},
+        {"role": "assistant", "content": "Final answer"},
+    ]
+    result_messages = previous_context + [
+        {"role": "user", "content": "next question"},
+        {"role": "assistant", "content": "next answer"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        "next question",
+    )
+
+    merged_tool_contents = [msg["content"] for msg in merged if msg.get("role") == "tool"]
+    assert full_tool_output in merged_tool_contents
+    assert summary not in merged_tool_contents
 
 
 def test_post_compression_context_raw_marker_collision_still_prunes():
