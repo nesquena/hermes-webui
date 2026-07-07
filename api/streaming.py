@@ -4025,6 +4025,10 @@ def _sanitize_messages_for_api(
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        # Drop empty tool_calls — strict providers (DeepSeek, newer OpenAI)
+        # reject tool_calls: [] with HTTP 400 even when no orphaned calls exist.
+        if 'tool_calls' in sanitized and not sanitized['tool_calls']:
+            del sanitized['tool_calls']
         # Provider-aware reasoning_content stripping from model-facing history.
         # Historical assistant reasoning_content is stripped only when the user
         # explicitly requests strip mode or auto mode identifies a local/generic
@@ -4136,6 +4140,8 @@ def _api_safe_message_positions(messages):
             if not tid or tid not in valid_tool_call_ids:
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if 'tool_calls' in sanitized and not sanitized['tool_calls']:
+            del sanitized['tool_calls']
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
         if 'content' in sanitized:
