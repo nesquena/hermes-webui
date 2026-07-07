@@ -219,6 +219,91 @@ process.stdout.write(JSON.stringify(scene.activity_rows.map(row => row.text)));
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_issue5749_long_live_progress_prefix_survives_without_settled_duplicate(tmp_path):
+    final_answer = "I checked the logs, identified the failing deterministic shard, and now I am applying the narrow render-path fix before rerunning the exact test file. The final answer continues with validation details and the pushed commit."
+    prefix_text = "I checked the logs, identified the failing deterministic shard, and now I am applying the narrow render-path fix before rerunning the exact test file."
+    script = f"""
+const src = {json.dumps(MESSAGES_JS)};
+function extractFunc(name) {{
+  const start = src.indexOf('function ' + name);
+  if (start === -1) throw new Error(name + ' not found');
+  const params = src.indexOf('(', start);
+  let depth = 0, close = -1;
+  for (let i = params; i < src.length; i++) {{
+    if (src[i] === '(') depth++;
+    else if (src[i] === ')') {{
+      depth--;
+      if (depth === 0) {{ close = i; break; }}
+    }}
+  }}
+  const brace = src.indexOf('{{', close);
+  depth = 0;
+  for (let i = brace; i < src.length; i++) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') {{
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1);
+    }}
+  }}
+  throw new Error(name + ' body did not close');
+}}
+global.window = {{
+  chatActivityMode() {{ return 'transparent_stream'; }},
+  _chatActivityDisplayMode: 'transparent_stream',
+  _transparentStream: true,
+}};
+global.S = {{ session: {{}} }};
+eval(extractFunc('_anchorSceneCleanText'));
+eval(extractFunc('_anchorSceneTextKey'));
+eval(extractFunc('_anchorSceneExistingRowKey'));
+eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
+eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
+eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
+eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
+eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
+eval(extractFunc('_completeSettledAnchorSceneForTurn'));
+function _anchorSceneActiveMode() {{ return 'transparent_stream'; }}
+function _anchorSceneFinalAnswerText(message) {{ return message && (message.final_answer || message.content || ''); }}
+function _anchorSceneRowsByMessageIndex() {{ return new Map(); }}
+function _anchorSceneMessageRef(message) {{ return String(message && message.id || ''); }}
+function _anchorSceneTurnDurationForSettlement() {{ return 0; }}
+function _anchorSceneRowDisplayHintForMode(row, sceneMode) {{
+  const hints = row && typeof row === 'object' && row.display_hints && typeof row.display_hints === 'object' ? row.display_hints : null;
+  if (sceneMode === 'transparent_stream') return (hints && hints.transparent_stream) || 'chronological_activity';
+  if (sceneMode === 'compact_worklog') return (hints && hints.compact_worklog) || row && row.display_hint || 'activity_row';
+  return row && row.display_hint || 'activity_row';
+}}
+const messages = [
+  {{ role: 'user', content: 'Prompt', id: 'user-1' }},
+  {{ role: 'assistant', content: {json.dumps(final_answer)}, id: 'assistant-1' }},
+];
+const scene = _completeSettledAnchorSceneForTurn(messages, 1, {{
+  mode: 'transparent_stream',
+  final_answer: {json.dumps(final_answer)},
+  lifecycle: {{ terminal_state: 'done' }},
+  identity: {{ source_message_refs: ['legacy'] }},
+  activity_rows: [
+    {{
+      role: 'prose',
+      kind: 'process_prose',
+      source_event_type: 'token',
+      local_id: 'live-prose:stream-long:1',
+      text: {json.dumps(prefix_text)},
+      status: 'running',
+    }},
+  ],
+}});
+process.stdout.write(JSON.stringify(scene.activity_rows.map(row => ({{
+  local_id: row.local_id,
+  text: row.text,
+  status: row.status,
+}}))));
+"""
+    data = _run_node(MESSAGES_JS, script, tmp_path)
+    assert data == [{"local_id": "live-prose:stream-long:1", "text": prefix_text, "status": "completed"}]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_issue5749_render_fallback_suppresses_persisted_live_token_prefix_rows(tmp_path):
     final_answer = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback so Transparent Stream does not repeat the same prose row."
     prefix_text = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback"
