@@ -11391,6 +11391,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     const text=String(row.text||'').trim();
     if(!text) return null;
     const finalAnswer=String((opts&&opts.finalAnswer)||'').trim();
+    if(_anchorSceneRowLooksLikeLiveTokenFinalAnswerPrefix(row,finalAnswer)) return null;
     if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)) return null;
     node=_anchorSceneNodeForRow(row,{settled});
     if(!node) return null;
@@ -11450,6 +11451,16 @@ function _anchorSceneProseMatchesFinalAnswer(proseText, finalAnswer){
   if(!(a.startsWith(b)||b.startsWith(a))) return false;
   const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
   return shorter>=80 && (shorter/longer)>=0.9;
+}
+function _anchorSceneRowLooksLikeLiveTokenFinalAnswerPrefix(row, finalAnswer){
+  if(!row||typeof row!=='object') return false;
+  if(String(row.role||'')!=='prose') return false;
+  if(String(row.kind||'')!=='process_prose') return false;
+  if(String(row.source_event_type||'')!=='token') return false;
+  if(!String(row.local_id||'').startsWith('live-prose:')) return false;
+  const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const a=norm(row.text), b=norm(finalAnswer);
+  return !!a&&!!b&&a.length<b.length&&b.startsWith(a);
 }
 function _anchorSceneWorklogGroup(blocks, opts){
   if(!blocks) return null;

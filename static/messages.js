@@ -3434,6 +3434,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const longer=Math.max(rowTextKey.length,finalKey.length);
     return shorter>=80&&longer>0&&(shorter/longer)>=0.9;
   }
+  function _anchorSceneRowLooksLikeLiveTokenFinalAnswerPrefix(row, finalAnswer){
+    if(!row||typeof row!=='object') return false;
+    if(String(row.role||'')!=='prose') return false;
+    if(String(row.kind||'')!=='process_prose') return false;
+    if(String(row.source_event_type||'')!=='token') return false;
+    if(!String(row.local_id||'').startsWith('live-prose:')) return false;
+    const rowTextKey=_anchorSceneTextKey(row.text);
+    const finalKey=_anchorSceneTextKey(finalAnswer);
+    return !!rowTextKey&&!!finalKey&&rowTextKey.length<finalKey.length&&finalKey.startsWith(rowTextKey);
+  }
   function _anchorSceneRowTextOverlapsExisting(rowTextKey, seenTextKeys){
     if(!rowTextKey||!Array.isArray(seenTextKeys)) return false;
     for(const existing of seenTextKeys){
@@ -3499,6 +3509,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!row||typeof row!=='object') return;
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
       if(!row||typeof row!=='object') return;
+      if(_anchorSceneRowLooksLikeLiveTokenFinalAnswerPrefix(row,finalAnswer)) return;
       const textKey=_anchorSceneTextKey(row.text);
       const isTextual=row.role==='prose'||row.role==='thinking';
       if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
