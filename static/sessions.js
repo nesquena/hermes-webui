@@ -6214,7 +6214,6 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childActivitySec=Number(childActivityRaw);
     if(Number.isFinite(childActivitySec)&&childActivitySec>Number(parentRow._child_session_latest_at||0)){
       parentRow._child_session_latest_at=childActivitySec;
-      parentRow._sidebar_activity_at=Math.max(Number(parentRow.last_message_at||parentRow.updated_at||parentRow.created_at||0), childActivitySec);
     }
     const childAttention=childRow&&childRow.attention&&typeof childRow.attention==='object'?childRow.attention:null;
     if(!childAttention||!childAttention.kind||!Number.isFinite(Number(childAttention.count))||Number(childAttention.count)<=0) return;

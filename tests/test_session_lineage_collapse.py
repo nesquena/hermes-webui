@@ -1082,7 +1082,7 @@ console.log(JSON.stringify(rows));
     assert "_child_sessions" not in rows[0]
 
 
-def test_nested_fork_bubbles_latest_child_timestamp_for_sorting():
+def test_nested_fork_tracks_latest_child_without_changing_parent_bucket_timestamp():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -1112,15 +1112,15 @@ console.log(JSON.stringify({{row: rows[0], timestampMs: _sessionTimestampMs(rows
     result = json.loads(_run_node(source))
     row = result["row"]
     assert row["session_id"] == "parent"
-    # Keep the parent row's persisted timestamp intact, but use newest attached
-    # child/subagent activity for sidebar sorting/date grouping.
+    # Keep the parent row's persisted timestamp intact while still recording
+    # the newest attached child/subagent metadata.
     assert row["last_message_at"] == 10
     assert row["_child_session_latest_at"] == 20
-    assert row["_sidebar_activity_at"] == 20
-    assert result["timestampMs"] == 20_000
+    assert "_sidebar_activity_at" not in row
+    assert result["timestampMs"] == 10_000
 
 
-def test_hidden_archived_lineage_child_bubbles_running_state_and_activity_to_visible_parent():
+def test_hidden_archived_lineage_child_bubbles_running_state_and_latest_child_timestamp_without_changing_parent_bucket():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -1179,11 +1179,11 @@ console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _ses
     assert "_child_sessions" not in row
     assert row["_child_session_streaming"] is True
     assert row["_child_session_latest_at"] == 30
-    assert row["_sidebar_activity_at"] == 30
-    assert result["timestampMs"] == 30_000
+    assert "_sidebar_activity_at" not in row
+    assert result["timestampMs"] == 10_000
 
 
-def test_archived_lineage_child_without_root_id_falls_back_to_parent_for_bubbling():
+def test_archived_lineage_child_without_root_id_preserves_parent_bucket_timestamp():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -1241,8 +1241,8 @@ console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _ses
     assert "_child_sessions" not in row
     assert row["_child_session_streaming"] is True
     assert row["_child_session_latest_at"] == 30
-    assert row["_sidebar_activity_at"] == 30
-    assert result["timestampMs"] == 30_000
+    assert "_sidebar_activity_at" not in row
+    assert result["timestampMs"] == 10_000
 
 
 def test_non_archived_reference_only_lineage_row_does_not_bubble_to_visible_parent():
@@ -1308,7 +1308,7 @@ console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _ses
     assert result["timestampMs"] == 10_000
 
 
-def test_stale_active_stream_id_on_hidden_archived_child_does_not_bubble_streaming_state():
+def test_stale_active_stream_id_on_hidden_archived_child_keeps_parent_bucket_and_latest_child_timestamp():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -1367,8 +1367,8 @@ console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _ses
     assert "_child_sessions" not in row
     assert "_child_session_streaming" not in row
     assert row["_child_session_latest_at"] == 30
-    assert row["_sidebar_activity_at"] == 30
-    assert result["timestampMs"] == 30_000
+    assert "_sidebar_activity_at" not in row
+    assert result["timestampMs"] == 10_000
 
 
 def test_collapsed_lineage_segments_do_not_render_as_child_sessions():
