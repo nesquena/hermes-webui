@@ -247,7 +247,7 @@ def _public_hit(row: sqlite3.Row | tuple[Any, ...], *, query: str = "") -> dict[
         data = dict(row)
     else:
         keys = ["source_id", "chunk_id", "source_type", "display_name", "origin_uri", "space_id", "summary", "redaction_status"]
-        data = dict(zip(keys, row))
+        data = dict(zip(keys, row, strict=False))
     return {
         "source_id": _safe_text(data.get("source_id"), limit=160),
         "chunk_id": _safe_text(data.get("chunk_id"), limit=160),
