@@ -380,13 +380,14 @@ def test_apply_provider_prefix_no_double_prefix():
     from api.config import _apply_provider_prefix
 
     raw = [
-        {"id": "@copilot:gpt-5.4", "label": "already prefixed"},
-        {"id": "openai/gpt-5.4", "label": "slash form"},
-        {"id": "bare-model", "label": "bare"},
+        {"id": "@copilot:gpt-5.4", "label": "already prefixed", "supports_fast_tier": True},
+        {"id": "openai/gpt-5.4", "label": "slash form", "supports_fast_tier": True},
+        {"id": "bare-model", "label": "bare", "supports_fast_tier": False},
     ]
     result = _apply_provider_prefix(raw, "copilot", "openai-codex")
     ids = [m["id"] for m in result]
     assert ids == ["@copilot:gpt-5.4", "openai/gpt-5.4", "@copilot:bare-model"], ids
+    assert [m["supports_fast_tier"] for m in result] == [True, True, False]
 
 
 def test_apply_provider_prefix_active_provider_no_prefix():
