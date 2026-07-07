@@ -304,7 +304,7 @@ process.stdout.write(JSON.stringify(scene.activity_rows.map(row => ({{
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_issue5749_render_fallback_suppresses_persisted_live_token_prefix_rows(tmp_path):
+def test_issue5749_render_fallback_preserves_persisted_live_progress_prefix_rows(tmp_path):
     final_answer = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback so Transparent Stream does not repeat the same prose row."
     prefix_text = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback"
     script = f"""
@@ -379,9 +379,75 @@ process.stdout.write(JSON.stringify({{
 }}));
 """
     data = _run_node(UI_JS, script, tmp_path)
-    assert data["liveResult"] is True
+    assert data["liveResult"] is False
     assert data["boundaryResult"] is True
     assert data["boundaryRowId"] == "session-prose:stream-1:2"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_issue5749_render_fallback_suppresses_near_complete_live_prefix_rows(tmp_path):
+    final_answer = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback now."
+    prefix_text = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback"
+    script = f"""
+const src = {json.dumps(UI_JS)};
+function extractFunc(name) {{
+  const start = src.indexOf('function ' + name);
+  if (start === -1) throw new Error(name + ' not found');
+  const params = src.indexOf('(', start);
+  let depth = 0, close = -1;
+  for (let i = params; i < src.length; i++) {{
+    if (src[i] === '(') depth++;
+    else if (src[i] === ')') {{
+      depth--;
+      if (depth === 0) {{ close = i; break; }}
+    }}
+  }}
+  const brace = src.indexOf('{{', close);
+  depth = 0;
+  for (let i = brace; i < src.length; i++) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') {{
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1);
+    }}
+  }}
+  throw new Error(name + ' body did not close');
+}}
+class FakeElement {{
+  constructor(tag) {{
+    this.tagName = String(tag || 'div').toUpperCase();
+    this.attributes = Object.create(null);
+    this.dataset = Object.create(null);
+  }}
+  setAttribute(name, value) {{
+    this.attributes[name] = String(value);
+    if (name.startsWith('data-')) {{
+      const key = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      this.dataset[key] = String(value);
+    }}
+  }}
+}}
+global.window = {{}};
+global.document = {{ createElement(tag) {{ return new FakeElement(tag); }} }};
+global._anchorSceneNodeForRow = () => new FakeElement('div');
+global._decorateTransparentEventRow = node => node;
+global._anchorSceneToolCallFromRow = () => ({{}});
+global.buildToolCard = () => new FakeElement('div');
+global._thinkingActivityNode = () => new FakeElement('div');
+eval(extractFunc('_anchorSceneProseMatchesFinalAnswer'));
+eval(extractFunc('_anchorSceneTransparentNodeForRow'));
+const liveRow = {{
+  role: 'prose',
+  kind: 'process_prose',
+  source_event_type: 'token',
+  local_id: 'live-prose:stream-1:near',
+  text: {json.dumps(prefix_text)},
+}};
+const liveResult = _anchorSceneTransparentNodeForRow(liveRow, {{ settled: true, finalAnswer: {json.dumps(final_answer)} }});
+process.stdout.write(JSON.stringify(liveResult === null));
+"""
+    data = _run_node(UI_JS, script, tmp_path)
+    assert data is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

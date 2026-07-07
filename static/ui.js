@@ -11393,7 +11393,6 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     const finalAnswer=String((opts&&opts.finalAnswer)||'').trim();
     const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
     const rowKey=norm(text), finalKey=norm(finalAnswer);
-    if(String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&rowKey&&finalKey&&rowKey.length>=80&&rowKey.length<finalKey.length&&finalKey.startsWith(rowKey)) return null;
     if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)) return null;
     node=_anchorSceneNodeForRow(row,{settled});
     if(!node) return null;
