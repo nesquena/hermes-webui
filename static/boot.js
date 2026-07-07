@@ -149,6 +149,26 @@ function _isPhoneWidthViewport(){
   return window.matchMedia('(max-width: 640px)').matches;
 }
 
+function _isTouchKeyboardViewport(){
+  try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
+}
+
+function _syncKeyboardBottomInset(){
+  const root=document.documentElement;
+  if(!root) return;
+  if(!window.visualViewport||!_isTouchKeyboardViewport()){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
+  const vv=window.visualViewport;
+  const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
+  if(inset>0){
+    root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
+  }else{
+    root.style.removeProperty('--keyboard-bottom-inset');
+  }
+}
+
 // Mobile PWA viewport reflow guard. When the on-screen keyboard / browser
 // chrome shows or hides, visualViewport (or a plain resize on browsers without
 // it) changes height without a layout invalidation, leaving the phone layout
@@ -156,6 +176,7 @@ function _isPhoneWidthViewport(){
 // (which applies a cheap GPU-promotion transform under the @media(max-width:640px)
 // rule) forces a repaint, then we resync the workspace panel + sidebar aria.
 function _forceMobileViewportReflow(){
+  _syncKeyboardBottomInset();
   if(!_isPhoneWidthViewport()) return;
   const layout=document.querySelector('.layout');
   if(!layout) return;
@@ -2183,6 +2204,7 @@ window.addEventListener('resize',()=>{
 // URL-bar collapse fire visualViewport resize/scroll rather than window resize.
 // Debounce a reflow so the phone layout repaints against the new geometry.
 if(window.visualViewport){
+  _syncKeyboardBottomInset();
   let _mobileViewportReflowTimer=0;
   const _scheduleMobileViewportReflow=()=>{
     if(_mobileViewportReflowTimer) clearTimeout(_mobileViewportReflowTimer);
@@ -3391,6 +3413,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
 // chrome aren't left in the stale bfcache snapshot.
 window.addEventListener('pageshow', async (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
+  _syncKeyboardBottomInset();
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
