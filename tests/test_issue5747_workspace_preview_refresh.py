@@ -163,6 +163,48 @@ class TestNormalizeArtifactPathAbsolute:
             f"Relative path canonicalization must not regress; got {out}"
         )
 
+    def test_windows_absolute_path_with_workspace_prefix_strips_to_relative(self):
+        """Windows absolute path C:\\Users\\test\\ws\\foo\\bar.py → foo/bar.py.
+
+        Greptile P2 finding: Windows-style absolute paths were not treated as
+        absolute because the code only checked for a leading '/'. The raw path
+        was returned, preventing preview-match on Windows runtimes (#5747).
+        """
+        ws = "C:\\Users\\test\\ws"
+        out = _normalize_via_node(
+            [f"{ws}\\foo\\bar.py", "foo/bar.py"],
+            workspace=ws,
+        )
+        assert out[0] == out[1] == "foo/bar.py", (
+            f"Windows absolute path with workspace prefix must canonicalize to "
+            f"the bare relative path so mutation tracking matches the preview "
+            f"path; got {out}"
+        )
+
+    def test_windows_absolute_path_with_forward_slashes(self):
+        """Windows path with forward slashes C:/Users/test/ws/foo.py → foo.py."""
+        ws = "C:\\Users\\test\\ws"
+        out = _normalize_via_node(
+            ["C:/Users/test/ws/foo.py"],
+            workspace=ws,
+        )
+        assert out == ["foo.py"], (
+            f"Windows absolute path with forward slashes must strip workspace "
+            f"prefix; got {out}"
+        )
+
+    def test_windows_absolute_path_without_workspace_prefix_stays_empty(self):
+        """Windows absolute path not under workspace should return ''."""
+        ws = "C:\\Users\\test\\ws"
+        out = _normalize_via_node(
+            ["C:\\Users\\other\\project\\foo.py"],
+            workspace=ws,
+        )
+        assert out == [""], (
+            f"Windows absolute path outside workspace should not produce a "
+            f"false positive match; got {out}"
+        )
+
     def test_no_workspace_session(self):
         """When S.session has no workspace, absolute paths should return ''."""
         # Pass empty workspace — the guard should skip prefix stripping

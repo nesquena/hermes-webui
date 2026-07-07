@@ -403,16 +403,20 @@ function _normalizeArtifactPath(path){
   path = path.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   if(!path) return '';
   // Strip workspace prefix from absolute paths so they compare equal to relative
-  // preview paths. Tools like terminal/execute_code pass absolute paths
+  // preview paths. Tools like write_file/patch pass absolute paths
   // ("/Users/x/ws/foo/bar.py") while the preview uses "foo/bar.py" — without
   // this they never match and the preview stays stale (#5747).
-  if(path.startsWith('/') && typeof S!=='undefined' && S.session && S.session.workspace){
-    const normWs = S.session.workspace.replace(/\/+$/,'') + '/';
-    if(path.startsWith(normWs)) path = path.slice(normWs.length);
+  // Also handle Windows-style absolute paths (C:\Users\...) — normalize
+  // backslashes to forward slashes first so both platforms match (#5747).
+  const normAbsPath = path.replace(/\\/g,'/');
+  const isAbsPath = normAbsPath.startsWith('/') || /^[A-Za-z]:\//.test(normAbsPath);
+  if(isAbsPath && typeof S!=='undefined' && S.session && S.session.workspace){
+    const normWs = String(S.session.workspace).replace(/\\/g,'/').replace(/\/+$/,'') + '/';
+    if(normAbsPath.startsWith(normWs)) path = normAbsPath.slice(normWs.length);
   }
   // An absolute path that was not under the workspace (or no workspace is set)
   // can never match a relative preview path — bail out to avoid false candidates.
-  if(path.startsWith('/')) return '';
+  if(path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)) return '';
   if(!path) return '';
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
   if(!/[./]/.test(path)) return '';
