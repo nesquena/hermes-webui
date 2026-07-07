@@ -16273,6 +16273,19 @@ function clearLiveToolCards(){
   const container=$('liveToolCards');
   if(container){container.innerHTML='';container.style.display='none';}
 }
+function _hideLiveActivityForFinalAnswerOnly(){
+  clearLiveToolCards();
+  if(typeof removeThinking==='function') removeThinking();
+  const turn=$('liveAssistantTurn');
+  const inner=_assistantTurnBlocks(turn);
+  if(inner){
+    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  }
+  const legacyThinking=$('thinkingRow');
+  if(legacyThinking) legacyThinking.remove();
+  if(turn&&inner&&!inner.children.length) turn.remove();
+}
+if(typeof window!=='undefined') window._hideLiveActivityForFinalAnswerOnly=_hideLiveActivityForFinalAnswerOnly;
 function _removeEmptyLiveWorklogShells(inner){
   if(!inner) return;
   inner.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-worklog-shell="1"],.tool-call-group[data-live-worklog-shell="1"]').forEach(group=>{

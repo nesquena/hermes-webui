@@ -306,6 +306,52 @@ def test_chat_activity_display_mode_settled_hide_all_scene_persists_without_work
     assert "return true;" not in block
 
 
+def test_chat_activity_display_mode_switch_to_final_only_clears_existing_live_activity():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "panels.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+let cleanupCalls = 0;
+const select = {{value:''}};
+const buttons = [
+  {{mode:'compact_worklog'}},
+  {{mode:'transparent_stream'}},
+  {{mode:'hide_all_activity'}},
+].map(({{mode}}) => ({{
+  getAttribute: (name) => name === 'data-chat-activity-mode' ? mode : null,
+  classList: {{toggle(){{}}}},
+  setAttribute(){{}},
+}}));
+global.window = {{_hideLiveActivityForFinalAnswerOnly(){{ cleanupCalls += 1; }}}};
+global.document = {{querySelectorAll: () => buttons}};
+global.$ = (id) => id === 'settingsChatActivityDisplayMode' ? select : null;
+eval(extractFunc('_syncChatActivityDisplayModeControl'));
+_syncChatActivityDisplayModeControl('transparent_stream');
+const afterTransparent = {{mode: window._chatActivityDisplayMode, transparent: window._transparentStream, cleanupCalls}};
+_syncChatActivityDisplayModeControl('hide_all_activity');
+const afterHide = {{mode: window._chatActivityDisplayMode, transparent: window._transparentStream, cleanupCalls, selectValue: select.value}};
+process.stdout.write(JSON.stringify({{afterTransparent, afterHide}}));
+"""
+    result = _run_node_script(script)
+
+    assert result == {
+        "afterTransparent": {"mode": "transparent_stream", "transparent": True, "cleanupCalls": 0},
+        "afterHide": {"mode": "hide_all_activity", "transparent": False, "cleanupCalls": 1, "selectValue": "hide_all_activity"},
+    }
+
+
+def test_chat_activity_display_mode_live_cleanup_removes_existing_activity_rows():
+    start = UI_JS.index("function _hideLiveActivityForFinalAnswerOnly(){")
+    end = UI_JS.index("function _removeEmptyLiveWorklogShells", start)
+    block = UI_JS[start:end]
+
+    assert "clearLiveToolCards();" in block
+    assert "removeThinking" in block
+    assert ".transparent-event-row" in block
+    assert "#liveRunStatus" in block
+    assert "window._hideLiveActivityForFinalAnswerOnly=_hideLiveActivityForFinalAnswerOnly" in UI_JS
+
+
 def test_transparent_stream_live_branch_uses_direct_rows():
     decorator_start = UI_JS.index("function _decorateTransparentEventRow(row, opts){")
     decorator_end = UI_JS.index("function _setTransparentRowsExpanded", decorator_start)
