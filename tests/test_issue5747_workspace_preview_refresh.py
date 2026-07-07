@@ -1,26 +1,31 @@
 """Regression: workspace preview auto-refresh + half-screen layout bug (#5747).
 
-Three root causes fixed in static/workspace.js:
+Two root causes fixed in static/workspace.js:
 
 1. _normalizeArtifactPath() did not strip the workspace prefix from absolute
-   paths. Tools like terminal/execute_code pass absolute paths
+   paths. Tools like write_file/patch pass absolute paths
    ("/Users/x/ws/foo.py") while the file-tree preview records a bare relative
    path ("foo.py"). The two never compared equal, so mutation tracking never
    fired and the preview stayed stale.
 
-2. ARTIFACT_MUTATION_TOOLS did not include 'terminal' or 'execute_code', so
-   file edits made through those tools were invisible to mutation tracking.
-   Additionally, terminal/execute_code args don't have standard path/file_path
-   fields — their args are {command:"..."} / {code:"..."} — so the existing
-   structured-arg extraction can't find paths. A new heuristic mines file-path
-   tokens from the command/code text.
+   The fix reuses the proven prefix-strip pattern from openArtifactPath()
+   (workspace.js:585-593): after stripping ~/ and ./ prefixes, strip the
+   S.session.workspace prefix from absolute paths. Crucially, this strip
+   happens BEFORE the `if(!/[./]/.test(path))` guard so that extension-less
+   root files like "Makefile" are not dropped.
 
-3. loadDir() calls renderFileTree() which unconditionally sets
+   Note: terminal/execute_code tools also modify files but their args are
+   shell/script bodies, not structured file paths. Tracking mutations from
+   those tools is scoped as a separate follow-up issue, not this fix.
+
+2. loadDir() calls renderFileTree() which unconditionally sets
    box.style.display='' (ui.js), restoring the fileTree to visible. When
    preservePreview=true and a preview is open, this left both fileTree and
    previewArea visible (each flex:1 in a flex-direction:column right panel),
    producing a half-screen layout. Fix: after renderFileTree(), re-hide
-   fileTree when preservePreview && _previewCurrentPath.
+   fileTree when preservePreview && _previewCurrentPath. This guard is
+   independent of the path-normalization fix — it holds even when mutation
+   detection fails, preventing the half-screen flicker regardless.
 
 Drives the ACTUAL functions from static/workspace.js via node so it can't
 drift from a Python mirror.
@@ -91,8 +96,6 @@ def _candidates_via_node(tc, workspace="/Users/test/ws"):
         for n in (
             "_normalizeArtifactPath",
             "_artifactCandidatesFromText",
-            "_artifactPathsFromShellCommand",
-            "_artifactPathsFromPythonCode",
             "_artifactCandidatesFromToolCall",
         )
     )
@@ -171,137 +174,38 @@ class TestNormalizeArtifactPathAbsolute:
             f"Without a workspace, absolute paths should not match; got {out}"
         )
 
-
-# ---------------------------------------------------------------------------
-# Fix 2: terminal/execute_code detected as mutation tools with path extraction
-# ---------------------------------------------------------------------------
-
-class TestTerminalExecuteCodeMutationTracking:
-    def test_terminal_in_artifact_mutation_tools(self):
-        """terminal must be in ARTIFACT_MUTATION_TOOLS set."""
-        src = _extract_const("ARTIFACT_MUTATION_TOOLS")
-        assert "'terminal'" in src, (
-            "terminal must be in ARTIFACT_MUTATION_TOOLS so file edits via "
-            "shell commands (sed, echo >, tee) are tracked for preview refresh"
-        )
-
-    def test_execute_code_in_artifact_mutation_tools(self):
-        """execute_code must be in ARTIFACT_MUTATION_TOOLS set."""
-        src = _extract_const("ARTIFACT_MUTATION_TOOLS")
-        assert "'execute_code'" in src, (
-            "execute_code must be in ARTIFACT_MUTATION_TOOLS so file edits "
-            "via Python scripts are tracked for preview refresh"
-        )
-
-    def test_terminal_sed_command_extracts_path(self):
-        """terminal with `sed -i 's/old/new/' foo.py` should extract foo.py."""
-        tc = {
-            "name": "terminal",
-            "args": {"command": "sed -i 's/old/new/g' foo.py"},
-        }
-        paths = _candidates_via_node(tc)
-        assert "foo.py" in paths, (
-            f"terminal sed -i command must extract the target file path for "
-            f"mutation tracking; got {paths}"
-        )
-
-    def test_terminal_redirect_command_extracts_path(self):
-        """terminal with `echo "x" > bar.py` should extract bar.py."""
-        tc = {
-            "name": "terminal",
-            "args": {"command": 'echo "content" > bar.py'},
-        }
-        paths = _candidates_via_node(tc)
-        assert "bar.py" in paths, (
-            f"terminal redirect (>) command must extract the target file; got {paths}"
-        )
-
-    def test_terminal_append_command_extracts_path(self):
-        """terminal with `echo "x" >> bar.py` should extract bar.py."""
-        tc = {
-            "name": "terminal",
-            "args": {"command": 'echo "line" >> bar.py'},
-        }
-        paths = _candidates_via_node(tc)
-        assert "bar.py" in paths, (
-            f"terminal append (>>) command must extract the target file; got {paths}"
-        )
-
-    def test_terminal_tee_command_extracts_path(self):
-        """terminal with `echo "x" | tee foo.py` should extract foo.py."""
-        tc = {
-            "name": "terminal",
-            "args": {"command": 'echo "content" | tee foo.py'},
-        }
-        paths = _candidates_via_node(tc)
-        assert "foo.py" in paths, (
-            f"terminal tee command must extract the target file; got {paths}"
-        )
-
-    def test_terminal_absolute_path_extracts_relative(self):
-        """terminal with absolute path under workspace extracts relative path."""
+    def test_write_file_absolute_path_matches_preview(self):
+        """write_file with absolute path must produce a candidate that
+        matches the relative preview path."""
         ws = "/Users/test/ws"
         tc = {
-            "name": "terminal",
-            "args": {"command": f"sed -i 's/a/b/' {ws}/src/main.py"},
+            "name": "write_file",
+            "args": {"path": f"{ws}/src/main.py"},
         }
         paths = _candidates_via_node(tc, workspace=ws)
         assert "src/main.py" in paths, (
-            f"terminal with absolute path under workspace must extract the "
-            f"relative path so it matches the preview path; got {paths}"
+            f"write_file with absolute path must produce a relative candidate "
+            f"that matches the preview path; got {paths}"
         )
 
-    def test_execute_code_writes_file(self):
-        """execute_code with code that writes a file should extract the path."""
+    def test_patch_absolute_path_matches_preview(self):
+        """patch with absolute path must produce a candidate that
+        matches the relative preview path."""
+        ws = "/Users/test/ws"
         tc = {
-            "name": "execute_code",
-            "args": {"code": "from hermes_tools import write_file\nwrite_file('output.py', 'print(1)')"},
+            "name": "patch",
+            "args": {"path": f"{ws}/config/settings.json"},
         }
-        paths = _candidates_via_node(tc)
-        assert "output.py" in paths, (
-            f"execute_code with write_file call must extract the target file; got {paths}"
-        )
-
-    def test_execute_code_open_write(self):
-        """execute_code with open('file', 'w') should extract the path."""
-        tc = {
-            "name": "execute_code",
-            "args": {"code": "with open('config.json', 'w') as f: f.write('{}')"},
-        }
-        paths = _candidates_via_node(tc)
-        assert "config.json" in paths, (
-            f"execute_code with open(..., 'w') must extract the target file; got {paths}"
-        )
-
-    def test_terminal_readonly_command_does_not_extract(self):
-        """terminal with `cat foo.py` (read-only) should NOT extract foo.py.
-
-        We only want to track files that are actually modified, not just read.
-        cat/ls/grep are read-only and should not trigger preview refresh.
-        """
-        tc = {
-            "name": "terminal",
-            "args": {"command": "cat foo.py"},
-        }
-        paths = _candidates_via_node(tc)
-        assert "foo.py" not in paths, (
-            f"Read-only commands (cat) must not produce mutation candidates; got {paths}"
-        )
-
-    def test_terminal_ls_command_does_not_extract(self):
-        """terminal with `ls` should not produce any file candidates."""
-        tc = {
-            "name": "terminal",
-            "args": {"command": "ls -la"},
-        }
-        paths = _candidates_via_node(tc)
-        assert paths == [], (
-            f"ls command must not produce mutation candidates; got {paths}"
+        paths = _candidates_via_node(tc, workspace=ws)
+        assert "config/settings.json" in paths, (
+            f"patch with absolute path must produce a relative candidate "
+            f"that matches the preview path; got {paths}"
         )
 
 
 # ---------------------------------------------------------------------------
-# Fix 3: loadDir re-hides fileTree when preservePreview and preview is open
+# Fix 2 (layout guard): loadDir re-hides fileTree when preservePreview
+# and preview is open — independent of mutation detection
 # ---------------------------------------------------------------------------
 
 class TestLoadDirPreservePreviewLayout:

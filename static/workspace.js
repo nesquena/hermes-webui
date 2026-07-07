@@ -390,10 +390,7 @@ function _escHtml(s){
 
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
 // Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
-// terminal and execute_code are included because they can modify files (sed, echo >,
-// write_file, open(...,'w')) — their paths are mined heuristically from command/code
-// text in _artifactCandidatesFromToolCall since they lack standard path/file_path args (#5747).
-const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file','terminal','execute_code']);
+const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
 
 function _normalizeArtifactPath(path){
   if(!path) return '';
@@ -459,17 +456,6 @@ function _artifactCandidatesFromToolCall(tc){
     if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p));
     if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path));
   }
-  // terminal/execute_code lack standard path/file_path args — their file targets
-  // are embedded in the command string or Python code. Mine those heuristically
-  // so edits via sed/echo/tee/write_file/open(...,'w') are tracked for preview
-  // refresh (#5747). Only write-modifying patterns are matched; read-only
-  // commands (cat, ls, grep) intentionally produce no candidates.
-  if(name==='terminal' && args && typeof args === 'object' && typeof args.command === 'string'){
-    for(const p of _artifactPathsFromShellCommand(args.command)) add(p, 'terminal');
-  }
-  if(name==='execute_code' && args && typeof args === 'object' && typeof args.code === 'string'){
-    for(const p of _artifactPathsFromPythonCode(args.code)) add(p, 'execute_code');
-  }
   const resultText = typeof result === 'string' ? result : (result ? JSON.stringify(result) : '');
   // Tool results may include unified diffs from patch-style tools; scan those
   // narrowly after structured args so diff headers can still contribute paths.
@@ -478,86 +464,6 @@ function _artifactCandidatesFromToolCall(tc){
     const argsText = typeof args === 'string' ? args : JSON.stringify(args || {});
     for(const a of _artifactCandidatesFromText(argsText)) out.push(a);
   }
-  return out;
-}
-
-// Heuristic extraction of file paths from shell commands that modify files.
-// Matches: sed -i, echo > / >>, cat > / >>, tee, cp, mv — the last token(s)
-// that look like a file path. Read-only commands (cat without redirect, ls,
-// grep, etc.) produce nothing so they don't pollute the mutation set (#5747).
-function _artifactPathsFromShellCommand(command){
-  if(!command || typeof command !== 'string') return [];
-  const out = [];
-  const seen = new Set();
-  // Token that looks like a file path: has a dot or slash, not a flag, not a
-  // shell builtin, and is plausibly a relative/absolute path.
-  const isFilePath = (t) => {
-    if(!t || t.startsWith('-') || t.startsWith('(')) return false;
-    // Must contain a dot (extension) or a slash to look like a path.
-    if(!/[./]/.test(t)) return false;
-    // Reject common shell keywords/builtins.
-    if(/^(?:sudo|bash|sh|zsh|python|python3|node|npm|pip|uv|cd|export|source|echo|cat|sed|awk|grep|find|ls|cp|mv|rm|mkdir|touch|tee|head|tail|wc|sort|uniq|tr|cut|xargs|chmod|chown|git|docker)$/.test(t)) return false;
-    return true;
-  };
-  const tryAdd = (t) => {
-    t = String(t||'').replace(/^['"`]/,'').replace(/['"`]$/,'').replace(/[;,]+$/,'');
-    if(isFilePath(t) && !seen.has(t)){ seen.add(t); out.push(t); }
-  };
-  // Redirect targets: echo "..." > file, cat <<EOF > file, etc.
-  let m;
-  const reRedirect = /(?:>>?)\s*([^\s|;&<]+)/g;
-  while((m = reRedirect.exec(command))) tryAdd(m[1]);
-  // tee file (tee -a file): capture the first non-flag arg after tee.
-  m = /(?:^|[;&|]\s*)tee\s+(?:-[a-zA-Z]+\s+)*([^\s|;&<]+)/.exec(command);
-  if(m) tryAdd(m[1]);
-  // sed -i 'expr' file — the file is the last path-like token (sed -i doesn't
-  // write to stdout; the file arg is modified in-place). -i may appear as
-  // `-i`, `-i.bak`, or `-i''` (GNU sed in-place flag).
-  if(/\bsed\b/.test(command) && /(^|\s)-i\b/.test(command)){
-    const tokens = command.split(/\s+/);
-    // Last token that looks like a file path (skip the expression arg).
-    for(let i = tokens.length - 1; i >= 0; i--){
-      const t = tokens[i].replace(/^['"`]/,'').replace(/['"`;]$/g,'');
-      if(isFilePath(t)){ tryAdd(t); break; }
-    }
-  }
-  // cp/mv src dst — the destination (last path-like token) is the file that
-  // changes (new file for cp, renamed file for mv).
-  m = /(?:^|[;&|]\s*)(?:cp|mv)\s+(?:-[a-zA-Z]+\s+)*(.+)/.exec(command);
-  if(m){
-    const tokens = m[1].trim().split(/\s+/);
-    if(tokens.length >= 2) tryAdd(tokens[tokens.length - 1]);
-  }
-  return out;
-}
-
-// Heuristic extraction of file paths from Python code that modifies files.
-// Matches: write_file('path', ...), open('path', 'w'/'a'/'x'), Path('path').write_text/bytes,
-// and patch(path='path', ...) / patch('path', ...) calls.
-function _artifactPathsFromPythonCode(code){
-  if(!code || typeof code !== 'string') return [];
-  const out = [];
-  const seen = new Set();
-  const tryAdd = (t) => {
-    t = String(t||'').trim();
-    if(t && !seen.has(t)){ seen.add(t); out.push(t); }
-  };
-  let m;
-  // write_file('path', ...) / write_file("path", ...)
-  const reWriteFile = /\bwrite_file\s*\(\s*(['"])([^'"]+)\1/g;
-  while((m = reWriteFile.exec(code))) tryAdd(m[2]);
-  // patch(path='path', ...) / patch('path', ...) / patch(path="path", ...)
-  const rePatch = /\bpatch\s*\(\s*(?:path\s*=\s*)?(['"])([^'"]+)\1/g;
-  while((m = rePatch.exec(code))) tryAdd(m[2]);
-  // edit_file(path='path', ...) / edit_file('path', ...)
-  const reEditFile = /\bedit_file\s*\(\s*(?:path\s*=\s*)?(['"])([^'"]+)\1/g;
-  while((m = reEditFile.exec(code))) tryAdd(m[2]);
-  // open('path', 'w'/'a'/'x')  — mode must include w/a/x to indicate writing
-  const reOpenWrite = /\bopen\s*\(\s*(['"])([^'"]+)\1\s*,\s*(['"])[wax]/g;
-  while((m = reOpenWrite.exec(code))) tryAdd(m[2]);
-  // Path('path').write_text(...) / Path('path').write_bytes(...)
-  const rePathWrite = /Path\s*\(\s*(['"])([^'"]+)\1\s*\)\s*\.write_(?:text|bytes)/g;
-  while((m = rePathWrite.exec(code))) tryAdd(m[2]);
   return out;
 }
 
