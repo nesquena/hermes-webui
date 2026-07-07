@@ -1110,8 +1110,14 @@
   :root[data-skin="openui"] .session-meta{font-size:11px;}
   :root[data-skin="openui"] .session-item.active{
     position:relative;padding:10px 12px 10px 18px;
-    background:var(--surface-subtle-hover)!important;border:1px solid var(--border2)!important;
+    background:var(--accent-bg-strong)!important;border:1px solid var(--border2)!important;
   }
+  :root[data-skin="openui"] .session-item.active.streaming,
+  :root[data-skin="openui"] .session-item.active.unread,
+  :root[data-skin="openui"] .session-item.active.needs-attention,
+  :root[data-skin="openui"] .session-item.active:focus-within,
+  :root[data-skin="openui"] .session-item.active.menu-open{padding-right:40px;}
+  :root[data-skin="openui"] .session-item.active:hover{padding-right:40px;}
   :root[data-skin="openui"] .session-item.active::before{
     content:"";position:absolute;left:6px;top:10px;bottom:10px;
     width:2px;border-radius:999px;background:var(--accent);
@@ -1127,8 +1133,9 @@
     background:var(--accent-bg)!important;
   }
   :root[data-skin="openui"] .composer-wrap{
-    background:var(--surface)!important;
+    background:var(--bg)!important;
   }
+  :root[data-skin="openui"] .composer-wrap::before{background:linear-gradient(to bottom,transparent,var(--bg));}
 
   /* ── Skin: Zeus ──
      OLED-near-black skin: replaces the default dark-blue/navy surfaces with warm
