@@ -407,6 +407,23 @@ def test_realign_genuinely_gone_anchor_no_geometry_keeps_raw_desktop():
     assert m["writes"] == [1200]
 
 
+def test_realign_gone_anchor_null_toppadbefore_does_not_fling_desktop():
+    """greptile P1: anchor row gone, a virtual top-spacer IS present (padNow=1300), but the
+    snapshot carries NO captured topPadBefore (null). Number(null) is 0, so a naive
+    isFinite(padBefore) check would treat padBefore as 0 and add the ENTIRE 1300px spacer
+    to scrollTop (1000 -> 2300), flinging the reader far from their content. The guard
+    requires an ACTUAL captured topPadBefore, so with null it keeps the raw snapshot.top.
+    Mutation: drop the `_padBeforeRaw!=null` term and this FAILS (writes 2300, the fling)."""
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90000, cur_scroll_height=90500, snapshot_top=1200,
+        active_intent=False, touch_like=False,
+        anchor={"key": "gone", "sessionIdx": 999, "topOffset": 1000, "topPadBefore": None},
+        anchor_row_content_pos=None, container_top=0, init_scroll_top=1000,
+        top_pad_now=1300,
+    )))
+    assert m["writes"] == [1200]
+
+
 
 
 def _predicate_harness(*, pointer_coarse, computed_overflow_anchor, has_matchmedia=True,

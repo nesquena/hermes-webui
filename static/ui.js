@@ -13641,8 +13641,13 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
           const s=el.querySelector('[data-virtual-spacer="before"]');
           return s?(parseFloat(s.style.height||'0')||0):NaN;
         })();
-        const _padBefore=Number(snapshot.anchor&&snapshot.anchor.topPadBefore);
-        if(Number.isFinite(_padNow)&&Number.isFinite(_padBefore)){
+        const _padBeforeRaw=snapshot.anchor&&snapshot.anchor.topPadBefore;
+        const _padBefore=Number(_padBeforeRaw);
+        // Require an ACTUAL captured topPadBefore (not null/undefined): Number(null) is 0,
+        // which would otherwise add the ENTIRE current spacer height to scrollTop and fling
+        // the reader far from their content (greptile P1). Only apply when it was really
+        // captured; else keep the raw fallback target.
+        if(_padBeforeRaw!=null&&Number.isFinite(_padNow)&&Number.isFinite(_padBefore)){
           _fbTarget=Math.max(0,Math.min(el.scrollTop+(_padNow-_padBefore), maxTop));
         }
         // else: no measurable anchor and no topPad geometry -> keep raw target.
