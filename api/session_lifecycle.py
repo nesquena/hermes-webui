@@ -45,6 +45,56 @@ _condition = threading.Condition(_lock)
 
 _sessions: dict[str, dict] = {}
 
+# Background commit threads spawned by fire-and-forget paths (e.g. POST /api/session/new).
+# Tracked so drain_all_on_shutdown() can join them before interpreter teardown,
+# preventing silent data loss when daemon threads are abandoned mid-commit.
+_background_commit_threads: set[threading.Thread] = set()
+_background_commit_threads_lock = threading.Lock()
+# Set once drain_all_on_shutdown() begins so no NEW background worker is started
+# after the drain has snapshotted the registry. A late arrival is not lost: its
+# uncommitted generation is still committed inline by the generation-drain loop
+# below (which re-snapshots _sessions each pass and commits with wait=True).
+_draining = False
+
+
+def _register_background_commit_thread(t: threading.Thread) -> bool:
+    """Register a fire-and-forget commit thread. Returns True if the caller
+    should start it. Returns False when shutdown draining has already begun —
+    the caller must NOT start a new worker in that window; the inline
+    generation-drain will commit the pending work instead."""
+    with _background_commit_threads_lock:
+        if _draining:
+            return False
+        _background_commit_threads.add(t)
+        return True
+
+
+def _unregister_background_commit_thread(t: threading.Thread) -> None:
+    # A completed worker removes itself so the registry does not grow without
+    # bound over the process lifetime; drain only needs threads still running.
+    with _background_commit_threads_lock:
+        _background_commit_threads.discard(t)
+
+
+def _drain_background_commit_threads(timeout: float = 5.0, deadline_fn=None) -> None:
+    """Join tracked fire-and-forget commit threads. When ``deadline_fn`` is given
+    (returns the remaining overall shutdown budget in seconds), each join is
+    clamped to that budget and the phase stops early once it is exhausted, so the
+    join phase cannot overrun ``drain_all_on_shutdown``'s deadline."""
+    with _background_commit_threads_lock:
+        threads = list(_background_commit_threads)
+        _background_commit_threads.clear()
+    for t in threads:
+        if not t.is_alive():
+            continue
+        if deadline_fn is None:
+            t.join(timeout)
+            continue
+        remaining = deadline_fn()
+        if remaining <= 0:
+            return
+        t.join(min(timeout, remaining))
+
 
 def _new_entry() -> dict:
     return {
@@ -225,16 +275,72 @@ def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, ti
     return True
 
 
-def drain_all_on_shutdown() -> None:
+def drain_all_on_shutdown(deadline: float = 30.0) -> None:
+    # Signal that draining has begun so no NEW background commit worker is
+    # started after this point (see _register_background_commit_thread). Any
+    # already-registered worker is joined below; a caller that loses the race
+    # (registered after our snapshot, or refused a start) still has its pending
+    # generation committed by the inline loop.
+    global _draining
+    with _background_commit_threads_lock:
+        _draining = True
+
+    # Overall wall-clock budget so a stuck worker holding in_flight cannot hang
+    # the shutdown path forever. Start the clock BEFORE the join phase so the
+    # join and the inline drain share one budget. The inline commit runs in a
+    # daemon worker joined only for the remaining budget — otherwise a provider
+    # wedged inside commit_memory_session() (whether we are waiting on an
+    # existing in_flight commit, OR the inline drain owns the segment and calls
+    # the provider directly) would block indefinitely and the deadline check
+    # would never run again.
+    started = time.monotonic()
+
+    def _remaining() -> float:
+        return deadline - (time.monotonic() - started)
+
+    def _commit_within_budget(session_id: str, budget: float) -> bool:
+        """Run one commit in a daemon worker, join at most `budget` seconds.
+        Returns True only if the commit completed within budget AND made
+        progress. On timeout the daemon worker is left running (it will finish
+        or die at interpreter exit; either way it mutates generation state only
+        under _condition, so nothing is corrupted) and we report no progress so
+        the drain can honor its deadline instead of hanging on a wedged
+        provider."""
+        holder = {"ok": False}
+
+        def _run():
+            holder["ok"] = commit_session_memory(session_id, wait=True)
+
+        worker = threading.Thread(target=_run, daemon=True, name=f"drain-commit-{session_id}")
+        worker.start()
+        worker.join(budget)
+        return holder["ok"] if not worker.is_alive() else False
+
+    # Drain in-flight background commit threads first (fire-and-forget from
+    # POST /api/session/new) so their commit work completes before we drain any
+    # remaining uncommitted generations inline. Each join consumes the shared
+    # budget so it cannot overrun the overall deadline.
+    _drain_background_commit_threads(deadline_fn=_remaining)
+
     while True:
         with _lock:
             snapshot = [sid for sid, entry in _sessions.items() if entry["generation"] > entry["committed_generation"]]
         if not snapshot:
             return
+        remaining = _remaining()
+        if remaining <= 0:
+            logger.warning("drain_all_on_shutdown: deadline hit with uncommitted sessions: %s", sorted(snapshot))
+            return
 
         made_progress = False
         for sid in snapshot:
-            if commit_session_memory(sid, wait=True):
+            budget = _remaining()
+            if budget <= 0:
+                logger.warning("drain_all_on_shutdown: deadline hit with uncommitted sessions: %s", sorted(snapshot))
+                return
+            # Budget-bounded (covers both the wait-for-in_flight path AND the
+            # unbounded provider call when the inline drain owns the segment).
+            if _commit_within_budget(sid, budget):
                 made_progress = True
         if not made_progress:
             logger.debug("drain_all_on_shutdown: stopped with uncommitted sessions: %s", sorted(snapshot))

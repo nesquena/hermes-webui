@@ -214,9 +214,18 @@ def is_cli_session_row_visible(row: dict) -> bool:
     if not is_cli_session_row(row):
         return True
 
-    message_count = _as_positive_int(row.get("actual_message_count") or row.get("message_count"))
+    actual_message_count = _as_positive_int(row.get("actual_message_count"))
+    message_count = actual_message_count or _as_positive_int(row.get("message_count"))
     if message_count <= 0:
         return False
+
+    if (
+        actual_message_count > 0
+        and _count_user_turns(row) > 0
+        and row.get("ended_at") is None
+        and not row.get("end_reason")
+    ):
+        return True
 
     if "tui" in {
         _normalize_source_name(row.get("source")),
@@ -1110,6 +1119,9 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                 parent_root = _continuation_root_id(rows, parent_id)
                 if parent_root:
                     entry['_parent_lineage_root_id'] = parent_root
+                    if parent_root not in lineage_tip_cache:
+                        lineage_tip_cache[parent_root] = freshest_continuation_tip(parent_root)
+                    entry['_parent_lineage_tip_id'] = lineage_tip_cache[parent_root][0]
                 continue
 
         root_id, segment_count = continuation_root_and_depth(sid)

@@ -78,7 +78,7 @@ def test_busy_placeholder_helper_preserves_compression_and_drafts():
 
 def test_locale_blocks_cover_new_keys():
     locale_blocks = I18N_JS.count("settings_default_message_mode_steer")
-    assert locale_blocks == 14
+    assert locale_blocks == 15
     for key in [
         "settings_label_busy_placeholder_hint",
         "settings_desc_busy_placeholder_hint",

@@ -20,7 +20,7 @@ import re
 
 
 def _src(name: str) -> str:
-    with open(f"static/{name}") as f:
+    with open(f"static/{name}", encoding="utf-8") as f:
         return f.read()
 
 
@@ -123,7 +123,7 @@ class TestComposerVoiceButtonI18n:
         "voice_mode_toggle_active",
     )
 
-    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi")
+    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi", "cs")
 
     def test_legacy_voice_toggle_key_removed(self):
         """The old key whose string was 'Voice input' caused the duplicate-
@@ -171,7 +171,7 @@ class TestComposerVoiceButtonI18n:
 class TestVoiceModePreferenceGate:
     """boot.js must hide btnVoiceMode by default, surface it via Preferences."""
 
-    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi")
+    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "tr", "pl", "vi", "cs")
 
     def test_voice_mode_pref_is_localstorage_backed(self):
         """The pref reads from localStorage key 'hermes-voice-mode-button'."""

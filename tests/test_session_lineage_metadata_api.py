@@ -217,6 +217,9 @@ def test_child_of_hidden_compression_segment_exposes_parent_lineage_root(_isolat
         assert child.get("relationship_type") == "child_session"
         assert child.get("parent_session_id") == "lineage_api_tip"
         assert child.get("_parent_lineage_root_id") == "lineage_api_root"
+        assert child.get("_parent_lineage_tip_id") == "lineage_api_tip"
+        serialized = routes._sidebar_session_response_item(child, redact_enabled=False)
+        assert serialized.get("_parent_lineage_tip_id") == "lineage_api_tip"
         assert "_lineage_root_id" not in child
     finally:
         conn.close()

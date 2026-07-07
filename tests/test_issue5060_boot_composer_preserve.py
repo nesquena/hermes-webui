@@ -38,11 +38,34 @@ def _draft_restore_block() -> str:
     return SESSIONS_JS[start:end]
 
 
-def _run_case(*, initial_text: str, draft: dict | None, opts: dict | None, current_sid, force_reload: bool) -> dict:
+def _draft_restore_suppression_block() -> str:
+    start = SESSIONS_JS.index("const _composerDraftRestoreSuppressedUntilBySid")
+    end = SESSIONS_JS.index("function _profileMatchesActiveProfile", start)
+    return SESSIONS_JS[start:end]
+
+
+def _run_case(*, initial_text: str, draft: dict | None, opts: dict | None, current_sid, force_reload: bool, suppress_restore: bool | dict = False, remembered_server_draft: dict | None = None) -> dict:
     if NODE is None:
         pytest.skip("node not on PATH")
     restore_fn = _function_block(SESSIONS_JS, "function _restoreComposerDraft(draft, targetSid, opts={}) {")
     draft_block = _draft_restore_block()
+    suppression_block = _draft_restore_suppression_block()
+    if isinstance(suppress_restore, dict):
+        suppress_call = (
+            "_suppressComposerDraftRestoreAfterSubmit("
+            f"sid, {json.dumps(suppress_restore.get('text', ''))}, {json.dumps(suppress_restore.get('files', []))}"
+            ");"
+        )
+    elif suppress_restore:
+        suppress_call = "_suppressComposerDraftRestoreAfterSubmit(sid);"
+    else:
+        suppress_call = ""
+    # At SEND time the session's composer_draft holds what was last persisted to
+    # the server (the prefix/old draft), which the dual-signature suppression
+    # reads. That is DISTINCT from the draft a later stale/cross-tab poll echoes
+    # back for restore. Seed the send-time remembered draft separately, then swap
+    # in the restore draft before _restoreComposerDraft runs.
+    send_time_draft = remembered_server_draft if remembered_server_draft is not None else draft
     script = f"""
 const state = {{
   value: {json.dumps(initial_text)},
@@ -58,16 +81,31 @@ function autoResize() {{
 function updateSendBtn() {{
   state.updateSendBtnCount += 1;
 }}
-const S = {{
-  session: {{
-    composer_draft: {json.dumps(draft)},
-  }},
-}};
 let _loadingSessionId = null;
 const sid = 'boot-session';
+const S = {{
+  session: {{
+    session_id: sid,
+    composer_draft: {json.dumps(send_time_draft)},
+  }},
+}};
 const currentSid = {json.dumps(current_sid)};
 const forceReload = {json.dumps(force_reload)};
 const opts = {json.dumps(opts or {})};
+function _composerDraftHasPayload(text, files) {{
+  return !!(String(text || '') || (Array.isArray(files) && files.filter(Boolean).length));
+}}
+function _rememberComposerDraftPayloadState(sid, text, files) {{
+  state.rememberedDraft = {{sid, text, files}};
+  if (S.session && S.session.session_id === sid) {{
+    S.session.composer_draft = {{text, files}};
+  }}
+}}
+{suppression_block}
+{suppress_call}
+// After send-time suppression is captured, the stale/cross-tab poll delivers a
+// (possibly different) draft that restore will evaluate.
+S.session.composer_draft = {json.dumps(draft)};
 {restore_fn}
 {draft_block}
 process.stdout.write(JSON.stringify({{
@@ -119,6 +157,65 @@ def test_boot_restore_still_populates_empty_composer_from_saved_draft():
         force_reload=False,
     )
     assert data["value"] == "server draft"
+    assert data["autoResizeCount"] == 1
+    assert data["updateSendBtnCount"] == 1
+
+
+def test_same_session_submitted_clear_blocks_stale_server_draft_restore():
+    """After send clears the composer, a stale same-session refresh must not refill it.
+
+    Mobile browsers can deliver refresh/input timing such that the textarea is
+    empty locally while /api/session still returns the previous non-empty
+    composer_draft. The submitted-clear suppression should keep that old draft
+    out of the input.
+    """
+    data = _run_case(
+        initial_text="",
+        draft={"text": "old submitted suffix", "files": []},
+        opts={"preserveActiveInput": True},
+        current_sid="boot-session",
+        force_reload=True,
+        remembered_server_draft={"text": "old submitted suffix", "files": []},
+        suppress_restore={"text": "old submitted suffix", "files": []},
+    )
+    assert data["value"] == ""
+    assert data["autoResizeCount"] == 0
+    assert data["updateSendBtnCount"] == 0
+
+
+def test_same_session_submitted_clear_blocks_stale_prefix_server_draft_restore():
+    """#5471 (Opus Finding 1): the server's last persisted draft is often a PREFIX
+    of the submitted text (Enter-to-send within 400ms of a keystroke cancels the
+    pending debounced save), so an exact-match on the submitted text would miss it.
+    The dual signature also captures the remembered SERVER draft, so the stale
+    prefix is suppressed.
+    """
+    data = _run_case(
+        initial_text="",
+        draft={"text": "hello worl", "files": []},          # stale prefix echoed back
+        opts={"preserveActiveInput": True},
+        current_sid="boot-session",
+        force_reload=True,
+        remembered_server_draft={"text": "hello worl", "files": []},  # server had the prefix
+        suppress_restore={"text": "hello world!", "files": []},        # user sent the full text
+    )
+    assert data["value"] == "", "stale prefix of the just-sent text must be suppressed"
+    assert data["autoResizeCount"] == 0
+    assert data["updateSendBtnCount"] == 0
+
+
+def test_same_session_submitted_clear_allows_different_cross_tab_draft_restore():
+    """A different same-session draft saved by another tab must not be hidden by send-time suppression."""
+    data = _run_case(
+        initial_text="",
+        draft={"text": "new cross-tab draft", "files": []},
+        opts={"preserveActiveInput": True},
+        current_sid="boot-session",
+        force_reload=True,
+        remembered_server_draft={"text": "old submitted suffix", "files": []},
+        suppress_restore={"text": "old submitted suffix", "files": []},
+    )
+    assert data["value"] == "new cross-tab draft"
     assert data["autoResizeCount"] == 1
     assert data["updateSendBtnCount"] == 1
 

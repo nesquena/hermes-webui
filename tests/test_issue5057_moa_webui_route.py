@@ -14,7 +14,9 @@ from tests.conftest import TEST_BASE, requires_agent_modules
 
 def _install_fake_moa_config(monkeypatch, *, default_preset="moa-default", usage_text="Usage: /moa <prompt>"):
     hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
-    hermes_cli_pkg.__path__ = []
+    # monkeypatch.setattr restores the REAL hermes_cli.__path__ on teardown;
+    # emptying it in place would strand the package for the rest of the suite.
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
     moa_config = ModuleType("hermes_cli.moa_config")
 
     def normalize_moa_config(cfg):
@@ -32,7 +34,9 @@ def _install_fake_moa_config(monkeypatch, *, default_preset="moa-default", usage
 
 def _install_fake_hermes_config(monkeypatch, cfg_data=None):
     hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
-    hermes_cli_pkg.__path__ = []
+    # monkeypatch.setattr restores the REAL hermes_cli.__path__ on teardown;
+    # emptying it in place would strand the package for the rest of the suite.
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
     config_mod = ModuleType("hermes_cli.config")
 
     def load_config():

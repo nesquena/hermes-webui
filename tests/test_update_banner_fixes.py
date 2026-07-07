@@ -1805,6 +1805,39 @@ class TestIndexHtmlBanner:
         )
 
 
+class TestClearLockButton:
+    """PR #5688 follow-up: clear-lock button must exist in index.html and be
+    hidden by default. Without this, the v2 frontend recovery path is dead --
+    $('btnClearUpdateLock') returns null at runtime so the lock-only error
+    branch in _showUpdateError() never reveals a clickable affordance (P1).
+    """
+
+    def test_clear_lock_button_exists(self):
+        src = read('static/index.html')
+        assert 'id="btnClearUpdateLock"' in src, (
+            "index.html must have #btnClearUpdateLock button (hidden by "
+            "default) -- PR #5688 v2 frontend path"
+        )
+
+    def test_clear_lock_button_hidden_by_default(self):
+        src = read('static/index.html')
+        m = re.search(r'id="btnClearUpdateLock"[^>]*>', src)
+        assert m, "#btnClearUpdateLock not found"
+        tag = m.group(0)
+        assert 'display:none' in tag, (
+            "#btnClearUpdateLock must be hidden by default (display:none)"
+        )
+
+    def test_clear_lock_button_calls_applyClearUpdateLock_handler(self):
+        src = read('static/index.html')
+        m = re.search(r'id="btnClearUpdateLock"[^>]*>', src)
+        assert m, "#btnClearUpdateLock not found"
+        tag = m.group(0)
+        assert 'applyClearUpdateLock(this)' in tag, (
+            "#btnClearUpdateLock onclick must invoke applyClearUpdateLock"
+        )
+
+
 # ── Regression: sequential webui+agent update — restart coordination ──────────
 
 class TestSequentialUpdateRestartCoordination:

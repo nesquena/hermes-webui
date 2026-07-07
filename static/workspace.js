@@ -46,7 +46,21 @@ async function api(path,opts={}){
           // re-authenticate. This is especially important for iOS PWA (standalone mode)
           // and for subpath mounts like /hermes/, where /login escapes to the site root.
           if(res.status===401){
-            if(redirect401) window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);
+            // #5578: if we're ALREADY on the login page, appending
+            // window.location.pathname+search (which contains ?next=…) into a
+            // fresh next= wraps the login URL into itself and re-encodes it —
+            // exponential URL growth on each expired-auth bounce until the tab
+            // breaks. On the login page, just reload login WITHOUT a next (the
+            // page preserves its own inner next); elsewhere, capture the path.
+            if(redirect401){
+              // Already on the login page? Reload login WITHOUT a next.
+              const _p=(window.location.pathname||'').replace(/\/+$/,'');
+              if(/(?:^|\/)login$/.test(_p)){
+                window.location.href='login';
+              }else{
+                window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);
+              }
+            }
             // Callers can opt out of navigation and handle the unauthenticated state themselves.
             return;
           }
@@ -1215,6 +1229,39 @@ function openInBrowser(){
   window.open(url,'_blank','noopener');
 }
 // openInBrowser keeps the helper-based raw path, which expands to an explicit &inline=1 URL.
+
+async function copyPreviewRelativePath(){
+  if(!_previewCurrentPath) return;
+  const btn=$('btnCopyPreviewRelPath');
+  if(btn&&btn.disabled) return;
+  if(btn) btn.disabled=true;
+  try{
+    const rel=_normalizeWorkspaceRelPath(_previewCurrentPath)||_previewCurrentPath;
+    if(typeof _copyTextWithFallback==='function'){
+      await _copyTextWithFallback(rel,t('path_copied'),t('path_copy_failed'));
+      return;
+    }
+    try{
+      await navigator.clipboard.writeText(rel);
+      showToast(t('path_copied'));
+    }catch(clipErr){
+      const ta=document.createElement('textarea');
+      ta.value=rel;
+      ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      let copied=false;
+      try{copied=document.execCommand('copy');}catch(_){}
+      ta.remove();
+      if(copied) showToast(t('path_copied'));
+      else showToast(t('path_copy_failed')+(clipErr&&clipErr.message?clipErr.message:String(clipErr)));
+    }
+  }catch(err){
+    showToast(t('path_copy_failed')+(err.message||err));
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
 
 // ── Workspace upload ──────────────────────────────────────────────────
 function triggerWorkspaceUpload() {

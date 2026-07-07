@@ -4,7 +4,7 @@ import re
 
 def test_excalidraw_extension_regex():
     """Verify _EXCALIDRAW_EXTS regex is defined."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert '_EXCALIDRAW_EXTS' in src, "Missing _EXCALIDRAW_EXTS regex"
     assert '.excalidraw' in src, "Excalidraw regex should match .excalidraw"
@@ -12,7 +12,7 @@ def test_excalidraw_extension_regex():
 
 def test_excalidraw_media_handler():
     """Verify MEDIA: .excalidraw files trigger inline loading."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert 'excalidraw-inline-load' in src, "Missing excalidraw-inline-load class"
     assert 'excalidraw_loading' in src, "Missing excalidraw_loading i18n key usage"
@@ -20,14 +20,14 @@ def test_excalidraw_media_handler():
 
 def test_loadExcalidrawInline_function():
     """Verify loadExcalidrawInline lazy-load function exists."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert 'function loadExcalidrawInline' in src, "Missing loadExcalidrawInline function"
 
 
 def test_excalidraw_json_validation():
     """Verify Excalidraw handler validates JSON format."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     func = src[src.find('function loadExcalidrawInline'):src.find('function loadExcalidrawInline') + 2000]
     assert 'JSON.parse' in func, "Should parse JSON"
@@ -37,7 +37,7 @@ def test_excalidraw_json_validation():
 
 def test_excalidraw_size_cap():
     """Verify Excalidraw inline rendering has a size cap."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     func = src[src.find('function loadExcalidrawInline'):src.find('function loadExcalidrawInline') + 2000]
     assert 'EXCALIDRAW_MAX_SIZE' in func, "Should have EXCALIDRAW_MAX_SIZE constant"
@@ -46,7 +46,7 @@ def test_excalidraw_size_cap():
 
 def test_excalidraw_error_handling():
     """Verify Excalidraw error handling."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     func = src[src.find('function loadExcalidrawInline'):src.find('function loadExcalidrawInline') + 3500]
     assert 'excalidraw_error' in func, "Should use excalidraw_error i18n on fetch failure"
@@ -54,7 +54,7 @@ def test_excalidraw_error_handling():
 
 def test_excalidraw_svg_renderer_exists():
     """Verify SVG renderer for Excalidraw elements exists."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert 'function _renderExcalidrawCanvases()' in src, "Missing _renderExcalidrawCanvases function"
     start = src.find('function _renderExcalidrawCanvases()')
@@ -66,7 +66,7 @@ def test_excalidraw_svg_renderer_exists():
 
 def test_excalidraw_renders_element_types():
     """Verify SVG renderer handles common Excalidraw element types."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     start = src.find('function _renderExcalidrawCanvases()')
     end = src.find('// ── PDF inline preview', start)
@@ -78,7 +78,7 @@ def test_excalidraw_renders_element_types():
 
 def test_excalidraw_arrow_marker():
     """Verify SVG renderer includes arrow marker definition."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     start = src.find('function _renderExcalidrawCanvases()')
     end = src.find('// ── PDF inline preview', start)
@@ -89,7 +89,7 @@ def test_excalidraw_arrow_marker():
 
 def test_excalidraw_bounds_calculation():
     """Verify SVG renderer calculates viewBox from element bounds."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     start = src.find('function _renderExcalidrawCanvases()')
     end = src.find('// ── PDF inline preview', start)
@@ -101,7 +101,7 @@ def test_excalidraw_bounds_calculation():
 
 def test_excalidraw_empty_elements():
     """Verify empty diagrams show a message."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     start = src.find('function _renderExcalidrawCanvases()')
     end = src.find('// ── PDF inline preview', start)
@@ -112,7 +112,7 @@ def test_excalidraw_empty_elements():
 
 def test_excalidraw_download_link():
     """Verify Excalidraw embed includes download link."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     func = src[src.find('function loadExcalidrawInline'):src.find('function loadExcalidrawInline') + 2000]
     assert 'excalidraw-open-link' in func, "Should include open/download link"
@@ -121,7 +121,7 @@ def test_excalidraw_download_link():
 
 def test_excalidraw_called_after_render():
     """Verify loadExcalidrawInline is called by the consolidated post-render pass."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     # Behavior assertion (#5338): post-render is now scheduled through
     # _postProcessWithAnchorSuppression (which still calls postProcessRenderedMessages).
@@ -139,7 +139,7 @@ def test_excalidraw_called_after_render():
 
 def test_excalidraw_embed_wrap_structure():
     """Verify Excalidraw embed uses proper container structure."""
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert 'excalidraw-embed-wrap' in src, "Missing excalidraw-embed-wrap container"
     assert 'excalidraw-canvas' in src, "Missing excalidraw-canvas div"
@@ -148,7 +148,7 @@ def test_excalidraw_embed_wrap_structure():
 
 def test_excalidraw_i18n_keys():
     """Verify Excalidraw i18n keys exist in all 7 locales."""
-    with open('static/i18n.js') as f:
+    with open('static/i18n.js', encoding="utf-8") as f:
         src = f.read()
     required_keys = [
         'excalidraw_loading', 'excalidraw_too_large', 'excalidraw_invalid',
@@ -162,7 +162,7 @@ def test_excalidraw_i18n_keys():
 
 def test_excalidraw_css_classes():
     """Verify Excalidraw CSS classes are defined."""
-    with open('static/style.css') as f:
+    with open('static/style.css', encoding="utf-8") as f:
         src = f.read()
     required_classes = [
         'excalidraw-embed-wrap', 'excalidraw-canvas', 'excalidraw-svg',
@@ -189,7 +189,7 @@ def test_excalidraw_css_classes():
 # be coerced via Number()/isFinite gates so they cannot carry strings.
 
 def _excalidraw_render_block():
-    with open('static/ui.js') as f:
+    with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     start = src.find('function _renderExcalidrawCanvases')
     assert start != -1, '_renderExcalidrawCanvases not found'

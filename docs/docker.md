@@ -185,6 +185,20 @@ services:
       # HERMES_WEBUI_GATEWAY_BASE_URL=http://hermes-agent:8642 also works.
 ```
 
+If WebUI browser chat is routed through that gateway and you expect approval prompts for guarded tools, set the gateway chat backend and opt into the runs API path in the **WebUI service**:
+
+```yaml
+services:
+  hermes-webui:
+    environment:
+      - HERMES_WEBUI_CHAT_BACKEND=gateway
+      - HERMES_WEBUI_GATEWAY_BASE_URL=http://hermes-agent:8642
+      - HERMES_WEBUI_GATEWAY_USE_RUNS_API=true
+      # HERMES_WEBUI_GATEWAY_API_KEY=... when the gateway requires API auth.
+```
+
+`HERMES_WEBUI_GATEWAY_USE_RUNS_API=true` is required for gateway approval cards because approval-capable gateway runs emit approval requests on the runs API transport. Leaving it unset keeps browser chat on the legacy chat-completions path.
+
 Do not copy only `API_SERVER_ENABLED=true` / `API_SERVER_HOST=0.0.0.0` into the
 agent service as a standalone fix. If you intentionally enable the agent API
 server, the agent also requires a real `API_SERVER_KEY` (at least 8 characters),

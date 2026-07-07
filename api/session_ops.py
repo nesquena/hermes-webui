@@ -110,10 +110,25 @@ def truncate_context_for_display_keep(
     msgs = full_messages if isinstance(full_messages, list) else []
     if not ctx:
         return []
-    if len(ctx) <= len(msgs):
-        return ctx[:keep]
     if len(msgs) == 0:
         return []
+    # Only the perfectly-parallel case (display and context row-for-row) can be
+    # sliced at the raw display index. When the two arrays differ in length —
+    # in EITHER direction — they have diverged and need alignment:
+    #   * context LONGER than display  → an injected summary/system prefix, etc.
+    #   * context SHORTER than display → large-session context trimming dropped
+    #     turns from the model context that the display still shows.
+    # The shorter-context case is the one that broke forked large sessions: the
+    # old ``len(ctx) <= len(msgs)`` guard short-circuited to ``ctx[:keep]``,
+    # slicing the shorter context at the display index (landing mid-turn, e.g.
+    # on an assistant tool_call whose result was past the cut). Fall through to
+    # the signature matcher for both divergent cases so the cut lands on a real
+    # turn boundary. Any residual dangling tool_use in the persisted context is
+    # made wire-safe on the send path (streaming: ``_sanitize_messages_for_api``
+    # strips unanswered tool_calls; gateway: it forwards no tool_calls/tool rows
+    # at all), so we do not re-do that trimming here.
+    if len(ctx) == len(msgs):
+        return ctx[:keep]
 
     def _row_signature(row: Any) -> tuple[str, ...] | None:
         if not isinstance(row, dict):
@@ -197,7 +212,27 @@ def truncate_context_for_display_keep(
                 return ctx[:ambiguous_first_unkept]
             return ctx[:last_kept + 1]
 
-    # Final fallback preserves #5096 behavior when alignment is unreliable.
+        # Both boundary rows were ambiguous/unmatched (common in large sessions
+        # where context rows have lost their id/timestamp so the matcher can't
+        # disambiguate structurally-identical rows). Only for the shorter-context
+        # case: cut just past the LAST display row in the kept prefix that
+        # resolved to a context index — preferring an exact match but accepting
+        # an ambiguous (weak) one, mirroring how the sibling branches above fold
+        # ``ambiguous_matches`` into the boundary. Accepting the weak match keeps
+        # the forked boundary turn's own context (often exactly that ambiguous
+        # row) instead of dropping back to an earlier exact match. It still errs
+        # toward UNDER-keeping rather than slicing at the raw display index,
+        # which would over-keep and mis-attribute later context rows to the kept
+        # display turns. The context-longer case (injected summary prefix) is
+        # left to the #5096 fallback below, which preserves that prefix.
+        if len(ctx) < len(msgs):
+            for i in range(keep - 1, -1, -1):
+                resolved = matches[i] if matches[i] is not None else ambiguous_matches[i]
+                if resolved is not None:
+                    return ctx[:resolved + 1]
+
+    # Final fallback preserves #5096 behavior when alignment is unreliable
+    # (no display row resolved to a context index, or keep >= len(msgs)).
     prefix_len = max(0, len(ctx) - len(msgs))
     prefix = ctx[:prefix_len]
     suffix = ctx[prefix_len:]

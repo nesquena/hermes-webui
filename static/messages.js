@@ -1027,8 +1027,12 @@ function _composerTextWithPendingSelections(){
 }
 
 function _clearComposerAfterQueuedSelectionSend(){
+  const sid=arguments.length?arguments[0]:(S.session&&S.session.session_id);
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  const draftText=composer?String(composer.value||''):'';
+  const draftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
   if(composer)composer.value='';
+  if(sid&&typeof _clearComposerDraft==='function') _clearComposerDraft(sid,draftText,draftFiles);
   _clearPendingSelections();
   if(typeof autoResize==='function') autoResize();
 }
@@ -1306,6 +1310,7 @@ async function send(){
       const _modelState=_chatPayloadModelState();
       queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
       _clearComposerAfterQueuedSelectionSend();
+      if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
       S.pendingFiles=[];renderTray();
       updateQueueBadge(_targetSid);
       showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
@@ -1321,6 +1326,11 @@ async function send(){
   _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
+    if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
+    _sendInProgress=false;_sendInProgressSid=null;
+    return;
+  }
 
   // #5472: snapshot the ORIGINAL user-typed composer state now — before slash
   // rewrites (/moa, bundles) mutate `text` and before uploadPendingFiles()
@@ -1340,7 +1350,7 @@ async function send(){
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
-    if(text){
+    if(text||S.pendingFiles.length){
       if(!S.session){await newSession();await renderSessionList();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
@@ -1364,21 +1374,21 @@ async function send(){
       if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
-        // _trySteer restores the draft and leaves the active stream running if
-        // the agent isn't running / cached / steer-capable.
+        // _trySteer captures the owner session/files before awaiting uploads,
+        // restores/persists the draft on failure, and clears the owner draft
+        // only after /api/chat/steer accepts.
         $('msg').value='';autoResize();
-        // Do NOT clear pendingFiles yet — a failed steer restores the draft and
-        // must keep staged files available for the user's next explicit action.
-        const _steerDelivered=await _trySteer(text, /*explicitSteer=*/false);
-        // After a delivered steer, clear any staged files because the text-only
-        // steer payload has been handled. On failure, keep files staged.
-        if(_steerDelivered){S.pendingFiles=[];renderTray();}
+        // Do NOT clear pendingFiles yet — _trySteer uploads with clearPending=false,
+        // and a failed steer must keep staged files available for the user's next explicit action.
+        await _trySteer(text, /*explicitSteer=*/false);
+        // _trySteer clears staged files only after /api/chat/steer accepts, and
+        // only when the visible session still matches the captured owner sid.
       } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();
         queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
         updateQueueBadge(S.session.session_id);
-        $('msg').value='';autoResize();
+        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
         if(S.activeStreamId&&typeof cancelStream==='function'){
           showToast(t('busy_interrupt_confirm'),2000);
@@ -1391,7 +1401,7 @@ async function send(){
         // 'steer' mode when no stream is active or _trySteer is unavailable.
         const _modelState=_chatPayloadModelState();
         queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        $('msg').value='';autoResize();
+        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
         updateQueueBadge(S.session.session_id);
         showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
@@ -1577,7 +1587,8 @@ async function send(){
     }
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
-
+  const _submittedDraftTextForClear=$('msg').value||'';
+  const _submittedDraftFilesForClear=Array.isArray(_failedSendFilesSnapshot)?[..._failedSendFilesSnapshot]:[];
   $('msg').value='';autoResize();
   // Clear persisted composer draft since message was sent. Capture the promise
   // so the #5472 failed-send restore can chain its re-persist AFTER this clear
@@ -1585,7 +1596,7 @@ async function send(){
   // text:<draft>) can be reordered under HTTP/2 multiplexing and leave the
   // server draft empty after a reload. (Opus #5484 NIT.)
   let _composerDraftClearPromise=null;
-  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid);
+  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
@@ -2535,10 +2546,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeLastArrivalMs=0;
   let _streamFadeArrivalWps=0;
   let _streamFadeLatestAnimationEndAt=0;
-  let _streamFadeAppendOffset=0;
   let _streamFadeVisibleWords=0;
   let _streamFadeHoldUntilMs=0;
-  let _streamFadeCurrentMs=200;
+  let _streamFadeCurrentMs=620;
+  let _streamFadeDomText='';
   let _streamFadeReduceMotionMql=null;
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
@@ -2549,11 +2560,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
     : 0;
   let _lastRunJournalEventId='';
-  const _STREAM_FADE_MS=200;
-  const _STREAM_FADE_MAX_MS=350;
-  const _STREAM_FADE_STAGGER_MS=16;
-  const _STREAM_FADE_DONE_MAX_MS=320;
-  const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
+  const _STREAM_FADE_MS=620;
+  const _STREAM_FADE_MAX_MS=900;
+  const _STREAM_FADE_DONE_MAX_MS=1000;
+  const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400;
   const _anchorApi=(typeof window!=='undefined'&&window.HermesAssistantTurnAnchors)
     ? window.HermesAssistantTurnAnchors
     : null;
@@ -2697,12 +2707,35 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seq=Number(_assistantSegmentSeq||_currentLiveSegmentSeq||0);
     return Number.isFinite(seq)&&seq>0?seq:1;
   }
+  function _anchorSceneActiveMode(){
+    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'?value:'';
+    if(typeof window!=='undefined'){
+      if(typeof window.chatActivityMode==='function'){
+        try{
+          const mode=normalize(window.chatActivityMode());
+          if(mode) return mode;
+        }catch(_){}
+      }
+      const displayMode=normalize(window._chatActivityDisplayMode);
+      if(displayMode) return displayMode;
+      if(window._transparentStream) return 'transparent_stream';
+    }
+    return 'compact_worklog';
+  }
+  function _anchorSceneRowDisplayHintForMode(row, sceneMode){
+    const hints=row&&typeof row==='object'&&row.display_hints&&typeof row.display_hints==='object'
+      ? row.display_hints
+      : null;
+    if(sceneMode==='transparent_stream') return (hints&&hints.transparent_stream)||'chronological_activity';
+    if(sceneMode==='compact_worklog') return (hints&&hints.compact_worklog)||row.display_hint||'activity_row';
+    return row&&row.display_hint||'activity_row';
+  }
   function _renderAnchorLiveScene(){
     if(!_anchorRegistry||!_isActiveSession()) return false;
     if(typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneForStream!=='function') return false;
     try{
       return !!window._renderLiveAnchorActivitySceneForStream(streamId, activeSid, {
-        mode:'compact_worklog',
+        mode:_anchorSceneActiveMode(),
       });
     }catch(err){
       if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
@@ -2715,7 +2748,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _projectLiveAnchorActivityScene(){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.projectAssistantTurnAnchorActivityScene!=='function') return null;
     try{
-      return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:'compact_worklog'});
+      return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:_anchorSceneActiveMode()});
     }catch(_){
       return null;
     }
@@ -3449,6 +3482,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
+    const sceneMode=base.mode==='transparent_stream'?'transparent_stream':_anchorSceneActiveMode();
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
     const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
       ? messageFinalAnswer
@@ -3471,7 +3505,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(key&&seen.has(key)) return;
       if(key) seen.add(key);
       if(isTextual&&textKey) seenTextKeys.push(textKey);
-      rows.push({...row,order_index:rows.length,seq:rows.length});
+      rows.push({
+        ...row,
+        display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode),
+        order_index:rows.length,
+        seq:rows.length,
+      });
     };
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
     for(const row of projectedRows){
@@ -3488,7 +3527,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const scene={
       ...base,
       version:'activity_scene_v1',
-      mode:'compact_worklog',
+      mode:sceneMode,
       identity:{
         ...((base.identity&&typeof base.identity==='object')?base.identity:{}),
         source_message_refs:messages.slice(turnStart+1,lastAsstIndex+1)
@@ -3629,21 +3668,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _anchorProseIncrementalNode(key, text){
     if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
     const value=String(text||'');
+    const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade();
     try{
       let st=_anchorProseSmdCache.get(key);
       // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
       // rebuild the parser+node from scratch, mirroring _smdWrite's guard.
       if(st && st.writtenText && !value.startsWith(st.writtenText)) st=null;
+      if(st && st.fade!==fade) st=null;
       if(!st){
         const node=document.createElement('div');
         node.className='assistant-segment';
         node.setAttribute('data-anchor-scene-prose','1');
         const body=document.createElement('div');
         body.className='msg-body';
+        if(body.classList) body.classList.toggle('stream-fade-active',fade);
         node.appendChild(body);
-        const baseRenderer=_safeSmdRenderer(body);
+        const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body);
         const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
-        st={node,parser:window.smd.parser(renderer),writtenText:''};
+        st={node,parser:window.smd.parser(renderer),writtenText:'',fade};
         _anchorProseSmdCache.set(key,st);
         // Bound memory across turns: keys embed the stream id, so stale entries
         // from finished streams age out here.
@@ -3652,6 +3694,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(oldest!==key) _anchorProseSmdCache.delete(oldest);
         }
       }
+      const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
+      if(body&&body.classList) body.classList.toggle('stream-fade-active',fade);
       const delta=value.slice(st.writtenText.length);
       if(delta){
         window.smd.parser_write(st.parser,delta);
@@ -4074,10 +4118,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeLastArrivalMs=0;
     _streamFadeArrivalWps=0;
     _streamFadeLatestAnimationEndAt=0;
-    _streamFadeAppendOffset=0;
     _streamFadeVisibleWords=0;
     _streamFadeHoldUntilMs=0;
     _streamFadeCurrentMs=_STREAM_FADE_MS;
+    _streamFadeDomText='';
   }
   function _cancelAnimationFramePendingStreamRender(){
     if(_pendingRafHandle===null) return;
@@ -4088,6 +4132,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _shouldUseStreamFade(){
     return window._fadeTextEffect===true;
+  }
+  function _shouldUseTransparentStreamFade(){
+    return typeof isTransparentStream==='function'&&isTransparentStream();
+  }
+  function _shouldUseLiveProseFade(){
+    return !_streamFadeReduceMotionEnabled() && (_shouldUseStreamFade() || _shouldUseTransparentStreamFade());
   }
   function _streamFadeSkipNode(node){
     if(!node||node.nodeType!==1) return false;
@@ -4147,13 +4197,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const span=document.createElement('span');
         span.className='stream-fade-word is-new';
         const fadeMs=_streamFadeCurrentMs||_STREAM_FADE_MS;
-        const delayMs=_streamFadeAppendOffset*_STREAM_FADE_STAGGER_MS;
-        span.style.animationDelay=delayMs+'ms';
         if(fadeMs!==_STREAM_FADE_MS) span.style.setProperty('--stream-fade-ms',fadeMs+'ms');
         span.textContent=match[1];
         frag.appendChild(span);
-        _streamFadeAppendOffset+=1;
-        _streamFadeLatestAnimationEndAt=Math.max(_streamFadeLatestAnimationEndAt,appendStartedAt+delayMs+fadeMs);
+        _streamFadeLatestAnimationEndAt=Math.max(_streamFadeLatestAnimationEndAt,appendStartedAt+fadeMs);
         if(match[2]) frag.appendChild(document.createTextNode(match[2]));
         last=match.index+match[0].length;
         changed=true;
@@ -4216,6 +4263,39 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _streamFadeWordCountOf(text){
     const m=String(text||'').match(/\S+/g);
     return m?m.length:0;
+  }
+  function _streamFadeAppendText(el, text){
+    if(!el) return;
+    const value=String(text||'');
+    if(!value) return;
+    const reduceMotion=_streamFadeReduceMotionEnabled();
+    const frag=document.createDocumentFragment();
+    const wordRe=/(\S+)(\s*)/g;
+    const appendStartedAt=performance.now();
+    let last=0, match, changed=false;
+    while((match=wordRe.exec(value))){
+      if(match.index>last) frag.appendChild(document.createTextNode(value.slice(last,match.index)));
+      if(reduceMotion){
+        frag.appendChild(document.createTextNode(match[1]));
+      }else{
+        const span=document.createElement('span');
+        span.className='stream-fade-word is-new';
+        const fadeMs=_streamFadeCurrentMs||_STREAM_FADE_MS;
+        if(fadeMs!==_STREAM_FADE_MS) span.style.setProperty('--stream-fade-ms',fadeMs+'ms');
+        span.textContent=match[1];
+        frag.appendChild(span);
+        _streamFadeLatestAnimationEndAt=Math.max(_streamFadeLatestAnimationEndAt,appendStartedAt+fadeMs);
+      }
+      if(match[2]) frag.appendChild(document.createTextNode(match[2]));
+      last=match.index+match[0].length;
+      changed=true;
+    }
+    if(!changed){
+      frag.appendChild(document.createTextNode(value));
+    }else if(last<value.length){
+      frag.appendChild(document.createTextNode(value.slice(last)));
+    }
+    el.appendChild(frag);
   }
   function _streamFadePauseAfter(text, paragraphBreakIndex){
     if(paragraphBreakIndex>=0) return 90;
@@ -4320,17 +4400,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const next=_streamFadeNextText(displayText);
     if(!next.changed) return next.caughtUp;
     assistantBody.classList.add('stream-fade-active');
-    if(!_smdParser&&window.smd){
-      if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
-      _smdNewParser(assistantBody,true);
+    if(!_shouldUseTransparentStreamFade()){
+      if(!_smdParser&&window.smd){
+        if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
+        _smdNewParser(assistantBody,true);
+      }
+      if(_smdParser){
+        _smdWrite(next.text,true);
+      }else{
+        assistantBody.innerHTML=renderMd ? renderMd(next.text||'') : esc(next.text||'');
+        _sanitizeSmdLinks(assistantBody);
+      }
+      _streamFadeDomText=String(next.text||'');
+      return next.caughtUp;
     }
     if(_smdParser){
-      _streamFadeAppendOffset=0;
-      _smdWrite(next.text,true);
-    }else{
-      assistantBody.innerHTML=renderMd ? renderMd(next.text||'') : esc(next.text||'');
-      _sanitizeSmdLinks(assistantBody);
+      _smdEndParser();
+      assistantBody.textContent='';
+      _streamFadeDomText='';
     }
+    _smdReconnect=false;
+    if(!_streamFadeDomText&&assistantBody.textContent){
+      assistantBody.textContent='';
+    }
+    if(!String(next.text||'').startsWith(_streamFadeDomText)){
+      assistantBody.textContent='';
+      _streamFadeDomText='';
+    }
+    const delta=String(next.text||'').slice(_streamFadeDomText.length);
+    if(delta) assistantBody.appendChild(document.createTextNode(delta));
+    _streamFadeDomText=String(next.text||'');
     return next.caughtUp;
   }
   function _streamFadeCurrentDisplayText(){
@@ -4346,6 +4445,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!assistantBody){onDone();return;}
       const target=_streamFadeCurrentDisplayText();
       const caughtUp=_renderStreamingFadeMarkdown(target);
+      const anchorProcessText=_streamFadeDomText||target;
+      if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
       scrollIfPinned();
       if(caughtUp){
         // parser_end can flush pending markdown text; include that final text in
@@ -4720,12 +4821,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const parsed=_cachedParsed&&_cachedParsedText===assistantText&&_cachedParsedReasoning===liveReasoningText ? _cachedParsed : _parseStreamState();
       _cachedParsed=null;
       _renderLiveThinking(parsed);
+      const displayText = segmentStart===0
+        ? parsed.displayText                          // first segment: uses think-tag stripping
+        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+      let anchorProcessText=displayText;
       if(assistantBody){
-        const displayText = segmentStart===0
-          ? parsed.displayText                          // first segment: uses think-tag stripping
-          : _stripXmlToolCalls(assistantText.slice(segmentStart));
-        if(_shouldUseStreamFade()){
+        if(_shouldUseLiveProseFade()){
           const caughtUp=_renderStreamingFadeMarkdown(displayText);
+          anchorProcessText=_streamFadeDomText||'';
           if(!caughtUp&&!_streamFinalized){
             setTimeout(()=>_scheduleRender(), 33);
           }
@@ -4750,13 +4853,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             assistantBody.innerHTML = renderMd ? renderMd(fallbackText) : esc(fallbackText);
           }
         }
-        _upsertAnchorProcessProse(displayText);
         if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
       }
+      if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
       scrollIfPinned();
       _throttledSnapshotLiveTurn();
     };
-    const frameIntervalMs=_shouldUseStreamFade()?33:66;
+    const frameIntervalMs=_shouldUseLiveProseFade()?33:66;
     if(sinceLastMs>=frameIntervalMs){
       _pendingRafHandle=requestAnimationFrame(_doRender);
     } else {
@@ -5449,7 +5552,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
-      if(_shouldUseStreamFade()&&assistantBody){
+      if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
         _drainStreamFadeBeforeDone(_finishDone);
         return;
@@ -5672,7 +5775,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
             }
           } else {
-            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
+            const recovery=(d.compression_recovery&&typeof d.compression_recovery==='object')?d.compression_recovery:null;
+            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel,_compressionRecovery:recovery||undefined});
             _attachProjectedAnchorSceneToLastAssistant(S.messages);
           }
         }catch(_){
@@ -5757,7 +5861,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // during this retry window and only surface an error after all probes fail.
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
-        const _retryDelays=[1500,3000,5000,8000];
+        const _retryDelays=[1500,3000,5000,8000,12000,20000];
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
         const _probeReconnect=async(attempt=0)=>{
           if(_terminalStateReached || _streamFinalized) return;
@@ -5786,6 +5890,42 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             setTimeout(()=>{void _probeReconnect(attempt+1);}, nextDelay);
             return;
           }
+          // Last-ditch: the stream may have finished while we were retrying.
+          // _restoreSettledSession polls the full session API (not just stream
+          // status) and can recover a completed response without an error banner.
+          // This is especially important on iOS where Tailscale reconnects can
+          // take longer than the retry window.
+          setComposerStatus('Restoring session…');
+          let _restoreTimedOut=false;
+          const _restoreTimer=setTimeout(()=>{
+            // If _restoreSettledSession hangs (flaky Tailscale), don't leave
+            // the UI stuck on "Restoring session…" forever. Fall through to
+            // _handleStreamError after 8s.
+            _restoreTimedOut=true;
+            if(!_terminalStateReached&&!_streamFinalized){
+              if(_deferStreamErrorIfOffline()) return;
+              if(_deferStreamErrorIfPageHidden(source)) return;
+              _flushReasoningToAnchor();
+              _scheduleAnchorRegistryCleanup(120000);
+              _handleStreamError(source);
+            }
+          },8000);
+          try{
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})){
+              if(_restoreTimedOut) return; // timer already fired _handleStreamError
+              clearTimeout(_restoreTimer);
+              return;
+            }
+          }catch(_){
+            // _restoreSettledSession threw. If the timer already fired,
+            // _handleStreamError was called there; we return below.
+            // Otherwise the code below cancels the timer and calls it directly.
+          }
+          if(_restoreTimedOut) return; // timer already fired _handleStreamError
+          clearTimeout(_restoreTimer);
+          if(_terminalStateReached||_streamFinalized) return;
+          if(_deferStreamErrorIfOffline()) return;
+          if(_deferStreamErrorIfPageHidden(source)) return;
           _flushReasoningToAnchor();
           _scheduleAnchorRegistryCleanup(120000);
           _handleStreamError(source);

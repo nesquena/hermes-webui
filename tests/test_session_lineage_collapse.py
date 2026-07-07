@@ -364,7 +364,7 @@ eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const raw = [
   {{session_id:'root', title:'Root', updated_at:10, last_message_at:10, _lineage_root_id:'root', _lineage_tip_id:'tip'}},
   {{session_id:'tip', title:'Tip', updated_at:20, last_message_at:20, _lineage_root_id:'root', _lineage_tip_id:'tip'}},
-  {{session_id:'child', title:'Subtask', parent_session_id:'tip', relationship_type:'child_session', _parent_lineage_root_id:'root', updated_at:30, last_message_at:30}},
+  {{session_id:'child', title:'Subtask', parent_session_id:'tip', relationship_type:'child_session', _parent_lineage_root_id:'root', _parent_lineage_tip_id:'tip', updated_at:30, last_message_at:30}},
 ];
 const collapsed = _collapseSessionLineageForSidebar(raw);
 const attached = _attachChildSessionsToSidebarRows(collapsed, raw);
@@ -374,6 +374,72 @@ console.log(JSON.stringify(attached));
     assert [row["session_id"] for row in rows] == ["tip"]
     assert rows[0]["_child_session_count"] == 1
     assert rows[0]["_child_sessions"][0]["session_id"] == "child"
+
+
+def test_mixed_source_live_refresh_keeps_authoritative_tip_and_child_set():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sessionLineageContainsSession'));
+eval(extractFunc('_authoritativeLineageTipId'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+function summarize(raw) {{
+  const collapsed = _collapseSessionLineageForSidebar(raw);
+  const rows = _attachChildSessionsToSidebarRows(collapsed, raw);
+  const row = rows[0];
+  return {{
+    visibleSid: row.session_id,
+    badgeKind: row._child_session_count > 0 ? 'children' : 'prior-turns',
+    childSids: (row._child_sessions || []).map(child => child.session_id),
+    segmentSids: (row._lineage_segments || []).map(seg => seg.session_id),
+  }};
+}}
+const refreshA = [
+  {{session_id:'root', title:'Optimizing Hermes Development', updated_at:40, last_message_at:40, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:2}},
+  {{session_id:'tip', title:'Optimizing Hermes Development', parent_session_id:'root', updated_at:20, last_message_at:20, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:2}},
+  {{session_id:'fork-child', title:'Optimizing Hermes Development child', parent_session_id:'root', relationship_type:'child_session', session_source:'fork', _parent_lineage_root_id:'root', _parent_lineage_tip_id:'tip', updated_at:50, last_message_at:50}},
+];
+const refreshB = [
+  {{session_id:'root', title:'Optimizing Hermes Development', updated_at:10, last_message_at:10, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:2}},
+  {{session_id:'tip', title:'Optimizing Hermes Development', parent_session_id:'root', updated_at:60, last_message_at:60, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:2}},
+  {{session_id:'fork-child', title:'Optimizing Hermes Development child', parent_session_id:'root', relationship_type:'child_session', session_source:'fork', _parent_lineage_root_id:'root', _parent_lineage_tip_id:'tip', updated_at:50, last_message_at:50}},
+];
+console.log(JSON.stringify([summarize(refreshA), summarize(refreshB)]));
+"""
+    assert json.loads(_run_node(source)) == [
+        {
+            "visibleSid": "tip",
+            "badgeKind": "children",
+            "childSids": ["fork-child"],
+            "segmentSids": ["root", "tip"],
+        },
+        {
+            "visibleSid": "tip",
+            "badgeKind": "children",
+            "childSids": ["fork-child"],
+            "segmentSids": ["tip", "root"],
+        },
+    ]
 
 
 
@@ -1502,8 +1568,8 @@ def test_sidebar_lineage_segment_badge_is_detailed_density_only_and_localized():
     assert "const density=(window._sidebarDensity==='detailed'?'detailed':'compact');" in js
     assert "const showLineageMetadata=density==='detailed';" in js
     assert "const segmentCount=showLineageMetadata?_sessionSegmentCount(s):0;" in js
-    assert "const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey):[];" in js
     assert "const needsLineageReport=showLineageMetadata?_lineageReportNeedsFetch(s,lineageKey,segmentCount):false;" in js
+    assert "const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey,needsLineageReport):[];" in js
     assert "const canExpandLineageSegments=showLineageMetadata&&Boolean(" in js
     assert "t('session_meta_segments', segmentCount)" in js
     assert "titleRow.appendChild(segmentCountEl);" in js
@@ -1560,6 +1626,7 @@ function extractFunc(name) {{
 const _lineageReportCache = new Map();
 const _lineageReportInflight = new Map();
 eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_authoritativeLineageTipId'));
 eval(extractFunc('_lineageLocalSegmentCount'));
 eval(extractFunc('_lineageReportNeedsFetch'));
 const backendOnly = {{session_id:'tip', _lineage_key:'root', _compression_segment_count:25}};
@@ -1575,7 +1642,103 @@ const afterCache = _lineageReportNeedsFetch(backendOnly, 'root', 25);
 const fullLocal = _lineageReportNeedsFetch(localFull, 'root', 2);
 console.log(JSON.stringify({{before, afterCache, fullLocal}}));
 """
-    assert json.loads(_run_node(source)) == {"before": True, "afterCache": False, "fullLocal": False}
+    assert json.loads(_run_node(source)) == {"before": True, "afterCache": True, "fullLocal": False}
+
+
+def test_lineage_report_cache_identity_uses_tip_and_evicts_segment_count_mismatch():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_authoritativeLineageTipId'));
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_lineageLocalSegmentCount'));
+eval(extractFunc('_lineageReportNeedsFetch'));
+const oldTip = {{session_id:'old-tip', _lineage_key:'root', _lineage_tip_id:'old-tip', _compression_segment_count:2}};
+const newTip = {{session_id:'new-tip', _lineage_key:'root', _lineage_tip_id:'new-tip', _compression_segment_count:3}};
+const staleSameTip = {{session_id:'new-tip', _lineage_key:'root', _lineage_tip_id:'new-tip', _compression_segment_count:3}};
+const oldKey = _lineageReportCacheKey(oldTip, 'root');
+const newKey = _lineageReportCacheKey(newTip, 'root');
+_lineageReportCache.set(oldKey, {{segments:[{{session_id:'old-tip'}}, {{session_id:'root'}}]}});
+const tipChangedNeedsFetch = _lineageReportNeedsFetch(newTip, 'root', 3);
+_lineageReportCache.set(newKey, {{segments:[{{session_id:'new-tip'}}, {{session_id:'root'}}]}});
+const mismatchNeedsFetch = _lineageReportNeedsFetch(staleSameTip, 'root', 3);
+console.log(JSON.stringify({{
+  oldKey,
+  newKey,
+  tipChangedNeedsFetch,
+  mismatchNeedsFetch,
+  newCacheRetained:_lineageReportCache.has(newKey),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "oldKey": "root::old-tip",
+        "newKey": "root::new-tip",
+        "tipChangedNeedsFetch": True,
+        "mismatchNeedsFetch": True,
+        "newCacheRetained": False,
+    }
+
+
+def test_render_path_skips_stale_cached_segments_when_mismatch_forces_refresh():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_authoritativeLineageTipId'));
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_lineageLocalSegmentCount'));
+eval(extractFunc('_lineageReportNeedsFetch'));
+eval(extractFunc('_lineageSegmentsForRender'));
+const row = {{
+  session_id:'tip',
+  _lineage_key:'root',
+  _lineage_tip_id:'tip',
+  _compression_segment_count:3,
+  _lineage_segments:[{{session_id:'root'}}],
+}};
+_lineageReportCache.set('root::tip', {{
+  segments:[{{session_id:'root'}}, {{session_id:'stale-extra'}}],
+}});
+const needsFetch = _lineageReportNeedsFetch(row, 'root', 3);
+const rendered = _lineageSegmentsForRender(row, 'root', needsFetch).map(seg => seg.session_id);
+console.log(JSON.stringify({{needsFetch, rendered, cacheRetained:_lineageReportCache.has('root::tip')}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "needsFetch": True,
+        "rendered": ["root"],
+        "cacheRetained": False,
+    }
 
 
 def test_cached_lineage_report_segments_merge_with_materialized_segments_without_duplicates_or_children():

@@ -17,6 +17,7 @@ def _models_with_cfg(model_cfg=None, custom_providers=None, active_provider=None
     """
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
+    old_path = getattr(config, "_cfg_path", None)
     config.cfg.clear()
     if model_cfg:
         config.cfg["model"] = model_cfg
@@ -26,12 +27,14 @@ def _models_with_cfg(model_cfg=None, custom_providers=None, active_provider=None
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
     except Exception:
         config._cfg_mtime = 0.0
+    config._cfg_path = config._get_config_path()
     try:
         return config.get_available_models()
     finally:
         config.cfg.clear()
         config.cfg.update(old_cfg)
         config._cfg_mtime = old_mtime
+        config._cfg_path = old_path
 
 
 def _all_model_ids(result):

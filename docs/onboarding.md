@@ -168,6 +168,8 @@ Docker UID/GID and mount guidance in [Docker setup guide](docker.md).
 Password protection is optional for localhost-only installs. Enable it if you
 expose WebUI outside `127.0.0.1`, behind a reverse proxy, or on a LAN.
 
+For installed PWAs, prefer WebUI's built-in password over proxy basic auth. Reverse proxies are supported, but HTTP basic-auth challenges in front of the WebUI origin can interrupt the service-worker and shell-asset fetches the installed app relies on during updates. If you keep proxy auth, scope it so same-origin `sw.js`, manifest, and shell update requests can complete.
+
 The password is stored through the normal WebUI settings path and hashed
 server-side. You can change it later from Settings.
 

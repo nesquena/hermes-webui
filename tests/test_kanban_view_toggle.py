@@ -14,10 +14,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
-INDEX_HTML = (ROOT / "static" / "index.html").read_text()
-PANELS_JS = (ROOT / "static" / "panels.js").read_text()
-STYLE_CSS = (ROOT / "static" / "style.css").read_text()
-I18N_JS = (ROOT / "static" / "i18n.js").read_text()
+INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
 def test_kanban_header_exposes_accessible_view_toggle():

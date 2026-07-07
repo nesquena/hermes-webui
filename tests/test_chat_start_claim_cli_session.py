@@ -14,10 +14,12 @@ reason branch correctly with monkey-patched state.db / SESSION_INDEX_FILE).
 """
 from __future__ import annotations
 
+import io
 import json
 import re
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -298,6 +300,32 @@ def _write_index(path: Path, entries: list[dict]) -> None:
     path.write_text(json.dumps(entries), encoding="utf-8")
 
 
+class _FakePostHandler:
+    def __init__(self, body: dict, *, path: str):
+        raw = json.dumps(body).encode("utf-8")
+        self.status = None
+        self.response_headers = {}
+        self.headers = {"Content-Length": str(len(raw))}
+        self.rfile = io.BytesIO(raw)
+        self.wfile = io.BytesIO()
+        self.command = "POST"
+        self.path = path
+        self.client_address = ("127.0.0.1", 12345)
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.response_headers[key] = value
+
+    def end_headers(self):
+        pass
+
+
+def _response_json(handler: _FakePostHandler) -> dict:
+    return json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+
 @pytest.fixture
 def routes_module():
     return pytest.importorskip("api.routes")
@@ -451,7 +479,7 @@ def test_helper_materialises_state_db_only_session(
     assert sess.session_id == SID
     assert sess.title == "Codex honcho integration"
     assert sess.model == "MiniMax-M3"
-    assert sess.workspace == "/root"  # from CLI metadata
+    assert Path(sess.workspace).name == "root"  # from CLI metadata
     assert len(sess.messages) == 3
     assert sess.messages[0]["role"] == "user"
     # Greptile #4911 P1: created_at must be populated from state.db
@@ -1021,6 +1049,140 @@ def test_helper_refuses_cron_via_state_db_source(
         "run that's only visible via state.db (Greptile 4/5 P2)"
     )
     assert sess.read_only is True
+
+
+def test_branch_from_cron_state_db_returns_writable_fork_without_source_sidecar(
+    routes_module, monkeypatch, isolated_state_db
+):
+    SID = "20260610_cron_branch_route"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=2,
+        title="Cron job", source="cron", cwd="/root",
+    )
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    handler = _FakePostHandler({"session_id": SID}, path="/api/session/branch")
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/branch", query=""))
+    assert handler.status == 200
+    payload = _response_json(handler)
+    assert payload["parent_session_id"] == SID
+    assert payload["session_id"] != SID
+    assert (isolated_state_db["sessions_dir"] / f'{payload["session_id"]}.json').exists()
+    assert not (isolated_state_db["sessions_dir"] / f"{SID}.json").exists()
+
+
+@pytest.mark.parametrize("source", ["gateway", "messaging", "external_agent", "unknown", "claude_code"])
+def test_branch_still_refuses_non_cron_not_claimable_sources(
+    routes_module, monkeypatch, isolated_state_db, source
+):
+    SID = f"20260610_{source}_branch_route"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title=f"{source} chat", source=source, cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {
+            "session_id": SID,
+            "source_tag": source,
+            "raw_source": source,
+            "session_source": "other",
+        },
+    )
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    handler = _FakePostHandler({"session_id": SID}, path="/api/session/branch")
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/branch", query=""))
+    assert handler.status == 403
+    payload = _response_json(handler)
+    assert "read-only" in payload["error"].lower()
+    assert not (isolated_state_db["sessions_dir"] / f"{SID}.json").exists()
+
+
+def test_branch_refuses_cron_prefixed_non_cron_not_claimable_source(
+    routes_module, monkeypatch, isolated_state_db
+):
+    SID = "cron_spoof_messaging"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title="Messaging chat", source="messaging", cwd="/root",
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {
+            "session_id": SID,
+            "source_tag": "messaging",
+            "raw_source": "messaging",
+            "session_source": "other",
+        },
+    )
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    handler = _FakePostHandler({"session_id": SID}, path="/api/session/branch")
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/branch", query=""))
+    assert handler.status == 403
+    payload = _response_json(handler)
+    assert "read-only" in payload["error"].lower()
+    assert not (isolated_state_db["sessions_dir"] / f"{SID}.json").exists()
+
+
+def test_branch_from_claimable_tui_still_creates_fork(
+    routes_module, monkeypatch, isolated_state_db
+):
+    SID = "20260610_tui_branch_route"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=3,
+        title="TUI chat", source="tui", cwd="/root",
+    )
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason == "materialized"
+    sess.save()
+    handler = _FakePostHandler({"session_id": SID}, path="/api/session/branch")
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/branch", query=""))
+    assert handler.status == 200
+    payload = _response_json(handler)
+    assert payload["parent_session_id"] == SID
+    assert payload["title"] == "TUI chat (fork)"
+    assert (isolated_state_db["sessions_dir"] / f"{SID}.json").exists()
+    assert (isolated_state_db["sessions_dir"] / f'{payload["session_id"]}.json').exists()
+
+
+def test_chat_start_still_refuses_cron_state_db_source(
+    routes_module, monkeypatch, isolated_state_db
+):
+    SID = "20260610_cron_chat_start_route"
+    _make_state_db(
+        isolated_state_db["db"], SID, message_count=1,
+        title="Cron job", source="cron", cwd="/root",
+    )
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    handler = _FakePostHandler({"session_id": SID}, path="/api/chat/start")
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/chat/start", query=""))
+    assert handler.status == 403
+    payload = _response_json(handler)
+    assert "read-only" in payload["error"].lower()
+    assert not (isolated_state_db["sessions_dir"] / f"{SID}.json").exists()
+
+
+def test_branch_refuses_subagent_view_only_source(
+    routes_module, monkeypatch
+):
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: True)
+    handler = _FakePostHandler({"session_id": "subagent-1"}, path="/api/session/branch")
+    routes_module.handle_post(handler, SimpleNamespace(path="/api/session/branch", query=""))
+    assert handler.status == 400
+    payload = _response_json(handler)
+    assert "view-only" in payload["error"].lower()
 
 
 def test_helper_reason_distinguishes_cli_meta_vs_state_db_source(

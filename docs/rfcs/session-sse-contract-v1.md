@@ -38,8 +38,8 @@ against current source before any route is added.
 - This RFC does **not** implement `GET /api/sessions/{session_id}/events`. No
   route, handler, or related code is added in this PR.
 - This RFC does **not** modify `GET /api/sessions/events` (the existing global
-  session-list invalidation stream routed at `api/routes.py:12345-12346` and
-  implemented by `_handle_session_events_stream()` at `api/routes.py:16177`).
+  session-list invalidation stream routed in `api/routes.py` and
+  implemented by `_handle_session_events_stream()` in `api/routes.py`).
 - This RFC does **not** replace or modify existing streams: `/api/chat/stream`,
   `/api/approval/stream`, or `/api/clarify/stream`.
 - This RFC does **not** introduce Android, iOS, or PWA client code.
@@ -53,15 +53,15 @@ against current source before any route is added.
 ### Existing global session-list stream
 
 `GET /api/sessions/events` is a **different endpoint** from the one this RFC
-proposes. It is routed at `api/routes.py:12345-12346` and implemented by
-`_handle_session_events_stream()` at `api/routes.py:16177`. It emits bare
+proposes. It is routed in `api/routes.py` and implemented by
+`_handle_session_events_stream()` in `api/routes.py`. It emits bare
 `sessions_changed` events and keepalives for any change to the session list. It
 is a global invalidation signal, not a per-session lifecycle stream. The proposed
 `GET /api/sessions/{session_id}/events` is per-session and path-distinct.
 
 ### Heartbeat
 
-`_SSE_HEARTBEAT_INTERVAL_SECONDS = 5` (`api/routes.py:1018-1030`) is the current
+`_SSE_HEARTBEAT_INTERVAL_SECONDS = 5` (defined in `api/routes.py`) is the current
 heartbeat interval for SSE streams. Phase 1 reuses this constant rather than
 adding a separate configurable knob.
 
@@ -69,26 +69,26 @@ adding a separate configurable knob.
 
 Current replay identity is run/stream-scoped:
 
-Line ranges in this inventory were verified against WebUI `master` when this
-RFC was written. Function, constant, and endpoint names are the stable anchors
-if source layout moves later.
+Symbols in this inventory were verified against WebUI `master` when this RFC
+was written. Function, constant, and endpoint **names** are the stable anchors:
+this RFC deliberately cites them by name (not by line number) so a source-layout
+shift in `api/routes.py` cannot invalidate the doc or its contract test.
 
-- `_parse_run_journal_event_id()` (`api/routes.py:15673-15686`) and
-  `_parse_run_journal_after_seq()` (`api/routes.py:15688-15701`) parse the replay
-  cursor from the `after_event_id` / `after_seq` **query params** (not the
+- `_parse_run_journal_event_id()` and `_parse_run_journal_after_seq()` (both in
+  `api/routes.py`) parse the replay cursor from the `after_event_id` /
+  `after_seq` **query params** (not the
   `Last-Event-ID` header — that header is the *proposed* new-endpoint contract
   below, §Reconnect).
-- `_runner_event_id()` at `api/routes.py:15765-15772` constructs the event `id`
+- `_runner_event_id()` (in `api/routes.py`) constructs the event `id`
   field as `stream_id:seq`.
 - SSE frames carry their `id:` via the `_sse_with_id()` helper, emitted on the
-  live `/api/chat/stream` path at `api/routes.py:15918`, on the runner-observe
-  path at `api/routes.py:15811`, and during journal replay at
-  `api/routes.py:15721` / `15734`.
-- `_replay_run_journal()` reads events by `(session_id, stream_id)` at
-  `api/routes.py:15703-15735`.
-- `api/streaming.py:6265-6285` writes current live agent streams to
+  live `/api/chat/stream` path, on the runner-observe path, and during journal
+  replay — all in `api/routes.py`.
+- `_replay_run_journal()` (in `api/routes.py`) reads events by
+  `(session_id, stream_id)`.
+- `api/streaming.py` writes current live agent streams to
   `STREAMS[stream_id]`.
-- `api/streaming.py:6620-6634` appends SSE events to the run journal and carries
+- `api/streaming.py` appends SSE events to the run journal and carries
   per-item `event_id` into the live queue.
 
 The existing run journal represents `session_id`, `stream_id`, `seq`, and
@@ -164,8 +164,8 @@ maintainer review before implementation.
 position.
 
 **`event_id` is opaque to clients.** Its current source-compatible form is
-`stream_id:seq`, as constructed by `_runner_event_id()` at
-`api/routes.py:15765-15772`. Clients must treat it as an opaque string and must
+`stream_id:seq`, as constructed by `_runner_event_id()` in `api/routes.py`.
+Clients must treat it as an opaque string and must
 not parse or construct cursor values.
 
 **`seq` is monotonic within a stream/run.** It is not a session-global counter
@@ -179,11 +179,11 @@ events, clients use `event_id` to detect and skip duplicates.
 ## Replay source
 
 Phase 1 uses the **durable run journal** as the replay source for replayable
-events. The live `STREAMS[stream_id]` queue (`api/streaming.py:6265-6285`) is
+events. The live `STREAMS[stream_id]` queue (in `api/streaming.py`) is
 not a reliable replay source because it holds only recent in-memory state.
 
 A future implementation must replay from the run journal via the existing
-`_replay_run_journal()` path (`api/routes.py:15703-15735`) and fall back to the
+`_replay_run_journal()` path (in `api/routes.py`) and fall back to the
 snapshot mechanism when journal entries are unavailable for a given cursor.
 
 ## Snapshot fallback
@@ -201,7 +201,7 @@ resync from the snapshot payload.
 
 ## Heartbeat
 
-Phase 1 reuses `_SSE_HEARTBEAT_INTERVAL_SECONDS` (`api/routes.py:1018-1030`) for
+Phase 1 reuses `_SSE_HEARTBEAT_INTERVAL_SECONDS` (defined in `api/routes.py`) for
 heartbeat cadence. A new per-session configurable heartbeat knob is **not** added
 in Phase 1. The implementation PR must follow whatever value the constant holds
 at implementation time; it must not hard-code a separate interval.

@@ -109,7 +109,7 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
+from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
@@ -435,12 +435,10 @@ class Handler(BaseHTTPRequestHandler):
         self._handle_write(handle_patch)
 
     def do_OPTIONS(self) -> None:
-        """Handle CORS preflight requests."""
+        """Handle CORS preflight requests (headers emitted by api.routes)."""
         self._req_t0 = time.time()
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        apply_cors_preflight_headers(self)
         self.end_headers()
 
     def do_DELETE(self) -> None:
@@ -688,6 +686,36 @@ def main() -> None:
         print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
+
+    # ctl.sh stops the WebUI with SIGTERM. Python's default SIGTERM handler
+    # terminates the process WITHOUT unwinding the try/finally around
+    # serve_forever(), so drain_all_on_shutdown() (which flushes in-flight
+    # fire-and-forget memory commits) would never run on the normal managed
+    # stop. Install a handler that requests an orderly shutdown so
+    # serve_forever() returns and the existing `finally` block drains cleanly.
+    #
+    # httpd.shutdown() blocks until serve_forever() has exited and MUST NOT be
+    # called from the thread running serve_forever() (it would deadlock), so we
+    # dispatch it from a short-lived helper thread. The handler is idempotent
+    # and guards against double-shutdown (e.g. repeated SIGTERM/SIGINT).
+    _shutdown_requested = threading.Event()
+
+    def _request_shutdown(signum, _frame):
+        if _shutdown_requested.is_set():
+            return
+        _shutdown_requested.set()
+        threading.Thread(
+            target=httpd.shutdown,
+            name="webui-sigterm-shutdown",
+            daemon=True,
+        ).start()
+
+    try:
+        signal.signal(signal.SIGTERM, _request_shutdown)
+    except (ValueError, OSError):
+        # Not on the main thread (e.g. embedded/test harness); skip handler.
+        logger.debug("Could not install SIGTERM handler", exc_info=True)
+
     try:
         httpd.serve_forever()
     finally:

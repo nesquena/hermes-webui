@@ -444,15 +444,19 @@ def _apply_config_defaults(config_data: dict) -> None:
  
 def reload_config_if_stale() -> None:
     """Refresh config.yaml once for concurrent stale read paths."""
+    global cfg
     with _cfg_lock:
         try:
             config_path = _get_config_path()
             current_mtime = config_path.stat().st_mtime
         except OSError:
             current_mtime = 0.0
-        cache_stale = current_mtime != _cfg_mtime or _cfg_path != config_path
-        if not _cfg_cache or (cache_stale and not _cfg_has_in_memory_overrides()):
+        path_changed = _cfg_path != config_path
+        mtime_stale = current_mtime != _cfg_mtime
+        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
+            if path_changed:
+                cfg = _cfg_cache
 
 
 def get_config() -> dict:
@@ -462,8 +466,9 @@ def get_config() -> dict:
         current_mtime = config_path.stat().st_mtime
     except OSError:
         current_mtime = 0.0
-    cache_stale = current_mtime != _cfg_mtime or _cfg_path != config_path
-    if not _cfg_cache or (cache_stale and not _cfg_has_in_memory_overrides()):
+    path_changed = _cfg_path != config_path
+    mtime_stale = current_mtime != _cfg_mtime
+    if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
     # When a test (or runtime caller) has rebound ``cfg`` to a different dict
     # via monkeypatch.setattr(config, "cfg", ...), return that override rather
@@ -1444,12 +1449,15 @@ def _canonicalise_provider_id(name: object) -> str:
     # keep as-is to avoid round-tripping through aliases (e.g. x-ai → xai).
     if raw in _PROVIDER_DISPLAY or raw in _PROVIDER_MODELS:
         return raw
-    # Try alias resolution. Only accept the result if it's itself a
-    # canonical id in _PROVIDER_DISPLAY — that prevents aliases pointing
-    # at non-canonical strings (legacy, hermes_cli-specific) from leaking
-    # in. Falls back to the normalised input otherwise.
+    # Try alias resolution. Accept the result if it's a canonical id known to
+    # either _PROVIDER_DISPLAY OR _PROVIDER_MODELS (mirroring the direct-hit
+    # check above) — some canonical targets (e.g. `gemini`) are indexed in
+    # _PROVIDER_MODELS but not _PROVIDER_DISPLAY, so a _DISPLAY-only check
+    # rejected valid aliases like `google-gemini`→`gemini`, leaving the id
+    # uncanonicalised and silently breaking provider-ownership checks (#5511).
+    # This still blocks aliases that point at non-canonical/legacy strings.
     resolved = _resolve_provider_alias(raw)
-    if resolved and resolved.lower() in _PROVIDER_DISPLAY:
+    if resolved and (resolved.lower() in _PROVIDER_DISPLAY or resolved.lower() in _PROVIDER_MODELS):
         return resolved.lower()
     return raw
 
@@ -2522,16 +2530,47 @@ def resolve_model_provider(model_id: str) -> tuple:
     )
     _default_model = model_cfg.get('default') if isinstance(model_cfg, dict) else None
     # Owns model if it appears in the static catalog for the configured provider.
+    # _PROVIDER_MODELS is keyed by CANONICAL slug (e.g. 'zai', not the 'z-ai'
+    # alias a user may write in config), so canonicalise config_provider before
+    # the lookup — otherwise an aliased active provider gets an empty ownership
+    # set and _skip_custom_providers guard-2 silently fails, letting another
+    # providers.<slug>.models entry hijack an active-owned model (#5511).
+    _canon_config_provider = _canonicalise_provider_id(config_provider) if config_provider else ""
     _provider_models_set: set[str] = set()
     if (
-        config_provider is not None
-        and config_provider in _PROVIDER_MODELS
-        and isinstance(_PROVIDER_MODELS[config_provider], list)
+        _canon_config_provider
+        and _canon_config_provider in _PROVIDER_MODELS
+        and isinstance(_PROVIDER_MODELS[_canon_config_provider], list)
     ):
         _provider_models_set = {
-            m.get('id', '') for m in _PROVIDER_MODELS[config_provider]
+            m.get('id', '') for m in _PROVIDER_MODELS[_canon_config_provider]
             if isinstance(m, dict) and isinstance(m.get('id'), str)
         }
+    # The active provider may be defined ENTIRELY via config.yaml `providers:`
+    # (no static _PROVIDER_MODELS entry) with its own `models:` allowlist. Fold
+    # that allowlist into the ownership set too, so the active provider owns its
+    # own declared models and can't be hijacked by another providers.<slug>
+    # entry that happens to list the same bare id earlier in config order (#5511).
+    if _canon_config_provider:
+        _providers_cfg_own = cfg.get('providers', {})
+        if isinstance(_providers_cfg_own, dict):
+            for _slug, _pdef in _providers_cfg_own.items():
+                if not isinstance(_pdef, dict):
+                    continue
+                if _canonicalise_provider_id(_slug) != _canon_config_provider:
+                    continue
+                if _canon_config_provider == "copilot":
+                    continue  # copilot.models is a settings map, not an allowlist
+                _own_models = _pdef.get('models')
+                if isinstance(_own_models, list):
+                    for _m in _own_models:
+                        _mid = str(_m.get('id') or '') if isinstance(_m, dict) else str(_m or '')
+                        if _mid.strip():
+                            _provider_models_set.add(_mid.strip())
+                elif isinstance(_own_models, dict):
+                    _provider_models_set.update(
+                        str(k).strip() for k in _own_models if isinstance(k, str) and str(k).strip()
+                    )
     _skip_custom_providers = (
         _is_explicit_non_custom_provider
         and (
@@ -2562,6 +2601,50 @@ def resolve_model_provider(model_id: str) -> tuple:
             if entry_name and model_id in entry_model_ids:
                 provider_hint = _custom_provider_slug_from_name(entry_name)
                 return model_id, provider_hint, entry_base_url or None
+
+    # Check user-defined providers (config.yaml → providers:).
+    # Mirrors the custom_providers scan above — exact match against each
+    # entry's declared models list (case-sensitive to match custom_providers).
+    providers_cfg = cfg.get('providers', {})
+    if isinstance(providers_cfg, dict):
+        target = model_id.strip()
+        # Honor the same active/default ownership guard as the custom_providers
+        # scan (_skip_custom_providers, config.py:2535): when the active provider
+        # explicitly owns this model (it's the configured default or in the
+        # active provider's model set), another provider's overlapping
+        # `providers.<slug>.models` entry must NOT hijack routing away from the
+        # active provider (#5511 gate finding — e.g. active ai-gateway + default
+        # gpt-5 was being pulled to providers.openai.models.gpt-5). In that case
+        # restrict the scan to the active provider's own canonical slug.
+        _active_slug = _canon_config_provider
+        for slug, pdef in providers_cfg.items():
+            if not isinstance(pdef, dict):
+                continue
+            # Copilot is the documented exception: `providers.copilot.models` is
+            # a per-model SETTINGS map (reasoning_effort, limits, etc.), NOT a
+            # routable allowlist (see the exception at the catalog-build site).
+            # Scanning it here would let a Copilot per-model settings entry
+            # hijack that model's routing away from its real provider (#5511).
+            if _canonicalise_provider_id(slug) == "copilot":
+                continue
+            # Ownership guard: when the active provider owns this model, only its
+            # own providers: entry may match; skip all other slugs.
+            if _skip_custom_providers and _canonicalise_provider_id(slug) != _active_slug:
+                continue
+            p_models = pdef.get('models')
+            if isinstance(p_models, list):
+                for m in p_models:
+                    mid = str(m.get('id') or '') if isinstance(m, dict) else str(m or '')
+                    if not mid:
+                        continue
+                    if mid.strip() == target:
+                        p_base_url = str(pdef.get('base_url') or '').strip()
+                        return model_id, slug, p_base_url or None
+            elif isinstance(p_models, dict):
+                for mid in p_models:
+                    if isinstance(mid, str) and mid.strip() == target:
+                        p_base_url = str(pdef.get('base_url') or '').strip()
+                        return model_id, slug, p_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
     # Route through that provider directly (resolve_runtime_provider will
@@ -5677,10 +5760,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     except OSError:
         _current_path = _get_config_path()
         _current_mtime = 0.0
-    if (
-        (_current_mtime != _cfg_mtime or _current_path != _cfg_path)
-        and not _cfg_has_in_memory_overrides()
-    ):
+    path_changed = _current_path != _cfg_path
+    mtime_stale = _current_mtime != _cfg_mtime
+    if path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
@@ -6925,6 +7007,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not raw_models:
                         if pid == "moa":
                             raw_models = _moa_preset_models_from_config(cfg)
+                        elif pid == "opencode-go":
+                            # Skip live /v1/models probe for OpenCode Go — it
+                            # returns models from the public catalog that are
+                            # not enabled on the Go tier, causing 404 when
+                            # selected. Use the curated static list only. (#5311)
+                            pass
                         else:
                             raw_models = _models_from_live_provider_ids(
                                 pid,
@@ -7477,36 +7565,119 @@ def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None
 
 
 def get_available_models_for_session_visit() -> dict:
-    """Return /api/models with a short session-visit freshness horizon."""
+    """Return /api/models with a short session-visit freshness horizon.
+
+    perf(session-load-latency) Phase 0: this function is the source of the
+    multi-second `/api/models?freshness=session_visit` latency. Stage markers
+    feed into RequestDiagnostics when called from /api/models; standalone
+    callers get the same envelope via the local _stagelog dict.
+    """
+    import time as _time
+    import logging as _logging
+    _stagelog: list[tuple[str, float]] = [("enter", _time.monotonic())]
+    def _mark(name: str) -> None:
+        _stagelog.append((name, _time.monotonic()))
+    _logger = _logging.getLogger("api.config")
+    # HERMES_DEBUG_SLOW: a numeric value sets the slow-log threshold in ms; any
+    # other non-empty (truthy) value — e.g. the documented `HERMES_DEBUG_SLOW=1`
+    # / `=true` — means "always log stage timing" (0ms threshold); unset/empty
+    # keeps the default 500ms. Must be non-throwing: a nonnumeric truthy value
+    # like `true` previously raised ValueError here and 500'd this hot path.
+    _slow_raw = (os.environ.get("HERMES_DEBUG_SLOW", "") or "").strip()
+    if not _slow_raw:
+        _slow_threshold_ms = 500.0
+    else:
+        try:
+            _slow_threshold_ms = float(_slow_raw) or 500.0
+        except ValueError:
+            # Non-numeric truthy flag (e.g. "true"): always emit stage timing.
+            _slow_threshold_ms = 0.0
+
     global _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint
     cache_path = _get_models_cache_path()
     cache_age = _models_cache_file_age_seconds(cache_path, time.time())
+    _mark(f"disk_age_check:{cache_age}")
     disk_cached = None
     if cache_age is not None and cache_age < _SESSION_VISIT_MODELS_FRESHNESS_SECONDS:
+        _mark("cache_age_within_ttl")
         now_mono = time.monotonic()
         with _available_models_cache_lock:
             cached = _get_fresh_memory_models_cache(now_mono)
             if cached is not None:
+                _mark("memory_cache_hit")
+                _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
+        _mark("memory_cache_miss_loading_disk")
         disk_cached = _load_models_cache_from_disk()
         if disk_cached is not None:
             with _available_models_cache_lock:
                 cached = _get_fresh_memory_models_cache(time.monotonic())
                 if cached is not None:
+                    _mark("disk_then_memory_cache_hit")
+                    _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                     return cached
                 _available_models_cache = copy.deepcopy(disk_cached)
                 _available_models_cache_ts = time.monotonic()
                 _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+            _mark("disk_cache_returned")
+            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
             return copy.deepcopy(disk_cached)
 
+    _mark("cache_age_stale_or_missing")
     stale_cached = disk_cached or _load_stale_models_cache_from_disk()
+    _mark(f"stale_cached_loaded:{bool(stale_cached)}")
     try:
-        return get_available_models(force_refresh=True)
+        _mark("force_refresh_start")
+        result = get_available_models(force_refresh=True)
+        _mark("force_refresh_done")
+        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+        return result
     except Exception:
+        _mark("force_refresh_failed")
         logger.debug("session-visit models refresh failed", exc_info=True)
         if stale_cached is not None:
+            _mark("stale_fallback_return")
+            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
             return copy.deepcopy(stale_cached)
+        _mark("prefer_cache_fallback")
+        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
         return get_available_models(prefer_cache=True)
+
+
+def _maybe_log_slow_stages(
+    logger_obj: "logging.Logger",
+    stagelog: "list[tuple[str, float]]",
+    threshold_ms: float,
+    tag: str,
+) -> None:
+    """perf(session-load-latency) Phase 0: per-stage timing reporter.
+
+    Emits a single log line listing every stage with its delta in ms when
+    the function's total wall time crosses ``threshold_ms``. Lives next to
+    the model cache code so it has zero coupling with the WebUI request
+    layer; called from both ``get_available_models_for_session_visit`` and
+    (Phase 1) the chat session load path.
+    """
+    if len(stagelog) < 2:
+        return
+    total_ms = (stagelog[-1][1] - stagelog[0][1]) * 1000.0
+    if total_ms < threshold_ms:
+        return
+    parts: list[str] = []
+    for i in range(1, len(stagelog)):
+        prev_t = stagelog[i - 1][1]
+        cur_t = stagelog[i][1]
+        parts.append(f"{stagelog[i][0]}={((cur_t - prev_t) * 1000.0):.1f}ms")
+    try:
+        logger_obj.warning(
+            "[SLOW] %s total=%.1fms stages: %s",
+            tag,
+            total_ms,
+            " ".join(parts),
+        )
+    except Exception:
+        # Logging must never break a response path.
+        pass
 
 
 # ── Static file path ─────────────────────────────────────────────────────────

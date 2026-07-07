@@ -92,73 +92,68 @@ class TestEndpointDistinction:
 
     def test_rfc_cites_current_global_endpoint_source(self):
         """The RFC's source anchors for the existing global stream must be
-        ACCURATE against current api/routes.py — verify the cited lines actually
-        contain what the RFC claims, rather than string-matching a fixed number
-        (which silently rots and codifies wrong anchors, #5513 gate finding)."""
-        import re
+        ACCURATE against current api/routes.py, verified by SYMBOL not by line
+        number. The RFC cites the route string and handler function by name;
+        this test confirms (a) each symbol still exists in api/routes.py and
+        (b) the RFC names that symbol. It deliberately does NOT check line
+        numbers: a routes.py line-shift must never break this test or the RFC
+        (#5513 gate finding, chronic brittle failure #5542)."""
         text = _rfc()
-        routes = (REPO / "api" / "routes.py").read_text(encoding="utf-8").splitlines()
+        routes_src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
 
-        # Pull every `api/routes.py:<start>-<end>` or `api/routes.py:<line>`
-        # anchor the RFC cites and confirm the referenced span exists.
-        anchors = re.findall(r"api/routes\.py:(\d+)(?:-(\d+))?", text)
-        assert anchors, "RFC must cite at least one api/routes.py source anchor"
-        for start, end in anchors:
-            lo = int(start)
-            hi = int(end) if end else lo
-            assert 1 <= lo <= len(routes), f"RFC cites api/routes.py:{start} beyond EOF ({len(routes)} lines)"
-            assert 1 <= hi <= len(routes), f"RFC cites api/routes.py:{end} beyond EOF ({len(routes)} lines)"
-
-        # The two load-bearing anchors must land on the real definitions.
-        def _anchor_line(label):
-            m = re.search(r"%s.*?api/routes\.py:(\d+)" % re.escape(label), text, re.DOTALL)
-            assert m, f"RFC must cite a routes.py anchor near {label!r}"
-            return int(m.group(1))
-
-        route_line = _anchor_line("routed at")
-        assert "/api/sessions/events" in routes[route_line - 1], (
-            f"RFC's routed-at anchor api/routes.py:{route_line} must be the "
-            f"/api/sessions/events route; got: {routes[route_line - 1].strip()!r}"
-        )
-        handler_line = _anchor_line("_handle_session_events_stream()")
-        assert "def _handle_session_events_stream" in routes[handler_line - 1], (
-            f"RFC's handler anchor api/routes.py:{handler_line} must be the "
-            f"_handle_session_events_stream definition; got: {routes[handler_line - 1].strip()!r}"
-        )
-
-    def test_rfc_run_journal_anchors_land_on_real_source(self):
-        """Every named-symbol / emission anchor the RFC cites in the run-journal
-        inventory must land on the actual source token (not just be in-bounds),
-        so a stale line number can't silently pass (#5513 gate finding 2)."""
-        import re
-        text = _rfc()
-        routes = (REPO / "api" / "routes.py").read_text(encoding="utf-8").splitlines()
-
-        def _first_anchor_after(label):
-            m = re.search(r"%s.*?api/routes\.py:(\d+)" % re.escape(label), text, re.DOTALL)
-            assert m, f"RFC must cite a routes.py anchor near {label!r}"
-            return int(m.group(1))
-
-        # (label in RFC prose, token that must appear on the cited line)
+        # (RFC-cited symbol, existence probe in api/routes.py source)
         checks = [
-            ("_parse_run_journal_event_id()", "def _parse_run_journal_event_id"),
-            ("_parse_run_journal_after_seq()", "def _parse_run_journal_after_seq"),
-            ("_runner_event_id()", "def _runner_event_id"),
-            ("_replay_run_journal()", "def _replay_run_journal"),
+            ("/api/sessions/events", "/api/sessions/events"),
+            ("_handle_session_events_stream", "def _handle_session_events_stream"),
         ]
-        for label, token in checks:
-            line = _first_anchor_after(label)
-            assert 1 <= line <= len(routes), f"{label} anchor api/routes.py:{line} beyond EOF"
-            assert token in routes[line - 1], (
-                f"RFC's {label} anchor api/routes.py:{line} must contain {token!r}; "
-                f"got: {routes[line - 1].strip()!r}"
+        for rfc_symbol, source_probe in checks:
+            assert source_probe in routes_src, (
+                f"api/routes.py must still define/route {source_probe!r}; the RFC "
+                f"cites {rfc_symbol!r} as a stable source anchor"
+            )
+            assert rfc_symbol in text, (
+                f"RFC must name the symbol {rfc_symbol!r} (symbol-based anchor, "
+                f"not a line number)"
             )
 
-        # The live-emission bullet must cite the real _sse_with_id call site.
-        emit_line = _first_anchor_after("live `/api/chat/stream` path at")
-        assert "_sse_with_id" in routes[emit_line - 1], (
-            f"RFC's live-emission anchor api/routes.py:{emit_line} must be an "
-            f"_sse_with_id() call; got: {routes[emit_line - 1].strip()!r}"
+    def test_rfc_run_journal_anchors_land_on_real_source(self):
+        """Every named-symbol anchor the RFC cites in the run-journal inventory
+        must be a REAL symbol in api/routes.py and be NAMED in the RFC prose.
+        This is verified by symbol, never by line number, so a routes.py
+        line-shift can't silently break it or the RFC (#5513 gate finding 2,
+        chronic brittle failure #5542)."""
+        text = _rfc()
+        routes_src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
+
+        # (RFC-cited symbol name, existence probe in api/routes.py source)
+        checks = [
+            ("_parse_run_journal_event_id", "def _parse_run_journal_event_id"),
+            ("_parse_run_journal_after_seq", "def _parse_run_journal_after_seq"),
+            ("_runner_event_id", "def _runner_event_id"),
+            ("_replay_run_journal", "def _replay_run_journal"),
+            ("_sse_with_id", "_sse_with_id"),
+        ]
+        for rfc_symbol, source_probe in checks:
+            assert source_probe in routes_src, (
+                f"api/routes.py must still define {source_probe!r}; the RFC cites "
+                f"{rfc_symbol!r} as a stable source anchor"
+            )
+            assert rfc_symbol in text, (
+                f"RFC must name the symbol {rfc_symbol!r} (symbol-based anchor, "
+                f"not a line number)"
+            )
+
+    def test_rfc_uses_no_hardcoded_routes_line_numbers(self):
+        """Guard against regression to line-number coupling: the RFC must not
+        cite `api/routes.py:<line>` (or streaming.py:<line>) anchors. Symbol
+        names are the durable anchor; absolute line numbers rot on any
+        source-layout shift and caused chronic brittle failures (#5513, #5542)."""
+        import re
+        text = _rfc()
+        stale = re.findall(r"\b\w+\.py:\d+(?:-\d+)?", text)
+        assert not stale, (
+            "RFC must not cite hardcoded source line numbers (they rot on any "
+            f"line-shift); found: {stale!r}. Reference symbols by name instead."
         )
 
     def test_contracts_distinguishes_both_endpoints(self):

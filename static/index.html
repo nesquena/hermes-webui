@@ -415,6 +415,7 @@
         <button class="update-btn" onclick="dismissUpdate()">Later</button>
         <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>
         <button class="update-btn" id="btnForceUpdate" style="display:none;background:var(--error,#e05);color:#fff;border-color:var(--error,#e05)" onclick="forceUpdate(this)">Force update</button>
+        <button class="update-btn" id="btnClearUpdateLock" style="display:none" onclick="applyClearUpdateLock(this)">Clear lock and retry update</button>
       </div>
     </div>
     <div class="update-banner" id="staleClientBanner">
@@ -1134,10 +1135,12 @@
               </div>
             </div>
             <div class="settings-field">
-              <label for="settingsModel" data-i18n="settings_label_model">Default Model</label>
+              <label for="settingsModelChip" data-i18n="settings_label_model">Default Model</label>
               <div class="model-advanced-row">
+                <button type="button" id="settingsModelChip" class="settings-model-chip" aria-haspopup="listbox" aria-expanded="false">Default Model</button>
                 <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
                 <button type="button" id="mainAdvancedBtn" class="model-advanced-btn" title="Advanced options" aria-label="Advanced options for main model"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+                <div class="model-dropdown settings-model-dropdown" id="settingsModelDropdown"></div>
               </div>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
             </div>
@@ -1291,7 +1294,7 @@
                 <input type="checkbox" id="settingsFadeTextEffect" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_fade_text_effect">Fade text effect</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_fade_text_effect">Fade newly streamed words in while the assistant is responding. Similar to OpenWebUI; off by default for maximum performance.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_fade_text_effect">Fade newly streamed words in while the assistant is responding. Similar to OpenWebUI; off by default for maximum performance. Transparent Stream always fades prose as part of that mode, regardless of this setting.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1645,6 +1648,7 @@
       <div class="preview-path" id="previewPath">
         <span id="previewPathText"></span>
         <span class="preview-badge" id="previewBadge"></span>
+        <button id="btnCopyPreviewRelPath" class="panel-icon-btn" style="font-size:12px;width:auto;padding:2px 8px;display:inline-flex;align-items:center;gap:4px" onclick="copyPreviewRelativePath()" title="Copy relative path" aria-label="Copy relative path" data-i18n-title="copy_relative_path" data-i18n-aria-label="copy_relative_path"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> <span class="preview-btn-label" data-i18n="copy_relative_path">Copy relative path</span></button>
         <button id="btnOpenInBrowser" class="panel-icon-btn" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px;display:none;align-items:center;gap:4px" onclick="openInBrowser()" title="Open in new browser tab"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg> <span data-i18n="open_in_browser">Open in browser</span></button>
         <button id="btnRenderMarkdownAnyway" class="panel-icon-btn" style="font-size:12px;width:auto;padding:2px 8px;display:none;align-items:center;gap:4px" onclick="forceRenderMarkdownPreview()" title="Render this large file as rich Markdown"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/><path d="M7 8h10"/><path d="M7 12h10"/><path d="M7 16h6"/></svg> Render as markdown anyway</button>
         <button id="btnDownloadFile" class="panel-icon-btn" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px;display:inline-flex;align-items:center;gap:4px" onclick="downloadFile(_previewCurrentPath)" title="Download file to your computer"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download</button>

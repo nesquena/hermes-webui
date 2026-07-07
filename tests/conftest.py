@@ -190,6 +190,32 @@ def _isolate_hermes_config_path():
     os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
 
 
+@pytest.fixture(autouse=True)
+def _reset_password_hash_cache():
+    """Reset the memoized password-hash cache around every test (#5588).
+
+    api.auth.get_password_hash() caches the resolved hash process-wide
+    (_AUTH_HASH_CACHE / _AUTH_HASH_COMPUTED) for perf — it is NOT keyed on the
+    HERMES_WEBUI_PASSWORD env var. A test that sets that env var (e.g.
+    test_session_static_assets.test_session_static_auth_exemption) populates the
+    cache with a real hash; monkeypatch pops the env var on teardown but the
+    cache stays populated, so is_auth_enabled() reads stale True and later tests
+    (e.g. test_issue803's profile-cookie helpers) fail with a spurious
+    "requires a request handler when auth is enabled". Invalidate before AND
+    after each test so neither a pre-existing cached value nor a value this test
+    populates leaks across the isolation boundary. No-op when auth is off.
+    """
+    try:
+        from api.auth import _invalidate_password_hash_cache
+    except Exception:
+        _invalidate_password_hash_cache = None
+    if _invalidate_password_hash_cache:
+        _invalidate_password_hash_cache()
+    yield
+    if _invalidate_password_hash_cache:
+        _invalidate_password_hash_cache()
+
+
 _MISSING = object()  # sentinel: api.profiles module not loaded pre-test
 
 
@@ -1056,6 +1082,107 @@ def _invalidate_models_cache_after_test():
         invalidate_models_cache()
     except Exception:
         pass
+
+
+# ── Per-test hermes_cli module integrity guard ───────────────────────────────
+# Several tests simulate "hermes_cli unavailable / CI without the package" by
+# swapping sys.modules['hermes_cli'] for a stub whose __path__ is [] (e.g.
+# test_byok_model_dropdown's _install_provider_model_ids sets
+# `hermes_cli.__path__ = []`), by monkeypatch.delitem-ing it, or by installing a
+# meta-path finder that raises ImportError for hermes_cli.* imports. monkeypatch
+# usually restores these, BUT once the REAL hermes_cli module object has its
+# __path__ emptied in place — or a submodule import is attempted while the stub /
+# blocking finder is installed — Python caches the broken state: a later
+# `import hermes_cli.profiles` can no longer find the subpackage (empty __path__)
+# even after the module object itself is restored. That is the exact chronic
+# full-suite poison behind the profile-resolution failures
+# (test_profile_skills_stats, test_scheduled_jobs_profile_isolation,
+# test_sprint10 crons) and the "Failed to load OpenAI Codex models from
+# hermes_cli" TLS-test failure — all pass in isolation, all fail only after one
+# of the poisoners has run earlier in the suite.
+#
+# This autouse guard captures the genuine on-disk hermes_cli package once, and
+# after every test restores it if sys.modules has been left with a stub, a
+# missing entry, or an emptied __path__ — and purges any poisoned hermes_cli.*
+# submodule entries so the next importer re-imports them cleanly from disk.
+_REAL_HERMES_CLI = sys.modules.get("hermes_cli")
+_REAL_HERMES_CLI_PATH = (
+    list(getattr(_REAL_HERMES_CLI, "__path__", []) or [])
+    if _REAL_HERMES_CLI is not None
+    else []
+)
+# hermes_state is a sibling top-level module in the SAME agent dir as hermes_cli
+# (…/hermes-agent/hermes_state.py). The same "simulate agent-package
+# unavailable" tests that poison hermes_cli also leave hermes_state unimportable
+# (test_v050259_sessiondb_fd_leak's `from hermes_state import SessionDB` fails
+# only in the full suite, never alone), so it needs the same restore guard.
+_REAL_HERMES_STATE = sys.modules.get("hermes_state")
+
+# Some tests (e.g. test_issue1574_cron_profile_lock._activate_spawn_fake_agent)
+# repoint the agent at a FAKE dir by mutating os.environ + sys.path DIRECTLY
+# (not via monkeypatch) and never restore them. A later test that spawns
+# server.py as a subprocess inherits the poisoned HERMES_WEBUI_AGENT_DIR /
+# PYTHONPATH and the child can't import hermes_cli — the chronic
+# test_tls_support::test_tls_startup_failure_fallback_to_http full-suite failure
+# (subprocess ModuleNotFoundError at cron/scheduler.py's `from
+# hermes_cli._subprocess_compat import ...`). Snapshot the agent-path env + the
+# real sys.path entries once so the guard below can restore them.
+_AGENT_PATH_ENV_KEYS = ("HERMES_WEBUI_AGENT_DIR", "PYTHONPATH", "HERMES_WEBUI_PYTHON")
+_REAL_AGENT_ENV = {k: os.environ.get(k) for k in _AGENT_PATH_ENV_KEYS}
+_REAL_SYS_PATH = list(sys.path)
+
+
+def _hermes_cli_is_healthy() -> bool:
+    mod = sys.modules.get("hermes_cli")
+    if mod is None or mod is not _REAL_HERMES_CLI:
+        return False
+    path = getattr(mod, "__path__", None)
+    return bool(isinstance(path, list) and len(path) > 0)
+
+
+@pytest.fixture(autouse=True)
+def _restore_hermes_cli_module():
+    """Restore the real hermes_cli / hermes_state packages + agent-path env after
+    any test that stubbed/blocked/repointed them.
+
+    Fixes the chronic full-suite test-isolation poison where a test that
+    simulates "agent package unavailable" (or repoints the agent at a fake dir)
+    leaves the real package unimportable — via a stub swap, delitem, blocking
+    meta-path finder, an emptied __path__, or a leaked HERMES_WEBUI_AGENT_DIR /
+    PYTHONPATH / sys.path mutation. Later tests then fail to `import
+    hermes_cli.profiles`, `import hermes_state`, or spawn a server subprocess
+    that can't import the agent at all.
+    """
+    yield
+    if _REAL_HERMES_CLI is not None and not _hermes_cli_is_healthy():
+        # Restore the genuine package object + its real __path__.
+        try:
+            _REAL_HERMES_CLI.__path__ = list(_REAL_HERMES_CLI_PATH)
+        except Exception:
+            pass
+        sys.modules["hermes_cli"] = _REAL_HERMES_CLI
+        # Drop poisoned submodule entries (stubs / partially-imported) so the
+        # next `import hermes_cli.<sub>` re-imports the real module from disk.
+        for _name in [n for n in list(sys.modules) if n.startswith("hermes_cli.")]:
+            _sub = sys.modules.get(_name)
+            _subfile = getattr(_sub, "__file__", None)
+            if not _subfile or "hermes_cli" not in str(_subfile):
+                sys.modules.pop(_name, None)
+    # Restore hermes_state if a test swapped/removed it for a stub.
+    if _REAL_HERMES_STATE is not None:
+        if sys.modules.get("hermes_state") is not _REAL_HERMES_STATE:
+            sys.modules["hermes_state"] = _REAL_HERMES_STATE
+    # Restore leaked agent-path env vars (so a later server-subprocess spawn
+    # inherits the real agent dir, not a prior test's fake one).
+    for _k, _v in _REAL_AGENT_ENV.items():
+        if os.environ.get(_k) != _v:
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+    # Restore the real sys.path if a test stripped the agent dir from it.
+    if sys.path != _REAL_SYS_PATH:
+        sys.path[:] = _REAL_SYS_PATH
 
 
 # ── Per-test session cleanup ──────────────────────────────────────────────────

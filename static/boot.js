@@ -2743,6 +2743,21 @@ function _applyComposerFooterVisibilitySettings(){
   if(hidden.hide_composer_reasoning&&typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(hidden.hide_composer_toolsets&&typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
   if(hidden.hide_composer_mobile_config&&typeof closeMobileComposerConfig==='function') closeMobileComposerConfig();
+
+  // Hide the divider when all left-group buttons before it are hidden
+  // Stops a lone vertical separator from appearing when attach/saved-prompts/mic/voice are all hidden.
+  const _divider=document.querySelector('.composer-divider');
+  if(_divider){
+    const _leftBtnSelectors=['#btnAttach','#btnSavedPrompts','#btnMic','#btnVoiceMode'];
+    const _allLeftHidden=_leftBtnSelectors.every(sel=>{
+      const el=document.querySelector(sel);
+      return !el||el.classList.contains('composer-control-hidden')||el.style.display==='none';
+    });
+    // Use classList.toggle directly instead of _setComposerControlHidden
+    // so we don't strip the intentional aria-hidden="true" on the decorative divider
+    // when buttons are visible (Greptile feedback).
+    _divider.classList.toggle('composer-control-hidden',_allLeftHidden);
+  }
 }
 window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
 
@@ -2975,8 +2990,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
     _mirrorSpeechSettingsFromServer(s);
-    _applyComposerFooterVisibilitySettings();
+    // Apply voice-mode visibility BEFORE computing the divider so the
+    // .composer-divider (#5451) sees #btnVoiceMode final display even
+    // when a server/localStorage sync path flipped the pref between
+    // module init and settings-load completion (round-2 SILENT race).
+    // Note: must use window._applyVoiceModePref — the bare name is
+    // closure-local to the voice-mode IIFE and not visible here.
     if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
+    _applyComposerFooterVisibilitySettings();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
@@ -3028,6 +3049,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    // Apply voice-mode visibility BEFORE computing the divider so the
+    // .composer-divider (#5451) sees #btnVoiceMode final display even when
+    // a server/localStorage sync path flipped the pref between module init
+    // and settings-load completion (round-2 SILENT race fix; safe no-op on
+    // the failure-fallback path because _applyVoiceModePref is idempotent).
+    // Note: must use window._applyVoiceModePref — the bare name is
+    // closure-local to the voice-mode IIFE and not visible here.
+    if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
     _applyComposerFooterVisibilitySettings();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
@@ -3071,6 +3100,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       return true;
     };
     const redirectToLogin=(nextUrl)=>{
+      // #5578: never nest the login URL into its own next= — if already on a
+      // login-shaped page, reload 'login' bare (the page keeps its inner next).
+      const _p=(window.location.pathname||'').replace(/\/+$/,'');
+      if(/(?:^|\/)login$/.test(_p)){window.location.href='login';return;}
       window.location.href='login?next='+encodeURIComponent(nextUrl);
     };
     return {

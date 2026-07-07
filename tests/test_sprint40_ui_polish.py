@@ -18,9 +18,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 REPO_ROOT  = _REPO_ROOT
-STYLE_CSS  = (REPO_ROOT / "static" / "style.css").read_text()
-SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text()
-PANELS_JS   = (REPO_ROOT / "static" / "panels.js").read_text()
+STYLE_CSS  = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_JS   = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
 try:
     from api import config as _api_config
@@ -101,7 +101,7 @@ class TestGatewaySessionNullModel(unittest.TestCase):
         """api/models.py must not use `or 'unknown'` for the model field
         so that a NULL model in state.db is returned as None (falsy) to
         the frontend rather than the truthy string 'unknown'."""
-        models_src = (REPO_ROOT / "api" / "models.py").read_text()
+        models_src = (REPO_ROOT / "api" / "models.py").read_text(encoding="utf-8")
         # Ensure the old fallback pattern is gone
         self.assertNotIn(
             "'model': row['model'] or 'unknown'",
@@ -113,7 +113,7 @@ class TestGatewaySessionNullModel(unittest.TestCase):
     def test_gateway_watcher_null_model_returns_none_not_unknown(self):
         """api/gateway_watcher.py must not use `or 'unknown'` for the model
         field so that a NULL model in state.db is returned as None (falsy)."""
-        gw_src = (REPO_ROOT / "api" / "gateway_watcher.py").read_text()
+        gw_src = (REPO_ROOT / "api" / "gateway_watcher.py").read_text(encoding="utf-8")
         self.assertNotIn(
             "'model': row['model'] or 'unknown'",
             gw_src,
@@ -124,8 +124,8 @@ class TestGatewaySessionNullModel(unittest.TestCase):
     def test_gateway_session_model_uses_none_fallback(self):
         """Both source files must use `row['model'] or None` (explicit None
         fallback) for the model field assignment."""
-        models_src = (REPO_ROOT / "api" / "models.py").read_text()
-        gw_src = (REPO_ROOT / "api" / "gateway_watcher.py").read_text()
+        models_src = (REPO_ROOT / "api" / "models.py").read_text(encoding="utf-8")
+        gw_src = (REPO_ROOT / "api" / "gateway_watcher.py").read_text(encoding="utf-8")
         self.assertIn(
             "'model': row['model'] or None,",
             models_src,

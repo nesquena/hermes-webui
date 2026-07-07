@@ -58,6 +58,23 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
+# Phrases git emits when its own short-lived index/refs lock files block a
+# subsequent operation. Tuned to match only the true "lock file already exists"
+# semantics that warrant a lock-conflict response -- v2 deliberately drops the
+# broad "lock file" substring from the prior version to avoid false positives
+# on unrelated errors like "lock file lost during ref transaction".
+# Matched case-insensitively in _is_git_lock_error().
+_GIT_LOCK_SIGNATURES = (
+    "index.lock': file exists",
+    ".lock': file exists",
+    'another git process seems to be running',
+    'unable to create .git/index.lock',
+)
+# Lock files we previously enumerated for auto-removal in v2. v2.2 no longer
+# removes anything on the server, so the enumerable list is no longer needed;
+# ``_inventory_locks`` reports whatever ``.git/**/*.lock`` files currently exist
+# via plain ``rglob``.
+
 
 
 def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CHARS) -> str:
@@ -214,12 +231,191 @@ def _run_git(args, cwd, timeout=10):
         return f'git failed to start: {exc}', False
 
 
+def _is_git_lock_error(output: str) -> bool:
+    if not output:
+        return False
+    lower_out = output.lower()
+    return any(sig in lower_out for sig in _GIT_LOCK_SIGNATURES)
+
+
+def _inventory_locks(path: Path) -> dict:
+    """Return a snapshot of lock files currently present under ``path/.git``.
+
+    v2.2: replaced v2's `_is_lock_held` + `_try_remove_lock` machinery with
+    pure inventory. Round-2 cert (gate-fail) proved that `fcntl.flock`
+    cannot detect a live git lock, because git uses `O_CREAT|O_EXCL` and
+    `rename(2)`, NOT advisory locking. Any auto-delete path can therefore
+    race against a running `git add` and corrupt the index. v2.2 stops
+    deleting locks from the server entirely: the only thing that removes
+    a lock is the user, on the host, via the manual command surfaced in
+    the response. Once the lock is gone, the user re-clicks Update Now
+    and the normal non-destructive apply path runs.
+    """
+    git_dir = path / '.git'
+    out = {
+        'well_known_lock_present': False,  # ``.git/index.lock`` exists?
+        'well_known_lock_path': None,      # absolute path of ``.git/index.lock``
+        'other_locks': [],                  # any other lock files, by relative path
+    }
+    if not git_dir.exists():
+        return out
+    well_known = git_dir / 'index.lock'
+    try:
+        out['well_known_lock_present'] = well_known.exists()
+    except OSError:
+        # Permission problem reading the directory -- treat conservatively.
+        out['well_known_lock_present'] = True
+    out['well_known_lock_path'] = str(well_known)
+
+    # Enumerate every other lock file under .git/ for diagnostic reporting.
+    # We never touch them; this is purely an inventory.
+    try:
+        for entry in sorted(git_dir.rglob('*.lock')):
+            try:
+                rel = str(entry.relative_to(git_dir))
+            except ValueError:
+                continue
+            if rel == 'index.lock':
+                continue
+            out['other_locks'].append(rel)
+    except OSError:
+        # rglob can fail on unreadable subtrees; skip quietly.
+        pass
+    return out
+
+
+def apply_clear_lock(target: str) -> dict:
+    """Manual-instruction lock recovery for ``target``.
+
+    v2.2: NEVER removes a lock file. Strategy:
+
+      - If ``.git/index.lock`` is absent: re-run the normal non-destructive
+        apply path so the user lands on the latest version without ever
+        touching destructive git operations.
+      - If ``.git/index.lock`` is present: do NOT touch it -- the server
+        has no reliable proof that no live git process is still using
+        it (round-2 cert showed `fcntl.flock` does not detect git's
+        actual ``O_CREAT|O_EXCL`` locking). Return a response with the
+        exact manual command the operator can run, plus the inventory of
+        any other lock files so they can investigate. The frontend then
+        surfaces a copyable ``rm`` line and a "I've removed the lock --
+        try update again" button that re-invokes this endpoint, which
+        (now that the lock is gone) will take the success branch and
+        re-run the normal apply.
+    """
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response(target, blocker_snapshot)
+
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'message': 'Update already in progress'}
+
+    try:
+        if target == 'webui':
+            path = REPO_ROOT
+        elif target == 'agent':
+            path = _AGENT_DIR
+        else:
+            return {'ok': False, 'message': f'Unknown target: {target}'}
+
+        if path is None or not (path / '.git').exists():
+            return {'ok': False, 'message': 'Not a git repository'}
+
+        inv = _inventory_locks(path)
+        manual_command = f"rm -f {inv['well_known_lock_path']}"
+
+        if not inv['well_known_lock_present']:
+            # Lock is gone. Run the normal non-destructive update flow and
+            # annotate the response with what we found for the user's
+            # records.
+            with _cache_lock:
+                _update_cache['checked_at'] = 0
+            retry_result = _apply_update_inner(target)
+            retry_result = dict(retry_result)
+            retry_result['lock_recovery'] = {
+                'action': 'no-lock-found',
+                'manual_command': manual_command,
+                'other_locks': inv['other_locks'],
+            }
+            return retry_result
+
+        # Lock is present. The server cannot prove it's safe to delete;
+        # the only safe path is to ask the operator.
+        message = (
+            'A git lock file (.git/index.lock) is present. The server does '
+            'not delete locks automatically -- git uses O_CREAT|O_EXCL '
+            'locking, which cannot be detected with advisory probes. To '
+            'recover: confirm no other git process is running against '
+            f'this checkout, then run: {manual_command}  '
+            'Click "Retry update" once you have removed it.'
+        )
+        return {
+            'ok': False,
+            'message': message,
+            'lock_held': True,
+            'target': target,
+            'manual_command': manual_command,
+            'well_known_lock_path': inv['well_known_lock_path'],
+            'other_locks': inv['other_locks'],
+        }
+    finally:
+        _apply_lock.release()
+
+
+def _windows_git_from_registry():
+    """Best-effort resolve git.exe from the Git-for-Windows registry key.
+
+    Git for Windows records its install root at
+    ``HKLM\\SOFTWARE\\GitForWindows\\InstallPath`` (and the WOW6432Node mirror
+    for a 32-bit install on 64-bit Windows). ``git.exe`` lives under
+    ``<InstallPath>\\cmd\\git.exe``. This is the reliable way to find git when
+    it is installed but NOT on the launching process's PATH — e.g. the WebUI
+    server started from a venv python whose environment does not inherit the
+    interactive shell PATH, which otherwise degrades WEBUI_VERSION to
+    ``'unknown'`` and freezes the ``?v=`` static-asset cache-busting stamp.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None
+    for hive, flag in (
+        (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_64KEY),
+        (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_32KEY),
+        (winreg.HKEY_CURRENT_USER, 0),
+    ):
+        try:
+            with winreg.OpenKey(
+                hive, r'SOFTWARE\GitForWindows', 0,
+                winreg.KEY_READ | flag,
+            ) as key:
+                install_path, _ = winreg.QueryValueEx(key, 'InstallPath')
+        except OSError:
+            continue
+        if not install_path:
+            continue
+        candidate = os.path.join(install_path, 'cmd', 'git.exe')
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def _resolve_git_executable():
     git_executable = shutil.which('git')
     if git_executable:
         return git_executable
     if sys.platform == 'darwin' and os.path.exists('/usr/bin/git'):
         return '/usr/bin/git'
+    if sys.platform == 'win32':
+        from_registry = _windows_git_from_registry()
+        if from_registry:
+            return from_registry
+        for candidate in (
+            os.path.expandvars(r'%ProgramFiles%\Git\cmd\git.exe'),
+            os.path.expandvars(r'%ProgramFiles(x86)%\Git\cmd\git.exe'),
+            os.path.expandvars(r'%LocalAppData%\Programs\Git\cmd\git.exe'),
+        ):
+            if candidate and os.path.exists(candidate):
+                return candidate
     return None
 
 
@@ -1315,6 +1511,15 @@ def apply_force_update(target: str) -> dict:
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
 
+        # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
+        # this entry point. The mtime-based heuristic was empirically proven
+        # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
+        # with unchanged mtime) and unconditional pre-cleanup clobbered locks
+        # for force-update retries that had nothing to do with a lock error.
+        # Lock cleanup is now ONLY performed by the explicit
+        # /api/updates/clear_lock endpoint, where the user has opted in to
+        # a non-destructive retry.
+
         # --force so a remote re-tag (e.g. squash-merge that re-points an
         # existing release tag) doesn't jam the apply path with "would clobber
         # existing tag". See #2756.
@@ -1396,6 +1601,41 @@ def apply_update(target):
         _apply_lock.release()
 
 
+def _restore_stash_after_pull_failure(
+    target: str,
+    path: Path,
+    pull_out: str,
+) -> str:
+    """Best-effort re-apply of a stash pushed earlier in `_apply_update_inner`.
+
+    Called when `git pull` failed with a lock error and we had already pushed
+    a stash for the user's local modifications. Without this, the user's
+    modifications remain in git stash with the working tree clean -- the
+    wrong user experience because the failure was a lock conflict, not a
+    stash-apply conflict, and the stash should re-apply cleanly.
+
+    Returns a human-readable note for inclusion in the response message.
+    """
+    _, pop_ok = _run_git(['stash', 'pop'], path)
+    if pop_ok:
+        return ('Local modifications were restored from the temporary stash.')
+
+    # `git stash pop` failed -- could be that the working tree changed under
+    # us. Try apply + drop to keep the change separation explicit.
+    _, apply_ok = _run_git(['stash', 'apply'], path)
+    if apply_ok:
+        _, _ = _run_git(['stash', 'drop'], path)
+        return ('Local modifications were restored from the temporary stash.')
+
+    detail = (pull_out or '').strip()[:200]
+    return (
+        'Your local modifications could not be restored automatically '
+        f'(stash pop failed after pull error: {detail or "no detail"}). '
+        'They remain safely in `git stash list`; run `git -C '
+        + str(path) + ' stash pop` once the lock is cleared.'
+    )
+
+
 def _apply_update_inner(target):
     """Inner implementation of apply_update, called under _apply_lock."""
     if target == 'webui':
@@ -1412,6 +1652,12 @@ def _apply_update_inner(target):
     # --force so a remote re-tag doesn't block the update path (see #2756).
     fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
+        if _is_git_lock_error(fetch_out):
+            return {
+                'ok': False,
+                'message': f'Fetch failed due to a repository lock: {fetch_out.strip()}',
+                'lock_conflict': True,
+            }
         return {
             'ok': False,
             'message': _apply_fetch_failure_message(
@@ -1428,6 +1674,12 @@ def _apply_update_inner(target):
         ['status', '--porcelain', '--untracked-files=no'], path
     )
     if not status_ok:
+        if _is_git_lock_error(status_out):
+            return {
+                'ok': False,
+                'message': f'Failed to inspect repo status due to a repository lock: {status_out.strip()}',
+                'lock_conflict': True,
+            }
         return {'ok': False, 'message': f'Failed to inspect repo status: {status_out[:200]}'}
     # Fail early on unresolved merge conflicts
     if any(line[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'}
@@ -1460,6 +1712,24 @@ def _apply_update_inner(target):
         pull_args.extend(['origin', compare_ref])
     pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
+        if _is_git_lock_error(pull_out):
+            # Lock conflict during pull. If a stash was pushed for the local
+            # modifications, attempt to restore it before returning so the
+            # user's working tree is not silently left empty with changes
+            # stranded in the stash (Greptile P1 on PR #5688).
+            stash_recovery_note = ''
+            if stashed:
+                stash_recovery_note = _restore_stash_after_pull_failure(
+                    target, path, pull_out
+                )
+            message = f'Pull failed due to a repository lock: {pull_out.strip()}'
+            if stash_recovery_note:
+                message = f'{message} {stash_recovery_note}'
+            return {
+                'ok': False,
+                'message': message,
+                'lock_conflict': True,
+            }
         pull_lower = pull_out.lower()
         detail = pull_out.strip()[:300] if pull_out.strip() else '(no output from git)'
         untracked_collision = (

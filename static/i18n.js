@@ -484,6 +484,7 @@ const LOCALES = {
      reveal_in_finder: 'Reveal in File Manager',
      reveal_failed: 'Failed to reveal: ',
      copy_file_path: 'Copy file path',
+     copy_relative_path: 'Copy relative path',
      open_in_vscode: 'Open in VS Code',
      open_in_vscode_failed: 'Failed to open in VS Code: ',
      download_folder: 'Download Folder',
@@ -1583,14 +1584,31 @@ const LOCALES = {
     // cron form
     cron_name_label: 'Name',
     cron_name_placeholder: 'Optional',
-    cron_schedule_label: 'Schedule',
-    cron_schedule_preset_label: 'Preset',
+    cron_schedule_label: 'Cron expression',
+    cron_schedule_preset_label: 'Schedule',
     cron_schedule_preset_hourly: 'Hourly',
     cron_schedule_preset_daily: 'Daily',
-    cron_schedule_preset_weekdays: 'Weekdays',
+    cron_schedule_preset_weekdays: 'Weekdays (Mon–Fri)',
     cron_schedule_preset_weekly: 'Weekly',
     cron_schedule_preset_monthly: 'Monthly',
     cron_schedule_preset_custom: 'Custom',
+    cron_schedule_hour_label: 'Hour',
+    cron_schedule_minute_label: 'Minute',
+    cron_schedule_weekday_label: 'Day of week',
+    cron_schedule_month_day_label: 'Day of month',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_time_hint: 'Time is server time; cron runs server-side.',
     cron_schedule_hint: "Use 'every 1h' or a cron expression for recurring jobs. Bare durations like '30m' run once.",
     cron_schedule_once_warning: "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.",
     cron_prompt_label: 'Prompt',
@@ -1696,7 +1714,7 @@ const LOCALES = {
     cancelling: 'Annullamento\u2026',
     cancel_failed: 'Annullamento fallito: ',
     mic_denied: 'Accesso al microfono negato. Controlla i permessi del browser.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'L\'input vocale richiede una connessione sicura. Apri Hermes tramite HTTPS o da localhost per usare il microfono.',
     mic_no_speech: 'Nessuna voce rilevata. Riprova.',
     mic_network: 'Riconoscimento vocale non disponibile.',
     mic_error: 'Errore input vocale: ',
@@ -2161,9 +2179,10 @@ const LOCALES = {
      reveal_in_finder: 'Mostra nel File Manager',
      reveal_failed: 'Mostra fallito: ',
      copy_file_path: 'Copia percorso file',
+     copy_relative_path: 'Copia percorso relativo',
      open_in_vscode: 'Apri in VS Code',
      open_in_vscode_failed: 'Apertura in VS Code fallita: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Cartella download',
     path_copied: 'Percorso file copiato negli appunti',
     path_copy_failed: 'Copia percorso fallita: ',
     session_rename: 'Rinomina conversazione',
@@ -2295,8 +2314,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Segui automaticamente i nuovi contenuti',
     settings_desc_auto_scroll_follow: 'Se abilitato, la vista scorre verso il basso man mano che arrivano nuovi token. Se disabilitato, controlli tu la posizione di scorrimento.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Mostra il selettore di profilo nella barra del titolo',
+    settings_desc_show_titlebar_profile: 'Se attivo, nella barra del titolo in alto a sinistra compare un pulsante per cambiare profilo da qualsiasi scheda. Disattivato per impostazione predefinita; il piè di pagina del compositore ha sempre un selettore di profilo indipendentemente da questa impostazione.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -2354,7 +2373,7 @@ const LOCALES = {
     settings_tab_appearance: 'Aspetto',
     settings_tab_preferences: 'Preferenze',
     settings_tab_plugins: 'Plugin',
-    settings_tab_extensions: 'Extensions',  // TODO: translate
+    settings_tab_extensions: 'Estensioni',
     settings_extensions_gallery_tab: 'Gallery',
     settings_extensions_installed_tab: 'Installed',
     settings_extensions_diagnostics_tab: 'Diagnostics',
@@ -2385,19 +2404,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Estensione installata. Consulta la scheda per i prossimi passi.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Plugin',
     plugins_enable_toggle: 'Abilita',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Visualizza i plugin Hermes installati e gli hook del ciclo di vita che registrano. Questo pannello è di sola lettura.',
+    settings_plugins_empty: 'Nessun plugin Hermes attualmente visibile. Installa o abilita i plugin dalla CLI/config di Hermes per vederli qui.',
+    plugins_unnamed: 'Plugin senza nome',
+    plugins_no_description: 'Nessuna descrizione fornita.',
+    plugins_no_hooks: 'Nessun hook del ciclo di vita registrato',
+    plugins_registered_hooks: 'Hook registrati',
+    plugins_enabled: 'Abilitato',
+    plugins_disabled: 'Disabilitato',
+    plugins_active_provider: 'Attivo (provider)',
+    plugins_provider_no_hooks: 'Plugin provider — nessun hook di visibilità per l\'agente',
+    plugins_load_failed: 'Impossibile caricare i plugin: ',
     settings_tab_system: 'Sistema',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -2685,7 +2704,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'La dashboard è solo loopback sul server. Naviga dal server stesso o riavvialo con --host 0.0.0.0 (non sicuro).',
     tab_logs: 'Log',
     tab_settings: 'Impostazioni',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Chiudi menu',
     new_conversation: 'Nuova conversazione',
     filter_conversations: 'Filtra conversazioni...',
     markdown_table_filter: 'Filtra tabella',
@@ -3256,6 +3275,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Ogni settimana',
     cron_schedule_preset_monthly: 'Ogni mese',
     cron_schedule_preset_custom: 'Personalizzato',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: 'Ora',
+    cron_schedule_minute_label: 'Minuto',
+    cron_schedule_weekday_label: 'Giorno della settimana (0-6, Dom-Sab)',
+    cron_schedule_month_day_label: 'Giorno',
+    cron_schedule_time_hint: 'L\'ora è quella del server; cron viene eseguito lato server.',
     cron_schedule_hint: 'Usa \'every 1h\' o un\'espressione cron per job ricorrenti. Durate semplici come \'30m\' vengono eseguite una volta sola.',
     cron_schedule_once_warning: 'Forme di durata come \'30m\' vengono eseguite una volta e rimosse dopo l\'esecuzione. Usa \'every 30m\' per mantenere un job ricorrente.',
     cron_prompt_label: 'Prompt',
@@ -3364,7 +3400,7 @@ const LOCALES = {
     cancelling: 'キャンセル中…',
     cancel_failed: 'キャンセル失敗: ',
     mic_denied: 'マイクへのアクセスが拒否されました。ブラウザの権限を確認してください。',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: '音声入力にはセキュアな接続が必要です。マイクを使うには HTTPS または localhost 経由で Hermes を開いてください。',
     mic_no_speech: '音声が検出されませんでした。もう一度お試しください。',
     mic_network: '音声認識を利用できません。',
     mic_error: '音声入力エラー: ',
@@ -3829,6 +3865,7 @@ const LOCALES = {
      reveal_in_finder: 'ファイルマネージャーで表示',
      reveal_failed: '表示に失敗しました: ',
      copy_file_path: 'ファイルパスをコピー',
+     copy_relative_path: '相対パスをコピー',
      open_in_vscode: 'VS Codeで開く',
      open_in_vscode_failed: 'VS Codeで開けませんでした: ',
      download_folder: 'フォルダをダウンロード',
@@ -3963,8 +4000,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: '新しい内容を自動で追従',
     settings_desc_auto_scroll_follow: '有効にすると、ストリーミング中に画面が自動で一番下までスクロールします。無効にすると、スクロール位置を自分で操作できます。',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'タイトルバーにプロファイル切替を表示',
+    settings_desc_show_titlebar_profile: '有効にすると、左上のアプリのタイトルバーにプロファイル切替ボタンが表示され、どのタブからでもプロファイルを変更できます。既定ではオフです。この設定に関係なく、コンポーザーのフッターには常にプロファイル切替があります。',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -4353,7 +4390,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'ダッシュボードはサーバー上のループバック専用です。サーバー上で閲覧するか、--host 0.0.0.0（安全ではありません）で再起動してください。',
     tab_logs: 'ログ',
     tab_settings: '設定',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'メニューを閉じる',
     new_conversation: '新しい会話',
     filter_conversations: '会話を絞り込み...',
     markdown_table_filter: 'テーブルをフィルター',
@@ -4929,6 +4966,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: '毎週',
     cron_schedule_preset_monthly: '毎月',
     cron_schedule_preset_custom: 'カスタム',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: '時',
+    cron_schedule_minute_label: '分',
+    cron_schedule_weekday_label: '曜日 (0-6, 日-土)',
+    cron_schedule_month_day_label: '日',
+    cron_schedule_time_hint: '時刻はサーバー時刻です。cron はサーバー側で実行されます。',
     cron_schedule_hint: "繰り返し実行には 'every 1h' または Cron 式を使います。'30m' のような期間だけの指定は 1 回だけ実行されます。",
     cron_schedule_once_warning: "'30m' のような期間指定は 1 回だけ実行され、実行後に削除されます。繰り返すには 'every 30m' を使ってください。",
     cron_prompt_label: 'プロンプト',
@@ -5036,7 +5090,7 @@ const LOCALES = {
     cancelling: 'Отменяю…',
     cancel_failed: 'Не удалось отменить: ',
     mic_denied: 'Доступ к микрофону запрещён. Проверьте разрешения браузера.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'Для голосового ввода нужно защищённое соединение. Откройте Hermes по HTTPS или с localhost, чтобы использовать микрофон.',
     mic_no_speech: 'Речь не распознана. Попробуйте ещё раз.',
     mic_network: 'Распознавание речи недоступно.',
     mic_error: 'Ошибка ввода речи: ',
@@ -5226,7 +5280,7 @@ const LOCALES = {
     new_session_creating: 'Создаём новую беседу…',
     compressing: 'Запрашиваю сжатие контекста...',
     token_usage_on: 'Отображение токенов включено',
-    usage_personality_none: 'none', // TODO: translate
+    usage_personality_none: 'нет',
     token_usage_off: 'Отображение токенов выключено',
     usage_cache_hit_detail: 'Кэш: {0}% попаданий ({1} чтение / {2} запись)',
     usage_cached_percent: '{0}% из кэша',
@@ -5328,21 +5382,21 @@ const LOCALES = {
     session_worktree_badge: 'Worktree',
     model_search_placeholder: 'Поиск моделей…',
     model_scope_advisory: 'Применяется к этой беседе со следующего сообщения.',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: 'Наборы инструментов сессии',
+    session_toolsets_desc: 'Использовать значения по умолчанию активного профиля или выбрать пользовательский список наборов инструментов для этой сессии',
+    session_toolsets_global: 'Значения по умолчанию активного профиля',
+    session_toolsets_profile_defaults: 'Значения по умолчанию активного профиля',
+    session_toolsets_custom: 'Пользовательское переопределение',
+    session_toolsets_use_profile_defaults: 'Использовать значения по умолчанию активного профиля',
+    session_toolsets_configured_servers: 'Настроенные серверы MCP',
+    session_toolsets_loading_servers: 'Загрузка настроенных серверов...',
+    session_toolsets_no_configured_servers: 'Нет настроенных серверов MCP',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: 'Применить',
+    session_toolsets_clear: 'Использовать значения по умолчанию',
+    session_toolsets_applied: 'Наборы инструментов обновлены',
+    session_toolsets_cleared: 'Используются значения по умолчанию активного профиля',
+    session_toolsets_failed: 'Не удалось обновить наборы инструментов: ',
     model_scope_toast: 'Применяется к этой беседе со следующего сообщения.',
     reference_only_label: 'Только справка',
     settings_label_skin: 'Скин',
@@ -5421,9 +5475,10 @@ const LOCALES = {
      reveal_in_finder: 'Показать в файловом менеджере',
      reveal_failed: 'Не удалось открыть: ',
      copy_file_path: 'Копировать путь к файлу',
+     copy_relative_path: 'Копировать относительный путь',
      open_in_vscode: 'Открыть в VS Code',
      open_in_vscode_failed: 'Не удалось открыть в VS Code: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Папка загрузок',
     path_copied: 'Путь к файлу скопирован в буфер обмена',
     path_copy_failed: 'Не удалось скопировать путь: ',
     session_rename: 'Переименовать беседу',
@@ -5719,21 +5774,21 @@ const LOCALES = {
     dashboard_loopback_warning: 'Панель доступна только через loopback на сервере. Откройте её с самого сервера или перезапустите с --host 0.0.0.0 (небезопасно).',
     tab_logs: 'Logs',
     tab_settings: 'Настройки',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Закрыть меню',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: 'Журналы',
+    logs_file: 'Файл',
+    logs_tail: 'Хвост',
+    logs_auto_refresh: 'Автообновление (5 с)',
+    logs_wrap: 'Перенос строк',
+    logs_copy_all: 'Копировать всё',
+    logs_empty: 'Пока нет строк журнала.',
+    logs_loading: 'Загрузка журналов…',
+    logs_load_failed: 'Не удалось загрузить журналы',
+    logs_status_idle: 'Выберите файл журнала, чтобы просмотреть последние строки.',
+    logs_no_mtime: 'ещё не записано',
+    logs_truncated_hint: 'Показан хвост большого файла журнала; более старые байты пропущены для ограничения использования памяти.',
+    logs_copied: 'Журналы скопированы',
     logs_severity: 'Уровень',
     logs_severity_all: 'Все',
     logs_severity_errors: 'Ошибки',
@@ -5957,16 +6012,16 @@ const LOCALES = {
     provider_category_specialized: 'Специализированные',
     onboarding_api_key_label: 'Ключ API',
     onboarding_api_key_placeholder: 'Оставьте пустым, чтобы сохранить уже сохранённый ключ',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    onboarding_api_key_label_optional: 'API-ключ (необязательно)',
+    onboarding_api_key_placeholder_optional: 'Оставьте пустым для серверов без ключа',
+    onboarding_api_key_help_keyless: 'Большинство установок LM Studio / Ollama / vLLM работают без ключа — оставьте это поле пустым, если ваш сервер не требует аутентификации. Используйте кнопку «Проверить подключение» для проверки.',
+    oauth_login_codex: 'Войти через Codex (ChatGPT)',
+    oauth_codex_step1: 'Шаг 1. Перейдите по этому URL и введите код',
+    oauth_codex_step2: 'Шаг 2. Введите этот код на странице',
+    oauth_codex_polling: 'Ожидание авторизации...',
+    oauth_codex_success: 'Вход через Codex OAuth выполнен!',
+    oauth_codex_error: 'Не удалось выполнить вход через OAuth',
+    oauth_codex_expired: 'Срок действия кода истёк, повторите попытку',
     onboarding_api_key_help_prefix: 'Сохраняется как секрет в вашем файле `.env` Hermes с помощью',
     onboarding_base_url_label: 'Базовый URL',
     onboarding_base_url_placeholder: 'https://your-endpoint.example/v1',
@@ -5992,19 +6047,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Выберите модель перед продолжением.',
     onboarding_error_provider_required: 'Выберите режим настройки перед продолжением.',
     onboarding_error_base_url_required: 'Для собственных endpoint-ов требуется базовый URL.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: 'Проверить подключение',
+    onboarding_probe_probing: 'Проверка подключения…',
+    onboarding_probe_ok: 'Подключено. Доступно моделей: {n}.',
+    onboarding_probe_error_generic: 'Не удалось связаться с настроенным базовым URL.',
+    onboarding_probe_error_invalid_url: 'Базовый URL должен начинаться с http:// или https://.',
+    onboarding_probe_error_dns: 'Не удалось разрешить хост. Проверьте URL или используйте IP-адрес хоста.',
+    onboarding_probe_error_connect_refused: 'В подключении отказано — возможно, сервер не запущен по этому адресу. Внутри Docker попробуйте IP хоста вместо localhost.',
+    onboarding_probe_error_timeout: 'Конечная точка не ответила вовремя. Убедитесь, что сервер запущен и URL указан верно.',
+    onboarding_probe_error_http_4xx: 'Конечная точка вернула ошибку клиента. Проверьте аутентификацию и путь URL (обычно оканчивается на /v1).',
+    onboarding_probe_error_http_5xx: 'Конечная точка вернула ошибку сервера. Проверьте журналы сервера LM Studio / Ollama.',
+    onboarding_probe_error_parse: 'Конечная точка вернула список моделей в неожиданном формате. Убедитесь, что URL указывает на корень API, совместимого с OpenAI.',
+    onboarding_probe_error_unreachable: 'Не удалось связаться с настроенным базовым URL.',
+    onboarding_error_probe_failed: 'Не удалось проверить настроенный базовый URL.',
     onboarding_error_workspace_required: 'Рабочее пространство обязательно.',
     onboarding_error_model_required: 'Модель обязательна.',
     onboarding_complete: 'Первичная настройка завершена',
@@ -6244,6 +6299,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Еженедельно',
     cron_schedule_preset_monthly: 'Ежемесячно',
     cron_schedule_preset_custom: 'Пользовательский',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: 'Час',
+    cron_schedule_minute_label: 'Минута',
+    cron_schedule_weekday_label: 'День недели (0-6, вс-сб)',
+    cron_schedule_month_day_label: 'День',
+    cron_schedule_time_hint: 'Время указано по серверу; cron выполняется на сервере.',
     cron_schedule_hint: "Для повторяющихся заданий используйте 'every 1h' или cron-выражение. Простые интервалы вроде '30m' выполняются один раз.",
     cron_schedule_once_warning: "Интервалы вроде '30m' выполняются один раз и удаляются после запуска. Используйте 'every 30m' для повторяющегося задания.",
     cron_prompt_label: 'Запрос',
@@ -6370,8 +6442,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Автопрокрутка к новому содержимому',
     settings_desc_auto_scroll_follow: 'Если включено, область прокручивается вниз по мере поступления новых токенов. Если выключено, вы сами управляете прокруткой.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Показывать переключатель профилей в заголовке окна',
+    settings_desc_show_titlebar_profile: 'Если включено, в заголовке окна в левом верхнем углу появляется кнопка переключения профилей, позволяющая менять профиль с любой вкладки. По умолчанию выключено; в нижней части редактора всегда есть переключатель профилей независимо от этой настройки.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -6425,7 +6497,7 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_plugins: 'Плагины',
-    settings_tab_extensions: 'Extensions',  // TODO: translate
+    settings_tab_extensions: 'Расширения',
     settings_extensions_gallery_tab: 'Gallery',
     settings_extensions_installed_tab: 'Installed',
     settings_extensions_diagnostics_tab: 'Diagnostics',
@@ -6456,19 +6528,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Расширение установлено. Следующие шаги смотрите на карточке.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Плагины',
     plugins_enable_toggle: 'Включить',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Просмотр установленных плагинов Hermes и регистрируемых ими хуков жизненного цикла. Эта панель доступна только для чтения.',
+    settings_plugins_empty: 'Сейчас нет видимых плагинов Hermes. Установите или включите плагины через CLI/конфигурацию Hermes, чтобы увидеть их здесь.',
+    plugins_unnamed: 'Плагин без названия',
+    plugins_no_description: 'Описание не предоставлено.',
+    plugins_no_hooks: 'Нет зарегистрированных хуков жизненного цикла',
+    plugins_registered_hooks: 'Зарегистрированные хуки',
+    plugins_enabled: 'Включено',
+    plugins_disabled: 'Отключено',
+    plugins_active_provider: 'Активен (провайдер)',
+    plugins_provider_no_hooks: 'Плагин провайдера — нет хуков видимости для агента',
+    plugins_load_failed: 'Не удалось загрузить плагины: ',
     settings_tab_system: 'System',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -6565,24 +6637,24 @@ const LOCALES = {
     settings_label_tts_engine: 'Движок TTS',
     settings_desc_tts_engine: 'Выберите движок синтеза речи. Edge TTS использует нейронные голоса Microsoft через сервер.',
 
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
+    checkpoint_date: 'Дата',
+    checkpoint_diff_files_changed: (n) => `${n} файл${n === 1 ? '' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'а' : 'ов')} изменено`,
+    checkpoint_diff_no_changes: 'Различий между этой контрольной точкой и текущим рабочим пространством не найдено.',
+    checkpoint_diff_title: 'Изменения в контрольной точке',
+    checkpoint_empty: 'Для этого рабочего пространства контрольные точки не найдены.',
+    checkpoint_error: 'Не удалось загрузить контрольные точки',
+    checkpoint_files: 'Файлы',
+    checkpoint_loading: 'Загрузка контрольных точек…',
+    checkpoint_message: 'Сообщение',
+    checkpoint_restore: 'Восстановить',
+    checkpoint_restore_confirm_message: (ckpt) => `Восстановить рабочее пространство до контрольной точки "${ckpt}"? Файлы будут перезаписаны сохранёнными версиями. Файлы, добавленные после этой контрольной точки, удалены не будут.`,
+    checkpoint_restore_confirm_title: 'Восстановить контрольную точку?',
+    checkpoint_restored: 'Контрольная точка восстановлена',
+    checkpoint_title: 'Контрольные точки',
+    checkpoint_view_diff: 'Показать diff',
+    insights_activity_by_day: 'Активность по дням',
+    insights_activity_by_hour: 'Активность по часам',
+    insights_cost: 'Оценочная стоимость',
     insights_daily_tokens: 'Daily Tokens',
     insights_model_name: 'Model',
     insights_model_sessions: 'Sessions',
@@ -6596,36 +6668,36 @@ const LOCALES = {
     insights_model_health_replacement: 'Replacement guide',
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: 'No usage data yet',
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
-    outline_title: 'Outline',  // TODO: translate
-    outline_empty: 'No questions yet.',  // TODO: translate
-    outline_loading: 'Loading…',  // TODO: translate
+    insights_footer: 'Показаны данные за последние {days} дн.',
+    insights_skill_usage_title: 'Использование навыков',
+    insights_skill_usage_sub: 'Частота вызова инструментов',
+    insights_skill_usage_total: 'Всего вызовов',
+    insights_skill_usage_skills_used: 'Использовано навыков',
+    insights_skill_usage_no_data: 'Пока нет данных об использовании навыков',
+    insights_skill_usage_no_data_hint: 'Навыки появятся здесь после использования в беседах.',
+    insights_skill_usage_footer: 'Подсчёты из ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Навык',
+    insights_skill_usage_col_uses: 'Использования',
+    insights_skill_usage_col_views: 'Просмотры',
+    insights_skill_usage_col_share: 'Использование, %',
+    insights_skill_usage_col_patches: 'Патчи',
+    insights_input_tokens: 'Ввод',
+    insights_messages: 'Сообщения',
+    insights_models: 'Модели',
+    insights_no_cost: 'Н/Д',
+    insights_output_tokens: 'Вывод',
+    insights_peak_hour: 'Пик: {hour}',
+    insights_sessions: 'Сессии',
+    insights_title: 'Аналитика использования',
+    insights_token_breakdown: 'Разбивка по токенам',
+    insights_tokens: 'Токены',
+    insights_total: 'Всего',
+    settings_desc_api_redact: 'Пользователи с собственным хостингом могут отключить для прозрачности (не рекомендуется для общих экземпляров).',
+    settings_label_api_redact: 'Скрывать конфиденциальные данные в ответах API',
+    subagent_children: 'Сессии субагентов',
+    outline_title: 'Структура',
+    outline_empty: 'Пока нет вопросов.',
+    outline_loading: 'Загрузка…',
     wiki_browse: 'Browse wiki',
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
@@ -6647,7 +6719,7 @@ const LOCALES = {
     cancelling: 'Cancelando…',
     cancel_failed: 'Error al cancelar: ',
     mic_denied: 'Acceso al micrófono denegado. Revisa los permisos del navegador.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'La entrada de voz necesita una conexión segura. Abre Hermes con HTTPS o desde localhost para usar el micrófono.',
     mic_no_speech: 'No se detectó voz. Inténtalo de nuevo.',
     mic_network: 'El reconocimiento de voz no está disponible.',
     mic_error: 'Error de entrada por voz: ',
@@ -6821,21 +6893,21 @@ const LOCALES = {
     workspace_worktree_created: 'Conversación en worktree creada',
     workspace_worktree_failed: 'Error al crear worktree: ',
     session_worktree_badge: 'Worktree',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: 'Conjuntos de herramientas de la sesión',
+    session_toolsets_desc: 'Usa los valores predeterminados del perfil activo o elige una lista personalizada de conjuntos de herramientas para esta sesión',
+    session_toolsets_global: 'Valores predeterminados del perfil activo',
+    session_toolsets_profile_defaults: 'Valores predeterminados del perfil activo',
+    session_toolsets_custom: 'Anulación personalizada',
+    session_toolsets_use_profile_defaults: 'Usar valores predeterminados del perfil activo',
+    session_toolsets_configured_servers: 'Servidores MCP configurados',
+    session_toolsets_loading_servers: 'Cargando servidores configurados...',
+    session_toolsets_no_configured_servers: 'No hay servidores MCP configurados',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: 'Aplicar',
+    session_toolsets_clear: 'Usar valores predeterminados',
+    session_toolsets_applied: 'Conjuntos de herramientas actualizados',
+    session_toolsets_cleared: 'Usando los valores predeterminados del perfil activo',
+    session_toolsets_failed: 'Error al actualizar los conjuntos de herramientas: ',
     model_scope_advisory: 'Se aplica a esta conversación desde tu próximo mensaje.',
     model_scope_toast: 'Se aplica a esta conversación desde tu próximo mensaje.',
     // commands.js
@@ -6881,7 +6953,7 @@ const LOCALES = {
     compress_failed_label: 'La compresión falló',
     focus_label: 'Tema',
     token_usage_on: 'Uso de tokens activado',
-    usage_personality_none: 'none', // TODO: translate
+    usage_personality_none: 'ninguna',
     token_usage_off: 'Uso de tokens desactivado',
     usage_cache_hit_detail: 'Caché: {0}% de acierto ({1} lectura / {2} escritura)',
     usage_cached_percent: '{0}% en caché',
@@ -7006,9 +7078,10 @@ const LOCALES = {
      reveal_in_finder: 'Mostrar en el gestor de archivos',
      reveal_failed: 'Error al mostrar: ',
      copy_file_path: 'Copiar ruta del archivo',
+     copy_relative_path: 'Copiar ruta relativa',
      open_in_vscode: 'Abrir en VS Code',
      open_in_vscode_failed: 'Error al abrir en VS Code: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Carpeta de descargas',
     path_copied: 'Ruta del archivo copiada al portapapeles',
     path_copy_failed: 'Error al copiar la ruta: ',
     session_rename: 'Renombrar conversación',
@@ -7324,21 +7397,21 @@ const LOCALES = {
     dashboard_loopback_warning: 'El panel solo usa loopback en el servidor. Navega desde el propio servidor o reinícialo con --host 0.0.0.0 (inseguro).',
     tab_logs: 'Logs',
     tab_settings: 'Ajustes',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Cerrar menú',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: 'Registros',
+    logs_file: 'Archivo',
+    logs_tail: 'Cola',
+    logs_auto_refresh: 'Actualización automática (5 s)',
+    logs_wrap: 'Ajustar líneas',
+    logs_copy_all: 'Copiar todo',
+    logs_empty: 'Aún no hay líneas de registro.',
+    logs_loading: 'Cargando registros…',
+    logs_load_failed: 'Error al cargar los registros',
+    logs_status_idle: 'Elige un archivo de registro para ver las líneas recientes.',
+    logs_no_mtime: 'aún no escrito',
+    logs_truncated_hint: 'Se muestra la cola de un archivo de registro grande; se omitieron los bytes más antiguos para limitar el uso de memoria.',
+    logs_copied: 'Registros copiados',
     logs_severity: 'Severidad',
     logs_severity_all: 'Todo',
     logs_severity_errors: 'Errores',
@@ -7565,16 +7638,16 @@ const LOCALES = {
     provider_category_specialized: 'Especializados',
     onboarding_api_key_label: 'API key',
     onboarding_api_key_placeholder: 'Déjala en blanco para conservar una key ya guardada',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    onboarding_api_key_label_optional: 'Clave de API (opcional)',
+    onboarding_api_key_placeholder_optional: 'Déjalo en blanco para servidores sin clave',
+    onboarding_api_key_help_keyless: 'La mayoría de las instalaciones de LM Studio / Ollama / vLLM funcionan sin clave: deja esto en blanco si tu servidor no requiere autenticación. Usa el botón Probar conexión para verificar.',
+    oauth_login_codex: 'Iniciar sesión con Codex (ChatGPT)',
+    oauth_codex_step1: 'Paso 1: Visita esta URL e introduce el código',
+    oauth_codex_step2: 'Paso 2: Introduce este código en la página',
+    oauth_codex_polling: 'Esperando la autorización...',
+    oauth_codex_success: '¡Inicio de sesión con Codex OAuth correcto!',
+    oauth_codex_error: 'Error al iniciar sesión con OAuth',
+    oauth_codex_expired: 'El código ha caducado, inténtalo de nuevo',
     onboarding_api_key_help_prefix: 'Se guarda como secreto en tu archivo .env de Hermes usando',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://tu-endpoint.example/v1',
@@ -7600,19 +7673,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Elige un modelo antes de continuar.',
     onboarding_error_provider_required: 'Elige un modo de configuración antes de continuar.',
     onboarding_error_base_url_required: 'La base URL es obligatoria para endpoints personalizados.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: 'Probar conexión',
+    onboarding_probe_probing: 'Probando la conexión…',
+    onboarding_probe_ok: 'Conectado. {n} modelo(s) disponible(s).',
+    onboarding_probe_error_generic: 'No se pudo acceder a la URL base configurada.',
+    onboarding_probe_error_invalid_url: 'La URL base debe empezar por http:// o https://.',
+    onboarding_probe_error_dns: 'No se pudo resolver el host. Comprueba la URL o usa la dirección IP del host.',
+    onboarding_probe_error_connect_refused: 'Conexión rechazada: es posible que el servidor no se esté ejecutando en esa dirección. Dentro de Docker, prueba con la IP del host en lugar de localhost.',
+    onboarding_probe_error_timeout: 'El punto de conexión no respondió a tiempo. Comprueba que el servidor se esté ejecutando y que la URL sea correcta.',
+    onboarding_probe_error_http_4xx: 'El punto de conexión devolvió un error de cliente. Comprueba la autenticación y la ruta de la URL (normalmente termina en /v1).',
+    onboarding_probe_error_http_5xx: 'El punto de conexión devolvió un error de servidor. Revisa los registros del servidor de LM Studio / Ollama.',
+    onboarding_probe_error_parse: 'El punto de conexión no devolvió una lista de modelos con el formato esperado. Verifica que la URL apunte a la raíz de la API compatible con OpenAI.',
+    onboarding_probe_error_unreachable: 'No se pudo acceder a la URL base configurada.',
+    onboarding_error_probe_failed: 'No se pudo validar la URL base configurada.',
     onboarding_error_workspace_required: 'El espacio de trabajo es obligatorio.',
     onboarding_error_model_required: 'El modelo es obligatorio.',
     onboarding_complete: 'Onboarding completado',
@@ -7836,6 +7909,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Semanal',
     cron_schedule_preset_monthly: 'Mensual',
     cron_schedule_preset_custom: 'Personalizado',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: 'Hora',
+    cron_schedule_minute_label: 'Minuto',
+    cron_schedule_weekday_label: 'Día de la semana (0-6, dom-sáb)',
+    cron_schedule_month_day_label: 'Día',
+    cron_schedule_time_hint: 'La hora es la del servidor; cron se ejecuta del lado del servidor.',
     cron_schedule_hint: "Usa 'every 1h' o una expresión cron para trabajos recurrentes. Duraciones como '30m' se ejecutan una sola vez.",
     cron_schedule_once_warning: "Las duraciones como '30m' se ejecutan una vez y se eliminan después de correr. Usa 'every 30m' para mantener un trabajo recurrente.",
     cron_prompt_label: 'Prompt',
@@ -7963,8 +8053,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Seguir automáticamente el contenido nuevo',
     settings_desc_auto_scroll_follow: 'Si está activado, la vista se desplaza hacia abajo a medida que llegan nuevos tokens. Si está desactivado, controlas tú la posición de desplazamiento.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Mostrar el selector de perfiles en la barra de título',
+    settings_desc_show_titlebar_profile: 'Cuando está activado, aparece un botón de cambio de perfil en la barra de título de la aplicación, en la esquina superior izquierda, para que puedas cambiar de perfil desde cualquier pestaña. Desactivado de forma predeterminada; el pie del compositor siempre tiene un selector de perfiles independientemente de este ajuste.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -8049,19 +8139,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Extensión instalada. Consulta la tarjeta para ver los próximos pasos.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Plugins',
     plugins_enable_toggle: 'Activar',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Consulta los plugins de Hermes instalados y los hooks de ciclo de vida que registran. Este panel es de solo lectura.',
+    settings_plugins_empty: 'Actualmente no hay plugins de Hermes visibles. Instala o activa plugins desde la CLI/configuración de Hermes para verlos aquí.',
+    plugins_unnamed: 'Plugin sin nombre',
+    plugins_no_description: 'No se proporcionó ninguna descripción.',
+    plugins_no_hooks: 'No hay hooks de ciclo de vida registrados',
+    plugins_registered_hooks: 'Hooks registrados',
+    plugins_enabled: 'Activado',
+    plugins_disabled: 'Desactivado',
+    plugins_active_provider: 'Activo (proveedor)',
+    plugins_provider_no_hooks: 'Plugin de proveedor — sin hooks de visibilidad para el agente',
+    plugins_load_failed: 'Error al cargar los plugins: ',
     settings_tab_system: 'System',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -8145,36 +8235,36 @@ const LOCALES = {
     settings_label_tts_auto_read: 'Leer respuestas automáticamente',
     settings_desc_tts_auto_read: 'Leer en voz alta las respuestas del asistente automáticamente',
     // Composer voice-mode pref (#1488)
-    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_label_voice_mode: 'Botón de modo de voz manos libres',
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_raw_audio: 'Send raw audio instead of transcribing',
     settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
     voice_send_raw: 'Send raw audio',
-    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
+    voice_raw_attached: 'Audio adjuntado. Pulsa Enviar o escribe más.',
     settings_label_tts_voice: 'Voz',
     settings_desc_tts_voice: 'Seleccionar voz para síntesis de voz',
     settings_label_tts_rate: 'Velocidad de voz',
     settings_label_tts_pitch: 'Tono de voz',
     settings_label_tts_engine: 'Motor TTS',
     settings_desc_tts_engine: 'Elija el motor de voz. Edge TTS utiliza voces neuronales de Microsoft a través del servidor.',
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
+    checkpoint_date: 'Fecha',
+    checkpoint_diff_files_changed: (n) => `${n} archivo${n === 1 ? '' : 's'} cambiado${n === 1 ? '' : 's'}`,
+    checkpoint_diff_no_changes: 'No se encontraron diferencias entre este punto de control y el espacio de trabajo actual.',
+    checkpoint_diff_title: 'Cambios en el punto de control',
+    checkpoint_empty: 'No se encontraron puntos de control para este espacio de trabajo.',
+    checkpoint_error: 'Error al cargar los puntos de control',
+    checkpoint_files: 'Archivos',
+    checkpoint_loading: 'Cargando puntos de control…',
+    checkpoint_message: 'Mensaje',
+    checkpoint_restore: 'Restaurar',
+    checkpoint_restore_confirm_message: (ckpt) => `¿Restaurar el espacio de trabajo al punto de control "${ckpt}"? Esto sobrescribirá los archivos con las versiones guardadas. Los archivos añadidos después de este punto de control no se eliminarán.`,
+    checkpoint_restore_confirm_title: '¿Restaurar el punto de control?',
+    checkpoint_restored: 'Punto de control restaurado',
+    checkpoint_title: 'Puntos de control',
+    checkpoint_view_diff: 'Ver diff',
+    insights_activity_by_day: 'Actividad por día',
+    insights_activity_by_hour: 'Actividad por hora',
+    insights_cost: 'Coste estimado',
     insights_daily_tokens: 'Daily Tokens',
     insights_model_name: 'Model',
     insights_model_sessions: 'Sessions',
@@ -8188,45 +8278,45 @@ const LOCALES = {
     insights_model_health_replacement: 'Replacement guide',
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: 'No usage data yet',
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    voice_error: 'Voice not supported in this browser',  // TODO: translate
-    voice_listening: 'Listening…',  // TODO: translate
-    voice_mode_active: 'Voice mode on',  // TODO: translate
-    voice_mode_off: 'Voice mode off',  // TODO: translate
-    voice_speaking: 'Speaking…',  // TODO: translate
-    voice_thinking: 'Thinking…',  // TODO: translate
+    insights_footer: 'Mostrando datos de los últimos {days} días',
+    insights_skill_usage_title: 'Uso de skills',
+    insights_skill_usage_sub: 'Frecuencia de invocación de herramientas',
+    insights_skill_usage_total: 'Invocaciones totales',
+    insights_skill_usage_skills_used: 'Skills usados',
+    insights_skill_usage_no_data: 'Aún no hay datos de uso de skills',
+    insights_skill_usage_no_data_hint: 'Los skills aparecerán aquí una vez que se usen en las conversaciones.',
+    insights_skill_usage_footer: 'Recuentos de ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Skill',
+    insights_skill_usage_col_uses: 'Usos',
+    insights_skill_usage_col_views: 'Vistas',
+    insights_skill_usage_col_share: 'Uso %',
+    insights_skill_usage_col_patches: 'Parches',
+    insights_input_tokens: 'Entrada',
+    insights_messages: 'Mensajes',
+    insights_models: 'Modelos',
+    insights_no_cost: 'N/D',
+    insights_output_tokens: 'Salida',
+    insights_peak_hour: 'Pico: {hour}',
+    insights_sessions: 'Sesiones',
+    insights_title: 'Analíticas de uso',
+    insights_token_breakdown: 'Desglose de tokens',
+    insights_tokens: 'Tokens',
+    insights_total: 'Total',
+    settings_desc_api_redact: 'Los usuarios autoalojados pueden desactivarlo para mayor transparencia (no recomendado para instancias compartidas).',
+    settings_label_api_redact: 'Ocultar datos sensibles en las respuestas de la API',
+    voice_error: 'Voz no compatible con este navegador',
+    voice_listening: 'Escuchando…',
+    voice_mode_active: 'Modo de voz activado',
+    voice_mode_off: 'Modo de voz desactivado',
+    voice_speaking: 'Hablando…',
+    voice_thinking: 'Pensando…',
     // Composer voice buttons (#1488)
-    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate: 'Dictar',
     voice_dictate_active: 'Stop dictation',
-    voice_recording_active: 'Detener grabación',  // TODO: translate
-    voice_mode_toggle: 'Voice mode',  // TODO: translate
-    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
+    voice_recording_active: 'Detener grabación',
+    voice_mode_toggle: 'Modo de voz',
+    voice_mode_toggle_active: 'Salir del modo de voz',
+    subagent_children: 'Sesiones de subagentes',
     outline_title: 'Esquema',
     outline_empty: 'Aún no hay preguntas.',
     outline_loading: 'Cargando…',
@@ -8251,7 +8341,7 @@ const LOCALES = {
     cancelling: 'Wird abgebrochen\u2026',
     cancel_failed: 'Abbrechen fehlgeschlagen: ',
     mic_denied: 'Mikrofonzugriff verweigert. Überprüfen Sie die Browserberechtigungen.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'Für die Spracheingabe ist eine sichere Verbindung erforderlich. Öffne Hermes über HTTPS oder von localhost, um das Mikrofon zu verwenden.',
     mic_no_speech: 'Keine Sprache erkannt. Versuchen Sie es erneut.',
     mic_network: 'Spracherkennung nicht verfügbar.',
     mic_error: 'Spracheingabefehler: ',
@@ -8455,7 +8545,7 @@ const LOCALES = {
     compress_failed_label: 'Komprimierung fehlgeschlagen',
     focus_label: 'Thema',
     token_usage_on: 'Token-Verbrauch an',
-    usage_personality_none: 'none', // TODO: translate
+    usage_personality_none: 'keine',
     token_usage_off: 'Token-Verbrauch aus',
     usage_cache_hit_detail: 'Cache: {0}% Treffer ({1} gelesen / {2} geschrieben)',
     usage_cached_percent: '{0}% im Cache',
@@ -8589,9 +8679,10 @@ const LOCALES = {
      reveal_in_finder: 'Im Dateimanager anzeigen',
      reveal_failed: 'Anzeige fehlgeschlagen: ',
      copy_file_path: 'Dateipfad kopieren',
+     copy_relative_path: 'Relativen Pfad kopieren',
      open_in_vscode: 'In VS Code öffnen',
      open_in_vscode_failed: 'In VS Code öffnen fehlgeschlagen: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Download-Ordner',
     path_copied: 'Dateipfad in die Zwischenablage kopiert',
     path_copy_failed: 'Pfad konnte nicht kopiert werden: ',
     session_rename: 'Unterhaltung umbenennen',
@@ -8907,21 +8998,21 @@ const LOCALES = {
     dashboard_loopback_warning: 'Das Dashboard ist auf dem Server nur per Loopback erreichbar. Öffne es direkt auf dem Server oder starte es mit --host 0.0.0.0 neu (unsicher).',
     tab_logs: 'Logs',
     tab_settings: 'Einstellungen',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Menü schließen',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: 'Protokolle',
+    logs_file: 'Datei',
+    logs_tail: 'Ende',
+    logs_auto_refresh: 'Automatisch aktualisieren (5 s)',
+    logs_wrap: 'Zeilen umbrechen',
+    logs_copy_all: 'Alles kopieren',
+    logs_empty: 'Noch keine Protokollzeilen.',
+    logs_loading: 'Protokolle werden geladen…',
+    logs_load_failed: 'Protokolle konnten nicht geladen werden',
+    logs_status_idle: 'Wähle eine Protokolldatei, um die letzten Zeilen anzuzeigen.',
+    logs_no_mtime: 'noch nicht geschrieben',
+    logs_truncated_hint: 'Es wird das Ende einer großen Protokolldatei angezeigt; ältere Bytes wurden übersprungen, um den Speicherverbrauch zu begrenzen.',
+    logs_copied: 'Protokolle kopiert',
     logs_severity: 'Schweregrad',
     logs_severity_all: 'Alle',
     logs_severity_errors: 'Fehler',
@@ -9110,6 +9201,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Wöchentlich',
     cron_schedule_preset_monthly: 'Monatlich',
     cron_schedule_preset_custom: 'Benutzerdefiniert',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: 'Stunde',
+    cron_schedule_minute_label: 'Minute',
+    cron_schedule_weekday_label: 'Wochentag (0-6, So-Sa)',
+    cron_schedule_month_day_label: 'Tag',
+    cron_schedule_time_hint: 'Die Zeit ist Serverzeit; cron läuft serverseitig.',
     cron_schedule_hint: "Für wiederkehrende Aufgaben 'every 1h' oder einen Cron-Ausdruck verwenden. Reine Dauern wie '30m' laufen einmal.",
     cron_schedule_once_warning: "Dauerangaben wie '30m' laufen einmal und werden nach der Ausführung entfernt. Verwende 'every 30m' für eine wiederkehrende Aufgabe.",
     cron_prompt_label: 'Prompt',
@@ -9237,8 +9345,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Neuen Inhalten automatisch folgen',
     settings_desc_auto_scroll_follow: 'Wenn aktiviert, scrollt die Ansicht nach unten, während neue Tokens eintreffen. Wenn deaktiviert, steuerst du die Scrollposition selbst.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Profilwechsler in der Titelleiste anzeigen',
+    settings_desc_show_titlebar_profile: 'Wenn aktiviert, erscheint in der Titelleiste der App oben links eine Schaltfläche zum Profilwechsel, sodass du das Profil von jedem Tab aus wechseln kannst. Standardmäßig deaktiviert; die Fußzeile des Editors hat unabhängig von dieser Einstellung immer einen Profilwechsler.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -9326,19 +9434,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Erweiterung installiert. Die nächsten Schritte stehen auf der Karte.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Plugins',
     plugins_enable_toggle: 'Aktivieren',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Zeigt installierte Hermes-Plugins und die von ihnen registrierten Lifecycle-Hooks an. Dieses Panel ist schreibgeschützt.',
+    settings_plugins_empty: 'Derzeit sind keine Hermes-Plugins sichtbar. Installiere oder aktiviere Plugins über die Hermes-CLI/-Konfiguration, um sie hier zu sehen.',
+    plugins_unnamed: 'Unbenanntes Plugin',
+    plugins_no_description: 'Keine Beschreibung angegeben.',
+    plugins_no_hooks: 'Keine registrierten Lifecycle-Hooks',
+    plugins_registered_hooks: 'Registrierte Hooks',
+    plugins_enabled: 'Aktiviert',
+    plugins_disabled: 'Deaktiviert',
+    plugins_active_provider: 'Aktiv (Anbieter)',
+    plugins_provider_no_hooks: 'Anbieter-Plugin — keine Hooks für die Agent-Sichtbarkeit',
+    plugins_load_failed: 'Plugins konnten nicht geladen werden: ',
     settings_tab_system: 'System',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -9398,21 +9506,21 @@ const LOCALES = {
     workspace_worktree_created: 'Worktree-Unterhaltung erstellt',
     workspace_worktree_failed: 'Worktree-Erstellung fehlgeschlagen: ',
     session_worktree_badge: 'Worktree',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: 'Sitzungs-Toolsets',
+    session_toolsets_desc: 'Verwende die Standardwerte des aktiven Profils oder wähle eine benutzerdefinierte Toolset-Liste für diese Sitzung',
+    session_toolsets_global: 'Standardwerte des aktiven Profils',
+    session_toolsets_profile_defaults: 'Standardwerte des aktiven Profils',
+    session_toolsets_custom: 'Benutzerdefinierte Überschreibung',
+    session_toolsets_use_profile_defaults: 'Standardwerte des aktiven Profils verwenden',
+    session_toolsets_configured_servers: 'Konfigurierte MCP-Server',
+    session_toolsets_loading_servers: 'Konfigurierte Server werden geladen...',
+    session_toolsets_no_configured_servers: 'Keine konfigurierten MCP-Server',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: 'Anwenden',
+    session_toolsets_clear: 'Standardwerte verwenden',
+    session_toolsets_applied: 'Toolsets aktualisiert',
+    session_toolsets_cleared: 'Standardwerte des aktiven Profils werden verwendet',
+    session_toolsets_failed: 'Toolsets konnten nicht aktualisiert werden: ',
     session_time_unknown: 'Unbekannt',
     session_time_minutes_ago: (n) => `Vor ${n} Minuten`,
     session_time_hours_ago: (n) => `Vor ${n} Stunden`,
@@ -9476,16 +9584,16 @@ const LOCALES = {
     provider_category_specialized: 'Spezialisiert',
     onboarding_api_key_label: 'API-Schlüssel',
     onboarding_api_key_placeholder: 'sk-…',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    onboarding_api_key_label_optional: 'API-Schlüssel (optional)',
+    onboarding_api_key_placeholder_optional: 'Für Server ohne Schlüssel leer lassen',
+    onboarding_api_key_help_keyless: 'Die meisten LM Studio- / Ollama- / vLLM-Installationen laufen ohne Schlüssel — lass dies leer, wenn dein Server keine Authentifizierung erfordert. Verwende die Schaltfläche „Verbindung testen“ zur Überprüfung.',
+    oauth_login_codex: 'Mit Codex (ChatGPT) anmelden',
+    oauth_codex_step1: 'Schritt 1: Rufe diese URL auf und gib den Code ein',
+    oauth_codex_step2: 'Schritt 2: Gib diesen Code auf der Seite ein',
+    oauth_codex_polling: 'Warten auf Autorisierung...',
+    oauth_codex_success: 'Codex-OAuth-Anmeldung erfolgreich!',
+    oauth_codex_error: 'OAuth-Anmeldung fehlgeschlagen',
+    oauth_codex_expired: 'Der Code ist abgelaufen, bitte versuche es erneut',
     onboarding_api_key_help_prefix: 'Gefunden unter',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://api.openai.com/v1',
@@ -9507,19 +9615,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Bitte wählen Sie ein Modell.',
     onboarding_error_provider_required: 'Anbieter erforderlich.',
     onboarding_error_base_url_required: 'Base URL erforderlich.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: 'Verbindung testen',
+    onboarding_probe_probing: 'Verbindung wird getestet…',
+    onboarding_probe_ok: 'Verbunden. {n} Modell(e) verfügbar.',
+    onboarding_probe_error_generic: 'Die konfigurierte Basis-URL konnte nicht erreicht werden.',
+    onboarding_probe_error_invalid_url: 'Die Basis-URL muss mit http:// oder https:// beginnen.',
+    onboarding_probe_error_dns: 'Der Host konnte nicht aufgelöst werden. Überprüfe die URL oder verwende die IP-Adresse des Hosts.',
+    onboarding_probe_error_connect_refused: 'Verbindung abgelehnt — der Server läuft möglicherweise nicht unter dieser Adresse. Verwende innerhalb von Docker die Host-IP anstelle von localhost.',
+    onboarding_probe_error_timeout: 'Der Endpunkt hat nicht rechtzeitig geantwortet. Überprüfe, ob der Server läuft und die URL korrekt ist.',
+    onboarding_probe_error_http_4xx: 'Der Endpunkt hat einen Client-Fehler zurückgegeben. Überprüfe die Authentifizierung und den URL-Pfad (endet normalerweise auf /v1).',
+    onboarding_probe_error_http_5xx: 'Der Endpunkt hat einen Serverfehler zurückgegeben. Überprüfe die Server-Protokolle von LM Studio / Ollama.',
+    onboarding_probe_error_parse: 'Der Endpunkt hat keine Modellliste in der erwarteten Form zurückgegeben. Stelle sicher, dass die URL auf den Stamm der OpenAI-kompatiblen API verweist.',
+    onboarding_probe_error_unreachable: 'Die konfigurierte Basis-URL konnte nicht erreicht werden.',
+    onboarding_error_probe_failed: 'Die konfigurierte Basis-URL konnte nicht validiert werden.',
     onboarding_error_workspace_required: 'Arbeitsbereich erforderlich.',
     onboarding_error_model_required: 'Modell erforderlich.',
     onboarding_complete: 'Einrichtung abgeschlossen!',
@@ -9752,12 +9860,12 @@ const LOCALES = {
     settings_label_tts_auto_read: 'Antworten automatisch vorlesen',
     settings_desc_tts_auto_read: 'Assistenten-Antworten automatisch vorlesen',
     // Composer voice-mode pref (#1488)
-    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_label_voice_mode: 'Freihändiger Sprachmodus-Button',
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_raw_audio: 'Send raw audio instead of transcribing',
     settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
     voice_send_raw: 'Send raw audio',
-    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
+    voice_raw_attached: 'Audio angehängt. Drücke „Senden“ oder gib mehr ein.',
     settings_label_tts_voice: 'Stimme',
     settings_desc_tts_voice: 'Stimme für Sprachsynthese auswählen',
     settings_label_tts_rate: 'Sprechgeschwindigkeit',
@@ -9765,24 +9873,24 @@ const LOCALES = {
     settings_label_tts_engine: 'TTS-Engine',
     settings_desc_tts_engine: 'Sprach-Engine auswählen. Edge TTS verwendet Microsoft Neural Voices über den Server.',
 
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
+    checkpoint_date: 'Datum',
+    checkpoint_diff_files_changed: (n) => `${n} Datei${n === 1 ? '' : 'en'} geändert`,
+    checkpoint_diff_no_changes: 'Zwischen diesem Checkpoint und dem aktuellen Arbeitsbereich wurden keine Unterschiede gefunden.',
+    checkpoint_diff_title: 'Änderungen im Checkpoint',
+    checkpoint_empty: 'Für diesen Arbeitsbereich wurden keine Checkpoints gefunden.',
+    checkpoint_error: 'Checkpoints konnten nicht geladen werden',
+    checkpoint_files: 'Dateien',
+    checkpoint_loading: 'Checkpoints werden geladen…',
+    checkpoint_message: 'Nachricht',
+    checkpoint_restore: 'Wiederherstellen',
+    checkpoint_restore_confirm_message: (ckpt) => `Arbeitsbereich auf Checkpoint "${ckpt}" wiederherstellen? Dadurch werden Dateien mit den gespeicherten Versionen überschrieben. Nach diesem Checkpoint hinzugefügte Dateien werden nicht gelöscht.`,
+    checkpoint_restore_confirm_title: 'Checkpoint wiederherstellen?',
+    checkpoint_restored: 'Checkpoint wiederhergestellt',
+    checkpoint_title: 'Checkpoints',
+    checkpoint_view_diff: 'Diff anzeigen',
+    insights_activity_by_day: 'Aktivität nach Tag',
+    insights_activity_by_hour: 'Aktivität nach Stunde',
+    insights_cost: 'Geschätzte Kosten',
     insights_daily_tokens: 'Daily Tokens',
     insights_model_name: 'Model',
     insights_model_sessions: 'Sessions',
@@ -9796,45 +9904,45 @@ const LOCALES = {
     insights_model_health_replacement: 'Replacement guide',
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: 'No usage data yet',
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    voice_error: 'Voice not supported in this browser',  // TODO: translate
-    voice_listening: 'Listening…',  // TODO: translate
-    voice_mode_active: 'Voice mode on',  // TODO: translate
-    voice_mode_off: 'Voice mode off',  // TODO: translate
-    voice_speaking: 'Speaking…',  // TODO: translate
-    voice_thinking: 'Thinking…',  // TODO: translate
+    insights_footer: 'Daten der letzten {days} Tage werden angezeigt',
+    insights_skill_usage_title: 'Skill-Nutzung',
+    insights_skill_usage_sub: 'Häufigkeit der Tool-Aufrufe',
+    insights_skill_usage_total: 'Aufrufe insgesamt',
+    insights_skill_usage_skills_used: 'Verwendete Skills',
+    insights_skill_usage_no_data: 'Noch keine Skill-Nutzungsdaten',
+    insights_skill_usage_no_data_hint: 'Skills werden hier angezeigt, sobald sie in Unterhaltungen verwendet werden.',
+    insights_skill_usage_footer: 'Zählungen aus ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Skill',
+    insights_skill_usage_col_uses: 'Nutzungen',
+    insights_skill_usage_col_views: 'Aufrufe',
+    insights_skill_usage_col_share: 'Nutzung %',
+    insights_skill_usage_col_patches: 'Patches',
+    insights_input_tokens: 'Eingabe',
+    insights_messages: 'Nachrichten',
+    insights_models: 'Modelle',
+    insights_no_cost: 'k. A.',
+    insights_output_tokens: 'Ausgabe',
+    insights_peak_hour: 'Spitze: {hour}',
+    insights_sessions: 'Sitzungen',
+    insights_title: 'Nutzungsanalysen',
+    insights_token_breakdown: 'Token-Aufschlüsselung',
+    insights_tokens: 'Tokens',
+    insights_total: 'Gesamt',
+    settings_desc_api_redact: 'Selbst gehostete Nutzer können dies zur Transparenz deaktivieren (für gemeinsam genutzte Instanzen nicht empfohlen).',
+    settings_label_api_redact: 'Sensible Daten in API-Antworten schwärzen',
+    voice_error: 'Sprache wird in diesem Browser nicht unterstützt',
+    voice_listening: 'Höre zu…',
+    voice_mode_active: 'Sprachmodus ein',
+    voice_mode_off: 'Sprachmodus aus',
+    voice_speaking: 'Spricht…',
+    voice_thinking: 'Denkt nach…',
     // Composer voice buttons (#1488)
-    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate: 'Diktieren',
     voice_dictate_active: 'Stop dictation',
-    voice_recording_active: 'Aufnahme stoppen',  // TODO: translate
-    voice_mode_toggle: 'Voice mode',  // TODO: translate
-    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
+    voice_recording_active: 'Aufnahme stoppen',
+    voice_mode_toggle: 'Sprachmodus',
+    voice_mode_toggle_active: 'Sprachmodus verlassen',
+    subagent_children: 'Subagenten-Sitzungen',
     outline_title: 'Gliederung',
     outline_empty: 'Noch keine Fragen.',
     outline_loading: 'Laden…',
@@ -10237,6 +10345,7 @@ const LOCALES = {
      reveal_in_finder: '在文件管理器中显示',
      reveal_failed: '显示失败：',
      copy_file_path: '\u590d\u5236\u6587\u4ef6\u8def\u5f84',
+     copy_relative_path: '\u590d\u5236\u76f8\u5bf9\u8def\u5f84',
      open_in_vscode: '在VS Code中打开',
      open_in_vscode_failed: '在VS Code中打开失败：',
      download_folder: '下载文件夹',
@@ -11056,6 +11165,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: '每周',
     cron_schedule_preset_monthly: '每月',
     cron_schedule_preset_custom: '自定义',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: '小时',
+    cron_schedule_minute_label: '分钟',
+    cron_schedule_weekday_label: '星期 (0-6，周日-周六)',
+    cron_schedule_month_day_label: '日期',
+    cron_schedule_time_hint: '时间以服务器时间为准；cron 在服务器端运行。',
     cron_schedule_hint: "循环任务请用 'every 1h' 或 Cron 表达式。像 '30m' 这样的裸时长只会运行一次。",
     cron_schedule_once_warning: "像 '30m' 这样的时长写法只会运行一次，并在运行后移除。要保留循环任务，请使用 'every 30m'。",
     cron_prompt_label: '提示词',
@@ -11919,6 +12045,7 @@ const LOCALES = {
     reveal_in_finder: '在檔案管理員中顯示',
     reveal_failed: '顯示失敗：',
     copy_file_path: '複製檔案路徑',
+    copy_relative_path: '複製相對路徑',
     open_in_vscode: '在 VS Code 中開啟',
     open_in_vscode_failed: '在 VS Code 中開啟失敗：',
     download_folder: '下載資料夾',
@@ -13023,6 +13150,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: '每週',
     cron_schedule_preset_monthly: '每月',
     cron_schedule_preset_custom: '自訂',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: '小時',
+    cron_schedule_minute_label: '分鐘',
+    cron_schedule_weekday_label: '星期 (0-6，週日-週六)',
+    cron_schedule_month_day_label: '日期',
+    cron_schedule_time_hint: '時間以伺服器時間為準；cron 在伺服器端執行。',
     cron_schedule_hint: '週期性任務請用「every 1h」或 Cron 表示式。像「30m」這樣的裸時長只會執行一次。',
     cron_schedule_once_warning: '像「30m」這樣的時長寫法只會執行一次，並在執行後移除。要保留週期性任務，請使用「every 30m」。',
     cron_prompt_label: '提示',
@@ -13132,7 +13276,7 @@ const LOCALES = {
     cancelling: 'Cancelando…',
     cancel_failed: 'Falha ao cancelar: ',
     mic_denied: 'Acesso ao microfone negado. Verifique as permissões do navegador.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'A entrada de voz precisa de uma conexão segura. Abra o Hermes por HTTPS ou a partir do localhost para usar o microfone.',
     mic_no_speech: 'Nenhuma fala detectada. Tente novamente.',
     mic_network: 'Reconhecimento de fala indisponível.',
     mic_error: 'Erro no input de voz: ',
@@ -13241,21 +13385,21 @@ const LOCALES = {
     model_custom_placeholder: 'ex: openai/gpt-5.4',
     model_show_all_models: 'Mostrar todos os {0} modelos',
     model_search_placeholder: 'Buscar modelos…',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: 'Conjuntos de ferramentas da sessão',
+    session_toolsets_desc: 'Use os padrões do perfil ativo ou escolha uma lista personalizada de conjuntos de ferramentas para esta sessão',
+    session_toolsets_global: 'Padrões do perfil ativo',
+    session_toolsets_profile_defaults: 'Padrões do perfil ativo',
+    session_toolsets_custom: 'Substituição personalizada',
+    session_toolsets_use_profile_defaults: 'Usar os padrões do perfil ativo',
+    session_toolsets_configured_servers: 'Servidores MCP configurados',
+    session_toolsets_loading_servers: 'Carregando servidores configurados...',
+    session_toolsets_no_configured_servers: 'Nenhum servidor MCP configurado',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: 'Aplicar',
+    session_toolsets_clear: 'Usar padrões',
+    session_toolsets_applied: 'Conjuntos de ferramentas atualizados',
+    session_toolsets_cleared: 'Usando os padrões do perfil ativo',
+    session_toolsets_failed: 'Falha ao atualizar os conjuntos de ferramentas: ',
     model_search_no_results: 'Nenhum modelo encontrado',
     model_group_configured: 'Configurados',
     ws_search_placeholder: 'Buscar espaços de trabalho…',
@@ -13488,9 +13632,10 @@ const LOCALES = {
      reveal_in_finder: 'Mostrar no gerenciador de arquivos',
      reveal_failed: 'Falha ao mostrar: ',
      copy_file_path: 'Copiar caminho do arquivo',
+     copy_relative_path: 'Copiar caminho relativo',
      open_in_vscode: 'Abrir no VS Code',
      open_in_vscode_failed: 'Falha ao abrir no VS Code: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: 'Pasta de downloads',
     path_copied: 'Caminho do arquivo copiado para a área de transferência',
     path_copy_failed: 'Falha ao copiar caminho: ',
     session_rename: 'Renomear conversa',
@@ -13617,8 +13762,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Acompanhar automaticamente o novo conteúdo',
     settings_desc_auto_scroll_follow: 'Quando ativado, a visualização rola para baixo conforme novos tokens chegam. Quando desativado, você controla a posição de rolagem.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Mostrar alternador de perfis na barra de título',
+    settings_desc_show_titlebar_profile: 'Quando ativado, um botão de alternância de perfis aparece na barra de título do app, no canto superior esquerdo, para que você possa trocar de perfil em qualquer aba. Desativado por padrão; o rodapé do compositor sempre tem um alternador de perfis, independentemente desta configuração.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -13707,19 +13852,19 @@ const LOCALES = {
     ext_gallery_install_followup: 'Extensão instalada. Veja o cartão para os próximos passos.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: 'Plugins',
     plugins_enable_toggle: 'Ativar',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: 'Veja os plugins do Hermes instalados e os hooks de ciclo de vida que eles registram. Este painel é somente leitura.',
+    settings_plugins_empty: 'Nenhum plugin do Hermes está visível no momento. Instale ou ative plugins pela CLI/configuração do Hermes para vê-los aqui.',
+    plugins_unnamed: 'Plugin sem nome',
+    plugins_no_description: 'Nenhuma descrição fornecida.',
+    plugins_no_hooks: 'Nenhum hook de ciclo de vida registrado',
+    plugins_registered_hooks: 'Hooks registrados',
+    plugins_enabled: 'Ativado',
+    plugins_disabled: 'Desativado',
+    plugins_active_provider: 'Ativo (provedor)',
+    plugins_provider_no_hooks: 'Plugin de provedor — sem hooks de visibilidade para o agente',
+    plugins_load_failed: 'Falha ao carregar os plugins: ',
     settings_tab_system: 'Sistema',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -14000,21 +14145,21 @@ const LOCALES = {
     dashboard_loopback_warning: 'O painel é somente loopback no servidor. Navegue pelo próprio servidor ou reinicie com --host 0.0.0.0 (inseguro).',
     tab_logs: 'Logs',
     tab_settings: 'Configurações',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Fechar menu',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: 'Logs',
+    logs_file: 'Arquivo',
+    logs_tail: 'Fim',
+    logs_auto_refresh: 'Atualização automática (5 s)',
+    logs_wrap: 'Quebrar linhas',
+    logs_copy_all: 'Copiar tudo',
+    logs_empty: 'Ainda não há linhas de log.',
+    logs_loading: 'Carregando logs…',
+    logs_load_failed: 'Falha ao carregar os logs',
+    logs_status_idle: 'Escolha um arquivo de log para ver as linhas recentes.',
+    logs_no_mtime: 'ainda não escrito',
+    logs_truncated_hint: 'Exibindo o fim de um arquivo de log grande; bytes mais antigos foram ignorados para limitar o uso de memória.',
+    logs_copied: 'Logs copiados',
     logs_severity: 'Severidade',
     logs_severity_all: 'Todos',
     logs_severity_errors: 'Erros',
@@ -14240,17 +14385,17 @@ const LOCALES = {
     provider_category_self_hosted: 'Open / self-hosted',
     provider_category_specialized: 'Especializado',
     onboarding_api_key_label: 'API key',
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    oauth_login_codex: 'Entrar com o Codex (ChatGPT)',
+    oauth_codex_step1: 'Etapa 1: Acesse esta URL e insira o código',
+    oauth_codex_step2: 'Etapa 2: Insira este código na página',
+    oauth_codex_polling: 'Aguardando autorização...',
+    oauth_codex_success: 'Login com Codex OAuth realizado com sucesso!',
+    oauth_codex_error: 'Falha no login com OAuth',
+    oauth_codex_expired: 'O código expirou, tente novamente',
     onboarding_api_key_placeholder: 'Deixe em branco para manter key existente',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
+    onboarding_api_key_label_optional: 'Chave de API (opcional)',
+    onboarding_api_key_placeholder_optional: 'Deixe em branco para servidores sem chave',
+    onboarding_api_key_help_keyless: 'A maioria das instalações de LM Studio / Ollama / vLLM funciona sem chave — deixe isto em branco se o seu servidor não exigir autenticação. Use o botão Testar conexão para verificar.',
     onboarding_api_key_help_prefix: 'Salvo como segredo no .env do Hermes usando',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://seu-endpoint.exemplo/v1',
@@ -14276,19 +14421,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Escolha modelo antes de continuar.',
     onboarding_error_provider_required: 'Escolha modo de setup antes de continuar.',
     onboarding_error_base_url_required: 'Base URL é necessária para endpoints customizados.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: 'Testar conexão',
+    onboarding_probe_probing: 'Testando a conexão…',
+    onboarding_probe_ok: 'Conectado. {n} modelo(s) disponível(is).',
+    onboarding_probe_error_generic: 'Não foi possível acessar a URL base configurada.',
+    onboarding_probe_error_invalid_url: 'A URL base deve começar com http:// ou https://.',
+    onboarding_probe_error_dns: 'Não foi possível resolver o host. Verifique a URL ou use o endereço IP do host.',
+    onboarding_probe_error_connect_refused: 'Conexão recusada — o servidor pode não estar em execução nesse endereço. Dentro do Docker, tente o IP do host em vez de localhost.',
+    onboarding_probe_error_timeout: 'O endpoint não respondeu a tempo. Verifique se o servidor está em execução e se a URL está correta.',
+    onboarding_probe_error_http_4xx: 'O endpoint retornou um erro de cliente. Verifique a autenticação e o caminho da URL (geralmente termina em /v1).',
+    onboarding_probe_error_http_5xx: 'O endpoint retornou um erro de servidor. Verifique os logs do servidor do LM Studio / Ollama.',
+    onboarding_probe_error_parse: 'O endpoint não retornou uma lista de modelos no formato esperado. Verifique se a URL aponta para a raiz da API compatível com OpenAI.',
+    onboarding_probe_error_unreachable: 'Não foi possível acessar a URL base configurada.',
+    onboarding_error_probe_failed: 'Não foi possível validar a URL base configurada.',
     onboarding_error_workspace_required: 'Workspace é necessário.',
     onboarding_error_model_required: 'Modelo é necessário.',
     onboarding_complete: 'Configuração completa',
@@ -14429,6 +14574,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Semanal',
     cron_schedule_preset_monthly: 'Mensal',
     cron_schedule_preset_custom: 'Personalizado',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: 'Hora',
+    cron_schedule_minute_label: 'Minuto',
+    cron_schedule_weekday_label: 'Dia da semana (0-6, dom-sáb)',
+    cron_schedule_month_day_label: 'Dia',
+    cron_schedule_time_hint: 'O horário usa a hora do servidor; cron roda no servidor.',
     cron_schedule_hint: "Use 'every 1h' ou uma expressão Cron para tarefas recorrentes. Durações como '30m' rodam uma vez.",
     cron_schedule_once_warning: "Durações como '30m' rodam uma vez e são removidas após executar. Use 'every 30m' para manter uma tarefa recorrente.",
     cron_prompt_label: 'Prompt',
@@ -14506,79 +14668,79 @@ const LOCALES = {
     settings_label_tts_auto_read: 'Ler respostas automaticamente',
     settings_desc_tts_auto_read: 'Ler automaticamente as respostas do assistente',
     // Composer voice-mode pref (#1488)
-    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_label_voice_mode: 'Botão de modo de voz mãos livres',
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_raw_audio: 'Send raw audio instead of transcribing',
     settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
     voice_send_raw: 'Send raw audio',
-    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
+    voice_raw_attached: 'Áudio anexado. Pressione Enviar ou digite mais.',
     settings_label_tts_voice: 'Voz',
     settings_desc_tts_voice: 'Selecionar voz para síntese de voz',
     settings_label_tts_rate: 'Velocidade da fala',
     settings_label_tts_pitch: 'Tom da fala',
     settings_label_tts_engine: 'Motor TTS',
     settings_desc_tts_engine: 'Escolha o mecanismo de fala. Edge TTS usa vozes neurais da Microsoft através do servidor.',
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    insights_model_health_title: 'Model health comparison',  // TODO: translate
-    insights_model_health_provider: 'Provider',  // TODO: translate
-    insights_model_health_replacement: 'Replacement guide',  // TODO: translate
-    insights_model_health_cost_per_m: 'Cost / 1M',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    voice_error: 'Voice not supported in this browser',  // TODO: translate
-    voice_listening: 'Listening…',  // TODO: translate
-    voice_mode_active: 'Voice mode on',  // TODO: translate
-    voice_mode_off: 'Voice mode off',  // TODO: translate
-    voice_speaking: 'Speaking…',  // TODO: translate
-    voice_thinking: 'Thinking…',  // TODO: translate
+    checkpoint_date: 'Data',
+    checkpoint_diff_files_changed: (n) => `${n} arquivo${n === 1 ? '' : 's'} alterado${n === 1 ? '' : 's'}`,
+    checkpoint_diff_no_changes: 'Nenhuma diferença encontrada entre este checkpoint e o espaço de trabalho atual.',
+    checkpoint_diff_title: 'Alterações no checkpoint',
+    checkpoint_empty: 'Nenhum checkpoint encontrado para este espaço de trabalho.',
+    checkpoint_error: 'Falha ao carregar os checkpoints',
+    checkpoint_files: 'Arquivos',
+    checkpoint_loading: 'Carregando checkpoints…',
+    checkpoint_message: 'Mensagem',
+    checkpoint_restore: 'Restaurar',
+    checkpoint_restore_confirm_message: (ckpt) => `Restaurar o espaço de trabalho para o checkpoint "${ckpt}"? Isso sobrescreverá os arquivos com as versões salvas. Arquivos adicionados após este checkpoint não serão excluídos.`,
+    checkpoint_restore_confirm_title: 'Restaurar checkpoint?',
+    checkpoint_restored: 'Checkpoint restaurado',
+    checkpoint_title: 'Checkpoints',
+    checkpoint_view_diff: 'Ver diff',
+    insights_activity_by_day: 'Atividade por dia',
+    insights_activity_by_hour: 'Atividade por hora',
+    insights_cost: 'Custo estimado',
+    insights_footer: 'Exibindo dados dos últimos {days} dias',
+    insights_skill_usage_title: 'Uso de skills',
+    insights_skill_usage_sub: 'Frequência de invocação de ferramentas',
+    insights_skill_usage_total: 'Total de invocações',
+    insights_skill_usage_skills_used: 'Skills usados',
+    insights_skill_usage_no_data: 'Ainda não há dados de uso de skills',
+    insights_skill_usage_no_data_hint: 'Os skills aparecerão aqui depois de usados nas conversas.',
+    insights_skill_usage_footer: 'Contagens de ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Skill',
+    insights_skill_usage_col_uses: 'Usos',
+    insights_skill_usage_col_views: 'Visualizações',
+    insights_skill_usage_col_share: 'Uso %',
+    insights_skill_usage_col_patches: 'Patches',
+    insights_input_tokens: 'Entrada',
+    insights_messages: 'Mensagens',
+    insights_models: 'Modelos',
+    insights_no_cost: 'N/D',
+    insights_output_tokens: 'Saída',
+    insights_peak_hour: 'Pico: {hour}',
+    insights_sessions: 'Sessões',
+    insights_title: 'Análise de uso',
+    insights_token_breakdown: 'Detalhamento de tokens',
+    insights_tokens: 'Tokens',
+    insights_total: 'Total',
+    insights_model_health_title: 'Comparação do estado dos modelos',
+    insights_model_health_provider: 'Provedor',
+    insights_model_health_replacement: 'Guia de substituição',
+    insights_model_health_cost_per_m: 'Custo / 1 mi',
+    settings_desc_api_redact: 'Usuários com hospedagem própria podem desativar para maior transparência (não recomendado para instâncias compartilhadas).',
+    settings_label_api_redact: 'Ocultar dados sensíveis nas respostas da API',
+    voice_error: 'Voz não suportada neste navegador',
+    voice_listening: 'Ouvindo…',
+    voice_mode_active: 'Modo de voz ativado',
+    voice_mode_off: 'Modo de voz desativado',
+    voice_speaking: 'Falando…',
+    voice_thinking: 'Pensando…',
     // Composer voice buttons (#1488)
-    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate: 'Ditar',
     voice_dictate_active: 'Stop dictation',
-    voice_recording_active: 'Parar gravação',  // TODO: translate
-    voice_mode_toggle: 'Voice mode',  // TODO: translate
-    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
+    voice_recording_active: 'Parar gravação',
+    voice_mode_toggle: 'Modo de voz',
+    voice_mode_toggle_active: 'Sair do modo de voz',
+    subagent_children: 'Sessões de subagentes',
     // login-flow keys (issue #1442)
     sign_out_failed: 'Falha ao sair: ',
     disable_auth_confirm_title: 'Desativar proteção por senha',
@@ -14620,7 +14782,7 @@ const LOCALES = {
     cancelling: '취소 중\u2026',
     cancel_failed: '취소 실패: ',
     mic_denied: '마이크 접근이 거부되었습니다. 브라우저 권한을 확인하세요.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: '음성 입력에는 보안 연결이 필요합니다. 마이크를 사용하려면 HTTPS 또는 localhost를 통해 Hermes를 여세요.',
     mic_no_speech: '음성이 감지되지 않았습니다. 다시 시도하세요.',
     mic_network: '음성 인식을 사용할 수 없습니다.',
     mic_error: '음성 입력 오류: ',
@@ -14785,21 +14947,21 @@ const LOCALES = {
     model_custom_placeholder: 'e.g. openai/gpt-5.4',
     model_show_all_models: '{0}개 모델 모두 보기',
     model_search_placeholder: 'Search models…',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Use active profile defaults or choose a custom toolset list for this session', // TODO: translate
-    session_toolsets_global: 'Active profile defaults', // TODO: translate
-    session_toolsets_profile_defaults: 'Active profile defaults', // TODO: translate
-    session_toolsets_custom: 'Custom override', // TODO: translate
-    session_toolsets_use_profile_defaults: 'Use active profile defaults', // TODO: translate
-    session_toolsets_configured_servers: 'Configured MCP servers', // TODO: translate
-    session_toolsets_loading_servers: 'Loading configured servers...', // TODO: translate
-    session_toolsets_no_configured_servers: 'No configured MCP servers', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Use defaults', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Using active profile defaults', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: '세션 도구 세트',
+    session_toolsets_desc: '활성 프로필 기본값을 사용하거나 이 세션에 대한 사용자 지정 도구 세트 목록을 선택합니다',
+    session_toolsets_global: '활성 프로필 기본값',
+    session_toolsets_profile_defaults: '활성 프로필 기본값',
+    session_toolsets_custom: '사용자 지정 재정의',
+    session_toolsets_use_profile_defaults: '활성 프로필 기본값 사용',
+    session_toolsets_configured_servers: '구성된 MCP 서버',
+    session_toolsets_loading_servers: '구성된 서버를 불러오는 중...',
+    session_toolsets_no_configured_servers: '구성된 MCP 서버 없음',
+    session_toolsets_placeholder: 'tool1, tool2, \u2026',
+    session_toolsets_apply: '적용',
+    session_toolsets_clear: '기본값 사용',
+    session_toolsets_applied: '도구 세트가 업데이트됨',
+    session_toolsets_cleared: '활성 프로필 기본값을 사용 중',
+    session_toolsets_failed: '도구 세트를 업데이트하지 못했습니다: ',
     model_search_no_results: 'No models found',
     model_group_configured: '구성됨',
     ws_search_placeholder: '워크스페이스 검색…',
@@ -15050,9 +15212,10 @@ const LOCALES = {
      reveal_in_finder: '파일 관리자에서 열기',
      reveal_failed: '표시 실패: ',
      copy_file_path: '파일 경로 복사',
+     copy_relative_path: '상대 경로 복사',
      open_in_vscode: 'VS Code에서 열기',
      open_in_vscode_failed: 'VS Code에서 열기 실패: ',
-     download_folder: 'Download Folder', // TODO: translate
+     download_folder: '다운로드 폴더',
     path_copied: '파일 경로가 클립보드에 복사되었습니다',
     path_copy_failed: '경로 복사 실패: ',
     session_rename: '대화 이름 변경',
@@ -15184,8 +15347,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: '새 내용 자동 따라가기',
     settings_desc_auto_scroll_follow: '활성화하면 토큰이 스트리밍되는 동안 화면이 자동으로 맨 아래로 스크롤됩니다. 비활성화하면 스크롤 위치를 직접 제어합니다.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: '제목 표시줄에 프로필 전환기 표시',
+    settings_desc_show_titlebar_profile: '활성화하면 앱 제목 표시줄 왼쪽 상단에 프로필 전환 버튼이 나타나 어느 탭에서든 프로필을 변경할 수 있습니다. 기본적으로 꺼져 있습니다. 이 설정과 관계없이 작성기 하단에는 항상 프로필 전환기가 있습니다.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -15243,7 +15406,7 @@ const LOCALES = {
     settings_tab_appearance: '외형',
     settings_tab_preferences: '환경설정',
     settings_tab_plugins: '플러그인',
-    settings_tab_extensions: 'Extensions',  // TODO: translate
+    settings_tab_extensions: '확장',
     settings_extensions_gallery_tab: 'Gallery',
     settings_extensions_installed_tab: 'Installed',
     settings_extensions_diagnostics_tab: 'Diagnostics',
@@ -15274,19 +15437,19 @@ const LOCALES = {
     ext_gallery_install_followup: '확장이 설치되었습니다. 카드에서 다음 단계를 확인하세요.',
     ext_gallery_install_ok: 'Extension installed successfully.',
     ext_gallery_uninstall_ok: 'Extension uninstalled.',
-    settings_plugins_title: 'Plugins',  // TODO: translate
+    settings_plugins_title: '플러그인',
     plugins_enable_toggle: '활성화',
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_meta: '설치된 Hermes 플러그인과 이들이 등록하는 수명 주기 훅을 봅니다. 이 패널은 읽기 전용입니다.',
+    settings_plugins_empty: '현재 표시되는 Hermes 플러그인이 없습니다. 여기에서 보려면 Hermes CLI/구성에서 플러그인을 설치하거나 활성화하세요.',
+    plugins_unnamed: '이름 없는 플러그인',
+    plugins_no_description: '제공된 설명이 없습니다.',
+    plugins_no_hooks: '등록된 수명 주기 훅 없음',
+    plugins_registered_hooks: '등록된 훅',
+    plugins_enabled: '활성화됨',
+    plugins_disabled: '비활성화됨',
+    plugins_active_provider: '활성(공급자)',
+    plugins_provider_no_hooks: '공급자 플러그인 — 에이전트 표시 훅 없음',
+    plugins_load_failed: '플러그인을 불러오지 못했습니다: ',
     settings_tab_system: '시스템',
     settings_tab_help: 'Help',
     settings_help_meta: 'Resources and support for Hermes WebUI.',
@@ -15566,21 +15729,21 @@ const LOCALES = {
     dashboard_loopback_warning: '대시보드는 서버에서 loopback 전용입니다. 서버 자체에서 접속하거나 --host 0.0.0.0(안전하지 않음)으로 다시 시작하세요.',
     tab_logs: 'Logs',
     tab_settings: '설정',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: '메뉴 닫기',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: '로그',
+    logs_file: '파일',
+    logs_tail: '끝부분',
+    logs_auto_refresh: '자동 새로고침(5초)',
+    logs_wrap: '줄 바꿈',
+    logs_copy_all: '모두 복사',
+    logs_empty: '아직 로그 줄이 없습니다.',
+    logs_loading: '로그를 불러오는 중…',
+    logs_load_failed: '로그를 불러오지 못했습니다',
+    logs_status_idle: '최근 줄을 보려면 로그 파일을 선택하세요.',
+    logs_no_mtime: '아직 기록되지 않음',
+    logs_truncated_hint: '대용량 로그 파일의 끝부분을 표시합니다. 메모리 사용을 제한하기 위해 오래된 바이트는 건너뛰었습니다.',
+    logs_copied: '로그가 복사됨',
     logs_severity: '심각도',
     logs_severity_all: '전체',
     logs_severity_errors: '오류',
@@ -15806,17 +15969,17 @@ const LOCALES = {
     provider_category_self_hosted: 'Open / self-hosted',
     provider_category_specialized: 'Specialized',
     onboarding_api_key_label: 'API key',
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    oauth_login_codex: 'Codex(ChatGPT)로 로그인',
+    oauth_codex_step1: '1단계: 이 URL을 방문하여 코드를 입력하세요',
+    oauth_codex_step2: '2단계: 페이지에 이 코드를 입력하세요',
+    oauth_codex_polling: '인증을 기다리는 중...',
+    oauth_codex_success: 'Codex OAuth 로그인 성공!',
+    oauth_codex_error: 'OAuth 로그인 실패',
+    oauth_codex_expired: '코드가 만료되었습니다. 다시 시도하세요',
     onboarding_api_key_placeholder: 'Leave blank to keep an existing saved key',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
+    onboarding_api_key_label_optional: 'API 키(선택 사항)',
+    onboarding_api_key_placeholder_optional: '키가 없는 서버는 비워 두세요',
+    onboarding_api_key_help_keyless: '대부분의 LM Studio / Ollama / vLLM 설치는 키 없이 실행됩니다. 서버에 인증이 필요하지 않으면 비워 두세요. 확인하려면 연결 테스트 버튼을 사용하세요.',
     onboarding_api_key_help_prefix: 'Saved as a secret in your Hermes .env file using',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://your-endpoint.example/v1',
@@ -15842,19 +16005,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Choose a model before continuing.',
     onboarding_error_provider_required: 'Choose a setup mode before continuing.',
     onboarding_error_base_url_required: 'Base URL is required for custom endpoints.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: '연결 테스트',
+    onboarding_probe_probing: '연결을 테스트하는 중…',
+    onboarding_probe_ok: '연결됨. {n}개 모델 사용 가능.',
+    onboarding_probe_error_generic: '구성된 기본 URL에 접근할 수 없습니다.',
+    onboarding_probe_error_invalid_url: '기본 URL은 http:// 또는 https://로 시작해야 합니다.',
+    onboarding_probe_error_dns: '호스트를 확인할 수 없습니다. URL을 확인하거나 호스트의 IP 주소를 사용하세요.',
+    onboarding_probe_error_connect_refused: '연결이 거부되었습니다 — 해당 주소에서 서버가 실행되고 있지 않을 수 있습니다. Docker 내부에서는 localhost 대신 호스트 IP를 사용해 보세요.',
+    onboarding_probe_error_timeout: '엔드포인트가 제때 응답하지 않았습니다. 서버가 실행 중이고 URL이 올바른지 확인하세요.',
+    onboarding_probe_error_http_4xx: '엔드포인트가 클라이언트 오류를 반환했습니다. 인증과 URL 경로(일반적으로 /v1로 끝남)를 확인하세요.',
+    onboarding_probe_error_http_5xx: '엔드포인트가 서버 오류를 반환했습니다. LM Studio / Ollama 서버 로그를 확인하세요.',
+    onboarding_probe_error_parse: '엔드포인트가 예상한 형식의 모델 목록을 반환하지 않았습니다. URL이 OpenAI 호환 API 루트를 가리키는지 확인하세요.',
+    onboarding_probe_error_unreachable: '구성된 기본 URL에 접근할 수 없습니다.',
+    onboarding_error_probe_failed: '구성된 기본 URL을 검증할 수 없습니다.',
     onboarding_error_workspace_required: 'Workspace is required.',
     onboarding_error_model_required: 'Model is required.',
     onboarding_complete: '설정 완료',
@@ -16078,6 +16241,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Weekly',
     cron_schedule_preset_monthly: 'Monthly',
     cron_schedule_preset_custom: 'Custom',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: '시간',
+    cron_schedule_minute_label: '분',
+    cron_schedule_weekday_label: '요일 (0-6, 일-토)',
+    cron_schedule_month_day_label: '일',
+    cron_schedule_time_hint: '시간은 서버 시간 기준이며 cron은 서버에서 실행됩니다.',
     cron_schedule_hint: "Use 'every 1h' or a cron expression for recurring jobs. Bare durations like '30m' run once.",
     cron_schedule_once_warning: "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.",
     cron_prompt_label: 'Prompt',
@@ -16172,36 +16352,36 @@ const LOCALES = {
     settings_label_tts_auto_read: '답변 자동 읽기',
     settings_desc_tts_auto_read: '도움말 답변을 자동으로 읽어줌',
     // Composer voice-mode pref (#1488)
-    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_label_voice_mode: '핸즈프리 음성 모드 버튼',
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_raw_audio: 'Send raw audio instead of transcribing',
     settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
     voice_send_raw: 'Send raw audio',
-    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
+    voice_raw_attached: '오디오가 첨부되었습니다. 보내기를 누르거나 더 입력하세요.',
     settings_label_tts_voice: '음성',
     settings_desc_tts_voice: '음성 합성 음성 선택',
     settings_label_tts_rate: '말 속도',
     settings_label_tts_pitch: '말 톤',
     settings_label_tts_engine: 'TTS 엔진',
     settings_desc_tts_engine: '음성 엔진을 선택하세요. Edge TTS는 서버를 통해 Microsoft 신경 음성을 사용합니다.',
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
+    checkpoint_date: '날짜',
+    checkpoint_diff_files_changed: (n) => `파일 ${n}개 변경됨`,
+    checkpoint_diff_no_changes: '이 체크포인트와 현재 작업 공간 사이에 차이가 없습니다.',
+    checkpoint_diff_title: '체크포인트의 변경 사항',
+    checkpoint_empty: '이 작업 공간에 대한 체크포인트를 찾을 수 없습니다.',
+    checkpoint_error: '체크포인트를 불러오지 못했습니다',
+    checkpoint_files: '파일',
+    checkpoint_loading: '체크포인트를 불러오는 중…',
+    checkpoint_message: '메시지',
+    checkpoint_restore: '복원',
+    checkpoint_restore_confirm_message: (ckpt) => `작업 공간을 체크포인트 "${ckpt}"(으)로 복원하시겠습니까? 파일이 저장된 버전으로 덮어쓰기됩니다. 이 체크포인트 이후에 추가된 파일은 삭제되지 않습니다.`,
+    checkpoint_restore_confirm_title: '체크포인트를 복원하시겠습니까?',
+    checkpoint_restored: '체크포인트가 복원됨',
+    checkpoint_title: '체크포인트',
+    checkpoint_view_diff: 'diff 보기',
+    insights_activity_by_day: '일별 활동',
+    insights_activity_by_hour: '시간별 활동',
+    insights_cost: '예상 비용',
     insights_daily_tokens: '일별 토큰',
     insights_model_name: '모델',
     insights_model_sessions: '세션',
@@ -16215,45 +16395,45 @@ const LOCALES = {
     insights_model_health_replacement: 'Replacement guide',
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: '아직 사용 데이터가 없습니다',
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    voice_error: 'Voice not supported in this browser',  // TODO: translate
-    voice_listening: 'Listening…',  // TODO: translate
-    voice_mode_active: 'Voice mode on',  // TODO: translate
-    voice_mode_off: 'Voice mode off',  // TODO: translate
-    voice_speaking: 'Speaking…',  // TODO: translate
-    voice_thinking: 'Thinking…',  // TODO: translate
+    insights_footer: '최근 {days}일간의 데이터 표시 중',
+    insights_skill_usage_title: '스킬 사용',
+    insights_skill_usage_sub: '도구 호출 빈도',
+    insights_skill_usage_total: '전체 호출 수',
+    insights_skill_usage_skills_used: '사용된 스킬',
+    insights_skill_usage_no_data: '아직 스킬 사용 데이터가 없습니다',
+    insights_skill_usage_no_data_hint: '스킬은 대화에서 사용되면 여기에 표시됩니다.',
+    insights_skill_usage_footer: '~/.hermes/skills/의 집계',
+    insights_skill_usage_col_skill: '스킬',
+    insights_skill_usage_col_uses: '사용',
+    insights_skill_usage_col_views: '조회',
+    insights_skill_usage_col_share: '사용률 %',
+    insights_skill_usage_col_patches: '패치',
+    insights_input_tokens: '입력',
+    insights_messages: '메시지',
+    insights_models: '모델',
+    insights_no_cost: '해당 없음',
+    insights_output_tokens: '출력',
+    insights_peak_hour: '최고: {hour}',
+    insights_sessions: '세션',
+    insights_title: '사용량 분석',
+    insights_token_breakdown: '토큰 분석',
+    insights_tokens: '토큰',
+    insights_total: '전체',
+    settings_desc_api_redact: '자체 호스팅 사용자는 투명성을 위해 비활성화할 수 있습니다(공유 인스턴스에는 권장되지 않음).',
+    settings_label_api_redact: 'API 응답에서 민감한 데이터 가리기',
+    voice_error: '이 브라우저에서는 음성이 지원되지 않습니다',
+    voice_listening: '듣는 중…',
+    voice_mode_active: '음성 모드 켜짐',
+    voice_mode_off: '음성 모드 꺼짐',
+    voice_speaking: '말하는 중…',
+    voice_thinking: '생각하는 중…',
     // Composer voice buttons (#1488)
-    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate: '받아쓰기',
     voice_dictate_active: 'Stop dictation',
-    voice_recording_active: '녹음 중지',  // TODO: translate
-    voice_mode_toggle: 'Voice mode',  // TODO: translate
-    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
+    voice_recording_active: '녹음 중지',
+    voice_mode_toggle: '음성 모드',
+    voice_mode_toggle_active: '음성 모드 종료',
+    subagent_children: '서브에이전트 세션',
     outline_title: '개요',
     outline_empty: '아직 질문이 없습니다.',
     outline_loading: '로딩 중…',
@@ -16731,6 +16911,7 @@ const LOCALES = {
     reveal_in_finder: 'Révéler dans le gestionnaire de fichiers',
     reveal_failed: 'Échec de la révélation : ',
     copy_file_path: 'Copier le chemin du fichier',
+    copy_relative_path: 'Copier le chemin relatif',
     open_in_vscode: 'Ouvrir dans VS Code',
     open_in_vscode_failed: 'Échec de l\'ouverture dans VS Code : ',
     download_folder: 'Télécharger le dossier',
@@ -17819,6 +18000,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Hebdomadaire',
     cron_schedule_preset_monthly: 'Mensuel',
     cron_schedule_preset_custom: 'Personnalisé',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: 'Heure',
+    cron_schedule_minute_label: 'Minute',
+    cron_schedule_weekday_label: 'Jour de la semaine (0-6, dim-sam)',
+    cron_schedule_month_day_label: 'Jour',
+    cron_schedule_time_hint: 'L\'heure est celle du serveur; cron s\'exécute côté serveur.',
     cron_schedule_hint: "Utilisez 'every 1h' ou une expression cron pour les tâches récurrentes. Les durées simples comme '30m' s'exécutent une fois.",
     cron_schedule_once_warning: "Les formes de durée comme '30m' s'exécutent une fois et sont supprimées après l'exécution. Utilisez 'every 30m' pour conserver une tâche récurrente.",
     cron_prompt_label: 'Invite',
@@ -17904,6 +18102,1651 @@ const LOCALES = {
     outline_loading: 'Chargement\u2026',
   },
 
+  cs: {
+    _label: 'Čeština',
+    _lang: 'cs',
+    _speech: 'cs-CZ',
+    copy_relative_path: 'Kopírovat relativní cestu',
+    cron_schedule_hour_label: 'Hodina',
+    cron_schedule_minute_label: 'Minuta',
+    cron_schedule_weekday_label: 'Den v týdnu',
+    cron_schedule_month_day_label: 'Den v měsíci',
+    cron_schedule_time_label: 'Čas',
+    cron_schedule_conj_on: 'v',
+    cron_schedule_conj_on_day: 'v den',
+    cron_schedule_conj_at: 'v',
+    cron_schedule_conj_at_minute: 'v minutě',
+    cron_weekday_sun: 'Neděle',
+    cron_weekday_mon: 'Pondělí',
+    cron_weekday_tue: 'Úterý',
+    cron_weekday_wed: 'Středa',
+    cron_weekday_thu: 'Čtvrtek',
+    cron_weekday_fri: 'Pátek',
+    cron_weekday_sat: 'Sobota',
+    cron_schedule_time_hint: 'Čas je serverový; cron běží na straně serveru.',
+    active_conversation_meta: (title, count) => `${title} · ${count} zpráv${count === 1 ? 'a' : ''}`,
+    active_conversation_none: 'Žádná aktivní konverzace není vybrána.',
+    add: 'Přidat',
+    add_failed: 'Přidání selhalo: ',
+    agent_soul: 'Duch agenta',
+    all_uploads_failed: (n) => `Všech ${n} nahrávání selhalo`,
+    approval_skip_all: '⚡ Přeskočit vše pro tuto relaci',
+    approval_skip_all_title: 'Přeskočit všechny výzvy ke schválení pro tuto relaci',
+    archive_extracted: (n, c) => `Rozbaleno ${n} souborů z ${c} archivů`,
+    auth_ack_save_failed: 'Nepodařilo se aktualizovat potvrzení: ',
+    auth_acknowledged_label: 'Zkontroloval jsem toto riziko; zobrazit méně urgentní varování v navigaci.',
+    auth_disabled: 'Auth zakázáno — ochrana heslem odstraněna',
+    auth_disabled_warning_message: 'Tato instance je přístupná bez autentifikace.',
+    auth_status_passkey_only: 'Pouze passkey',
+    auth_status_password: 'Heslová autentifikace',
+    auth_status_unauthenticated: 'Neautentifikováno',
+    auth_warning_badge: 'Auth zakázáno',
+    bg_error_multi: (count) => `${count} relací narazilo na chybu`,
+    bg_error_single: (title) => `"${title}" narazil na chybu`,
+    cancel: 'Zrušit',
+    checkpoint_date: 'Datum',
+    checkpoint_diff_files_changed: (n) => `${n} souborů změněno`,
+    checkpoint_diff_no_changes: 'Žádné rozdíly mezi tímto kontrolním bodem a aktuálním pracovním prostorem.',
+    checkpoint_diff_title: 'Změny v kontrolním bodě',
+    checkpoint_empty: 'Pro tento pracovní prostor nebyl nalezen žádný kontrolní bod.',
+    checkpoint_error: 'Nepodařilo se načíst kontrolní body',
+    checkpoint_files: 'Soubory',
+    checkpoint_loading: 'Načítám kontrolní body…',
+    checkpoint_message: 'Zpráva',
+    checkpoint_restore: 'Obnovit',
+    checkpoint_restore_confirm_message: (ckpt) => `Obnovit pracovní prostor do kontrolního bodu "${ckpt}"? Toto přepíše soubory uloženými verzemi. Soubory přidané po tomto kontrolním bodě nebudou smazány.`,
+    checkpoint_restore_confirm_title: 'Obnovit kontrolní bod?',
+    checkpoint_restored: 'Kontrolní bod obnoven',
+    checkpoint_title: 'Kontrolní body',
+    checkpoint_view_diff: 'Zobrazit rozdíly',
+    clear_conversation_btn_tooltip: 'Vymazat všechny zprávy v této konverzaci',
+    clear_conversation_message: 'Vymazat všechny zprávy? Toto nelze vrátit zpět.',
+    clear_conversation_title: 'Vymazat konverzaci',
+    clear_failed: 'Vymazání selhalo: ',
+    close_menu: 'Zavřít nabídku',
+    cmd_reasoning: 'Přepnout viditelnost přemýšlení (zobrazit/skrýt), nastavit úroveň úsilí nebo zkontrolovat aktuální stav',
+    cmd_yolo: 'Přepnout YOLO režim (přeskočit schválení)',
+    composer_compression_will_queue: 'Napište zprávu — bude zařazena do fronty a odeslána po kompresi',
+    composer_control_attach: 'Přiložit',
+    composer_control_bg_badge: 'Odznak na pozadí',
+    composer_control_context: 'Kontext',
+    composer_control_mic: 'Mikrofon',
+    composer_control_mobile_config: 'Mobilní konfigurace',
+    composer_control_model: 'Model',
+    composer_control_profile: 'Profil',
+    composer_control_quota_chip: 'Čip kvóty',
+    composer_control_reasoning: 'Uvažování',
+    composer_control_saved_prompts: 'Uložené výzvy',
+    composer_control_status: 'Stav',
+    composer_control_toolsets: 'Sady nástrojů',
+    composer_control_voice_mode: 'Hlasový režim',
+    composer_control_workspace: 'Pracovní prostor',
+    composer_control_yolo: 'YOLO',
+    composer_disabled_clarify: 'Odpovězte na žádost o upřesnění',
+    composer_disabled_compression: 'Čekám na dokončení komprese',
+    composer_disabled_empty: 'Napište zprávu k odeslání',
+    composer_interrupt: 'Přerušit a odeslat',
+    composer_mobile_context: 'Kontext',
+    composer_mobile_model: 'Model',
+    composer_mobile_quota: 'Kvóta',
+    composer_mobile_reasoning: 'Uvažování',
+    composer_mobile_workspace: 'Pracovní prostor',
+    composer_queue: 'Zařadit zprávu do fronty',
+    composer_send: 'Odeslat zprávu',
+    composer_steer: 'Řídit aktuální odpověď',
+    composer_stop: 'Zastavit generování',
+    content_required: 'Obsah je povinný',
+    create_failed: 'Vytvoření selhalo: ',
+    create_job: 'Vytvořit úlohu',
+    created: 'Vytvořeno ',
+    cron_all_runs: 'Všechna spuštění',
+    cron_attention_copy_diagnostics: 'Kopírovat diagnostiku',
+    cron_attention_croniter_hint: 'Runtime gateway možná postrádá balíček croniter. Restartujte gateway s podporou cron a poté pokračujte v této úloze.',
+    cron_attention_desc: 'Tato opakující se úloha nemá čas dalšího spuštění. Plánovač možná nedokázal vypočítat další spuštění.',
+    cron_attention_resume: 'Obnovit a přepočítat',
+    cron_attention_run_once: 'Spustit jednou nyní',
+    cron_collapse_output: 'Sbalit výstup',
+    cron_collapse_prompt: 'Sbalit výzvu',
+    cron_completion_status: (name, status) => `Cron „${name}“ ${status}`,
+    cron_delete_confirm_message: 'Toto nelze vrátit zpět.',
+    cron_delete_confirm_title: 'Smazat cron úlohu',
+    cron_deliver_custom: 'Vlastní cíl doručení',
+    cron_deliver_label: 'Doručit výstup do',
+    cron_deliver_local: 'Lokálně (pouze uložit výstup)',
+    cron_diagnostics_copied: 'Diagnostika cronu zkopírována',
+    cron_duplicate: 'Duplikovat',
+    cron_duplicated: 'Úloha duplikována (pozastavena)',
+    cron_expand_output: 'Rozbalit výstup',
+    cron_expand_prompt: 'Rozbalit výzvu',
+    cron_hide_runs: 'Skrýt spuštění',
+    cron_job_created: 'Úloha vytvořena',
+    cron_job_deleted: 'Úloha smazána',
+    cron_job_name_placeholder: 'Název úlohy',
+    cron_job_paused: 'Úloha pozastavena',
+    cron_job_resumed: 'Úloha obnovena',
+    cron_job_triggered: 'Úloha spuštěna',
+    cron_job_updated: 'Úloha aktualizována',
+    cron_jobs_project: 'Cron úlohy',
+    cron_last: 'Poslední',
+    cron_last_output: 'Poslední výstup',
+    cron_mode_agent: 'Agent',
+    cron_mode_label: 'Režim',
+    cron_mode_script: 'Skript',
+    cron_model_hint: 'Přepsat výchozí model pro tuto úlohu.',
+    cron_model_label: 'Přepsání modelu',
+    cron_model_no_agent_hint: 'Úlohy bez agenta spouštějí nakonfigurovaný skript přímo; model se nepoužívá.',
+    cron_model_use_default: 'Výchozí (použít výchozí nastavení profilu/systému)',
+    cron_name_label: 'Název',
+    cron_name_placeholder: 'Volitelné',
+    cron_next: 'Další',
+    cron_no_jobs: 'Nebyly nalezeny žádné naplánované úlohy.',
+    cron_no_runs_yet: '(zatím žádná spuštění)',
+    cron_pause: 'Pozastavit',
+    cron_profile_label: 'Profil',
+    cron_profile_server_default: 'výchozí serveru',
+    cron_profile_server_default_hint: 'Používá výchozí profil WebUI serveru v době spuštění. Stávající úlohy bez profilu si zachovávají toto starší chování.',
+    cron_prompt_label: 'Výzva',
+    cron_prompt_placeholder: 'Výzva',
+    cron_prompt_required: 'Výzva je povinná',
+    cron_resume: 'Obnovit',
+    cron_run_now: 'Spustit nyní',
+    cron_schedule_hint: "Použijte 'every 1h' nebo cron výraz pro opakující se úlohy. Holé doby trvání jako '30m' se spustí jednou.",
+    cron_schedule_label: 'Rozvrh',
+    cron_schedule_once_warning: "Formy doby trvání jako '30m' se spustí jednou a po spuštění se odeberou. Použijte 'every 30m' pro zachování opakující se úlohy.",
+    cron_schedule_placeholder: 'Rozvrh',
+    cron_schedule_preset_custom: 'Vlastní',
+    cron_schedule_preset_daily: 'Denně',
+    cron_schedule_preset_hourly: 'Každou hodinu',
+    cron_schedule_preset_label: 'Předvolba',
+    cron_schedule_preset_monthly: 'Měsíčně',
+    cron_schedule_preset_weekdays: 'V pracovní dny',
+    cron_schedule_preset_weekly: 'Týdně',
+    cron_schedule_required: 'Rozvrh je povinný',
+    cron_schedule_required_example: 'Rozvrh je povinný (např. "0 9 * * *" nebo "every 1h")',
+    cron_script_badge_title: 'Skript úloha (bez agenta)',
+    cron_script_card_title: 'Skript',
+    cron_script_job_banner: 'Spouští skript podle rozvrhu — stdout je doručen do cíle. Bez agenta, výzvy nebo dovedností.',
+    cron_script_output: 'Výstup skriptu',
+    cron_script_path_hint: 'Řešeno v ~/.hermes/scripts/ pokud není absolutní cesta. Upravte soubor skriptu na serveru pro změnu chování.',
+    cron_script_path_label: 'Cesta skriptu',
+    cron_skills_edit_hint: 'Seznam dovedností nelze po vytvoření upravovat.',
+    cron_skills_label: 'Dovednosti',
+    cron_skills_placeholder: 'Přidat dovednosti (volitelné)…',
+    cron_status_active: 'aktivní',
+    cron_status_error: 'chyba',
+    cron_status_needs_attention: 'vyžaduje pozornost',
+    cron_status_off: 'vypnuto',
+    cron_status_paused: 'pozastaveno',
+    cron_status_running: 'běží…',
+    cron_toast_notifications_disabled: 'Zakázáno',
+    cron_toast_notifications_enabled: 'Povoleno',
+    cron_toast_notifications_hint: 'Zobrazit toast po dokončení tohoto cronu. Odznak Úloh a nový ukazatel běhu se stále aktualizují když je toto vypnuto.',
+    cron_toast_notifications_label: 'Dokončovací notifikace',
+    cron_view_full_output: 'Zobrazit celý výstup',
+    cron_workdir_label: 'Pracovní adresář',
+    csv_error: 'Nepodařilo se načíst CSV soubor',
+    csv_header_note: 'První řádek zobrazen jako záhlaví tabulky',
+    csv_loading: 'Načítám CSV',
+    csv_no_data: 'CSV soubor nemá dostatek dat pro vykreslení jako tabulka',
+    csv_too_large: 'CSV soubor je příliš velký pro vložené vykreslení',
+    current_password_incorrect: 'Současné heslo je nesprávné.',
+    current_password_label: 'Současné heslo',
+    current_password_placeholder: 'Zadejte současné heslo…',
+    current_password_required: 'Současné heslo je povinné pro změnu nebo zakázání autentifikace.',
+    current_task_list: 'Aktuální seznam úkolů',
+    dashboard_loopback_warning: 'Dashboard je na serveru pouze loopback. Buď prohlížejte ze serveru samotného nebo ho restartujte s --host 0.0.0.0 (nebezpečné).',
+    default: 'výchozí',
+    disable: 'Zakázat',
+    disable_auth: 'Zakázat autentifikaci',
+    disable_auth_confirm_message: 'Kdokoliv bude moci přistupovat k této instanci.',
+    disable_auth_confirm_title: 'Zakázat ochranu heslem',
+    disable_auth_failed: 'Nepodařilo se zakázat autentifikaci: ',
+    disable_auth_typed_confirm: 'Zadejte DISABLE AUTH pro potvrzení',
+    discard_file_edits_message: 'Přepnutí pracovních prostorů zahodí neuložené úpravy souborů v náhledu.',
+    discard_file_edits_title: 'Zahodit úpravy souborů?',
+    dismiss: 'Zavřít',
+    done: 'Hotovo',
+    download_transcript: 'Stáhnout jako Markdown',
+    editing: 'Úpravy',
+    empty_dir: '(prázdný)',
+    empty_subtitle: 'Zeptejte se na cokoliv, spouštějte příkazy, prozkoumávejte soubory nebo spravujte naplánované úlohy.',
+    empty_title: 'Jak vám mohu pomoci?',
+    error_prefix: 'Chyba: ',
+    excalidraw_download: 'Stáhnout',
+    excalidraw_empty: 'Prázdný diagram',
+    excalidraw_error: 'Nepodařilo se načíst Excalidraw soubor',
+    excalidraw_invalid: 'Neplatný formát Excalidraw souboru',
+    excalidraw_label: 'Diagram',
+    excalidraw_loading: 'Načítám diagram',
+    excalidraw_render_error: 'Nepodařilo se vykreslit diagram',
+    excalidraw_simplified: 'Zjednodušený SVG náhled — není pixelově identický s plátnem Excalidraw',
+    excalidraw_too_large: 'Excalidraw soubor je příliš velký pro vložené vykreslení',
+    export_session_html: 'HTML',
+    export_session_html_tooltip: 'Exportovat jako samostatnou HTML stránku',
+    export_session_json: 'JSON',
+    export_session_json_tooltip: 'Exportovat celou relaci jako JSON',
+    ext_gallery_after_install: 'Po instalaci',
+    ext_gallery_author: 'Autor',
+    ext_gallery_capabilities: 'Schopnosti',
+    ext_gallery_install: 'Instalovat',
+    ext_gallery_install_followup: 'Rozšíření nainstalováno. Viz karta pro další kroky.',
+    ext_gallery_install_ok: 'Rozšíření úspěšně nainstalováno.',
+    ext_gallery_install_restart_required: 'Rozšíření nainstalováno. Je vyžadován restart pro aplikaci.',
+    ext_gallery_installed: 'Nainstalováno',
+    ext_gallery_installing: 'Instaluji…',
+    ext_gallery_local_app_label: 'Lokální aplikace',
+    ext_gallery_local_component_required: 'Toto rozšíření má lokální komponent. Po instalaci spusťte požadovanou lokální aplikaci nebo sidecar.',
+    ext_gallery_native_host_required: 'Je vyžadován nativní hostitel',
+    ext_gallery_next_step: 'Další krok',
+    ext_gallery_open_setup_guide: 'Otevřít průvodce nastavením',
+    ext_gallery_permissions_empty: 'Nejsou deklarována žádná další oprávnění.',
+    ext_gallery_permissions_hide: 'Skrýt oprávnění',
+    ext_gallery_permissions_show: 'Oprávnění',
+    ext_gallery_required_suffix: 'Je vyžadován {0}',
+    ext_gallery_restart_required: 'Je vyžadován restart',
+    ext_gallery_sidecar_required: 'Je vyžadován sidecar',
+    ext_gallery_uninstall: 'Odinstalovat',
+    ext_gallery_uninstall_ok: 'Rozšíření odinstalováno.',
+    ext_gallery_uninstalling: 'Odinstalovávám…',
+    ext_gallery_version: 'Verze',
+    external_notes_auto: 'auto',
+    external_notes_auto_recall_hint: 'Automatické připomenutí relace je nezměněno; tento zásuvný panel pouze zobrazuje nakonfigurované zdroje a dostupné nástroje pro čtení/hledání.',
+    external_notes_configured_hint: 'Názvy nástrojů se očekávají z tohoto nakonfigurovaného zdroje; živá schémata se zobrazí, když je WebUI runtime zpřístupní.',
+    external_notes_empty: 'Nejsou viditelné žádné zdroje poznámek nebo znalostí MCP. Nakonfigurujte Joplin, Obsidian, Notion, llm-wiki nebo jiný server poznámek pro jeho zobrazení zde.',
+    external_notes_no_tools: 'Pro tento zdroj nejsou aktuálně viditelné žádné nástroje pro čtení/hledání.',
+    external_notes_recent_ai: 'Nedávno použito AI',
+    external_notes_recent_ai_reason: 'Automatické připomenutí',
+    external_notes_search_empty: 'Pro náhled poznámek zde vyhledejte nakonfigurovaný zdroj poznámek.',
+    external_notes_search_placeholder: 'Hledat poznámky…',
+    external_notes_sources: 'Poznámky třetích stran',
+    external_notes_tool_count: (count) => `${count} dostupných nástrojů pro poznámky`,
+    filter_conversations: 'Filtrovat konverzace...',
+    first_token_time: 'Čas do prvního tokenu',
+    folder_add_as_space_btn: 'Přidat jako prostor',
+    folder_add_as_space_msg: 'Přidat tuto složku jako nový prostor do seznamu pracovních prostorů?',
+    folder_add_as_space_title: 'Přidat jako prostor?',
+    folder_create_failed: 'Vytvoření složky selhalo: ',
+    folder_created: 'Vytvořena složka ',
+    font_size_default: 'Výchozí',
+    font_size_large: 'Velká',
+    font_size_small: 'Malá',
+    font_size_xlarge: 'Extra velká',
+    gateway_endpoint_unreachable: 'Koncový bod gateway není dosažitelný',
+    gateway_last_active: 'Naposledy aktivní: ',
+    gateway_load_failed: 'Nepodařilo se načíst stav gateway',
+    gateway_metadata_stale: 'Metadata gateway jsou zastaralá',
+    gateway_not_configured: 'Gateway není nakonfigurován',
+    gateway_not_running: 'Gateway neběží',
+    gateway_running_label: 'Běží',
+    gateway_session_count: (n) => `${n} ${n === 1 ? 'relace' : 'relací'}`,
+    import: 'Importovat',
+    import_session_json_tooltip: 'Importovat relaci z JSON',
+    insights_activity_by_day: 'Aktivita podle dne',
+    insights_activity_by_hour: 'Aktivita podle hodiny',
+    insights_cache_hit: 'Úspěšnost prompt-cache',
+    insights_cost: 'Odhadované náklady',
+    insights_daily_tokens: 'Denní tokeny',
+    insights_footer: 'Zobrazeny údaje za posledních {days} dnů',
+    insights_input_tokens: 'Vstup',
+    insights_messages: 'Zprávy',
+    insights_model_cache: 'Mezipaměť',
+    insights_model_cost: 'Náklady',
+    insights_model_health_cost_per_m: 'Náklady / 1M',
+    insights_model_health_provider: 'Poskytovatel',
+    insights_model_health_replacement: 'Průvodce náhrady',
+    insights_model_health_title: 'Srovnání zdraví modelů',
+    insights_model_name: 'Model',
+    insights_model_sessions: 'Relace',
+    insights_model_share: 'Podíl',
+    insights_model_tokens: 'Tokeny',
+    insights_models: 'Modely',
+    insights_no_cost: 'Nedostupné',
+    insights_no_usage_data: 'Zatím žádná data o využití',
+    insights_output_tokens: 'Výstup',
+    insights_peak_hour: 'Špička: {hour}',
+    insights_sessions: 'Relace',
+    insights_skill_usage_col_patches: 'Záplaty',
+    insights_skill_usage_col_share: 'Podíl použití %',
+    insights_skill_usage_col_skill: 'Dovednost',
+    insights_skill_usage_col_uses: 'Použití',
+    insights_skill_usage_col_views: 'Zobrazení',
+    insights_skill_usage_footer: 'Počty z ~/.hermes/skills/',
+    insights_skill_usage_no_data: 'Zatím žádná data o použití dovedností',
+    insights_skill_usage_no_data_hint: 'Dovednosti se zde zobrazí po použití v konverzacích.',
+    insights_skill_usage_skills_used: 'Použité dovednosti',
+    insights_skill_usage_sub: 'Frekvence volání nástrojů',
+    insights_skill_usage_title: 'Použití dovedností',
+    insights_skill_usage_total: 'Celkem volání',
+    insights_title: 'Analýza využití',
+    insights_token_breakdown: 'Rozložení tokenů',
+    insights_tokens: 'Tokeny',
+    insights_total: 'Celkem',
+    kanban_add_comment: 'Přidat komentář',
+    kanban_add_dependency: 'Přidat závislost',
+    kanban_all_assignees: 'Všichni přiřazení',
+    kanban_all_tenants: 'Všichni tenanti',
+    kanban_archive_board: 'Archivovat aktuální desku…',
+    kanban_archive_board_confirm: 'Archivovat desku "{name}"? Úkoly zůstávají na disku a desku lze obnovit z kanban/boards/_archived/.',
+    kanban_assignee: 'Přiřazený',
+    kanban_assignee_other_label: 'Jiný (CLI jízdní pruhy / odstraněné profily)',
+    kanban_assignee_placeholder: 'Volitelné — nechte prázdné pro jakéhokoliv pracovníka',
+    kanban_assignee_profiles_label: 'Hermes profily',
+    kanban_assignee_unassigned: '— Nepřiřazeno (nebude automaticky spuštěno) —',
+    kanban_back_to_board: 'Zpět na desku',
+    kanban_block: 'Blokovat',
+    kanban_board: 'Deska',
+    kanban_board_archived: 'Deska archivována',
+    kanban_board_color: 'Barva (volitelná)',
+    kanban_board_description: 'Popis (volitelný)',
+    kanban_board_icon: 'Ikona (emoji, volitelná)',
+    kanban_board_name: 'Název',
+    kanban_board_name_required: 'Název je povinný',
+    kanban_board_slug: 'Slug (malá písmena, pomlčky)',
+    kanban_board_slug_required: 'Slug je povinný',
+    kanban_bulk_action: 'Hromadná akce',
+    kanban_card_archive: 'archivovat',
+    kanban_card_complete: 'dokončit',
+    kanban_children: 'Potomci',
+    kanban_clear_filters: 'Vymazat filtry',
+    kanban_comments_count: 'Komentáře ({0})',
+    kanban_dependency_placeholder: 'ID úkolu k propojení',
+    kanban_dependency_self: 'Úkol nemůže záviset sám na sobě',
+    kanban_description: 'Popis',
+    kanban_description_placeholder: 'Volitelné — co je třeba udělat, kritéria přijetí, odkazy',
+    kanban_dispatch_auto_blocked: 'auto-blokovaný',
+    kanban_dispatch_crashed: 'padl',
+    kanban_dispatch_preview_prefix: 'Náhled:',
+    kanban_dispatch_promoted: 'povýšen',
+    kanban_dispatch_reclaimed: 'získán zpět',
+    kanban_dispatch_run_prefix: 'Odesláno:',
+    kanban_dispatch_skipped_nonspawnable: 'přeskočeno (neznámý profil)',
+    kanban_dispatch_skipped_unassigned: 'přeskočeno (bez přiřazení)',
+    kanban_dispatch_spawned: 'vytvořen',
+    kanban_dispatch_timed_out: 'vypršel čas',
+    kanban_edit_task: 'Upravit úkol',
+    kanban_empty: 'Prázdné',
+    kanban_events_count: 'Události ({0})',
+    kanban_include_archived: 'Zahrnout archivované',
+    kanban_lanes_by_profile: 'Jízdní pruhy podle profilu',
+    kanban_links: 'Odkazy',
+    kanban_max_runtime_hint: 'Nechte prázdné pro neomezené.',
+    kanban_max_runtime_invalid: 'Maximální doba běhu musí být celé číslo v sekundách větší než 0.',
+    kanban_max_runtime_seconds: 'Maximální doba běhu (sekundy)',
+    kanban_new_board: 'Nová deska…',
+    kanban_new_task: 'Nový úkol',
+    kanban_no_comments: 'Žádné komentáře',
+    kanban_no_data: 'Žádná data Kanban',
+    kanban_no_description: 'Bez popisu',
+    kanban_no_events: 'Žádné události',
+    kanban_no_matching_tasks: 'Žádné odpovídající úkoly',
+    kanban_no_runs: 'Žádná spuštění',
+    kanban_nudge_dispatcher: 'Náhled dispečera',
+    kanban_only_mine: 'Pouze mé',
+    kanban_parents: 'Rodiče',
+    kanban_parents_modal: 'Závislosti rodičů',
+    kanban_parents_placeholder: 'ID nadřazeného úkolu',
+    kanban_priority: 'Priorita',
+    kanban_priority_hint: 'Vyšší čísla běží první. Výchozí je 0.',
+    kanban_read_only: 'Zobrazení pouze pro čtení',
+    kanban_ready_needs_assignee: 'Zvolili jste Nepřiřazeno + Připraveno. Dispečer tento úkol přeskočí. Odešlete znovu pro potvrzení nebo zvolte profil.',
+    kanban_refresh: 'Obnovit',
+    kanban_remove_dependency: 'Odebrat závislost',
+    kanban_rename_board: 'Přejmenovat aktuální desku…',
+    kanban_run_dispatcher: 'Spustit dispečera',
+    kanban_run_dispatcher_confirm: 'Toto získá úkoly ve stavu Připraveno na této desce a vytvoří pracovní dílčí procesy (jeden na úkol, až 8 na kliknutí). Pokračovat?',
+    kanban_runs_count: 'Spuštění ({0})',
+    kanban_search_tasks: 'Hledat úkoly',
+    kanban_skills: 'Dovednosti',
+    kanban_skills_placeholder: 'Názvy dovedností oddělené čárkami, např. python,git',
+    kanban_stats: 'Statistiky',
+    kanban_status: 'Stav',
+    kanban_status_archived: 'Archivováno',
+    kanban_status_blocked: 'Blokováno',
+    kanban_status_done: 'Hotovo',
+    kanban_status_original_hint: 'Skutečný stav: {0}. Toto dialog pouze podporuje úpravy Triage/Todo/Ready.',
+    kanban_status_ready: 'Připraveno',
+    kanban_status_running: 'Běží',
+    kanban_status_todo: 'K udělání',
+    kanban_status_triage: 'Třídění',
+    kanban_task: 'Úkol',
+    kanban_tasks_hidden_by_filters: 'Úkoly skryté filtry',
+    kanban_tenant: 'Nájemce',
+    kanban_tenant_placeholder: 'Volitelné — slug projektu nebo týmu',
+    kanban_title: 'Název',
+    kanban_title_required: 'Název je povinný.',
+    kanban_unassigned: 'nepřiřazeno',
+    kanban_unavailable: 'Kanban není dostupný',
+    kanban_unblock: 'Odblokovat',
+    kanban_view_consolidated: 'Konsolidované zobrazení',
+    kanban_view_consolidated_saved: 'Zobrazení Kanban: konsolidované',
+    kanban_view_lanes: 'Jízdní pruhy podle profilu',
+    kanban_view_lanes_saved: 'Zobrazení Kanban: jízdní pruhy podle profilu',
+    kanban_view_update_failed: 'Nepodařilo se aktualizovat zobrazení Kanban: ',
+    kanban_visible_tasks: 'Viditelných úkolů: {0}',
+    kanban_work_queue_hint: 'Toto je fronta úkolů Hermes agenta. Vytvořte nebo triážujte úkol, přiřaďte ho, přesuňte do stavu Připraveno a nechte dispečera ho získat.',
+    kanban_worker_log: 'Pracovní log',
+    kanban_workspace_dir: 'Adresář',
+    kanban_workspace_kind: 'Typ pracovního prostoru',
+    kanban_workspace_path: 'Cesta pracovního prostoru',
+    kanban_workspace_path_placeholder: 'Cesta k pracovnímu prostoru',
+    kanban_workspace_path_required: 'Cesta pracovního prostoru je povinná pro ne-scratch pracovní prostory.',
+    kanban_workspace_scratch: 'Scratch',
+    kanban_workspace_worktree: 'Worktree',
+    linked_files: 'Propojené soubory',
+    login_btn: 'Přihlásit se',
+    login_conn_failed: 'Připojení selhalo',
+    login_invalid_pw: 'Neplatné heslo',
+    login_placeholder: 'Heslo',
+    login_subtitle: 'Zadejte heslo pro pokračování',
+    login_title: 'Přihlášení',
+    logs_auto_refresh: 'Automatická obnova (5s)',
+    logs_copied: 'Logy zkopírovány',
+    logs_copy_all: 'Kopírovat vše',
+    logs_empty: 'Zatím žádné logy.',
+    logs_file: 'Soubor',
+    logs_filter_active: 'zobrazeno (filtr aktivní)',
+    logs_load_failed: 'Načtení logů selhalo',
+    logs_loading: 'Načítám logy…',
+    logs_no_mtime: 'ještě nepsáno',
+    logs_severity: 'Závažnost',
+    logs_severity_all: 'Všechny',
+    logs_severity_errors: 'Chyby',
+    logs_severity_warnings: 'Varování+',
+    logs_status_idle: 'Zvolte soubor logu pro zobrazení posledních řádků.',
+    logs_tail: 'Tail',
+    logs_title: 'Logy',
+    logs_truncated_hint: 'Zobrazen konec velkého log souboru; starší bajty byly přeskočeny pro udržení paměti.',
+    logs_wrap: 'Zalamovat řádky',
+    manage_profiles: 'Spravovat profily',
+    markdown_table_filter: 'Filtrovat tabulku',
+    markdown_table_sort_column: 'Řadit sloupec',
+    mcp_disable_server: 'Zakázat tento MCP server',
+    mcp_enable_server: 'Povolit tento MCP server',
+    media_audio_label: 'Zvuk',
+    media_download: 'Stáhnout',
+    media_svg_label: 'Diagram',
+    media_video_label: 'Video',
+    memory_notes_label: 'paměť (poznámky)',
+    memory_saved: 'Paměť uložena',
+    my_notes: 'Moje poznámky',
+    name_required: 'Název je povinný',
+    never: 'nikdy',
+    new_conversation: 'Nová konverzace',
+    new_file: 'Nový soubor',
+    new_file_prompt: 'Nový název souboru (např. notes.md):',
+    new_file_prompt_title: 'Nový název souboru v {0}:',
+    new_folder: 'Nová složka',
+    new_folder_prompt: 'Nový název složky:',
+    new_folder_prompt_title: 'Nový název složky v {0}:',
+    new_job: 'Nová úloha',
+    new_profile: 'Nový profil',
+    new_skill: 'Nová dovednost',
+    no_notes_yet: 'Zatím žádné poznámky.',
+    no_profile_yet: 'Zatím žádný profil.',
+    no_soul_yet: 'Zatím není definována žádná duše.',
+    not_available: 'Nedostupné',
+    notifications_denied: 'Notifikace jsou v tomto prohlížeči blokovány. Povolte je v nastavení prohlížeče.',
+    notifications_enable_btn: 'Povolit notifikace',
+    notifications_enabled_toast: 'Notifikace povoleny.',
+    notifications_permission_status: (status) => `Povolení: ${status}`,
+    notifications_test_btn: 'Odeslat test',
+    notifications_unsupported: 'Notifikace nejsou v tomto prohlížeči podporovány.',
+    oauth_codex_error: 'OAuth přihlášení selhalo',
+    oauth_codex_expired: 'Kód vypršel, prosím zkuste znovu',
+    oauth_codex_polling: 'Čekám na autorizaci…',
+    oauth_codex_step1: 'Krok 1: Navštivte tuto URL a zadejte kód',
+    oauth_codex_step2: 'Krok 2: Zadejte tento kód na stránce',
+    oauth_codex_success: 'Codex OAuth přihlášení úspěšné!',
+    oauth_login_codex: 'Přihlásit se přes Codex (ChatGPT)',
+    onboarding_api_key_help_keyless: 'Většina instalací LM Studio / Ollama / vLLM běží bez klíče — nechte prázdné pokud váš server nevyžaduje autentifikaci. Pro ověření použijte tlačítko Test připojení.',
+    onboarding_api_key_help_prefix: 'Uloženo jako tajemství v souboru .env vašeho Herma pomocí',
+    onboarding_api_key_label: 'API klíč',
+    onboarding_api_key_label_optional: 'API klíč (volitelný)',
+    onboarding_api_key_placeholder: 'Nechte prázdné pro zachování existujícího uloženého klíče',
+    onboarding_api_key_placeholder_optional: 'Nechte prázdné pro servery bez klíče',
+    onboarding_back: 'Zpět',
+    onboarding_badge: 'PRVNÍ SPUŠTĚNÍ',
+    onboarding_base_url_help: 'Použijte toto pro OpenAI-kompatibilní routery, samostatně hostované servery, LiteLLM, Ollama, LM Studio, vLLM nebo podobné koncové body.',
+    onboarding_base_url_label: 'Základní URL',
+    onboarding_base_url_placeholder: 'https://vas-endpoint.example/v1',
+    onboarding_check_agent: 'Hermes Agent',
+    onboarding_check_agent_missing: 'Chybí nebo částečně importovatelný',
+    onboarding_check_agent_ready: 'Detekován a importovatelný',
+    onboarding_check_password: 'Heslo',
+    onboarding_check_password_disabled: 'Ještě nepovoleno',
+    onboarding_check_password_enabled: 'Již povoleno',
+    onboarding_check_provider: 'Konfigurace poskytovatele',
+    onboarding_check_provider_partial: 'Uloženo ale neúplné',
+    onboarding_check_provider_pending: 'Vyžaduje ověření',
+    onboarding_check_provider_ready: 'Připraveno k chatu',
+    onboarding_config_file: 'Konfigurační soubor:',
+    onboarding_continue: 'Pokračovat',
+    onboarding_current_provider: 'Aktuální nastavení:',
+    onboarding_custom_model_help: 'Pro vlastní koncové body zadejte přesné ID modelu, které váš server očekává.',
+    onboarding_custom_model_placeholder: 'název-vašeho-modelu',
+    onboarding_env_file: 'Soubor .env:',
+    onboarding_error_base_url_required: 'Základní URL je povinná pro vlastní koncové body.',
+    onboarding_error_choose_model: 'Před pokračováním zvolte model.',
+    onboarding_error_choose_workspace: 'Před pokračováním zvolte pracovní prostor.',
+    onboarding_error_model_required: 'Model je povinný.',
+    onboarding_error_probe_failed: 'Nepodařilo se ověřit nakonfigurovanou základní URL.',
+    onboarding_error_provider_required: 'Před pokračováním zvolte režim nastavení.',
+    onboarding_error_workspace_required: 'Pracovní prostor je povinný.',
+    onboarding_finish_help: 'Dokončení ukládá <code>onboarding_completed</code> do nastavení a přenese vás do normální aplikace.',
+    onboarding_lead: 'Rychlé vedené nastavení ověří Herma, uloží skutečnou konfiguraci poskytovatele, zvolí pracovní prostor a model a volitelně ochrání aplikaci heslem.',
+    onboarding_missing_imports: 'Chybějící importy:',
+    onboarding_model_label: 'Výchozí model',
+    onboarding_not_set: 'Nenastaveno',
+    onboarding_notice_finish: 'Nastavení můžete znovu otevřít později a změnit cokoliv.',
+    onboarding_notice_password_enabled: 'Heslo je již nakonfigurováno. Zadejte nové pouze pokud ho chcete nahradit.',
+    onboarding_notice_password_recommended: 'Volitelné ale doporučené pokud budete vystavovat UI mimo localhost.',
+    onboarding_notice_setup_already_ready: 'Je detekováno funkční nastavení poskytovatele Herma. Můžete ho zachovat nebo nahradit zde.',
+    onboarding_notice_setup_required: 'Zvolte jednoduchou cestu poskytovatele zde. Pokročilé OAuth toky stále patří do CLI Herma.',
+    onboarding_notice_system_ready: 'Hermes Agent se jeví jako dosažitelný z Web UI.',
+    onboarding_notice_system_unavailable: 'Hermes Agent ještě není plně dostupný. Bootstrap ho může nainstalovat, ale nastavení poskytovatele může stále vyžadovat terminál.',
+    onboarding_notice_workspace: 'Tyto hodnoty znovu používají stejná nastavení API jako normální aplikace.',
+    onboarding_oauth_provider_not_ready_body: 'Tato instance je nakonfigurována používat <strong>{provider}</strong>, který používá OAuth namísto API klíče. Spusťte <code>hermes auth</code> nebo <code>hermes model</code> v terminálu pro autentifikaci a poté znovu načtěte Web UI.',
+    onboarding_oauth_provider_not_ready_title: 'OAuth poskytovatel ještě není autentifikován',
+    onboarding_oauth_provider_ready_body: 'Tato instance je nakonfigurována používat OAuth poskytovatele (<strong>{provider}</strong>), který byl nastaven přes Hermes CLI. Žádný API klíč zde není potřeba — klikněte Pokračovat pro dokončení nastavení.',
+    onboarding_oauth_provider_ready_title: 'Poskytovatel již autentifikován',
+    onboarding_oauth_switch_hint: 'Nebo zvolte jiného poskytovatele níže pro přepnutí na nastavení s API klíčem:',
+    onboarding_open: 'Otevřít Herma',
+    onboarding_password_help: 'Hesla jsou ukládána přes existující API nastavení a hashovaná na serveru.',
+    onboarding_password_keep_existing: 'Zachovat aktuální heslo',
+    onboarding_password_label: 'Heslo (volitelné)',
+    onboarding_password_placeholder: 'Nechte prázdné pro přeskočení',
+    onboarding_password_remains_disabled: 'Zůstane zakázáno',
+    onboarding_password_skipped: 'Přeskočeno prozatím',
+    onboarding_password_will_enable: 'Bude povoleno',
+    onboarding_password_will_replace: 'Bude nahrazeno',
+    onboarding_probe_error_connect_refused: 'Připojení odmítnuto — server pravděpodobně neběží na této adrese. Z Dockeru zkuste IP hostitele místo localhostu.',
+    onboarding_probe_error_dns: 'Nelze přeložit hostitele. Zkontrolujte URL nebo použijte IP adresu hostitele.',
+    onboarding_probe_error_generic: 'Nelze dosáhnout nakonfigurované základní URL.',
+    onboarding_probe_error_http_4xx: 'Koncový bod vrátil chybu klienta. Zkontrolujte autentifikaci a cestu URL (obvykle končí na /v1).',
+    onboarding_probe_error_http_5xx: 'Koncový bod vrátil chybu serveru. Zkontrolujte logy serveru LM Studio / Ollama.',
+    onboarding_probe_error_invalid_url: 'Základní URL musí začínat http:// nebo https://.',
+    onboarding_probe_error_parse: 'Koncový bod nevrátil seznam modelů v očekávaném tvaru. Ověřte že URL ukazuje na kořen OpenAI-kompatibilního API.',
+    onboarding_probe_error_timeout: 'Koncový bod včas neodpověděl. Zkontrolujte že server běží a URL je správná.',
+    onboarding_probe_error_unreachable: 'Nelze dosáhnout nakonfigurované základní URL.',
+    onboarding_probe_ok: 'Připojeno. Dostupných {n} modelů.',
+    onboarding_probe_probing: 'Testuji připojení…',
+    onboarding_probe_test_button: 'Test připojení',
+    onboarding_provider_label: 'Režim nastavení',
+    onboarding_quick_setup_badge: 'rychlé nastavení',
+    onboarding_skipped: 'Nastavení přeskočeno — používám existující konfiguraci.',
+    onboarding_step_finish_desc: 'Zkontrolujte a vstupte do aplikace.',
+    onboarding_step_finish_title: 'Dokončit',
+    onboarding_step_password_desc: 'Chraňte Web UI před jeho sdílením.',
+    onboarding_step_password_title: 'Volitelné heslo',
+    onboarding_step_setup_desc: 'Uložte minimální konfiguraci poskytovatele Herma.',
+    onboarding_step_setup_title: 'Nastavení poskytovatele',
+    onboarding_step_system_desc: 'Ověřte dostupnost a viditelnost konfigurace agenta Herma.',
+    onboarding_step_system_title: 'Systémová kontrola',
+    onboarding_step_workspace_desc: 'Zvolte výchozí nastavení pro nové relace a chat.',
+    onboarding_step_workspace_title: 'Pracovní prostor + model',
+    onboarding_title: 'Vítejte v Hermes Web UI',
+    onboarding_unknown: 'Neznámý',
+    onboarding_workspace_help: 'Zvolte model který má Hermes používat pro nové chaty po dokončení nastavení.',
+    onboarding_workspace_label: 'Pracovní prostor',
+    onboarding_workspace_or_path: 'Nebo zadejte cestu pracovního prostoru',
+    onboarding_workspace_placeholder: '/home/you/workspace',
+    open_in_browser: 'Otevřít v prohlížeči',
+    outline_empty: 'Zatím žádné otázky.',
+    outline_loading: 'Načítám…',
+    outline_title: 'Osnova',
+    password_env_var_locked: 'Proměnná prostředí HERMES_WEBUI_PASSWORD je aktuálně nastavena a má přednost. Zrušte ji a restartujte server pro správu hesla odtud.',
+    password_env_var_locked_placeholder: 'Uzamčeno: je nastavena proměnná prostředí HERMES_WEBUI_PASSWORD',
+    password_placeholder: 'Zadejte nové heslo…',
+    personal_memory: 'Osobní paměť',
+    plugins_active_provider: 'Aktivní (poskytovatel)',
+    plugins_disabled: 'Zakázáno',
+    plugins_enable_toggle: 'Povolit',
+    plugins_enabled: 'Povoleno',
+    plugins_load_failed: 'Nepodařilo se načíst pluginy: ',
+    plugins_no_description: 'Nebyl poskytnut žádný popis.',
+    plugins_no_hooks: 'Žádné registrované háčky životního cyklu',
+    plugins_provider_no_hooks: 'Plugin poskytovatele — žádné háčky viditelné pro agenta',
+    plugins_registered_hooks: 'Registrované háčky',
+    plugins_unnamed: 'Nepojmenovaný plugin',
+    profile_active: 'AKTIVNÍ',
+    profile_api_key_label: 'API klíč',
+    profile_api_key_placeholder: 'API klíč (volitelný)',
+    profile_api_keys_configured: 'API klíče nakonfigurovány',
+    profile_base_url_label: 'Základní URL',
+    profile_base_url_placeholder: 'Základní URL (volitelná, např. http://localhost:11434)',
+    profile_base_url_rule: 'Základní URL musí začínat http:// nebo https://',
+    profile_clone_label: 'Klonovat konfiguraci z aktivního profilu',
+    profile_created: (name) => `Profil vytvořen: ${name}`,
+    profile_default_label: '(výchozí)',
+    profile_delete_confirm_message: 'Všechny relace, konfigurace, dovednosti a paměť tohoto profilu budou trvale smazány. Toto nelze vrátit zpět.',
+    profile_delete_confirm_title: (name) => `Smazat profil "${name}"?`,
+    profile_delete_title: 'Smazat tento profil',
+    profile_deleted: (name) => `Profil smazán: ${name}`,
+    profile_gateway_running: 'Gateway běží',
+    profile_gateway_stopped: 'Gateway zastaven',
+    profile_model_hint: 'Zvolte z nakonfigurovaných poskytovatelů a modelů pro tento nový profil.',
+    profile_model_label: 'Model / poskytovatel',
+    profile_model_use_default: 'Použít výchozí nastavení aktivního profilu',
+    profile_name_label: 'Název',
+    profile_name_placeholder: 'Název profilu (malá písmena, a-z 0-9 pomlčky)',
+    profile_name_rule: 'Pouze malá písmena, čísla, pomlčky a podtržítka',
+    profile_no_configuration: 'Bez konfigurace',
+    profile_skill_count: (count) => `${count} dovedností${count === 1 ? '' : 'í'}`,
+    profile_switch_title: 'Přepnout na tento profil',
+    profile_switched: (name) => `Přepnuto na profil: ${name}`,
+    profile_switched_new_conversation: (name) => `Přepnuto na profil: ${name} — zahájena nová konverzace`,
+    profile_use: 'Použít',
+    profiles_empty_sub: 'Zvolte profil agenta z bočního panelu pro zobrazení a úpravu jeho nastavení, nebo vytvořte nový.',
+    profiles_empty_title: 'Zvolte profil',
+    profiles_load_failed: 'Nepodařilo se načíst profily',
+    profiles_no_profiles: 'Nebyly nalezeny žádné profily.',
+    project_name_prompt: 'Název projektu:',
+    provider_category_easy_start: 'Snadný start',
+    provider_category_self_hosted: 'Otevřené / samostatně hostované',
+    provider_category_specialized: 'Specializované',
+    provider_cost_budget_clear: 'Vymazat',
+    provider_cost_budget_label: 'Měsíční rozpočet',
+    provider_cost_budget_pct: '{0}% z rozpočtu ${1} (měsíční tempo)',
+    provider_cost_budget_placeholder: 'např. 50.00',
+    provider_cost_budget_save_failed: 'Nepodařilo se uložit rozpočet',
+    provider_cost_budget_set: 'Nastavit',
+    provider_quota_account_limits_loaded: 'Limity účtu načteny.',
+    provider_quota_active_provider: 'Aktivní poskytovatel',
+    provider_quota_credential_label: 'Pověření {0}',
+    provider_quota_credential_pool: 'Fond pověření',
+    provider_quota_last_checked: 'Naposledy kontrolováno {0}',
+    provider_quota_last_checked_after_refresh: 'Naposledy kontrolováno po obnovení',
+    provider_quota_metric_limit: 'Limit',
+    provider_quota_metric_remaining: 'Zbývající',
+    provider_quota_metric_used: 'Použito',
+    provider_quota_pool_no_windows: 'Nejsou hlášena žádná okna limitů účtu.',
+    provider_quota_pool_plans: 'Plány: {0}',
+    provider_quota_pool_summary_available: '{0}/{1} dostupných',
+    provider_quota_pool_summary_checked: '{0} zkontrolováno',
+    provider_quota_pool_summary_exhausted: '{0} vyčerpáno',
+    provider_quota_pool_summary_failed: '{0} selhalo',
+    provider_quota_refresh_failed: 'Obnovení využití poskytovatele selhalo',
+    provider_quota_refresh_succeeded: 'Využití poskytovatele obnoveno',
+    provider_quota_refresh_title: 'Nyní obnovit limity využití poskytovatele',
+    provider_quota_refresh_usage: 'Obnovit využití',
+    provider_quota_refreshing: 'Obnovování…',
+    provider_quota_resets_meta: 'resetuje {0}',
+    provider_quota_retry_after: 'Zkusit znovu za {0}',
+    provider_quota_session_limit: '5-hodinový limit',
+    provider_quota_status_available: 'dostupné',
+    provider_quota_status_checked: 'zkontrolováno',
+    provider_quota_status_exhausted: 'vyčerpáno',
+    provider_quota_status_failed: 'selhalo',
+    provider_quota_status_invalid_key: 'neplatný klíč',
+    provider_quota_status_no_key: 'bez klíče',
+    provider_quota_status_unavailable: 'nedostupné',
+    provider_quota_status_unsupported: 'nepodporováno',
+    provider_quota_title: 'Kvóta aktivního poskytovatele',
+    provider_quota_unavailable: 'Stav kvóty nedostupný',
+    provider_quota_used_meta: '{0} použito',
+    provider_quota_weekly_limit: 'Týdenní limit',
+    provider_quota_window_fallback: 'Okno',
+    providers_empty: 'Nebyli nalezeni žádní konfigurovatelní poskytovatelé.',
+    providers_enter_key: 'Prosím zadejte API klíč',
+    providers_key_placeholder_new: 'sk-…',
+    providers_key_placeholder_replace: 'Zadejte nový klíč pro nahrazení…',
+    providers_key_removed: 'API klíč odstraněn',
+    providers_key_updated: 'API klíč uložen',
+    providers_models_refreshed: 'Modely obnoveny',
+    providers_oauth_config_yaml_hint: 'Token nakonfigurován přes config.yaml. Pro aktualizaci upravte sekci poskytovatele ve vašem config.yaml nebo spusťte hermes auth.',
+    providers_oauth_hint: 'Autentifikováno přes OAuth. Žádný API klíč není potřeba.',
+    providers_oauth_not_configured_hint: 'Neautentifikováno. Spusťte hermes auth v terminálu pro konfiguraci tohoto poskytovatele.',
+    providers_refresh_models: 'Obnovit modely',
+    providers_refreshing: 'Obnovování…',
+    providers_remove: 'Odebrat',
+    providers_removing: 'Odebírám…',
+    providers_save: 'Uložit',
+    providers_saving: 'Ukládám…',
+    providers_section_meta: 'Spravujte API klíče pro AI poskytovatele. Změny se okamžitě projeví.',
+    providers_section_title: 'Poskytovatelé',
+    providers_status_api_key: 'API klíč',
+    providers_status_configured: 'API klíč nakonfigurován',
+    providers_status_model: 'Model',
+    providers_status_not_configured: 'Bez API klíče',
+    providers_status_not_configured_label: 'Nenakonfigurováno',
+    providers_status_oauth: 'OAuth',
+    providers_tab_title: 'Poskytovatelé',
+    remove_failed: 'Odebrání selhalo: ',
+    remove_title: 'Odebrat',
+    save_skill: 'Uložit dovednost',
+    scheduled_jobs: 'Naplánované úlohy',
+    search: 'Hledat',
+    search_skills: 'Hledat dovednosti...',
+    session_archive: 'Archivovat konverzaci',
+    session_archive_desc: 'Skrýt tuto konverzaci dokud se nezobrazí archivované',
+    session_archive_failed: 'Archivace selhala: ',
+    session_archive_worktree_desc: 'Skrýt tuto konverzaci; zachovat její worktree na disku',
+    session_archived: 'Relace archivována',
+    session_archived_worktree: 'Relace archivována. Worktree zůstává na disku.',
+    session_batch_archive: 'Archivovat',
+    session_batch_archive_confirm: 'Archivovat {0} konverzací?',
+    session_batch_archive_worktree_confirm: 'Archivovat {0} konverzací? {1} konverzace s worktree si ponechají své adresáře worktree na disku.',
+    session_batch_delete: 'Smazat',
+    session_batch_delete_confirm: 'Smazat {0} konverzací?',
+    session_batch_delete_worktree_confirm: 'Smazat {0} konverzací? {1} konverzace s worktree zanechají své adresáře worktree na disku.',
+    session_batch_move: 'Přesunout do projektu',
+    session_child_toggle_hint: '{0} — podřízené konverzace vytvořené z této relace. Klikněte pro zobrazení nebo skrytí.',
+    session_delete: 'Smazat konverzaci',
+    session_delete_confirm: 'Smazat tuto konverzaci?',
+    session_delete_desc: 'Trvale odstranit tuto konverzaci',
+    session_delete_worktree_confirm: (path) => `Smazat tuto konverzaci? Worktree na ${path} zůstane na disku.`,
+    session_delete_worktree_desc: 'Smazat pouze WebUI konverzaci; zachovat worktree na disku',
+    session_deleted: 'Konverzace smazána',
+    session_deleted_worktree: 'Konverzace smazána. Worktree zůstává na disku.',
+    session_deselect_all: 'Odznačit vše',
+    session_duplicate: 'Duplikovat konverzaci',
+    session_duplicate_desc: 'Vytvořit kopii se stejným pracovním prostorem a modelem',
+    session_duplicate_failed: 'Duplikace selhala: ',
+    session_duplicated: 'Relace duplikována',
+    session_export_html: 'Exportovat jako HTML',
+    session_export_html_desc: 'Stáhnout tuto konverzaci jako samostatný HTML soubor',
+    session_hidden: 'Relace skryta ze seznamu',
+    session_hide_external: 'Skrýt ze seznamu',
+    session_hide_external_desc: 'Skrýt tuto importovanou relaci z WebUI bez mazání zdrojové historie.',
+    session_lineage_segment_open: 'Otevřít segment linie',
+    session_lineage_segment_untitled: 'Neoznačený segment',
+    session_lineage_static_hint: '{0} — dřívější kontextové tahy jsou zde sbaleny.',
+    session_lineage_toggle_hint: '{0} — dřívější kontextové tahy jsou zde sbaleny. Klikněte pro zobrazení nebo skrytí.',
+    session_link_copied: 'Odkaz na konverzaci zkopírován do schránky',
+    session_link_copy_failed: 'Kopírování odkazu na konverzaci selhalo: ',
+    session_meta_children: (n) => `${n} potomek${n === 1 ? '' : 'ci'}`,
+    session_meta_messages: (n) => `${n} zpráv${n === 1 ? 'a' : ''}`,
+    session_meta_segments: (n) => `${n} předchozích tah${n === 1 ? '' : 'ů'}`,
+    session_move_project: 'Přesunout do projektu',
+    session_move_project_desc_has: 'Změnit projekt této konverzace',
+    session_move_project_desc_none: 'Přiřadit projekt této konverzaci',
+    session_no_selection: 'Nejsou vybrány žádné konverzace',
+    session_pin: 'Připnout konverzaci',
+    session_pin_desc: 'Ponechat tuto konverzaci nahoře',
+    session_pin_failed: 'Připnutí selhalo: ',
+    session_readonly_title_hint: 'Importovaná relace pouze pro čtení — {0}',
+    session_restore: 'Obnovit konverzaci',
+    session_restore_desc: 'Vrátit tuto konverzaci zpět do hlavního seznamu',
+    session_restored: 'Relace obnovena',
+    session_select_all: 'Vybrat vše',
+    session_select_mode: 'Vybrat',
+    session_select_mode_desc: 'Vybrat konverzace pro hromadnou správu',
+    session_selected_count: '{0} vybráno',
+    session_stop_response: 'Zastavit odpověď',
+    session_stop_response_desc: 'Zrušit běžící odpověď této konverzace',
+    session_time_bucket_last_week: 'Minulý týden',
+    session_time_bucket_older: 'Starší',
+    session_time_bucket_this_week: 'Tento týden',
+    session_time_bucket_today: 'Dnes',
+    session_time_bucket_yesterday: 'Včera',
+    session_time_days_ago: (n) => `${n} d`,
+    session_time_hours_ago: (n) => `${n} h`,
+    session_time_last_week: '1t',
+    session_time_minutes_ago: (n) => `${n} min`,
+    session_time_unknown: 'Neznámý',
+    session_unpin: 'Odpnout konverzaci',
+    session_unpin_desc: 'Odebrat z připnutých',
+    session_worktree_remove: 'Odebrat worktree',
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} nepushnutých commitů bude ztraceno.`,
+    session_worktree_remove_confirm: (path) => `Odebrat git worktree z disku?\n\nCesta: ${path}\n\nToto smaže celý adresář worktree. Data relace zůstanou ve WebUI.`,
+    session_worktree_remove_confirm_label: 'Odebrat',
+    session_worktree_remove_desc: (path) => `Smazat git worktree na ${path} z disku`,
+    session_worktree_remove_dirty_warning: 'UPOZORNĚNÍ: Tento worktree má necommitované změny které budou ztraceny.',
+    session_worktree_remove_failed: 'Odebrání worktree selhalo: ',
+    session_worktree_remove_locked_by_stream: 'Nelze odebrat — aktivní streamovací relace používá tento worktree.',
+    session_worktree_remove_locked_by_terminal: 'Nelze odebrat — aktivní terminálová relace používá tento worktree.',
+    session_worktree_remove_not_exists: (path) => `Worktree na ${path} již neexistuje na disku.`,
+    session_worktree_remove_status_failed: 'Čtení stavu worktree selhalo: ',
+    session_worktree_remove_unsafe_blocked: 'Vyřešte lokální změny nebo nepushnuté commity před odebráním tohoto worktree.',
+    session_worktree_remove_untracked_warning: (count) => `${count} nesledovaných souborů bude trvale smazáno.`,
+    session_worktree_removed: 'Worktree odebrán.',
+    settings_auto_title_refresh_10: 'Každých 10 výměn',
+    settings_auto_title_refresh_20: 'Každých 20 výměn',
+    settings_auto_title_refresh_5: 'Každých 5 výměn',
+    settings_auto_title_refresh_off: 'Vypnuto',
+    settings_autosave_failed: 'Uložení selhalo',
+    settings_autosave_retry: 'Zkusit znovu',
+    settings_autosave_saved: 'Uloženo',
+    settings_autosave_saving: 'Ukládání…',
+    settings_aux_advanced_api_key: 'Přepsání API klíče',
+    settings_aux_advanced_api_key_clear: 'Vymazat existující přepsání API klíče',
+    settings_aux_advanced_api_key_empty_hint: 'Nechte prázdné pro použití pověření poskytovatele/výchozích.',
+    settings_aux_advanced_api_key_set_hint: 'API klíč je nastaven. Nechte prázdné pro jeho zachování, nebo použijte vymazání pro jeho odstranění.',
+    settings_aux_advanced_base_url: 'Základní URL',
+    settings_aux_advanced_base_url_desc: 'Volitelné přepsání koncového bodu poskytovatele.',
+    settings_aux_advanced_button_aria: 'Pokročilé možnosti pro {task}',
+    settings_aux_advanced_button_title: 'Pokročilé možnosti',
+    settings_aux_advanced_download_timeout: 'Časový limit stahování v sekundách',
+    settings_aux_advanced_download_timeout_desc: 'Relevantní pouze pro úlohy stahující média/obsah, např. vision. Prázdné používá výchozí.',
+    settings_aux_advanced_extra_body: 'Extra tělo JSON',
+    settings_aux_advanced_extra_body_desc: 'Volitelný JSON objekt sloučený do těla požadavku modelu.',
+    settings_aux_advanced_extra_body_invalid_json: 'Extra body musí být platný JSON',
+    settings_aux_advanced_extra_body_object_required: 'Extra body musí být JSON objekt',
+    settings_aux_advanced_max_concurrency: 'Maximální souběžnost',
+    settings_aux_advanced_max_concurrency_desc: 'Volitelný limit souběžnosti na úlohu. Prázdné používá výchozí.',
+    settings_aux_advanced_save: 'Uložit možnosti',
+    settings_aux_advanced_save_failed: 'Nepodařilo se uložit pomocné možnosti',
+    settings_aux_advanced_saved: 'Pomocné možnosti uloženy',
+    settings_aux_advanced_subtitle: 'Pokročilá konfigurace pro pomocný.',
+    settings_aux_advanced_timeout: 'Časový limit v sekundách',
+    settings_aux_advanced_timeout_desc: 'Časový limit požadavku pro tuto pomocnou úlohu. Prázdné používá výchozí Hermes.',
+    settings_aux_advanced_title: 'Možnosti {task}',
+    settings_aux_load_failed: 'Nepodařilo se načíst nastavení pomocného modelu. Ujistěte se že API agenta je dostupné.',
+    settings_aux_loading: 'Načítám pomocné modely…',
+    settings_aux_model_auto: 'auto (použít výchozí nastavení poskytovatele)',
+    settings_aux_model_custom: 'Vlastní model…',
+    settings_aux_model_custom_prompt: 'Zadejte ID modelu:',
+    settings_aux_no_changes: 'Žádné změny k aplikování',
+    settings_aux_provider_auto: 'použít hlavní model',
+    settings_aux_reset_confirm_msg: 'Toto nastaví všechny pomocné úlohy na auto (použít hlavní model).',
+    settings_aux_reset_confirm_title: 'Resetovat pomocné modely?',
+    settings_aux_reset_done: 'Pomocné modely resetovány na auto',
+    settings_aux_save_failed: 'Nepodařilo se uložit pomocný model',
+    settings_aux_saved: 'Pomocné modely aktualizovány',
+    settings_aux_task_approval: 'Schvalování',
+    settings_aux_task_approval_desc: 'chytré schvalování příkazů',
+    settings_aux_task_compression: 'Komprese',
+    settings_aux_task_compression_desc: 'sumarizace kontextu',
+    settings_aux_task_curator: 'Kurátor',
+    settings_aux_task_curator_desc: 'revize použití dovedností',
+    settings_aux_task_kanban_decomposer: 'Kanban dekompozitor',
+    settings_aux_task_kanban_decomposer_desc: 'dekompozice úkolů',
+    settings_aux_task_mcp: 'MCP',
+    settings_aux_task_mcp_desc: 'uvažování o nástrojích MCP',
+    settings_aux_task_profile_describer: 'Profil popisovač',
+    settings_aux_task_profile_describer_desc: 'souhrny profilů',
+    settings_aux_task_session_search: 'Hledání relací',
+    settings_aux_task_session_search_desc: 'připomenutí minulých konverzací',
+    settings_aux_task_skills_hub: 'Centrum dovedností',
+    settings_aux_task_skills_hub_desc: 'hledání/instalace dovedností',
+    settings_aux_task_title_generation: 'Generování názvů',
+    settings_aux_task_title_generation_desc: 'názvy relací',
+    settings_aux_task_triage_specifier: 'Triáž specifikátor',
+    settings_aux_task_triage_specifier_desc: 'specifikace triáže problémů/úkolů',
+    settings_aux_task_vision: 'Vidění',
+    settings_aux_task_vision_desc: 'analýza obrázků/screenshotů',
+    settings_aux_task_web_extract: 'Extrakce webu',
+    settings_aux_task_web_extract_desc: 'sumarizace webových stránek',
+    settings_btn_apply_aux_models: 'Aplikovat změny',
+    settings_btn_reset_aux_models: 'Resetovat vše na auto',
+    settings_btn_shutdown: 'Zastavit server',
+    settings_check_now: 'Zkontrolovat nyní',
+    settings_checking: 'Kontroluji…',
+    settings_dashboard_mode_always: 'Vždy zobrazit',
+    settings_dashboard_mode_auto: 'Automatická detekce',
+    settings_dashboard_mode_never: 'Nikdy nezobrazovat',
+    settings_dashboard_save: 'Uložit nastavení dashboard odkazu',
+    settings_default_message_mode_interrupt: 'Přerušit aktuální tah',
+    settings_default_message_mode_queue: 'Zařadit navazující zprávu',
+    settings_default_message_mode_steer: 'Steer (mezitahová oprava)',
+    settings_desc_api_redact: 'Uživatelé samostatně hostované instance mohou zakázat pro transparentnost (nedoporučeno pro sdílené instance).',
+    settings_desc_auto_scroll_follow: 'Když povoleno, zobrazení se posouvá dolů jak nové tokeny přicházejí. Když zakázáno, pozici posouvání ovládáte manuálně.',
+    settings_desc_auto_title_refresh: 'Automaticky regeneruje název relace na základě poslední výměny, udržuje ho relevantní jak konverzace pokračuje. Vyžaduje aby byl nakonfigurován LLM model pro generování názvů.',
+    settings_desc_auxiliary_models: 'Směrování vedlejších úloh pro vision, kompresi, generování názvů atd. "Auto" používá váš hlavní chatovací model.',
+    settings_desc_bot_name: 'Použito pouze pro výchozí profil. Ostatní profily používají vlastní názvy profilů.',
+    settings_desc_chat_activity_display_mode: 'Kompaktní Worklog seskupuje podpůrnou aktivitu do tichého souhrnu. Transparentní Stream zachovává každou událost přemýšlení/nástroje jako vlastní chronologicky rozbalitelný řádek.',
+    settings_desc_check_updates: 'Zobrazit banner když jsou dostupné novější verze WebUI nebo Agenta. Spouští periodické git fetch na pozadí.',
+    settings_desc_claude_code_sessions: 'Zobrazit importované relace Claude Code v bočním panelu, nebo je skrýt při zachování ostatních externích relací viditelných.',
+    settings_desc_composer_controls: 'Přepínat které ovládací prvky jsou zobrazeny v zápatí chatu. Přetáhněte čipy pro změnu pořadí každé skupiny zápatí.',
+    settings_desc_composer_situational_controls: 'Tyto ovládací prvky se ne vždy zobrazí, v závislosti na viewportu, režimu nebo stavu runtime. Stále je můžete vypnout pokud je to potřeba.',
+    settings_desc_conversation_outline: 'Zobrazit seznam otázek uživatele v aktuální konverzaci (pouze desktop). Standardně vypnuto.',
+    settings_desc_cron_sessions: 'Zobrazit výstup cron úloh jako konverzace v bočním panelu. Aktivní pouze když jsou povoleny externí relace. Standardně vypnuto; úlohy s vysokou frekvencí mohou zaplavit boční panel.',
+    settings_desc_dashboard_mode: 'Zobrazit odkaz navigačního pruhu když je oficiální hermes dashboard dosažitelný. Veřejné reverse-proxy URL jsou ukládány jako odkazy pouze v prohlížeči a nikdy nejsou kontrolovány serverem.',
+    settings_desc_default_message_mode: 'Řídí co se stane když odešlete zprávu zatímco agent běží. Fronta čeká; Přerušení ruší a začíná novou; Steer vkládá opravu mezitah bez přerušení. Pokud Steer není dostupný, návrh je obnoven pro výběr další akce.',
+    settings_desc_external_sessions: 'Zobrazit konverzace z CLI, Telegramu, Discordu, Slacku a dalších kanálů v seznamu relací. Klikněte pro import a pokračování.',
+    settings_desc_gateway_status: 'Stav Hermes gateway (Telegram, Discord, Slack atd.)',
+    settings_desc_hide_suggestions: 'Skrýt tři výchozí tlačítka návrhů na prázdné obrazovce nového chatu pro vyhnutí se náhodným klepnutím.',
+    settings_desc_ignore_agent_updates: 'Zachovat kontroly aktualizací WebUI zapnuté, ale skrýt oznámení aktualizací Agenta a přeskočit fetchování aktualizací Agenta.',
+    settings_desc_large_text_paste_as_attachment: 'Když povoleno, dlouhý vložený text se stane přílohou .md místo vyplnění kompozitoru.',
+    settings_desc_notifications: 'Zobrazit systémovou notifikaci když se odpověď dokončí zatímco je aplikace na pozadí.',
+    settings_desc_password: 'Zadejte nové heslo pro nastavení nebo změnu. Nechte prázdné pro zachování aktuálního nastavení.',
+    settings_desc_pinned_limit: 'Maximální počet aktivních konverzací které mohou být připnuty v bočním panelu. Výchozí je 3.',
+    settings_desc_previous_messaging_sessions: 'Zobrazit starší Discord, Telegram, Slack a Weixin relace které byly nahrazeny resetem nebo kompresí.',
+    settings_desc_project_quick_create: 'Když povoleno, každý čip projektu v bočním panelu získá tlačítko + pro zahájení konverzace v tomto projektu.',
+    settings_desc_quota_chip: 'Zobrazuje indikátor zbývající kvóty (např. zůstatek kreditu OpenRouter) v zápatí kompozitoru. Standardně vypnuto. Viditelné pouze na širokých displejích (>=1400px) když povoleno, pro zachování přehlednosti kompozitoru na šířce notebooku a standardního desktopu.',
+    settings_desc_raw_audio: 'Nahrávat a odesílat původní audio soubor agentovi místo prvního převodu na text. Agent ho pak může přepsat nebo zpracovat (emoce, pozadí, vlastní STT). Podobně jako hlasové zprávy na Telegramu.',
+    settings_desc_render_user_markdown: 'Když povoleno, tučné, kurzíva, odkazy a další markdown ve vašich vlastních zprávách jsou vykresleny. Standardně vypnuto; ohraničené bloky kódu a matematika jsou vždy vykresleny bez ohledu na toto nastavení.',
+    settings_desc_session_endless_scroll: 'Když povoleno, starší zprávy se načítají automaticky při posouvání nahoru. Když zakázáno, použijte tlačítko starších zpráv.',
+    settings_desc_session_jump_buttons: 'Zobrazit plovoucí tlačítka Spustit a Konec při čtení dlouhých historií relací.',
+    settings_desc_show_titlebar_profile: 'Když povoleno, přepínač profilů se objeví v levém horním záhlaví aplikace pro změnu profilů z jakékoliv karty. Standardně vypnuto; zápatí kompozitoru vždy obsahuje přepínač profilů bez ohledu na toto nastavení.',
+    settings_desc_shutdown_after_cmd: ' nebo nativní aplikace) před tím než je WebUI znovu dosažitelný.',
+    settings_desc_shutdown_before_cmd: 'Řízeně zastaví lokální WebUI server. Užitečné pokud jste spustili přes ',
+    settings_desc_shutdown_between_cmds: ' a chcete zastavit bez přepnutí do terminálu. Budete muset znovu spustit server (',
+    settings_desc_sidebar_density: 'Řídí kolik metadat seznam relací zobrazuje v levém bočním panelu.',
+    settings_desc_sound: 'Přehrát zvuk když asistent dokončí odpověď.',
+    settings_desc_structured_code: 'Když je vybráno Auto, JSON/YAML bloky s alespoň tímto počtem řádků se otevřou ve Stromovém zobrazení. Strom vždy otevře strukturovanou prohlížeč; Zdroj zachovává zvýrazněný text. Stále můžete přepínat Strom/Zdroj na každém bloku.',
+    settings_desc_sync_insights: 'Zrcadlí využití tokenů WebUI do state.db takže hermes /insights zahrnuje data relace prohlížeče. Standardně vypnuto.',
+    settings_desc_tab_visibility: 'Zvolte které karty se zobrazí v bočním panelu a liště. Přetáhněte čipy pro změnu pořadí. Chat a Nastavení jsou vždy viditelné.',
+    settings_desc_terminal_auto_expand: 'Automaticky rozbalit sbalený terminálový panel když běžící příkaz emituje nový výstup.',
+    settings_desc_token_speed: 'Zobrazuje tokeny za sekundu v záhlavích zpráv asistenta během streamování a po dokončení odpovědi. Standardně vypnuto.',
+    settings_desc_token_usage: 'Zobrazuje počet vstupních/výstupních tokenů pod každou odpovědí asistenta. Také přepínáno s /usage.',
+    settings_desc_tts: 'Zobrazit tlačítko reproduktoru na každé zprávě asistenta pro přečtení nahlas pomocí syntetizátoru řeči vašeho prohlížeče.',
+    settings_desc_tts_auto_read: 'Automaticky číst každou novou odpověď asistenta když se dokončí. Pozastaví když začnete psát.',
+    settings_desc_tts_engine: 'Zvolte engine řeči. Edge TTS používá Microsoft neurální hlasy přes server.',
+    settings_desc_tts_voice: 'Preferovaný hlas. Naplněno z dostupných hlasů vašeho prohlížeče.',
+    settings_desc_virtualize_transcript: 'Experimentální. Vykresluje pouze viditelnou část velmi dlouhých chat transcriptů (přes 80 zpráv) pro urychlení posouvání. Standardně vypnuto protože to může způsobit blikání při posouvání na dlouhých relacích s velkými bloky volání nástrojů. Zapněte to pro vyzkoušení; nechte vypnuté pro vykreslení celého transcriptu najednou (a tak vyhledávání prohlížeče (Ctrl+F) odpovídá celé konverzaci).',
+    settings_desc_voice_mode: 'Zobrazit tlačítko hlasového režimu (audio vlna) vedle mikrofonu pro diktování. Umožňuje mluvit přirozeně — Hermes automaticky odesílá po pauze a čte odpovědi nahlas. Vyžaduje prohlížeč který podporuje rozpoznávání řeči i TTS.',
+    settings_desc_webhook_sessions: 'Zobrazit webhook běhy jako konverzace v bočním panelu. Aktivní pouze když jsou povoleny externí relace. Standardně vypnuto; vysokoobjemové trasy mohou zaplavit boční panel.',
+    settings_desc_whats_new_summary: 'Mění akci Co je nového z otevření raw diff první na generování krátkého lidsky čitelného souhrnu. Regulární srovnání diff zůstává dostupné po souhrnu.',
+    settings_desc_worklog_details_expanded_default: 'Když povoleno, detaily Worklog se začínají rozbalené tak aby byly viditelné nástroje, přemýšlení a karty pokroku bez dalšího kliknutí. Když vypnuto, detaily zůstávají sbalené standardně; manuální volby sbalení/rozbalení na úroveň tahu stále vyhrávají.',
+    settings_desc_workspace_panel_open: 'Když povoleno, panel pracovního prostoru / prohlížeč souborů se otevírá automaticky s každou novou relací. Stále ho můžete kdykoliv manuálně zavřít.',
+    settings_desc_workspace_todos_tab: 'Když povoleno, záložka Úkoly se objeví v panelu pracovního prostoru. Panel Úkoly v bočním panelu zůstává dostupný.',
+    settings_dropdown_appearance: 'Vzhled',
+    settings_dropdown_conversation: 'Konverzace',
+    settings_dropdown_preferences: 'Předvolby',
+    settings_dropdown_providers: 'Poskytovatelé',
+    settings_dropdown_system: 'Systém',
+    settings_extensions_diagnostics_tab: 'Diagnostika',
+    settings_extensions_gallery_empty: 'V registru nebyla nalezena žádná rozšíření.',
+    settings_extensions_gallery_error: 'Načtení galerie selhalo.',
+    settings_extensions_gallery_loading: 'Načítám galerii…',
+    settings_extensions_gallery_tab: 'Galerie',
+    settings_extensions_installed_tab: 'Instalované',
+    settings_heading_subtitle: 'Předvolby, nástroje konverzace a systémové ovládací prvky.',
+    settings_heading_title: 'Ovládací centrum',
+    settings_help_docs_desc: 'Průvodci, referenční dokumentace konfigurace a kompletní README Hermes WebUI.',
+    settings_help_docs_label: 'Dokumentace',
+    settings_help_docs_link: 'Otevřít dokumentaci',
+    settings_help_issue_desc: 'Hledat existující zprávy nebo otevřít novou na GitHubu.',
+    settings_help_issue_label: 'Máte problém?',
+    settings_help_issue_link: 'Otevřít GitHub Issues',
+    settings_help_meta: 'Zdroje a podpora pro Hermes WebUI.',
+    settings_label_api_redact: 'Redakce citlivých dat v odpovědích API',
+    settings_label_auto_scroll_follow: 'Automatické sledování nového obsahu',
+    settings_label_auto_title_refresh: 'Adaptivní obnovení názvu',
+    settings_label_auxiliary_models: 'Pomocné modely',
+    settings_label_bot_name: 'Výchozí název asistenta',
+    settings_label_chat_activity_display_mode: 'Zobrazení aktivity',
+    settings_label_check_updates: 'Kontrolovat aktualizace',
+    settings_label_claude_code_sessions: 'Zobrazit Claude Code relace',
+    settings_label_composer_controls: 'Ovládací prvky zápatí chatu',
+    settings_label_composer_situational_controls: 'Situační ovládací prvky zápatí',
+    settings_label_conversation_outline: 'Zobrazit osnovu konverzace',
+    settings_label_cron_sessions: 'Zobrazit cron relace',
+    settings_label_dashboard_mode: 'Oficiální Hermes Dashboard',
+    settings_label_default_message_mode: 'Výchozí režim zpráv',
+    settings_label_external_sessions: 'Zobrazit externí relace',
+    settings_label_font_size: 'Velikost písma',
+    settings_label_gateway_status: 'Stav Gateway',
+    settings_label_hide_suggestions: 'Skrýt návrhy nového chatu',
+    settings_label_ignore_agent_updates: 'Ignorovat aktualizace Agenta',
+    settings_label_large_text_paste_as_attachment: 'Přiložit velký vložený text jako soubor',
+    settings_label_notifications: 'Notifikace prohlížeče',
+    settings_label_password: 'Heslo přístupu',
+    settings_label_pinned_limit: 'Limit připnutých konverzací',
+    settings_label_previous_messaging_sessions: 'Zobrazit předchozí messaging relace',
+    settings_label_project_quick_create: 'Zobrazit tlačítka nové konverzace na projekt',
+    settings_label_quota_chip: 'Zobrazit čip kvóty poskytovatele v kompozitoru',
+    settings_label_raw_audio: 'Odesílat surové audio místo přepisu',
+    settings_label_render_user_markdown: 'Vykreslovat markdown ve zprávách uživatele',
+    settings_label_session_endless_scroll: 'Načítat starší zprávy při posouvání nahoru',
+    settings_label_session_jump_buttons: 'Zobrazit tlačítka skoku relace',
+    settings_label_show_titlebar_profile: 'Zobrazit přepínač profilů v záhlaví',
+    settings_label_shutdown: 'Zastavit Hermes WebUI server',
+    settings_label_sidebar_density: 'Hustota bočního panelu',
+    settings_label_skin: 'Vzhled',
+    settings_label_sound: 'Zvuk notifikace',
+    settings_label_structured_code: 'JSON/YAML bloky kódu',
+    settings_label_structured_code_auto_lines: 'Automatický práh řádků',
+    settings_label_sync_insights: 'Synchronizovat do přehledů',
+    settings_label_tab_visibility: 'Záložky bočního panelu',
+    settings_label_terminal_auto_expand: 'Automaticky rozbalit terminál při výstupu',
+    settings_label_token_speed: 'Zobrazit rychlost tokenů (TPS)',
+    settings_label_token_usage: 'Zobrazit využití tokenů',
+    settings_label_tts: 'Text-na-řeč pro odpovědi',
+    settings_label_tts_auto_read: 'Automaticky číst odpovědi nahlas',
+    settings_label_tts_engine: 'TTS engine',
+    settings_label_tts_pitch: 'Výška řeči',
+    settings_label_tts_rate: 'Rychlost řeči',
+    settings_label_tts_voice: 'Hlas',
+    settings_label_virtualize_transcript: 'Virtualizovat dlouhé transcripty (experimentální)',
+    settings_label_voice_mode: 'Tlačítko hands-free hlasového režimu',
+    settings_label_webhook_sessions: 'Zobrazit webhook relace',
+    settings_label_whats_new_summary: 'Shrnout Co je nového s AI',
+    settings_label_worklog_details_expanded_default: 'Automaticky otevírat detaily Worklog',
+    settings_label_workspace_panel_open: 'Ve výchozím stavu otevřít panel pracovního prostoru',
+    settings_label_workspace_todos_tab: 'Zobrazit záložku Úkoly v panelu pracovního prostoru',
+    settings_load_failed: 'Načtení nastavení selhalo: ',
+    settings_main_advanced_button_aria: 'Pokročilé možnosti pro hlavní model',
+    settings_main_advanced_save_failed: 'Nepodařilo se uložit možnosti hlavního modelu',
+    settings_main_advanced_saved: 'Možnosti hlavního modelu uloženy',
+    settings_main_advanced_service_tier: 'Úroveň služby',
+    settings_main_advanced_service_tier_default: 'Výchozí / vypnuto',
+    settings_main_advanced_service_tier_desc: 'Volitelné nastavení požadavku pro poskytovatele rodiny OpenAI.',
+    settings_main_advanced_service_tier_priority: 'Priorita (rychlé)',
+    settings_main_advanced_subtitle: 'Pokročilá konfigurace pro výchozí chatovací model.',
+    settings_main_advanced_title: 'Možnosti hlavního modelu',
+    settings_option_compact_worklog: 'Kompaktní Worklog',
+    settings_option_structured_code_auto: 'Auto: Strom pro dlouhé bloky',
+    settings_option_structured_code_off: 'Zdroj standardně',
+    settings_option_structured_code_on: 'Strom standardně',
+    settings_option_transparent_stream: 'Transparentní Stream',
+    settings_plugins_empty: 'Žádné Hermes pluginy nejsou aktuálně viditelné. Nainstalujte nebo povolte pluginy z Hermes CLI/config pro jejich zobrazení zde.',
+    settings_plugins_meta: 'Zobrazit nainstalované Hermes pluginy a háčky životního cyklu, které registrují. Tento panel je pouze pro čtení.',
+    settings_plugins_title: 'Pluginy',
+    settings_save_btn: 'Uložit nastavení',
+    settings_save_failed: 'Uložení selhalo: ',
+    settings_saved: 'Nastavení uloženo',
+    settings_saved_pw: 'Nastavení uloženo — ochrana heslem povolena a tento prohlížeč zůstává přihlášen',
+    settings_saved_pw_updated: 'Nastavení uloženo — heslo aktualizováno',
+    settings_search_no_results: 'Nenalezena žádná nastavení.',
+    settings_search_placeholder: 'Hledat nastavení…',
+    settings_section_appearance_meta: 'Motiv, barvy a vizuální styl.',
+    settings_section_appearance_title: 'Vzhled',
+    settings_section_conversation_title: 'Konverzace',
+    settings_section_preferences_meta: 'Výchozí nastavení a chování UI pro Hermes Web UI.',
+    settings_section_preferences_title: 'Předvolby',
+    settings_section_system_meta: 'Verze instance a kontroly přístupu.',
+    settings_section_system_title: 'Systém',
+    settings_shutdown_confirm_btn: 'Zastavit',
+    settings_shutdown_confirm_message: 'Zastavit Hermes WebUI server?',
+    settings_shutdown_confirm_title: 'Zastavit Hermes WebUI',
+    settings_shutdown_stopped_message: 'Server zastaven. Tuto záložku můžete zavřít.',
+    settings_sidebar_density_compact: 'Kompaktní',
+    settings_sidebar_density_detailed: 'Detailní',
+    settings_tab_appearance: 'Vzhled',
+    settings_tab_conversation: 'Konverzace',
+    settings_tab_extensions: 'Rozšíření',
+    settings_tab_help: 'Nápověda',
+    settings_tab_plugins: 'Pluginy',
+    settings_tab_preferences: 'Předvolby',
+    settings_tab_system: 'Systém',
+    settings_title: 'Nastavení',
+    settings_unsaved_changes: 'Máte neuložené změny.',
+    settings_up_to_date: 'Aktuální ✓',
+    settings_update_check_failed: 'Kontrola aktualizací selhala',
+    settings_update_no_git: 'Nelze kontrolovat aktualizace (nejde o git checkout)',
+    settings_updates_available: 'Dostupných {count} aktualizací',
+    settings_updates_disabled: 'Kontroly aktualizací zakázány',
+    sign_out: 'Odhlásit se',
+    sign_out_failed: 'Odhlášení selhalo: ',
+    skill_category: 'Kategorie',
+    skill_category_placeholder: 'Volitelná, např. devops',
+    skill_content: 'Obsah SKILL.md',
+    skill_content_placeholder: 'YAML frontmatter + markdown tělo',
+    skill_created: 'Dovednost vytvořena',
+    skill_delete_confirm: 'Smazat dovednost "{0}"?',
+    skill_deleted: 'Dovednost smazána',
+    skill_disabled: 'Zakázáno',
+    skill_enabled: 'Povoleno',
+    skill_file_load_failed: 'Nelze načíst soubor: ',
+    skill_load_failed: 'Nelze načíst dovednost: ',
+    skill_metadata: 'Metadata',
+    skill_name: 'Název',
+    skill_name_required: 'Název dovednosti je povinný',
+    skill_rename_not_supported: 'Přejmenování dovednosti není podporováno. Vytvořte novou dovednost a smažte starou pro přejmenování.',
+    skill_toggle_failed: 'Přepnutí dovednosti selhalo: ',
+    skill_updated: 'Dovednost aktualizována',
+    skills_back_to: 'Zpět na {0}',
+    skills_delete: 'Smazat',
+    skills_edit: 'Upravit',
+    skills_empty_sub: 'Zvolte dovednost z bočního panelu pro zobrazení jejího obsahu, nebo vytvořte novou.',
+    skills_empty_title: 'Zvolte dovednost',
+    skills_no_match: 'Žádné odpovídající dovednosti.',
+    source_active: 'aktivní',
+    source_configured: 'nakonfigurováno',
+    status_completed: 'dokončeno',
+    status_failed: 'selhalo',
+    suggest_files: 'Jaké soubory jsou v tomto pracovním prostoru?',
+    suggest_plan: 'Pomozte mi naplánovat malý projekt.',
+    suggest_schedule: 'Co mám dnes v plánu?',
+    switch_failed: 'Přepnutí selhalo: ',
+    tab_chat: 'Chat',
+    tab_dashboard: 'Hermes Dashboard',
+    tab_insights: 'Přehledy',
+    tab_kanban: 'Kanban',
+    tab_logs: 'Logy',
+    tab_memory: 'Paměť',
+    tab_profiles: 'Profily',
+    tab_settings: 'Nastavení',
+    tab_skills: 'Dovednosti',
+    tab_tasks: 'Úkoly',
+    tab_todos: 'Úkoly',
+    tab_workspaces: 'Prostory',
+    tasks_empty_sub: 'Zvolte úlohu z bočního panelu pro zobrazení jejích detailů a běhů, nebo vytvořte novou.',
+    tasks_empty_title: 'Zvolte naplánovanou úlohu',
+    todos_no_active: 'V této relaci není aktivní seznam úkolů.',
+    tool_target_skill_suffix: 'dovednost',
+    transcript: 'Transkript',
+    tts_listen: 'Poslouchat',
+    tts_not_supported: 'Syntéza řeči není v tomto prohlížeči podporována.',
+    upload_failed: 'Nahrání selhalo: ',
+    upload_too_large: (maxMb, fileMb) => `Soubor je příliš velký (${fileMb} MB). Maximální velikost nahrávání je ${maxMb} MB.`,
+    uploaded: 'Nahráno',
+    uploading: 'Nahrávám…',
+    user_profile: 'Uživatelský profil',
+    view: 'Zobrazit',
+    voice_raw_attached: 'Audio přiloženo. Stiskněte Odeslat nebo napište více.',
+    voice_send_raw: 'Odeslat surové audio',
+    wiki_browse: 'Procházet wiki',
+    wiki_no_pages: 'Nenalezeny žádné wiki stránky',
+    wiki_not_configured: 'Wiki není nakonfigurována',
+    wiki_search_placeholder: 'Hledat stránky...',
+    worklog_thinking: 'Přemýšlím',
+    workspace_add_path_placeholder: 'Přidat cestu pracovního prostoru (např. /home/user/my-project)',
+    workspace_added: 'Pracovní prostor přidán',
+    workspace_already_saved: 'Pracovní prostor již uložen — zvolte ho ze seznamu',
+    workspace_auto_create_folder: 'Vytvořit složku pokud neexistuje',
+    workspace_busy_switch: 'Nelze přepnout pracovní prostor, zatímco agent běží',
+    workspace_choose_path: 'Zvolit cestu pracovního prostoru',
+    workspace_choose_path_meta: 'Přidat ověřenou cestu a přepnout tuto konverzaci',
+    workspace_desc: 'Přidávejte a přepínejte pracovní prostory pro vaše relace.',
+    workspace_drag_hint: 'Přetáhněte pro změnu pořadí',
+    workspace_manage: 'Spravovat pracovní prostory',
+    workspace_manage_meta: 'Otevřít panel Prostory',
+    workspace_name_label: 'Název',
+    workspace_name_placeholder: 'Volitelný přátelský název',
+    workspace_new_title: 'Nový prostor',
+    workspace_not_added: 'Pracovní prostor nebyl přidán',
+    workspace_path_label: 'Cesta',
+    workspace_path_readonly: 'Cesta nemůže být změněna. Pouze přejmenování.',
+    workspace_path_required: 'Cesta je povinná',
+    workspace_paths_validated_hint: 'Cesty jsou ověřovány jako existující adresáře před uložením.',
+    workspace_remove_confirm_message: (path) => `Odebrat "${path}"?`,
+    workspace_remove_confirm_title: 'Odebrat pracovní prostor',
+    workspace_removed: 'Pracovní prostor odebrán',
+    workspace_renamed: 'Pracovní prostor přejmenován',
+    workspace_reorder_failed: 'Změna pořadí selhala',
+    workspace_root: 'kořen pracovního prostoru',
+    workspace_switch_prompt_confirm: 'Přepnout',
+    workspace_switch_prompt_message: 'Zadejte absolutní cestu pracovního prostoru pro přidání a přepnutí této konverzace.',
+    workspace_switch_prompt_placeholder: '/Users/you/project',
+    workspace_switch_prompt_title: 'Přepnout pracovní prostor',
+    workspace_switched_to: (name) => `Přepnuto na ${name}`,
+    workspace_use: 'Použít',
+    workspace_use_title: 'Použít v aktuální relaci',
+    workspaces_empty_sub: 'Zvolte prostor z bočního panelu pro zobrazení jeho souborů a nastavení, nebo přidejte nový.',
+    workspaces_empty_title: 'Zvolte prostor',
+    yolo_disabled: 'YOLO režim VYPNUT',
+    yolo_enabled: '⚡ YOLO režim ZAPNUT — schválení přeskočena pro tuto relaci',
+    yolo_no_session: 'Žádná aktivní relace',
+    yolo_pill_label: 'YOLO',
+    yolo_pill_title_active: 'YOLO režim aktivní — klikněte pro zakázání',
+    approval_btn_always: 'Vždy povolit',
+    approval_btn_always_title: 'Vždy povolit tento vzor příkazu',
+    approval_btn_deny: 'Odmítnout',
+    approval_btn_deny_title: 'Odmítnout — tento příkaz nespouštět',
+    approval_btn_once: 'Povolit jednou',
+    approval_btn_once_title: 'Povolit tento jeden příkaz (Enter)',
+    approval_btn_session: 'Povolit relaci',
+    approval_btn_session_title: 'Povolit tuto relaci konverzace',
+    approval_desc_prefix: 'Byl zjištěn nebezpečný příkaz',
+    approval_gateway_unsupported: 'Schválení vyžadují novější gateway. Upgradujte připojený Hermes gateway.',
+    approval_gateway_unsupported_label: 'Schválení nejsou podporována',
+    approval_heading: 'Požadováno schválení',
+    approval_responding: 'Reakce\u2026',
+    auto_compress_label: 'Automatická komprese',
+    available_commands: 'Dostupné příkazy',
+    available_personalities: 'Dostupné osobnosti:',
+    bg_complete: 'Úkol na pozadí dokončen',
+    bg_failed: 'Úkol na pozadí se nezdařil:',
+    bg_label: 'Výsledek na pozadí:',
+    bg_no_answer: 'Žádná odpověď',
+    bg_running: 'Běží na pozadí...',
+    branch_failed: 'Rozvětvení selhalo: ',
+    branch_forked: 'Rozvětveno do nové relace',
+    btw_asking: 'Kladení vedlejší otázky...',
+    btw_done: 'Vedlejší otázka zodpovězena',
+    btw_failed: 'Vedlejší otázka selhala:',
+    btw_label: 'Vedlejší otázka — není v historii',
+    btw_no_answer: 'Nebyla přijata žádná odpověď.',
+    busy_interrupt_confirm: 'Přerušeno — odeslání nové zprávy',
+    busy_steer_fallback: 'Řízení není k dispozici — návrh byl obnoven',
+    cancel_failed: 'Zrušení selhalo: ',
+    cancel_unavailable: 'Zrušení není k dispozici.',
+    cancelling: 'Rušení\u2026',
+    clarify_heading: 'Zde je zapotřebí vyjasnění.',
+    clarify_hint: 'Vyberte si možnost nebo zadejte svou vlastní odpověď níže.',
+    clarify_input_placeholder: 'Sem napište odpověď',
+    clarify_other: 'Jiné',
+    clarify_responding: 'Reakce\u2026',
+    clarify_send: 'Odeslat',
+    clear: 'Vymazat',
+    cmd_background: 'Spustit výzvu na pozadí',
+    cmd_background_usage: '/background <prompt> — běh paralelně bez blokování',
+    cmd_branch: 'Rozvětvit tuto konverzaci do nové relace',
+    cmd_branch_usage: '/branch [name] — rozvětvit konverzaci (volitelně s názvem)',
+    cmd_btw: 'Položit vedlejší otázku (pomíjivá)',
+    cmd_btw_usage: '/btw <question> — položit vedlejší otázku pomocí kontextu relace',
+    cmd_clear: 'Vymazat konverzační zprávy',
+    cmd_compact_alias: 'Starší alias pro /compress',
+    cmd_compress: 'Ručně komprimovat kontext konverzace (použití: /compress [focus topic])',
+    cmd_goal: 'Nastavte nebo zkontrolujte trvalý cíl',
+    cmd_help: 'Zobrazit dostupné příkazy',
+    cmd_interrupt: 'Zrušit aktuální tah a odeslat novou zprávu',
+    cmd_interrupt_confirm: 'Přerušeno — odeslání nové zprávy',
+    cmd_interrupt_no_msg: 'Použití: /interrupt <zpráva>',
+    cmd_model: 'Přepnout model (např. /model gpt-4o)',
+    cmd_new: 'Začít novou chat relaci',
+    cmd_personality: 'Přepnout osobnost agenta',
+    cmd_queue: 'Zařaď zprávu na další tah',
+    cmd_queue_confirm: 'Zpráva ve frontě',
+    cmd_queue_no_msg: 'Použití: /queue <zpráva>',
+    cmd_queue_not_busy: 'Žádná aktivní úloha — stačí odeslat normálně',
+    cmd_retry: 'Znovu odeslat poslední zprávu',
+    cmd_skills: 'Seznam dostupných dovedností Hermes',
+    cmd_status: 'Zobrazit informace o relaci',
+    cmd_steer: 'Vložit opravu během tahu bez přerušení agenta',
+    cmd_steer_delivered: 'Řízení dodáno — agent to uvidí ve svém dalším výsledku nástroje',
+    cmd_steer_fallback: 'Řízení není k dispozici — návrh byl obnoven',
+    cmd_steer_no_msg: 'Použití: /steer <zpráva>',
+    cmd_stop: 'Zastavit aktuální odpověď',
+    cmd_terminal: 'Otevřete terminál pracovního prostoru',
+    cmd_theme: "Přepnout vzhled (motiv: system\/dark\/light, skin: default\/ares\/mono\/graphite\/slate\/poseidon\/sisyphus\/charizard\/sienna\/catppuccin\/nous\/geist-contrast/zeus/verdigris)",
+    cmd_title: 'Získat nebo nastavit název relace',
+    cmd_undo: 'Odebrat poslední výměnu',
+    cmd_usage: 'Zapnout/vypnout zobrazení použití tokenu',
+    cmd_use: 'Vynutit dovednost pro další zprávu',
+    cmd_voice: 'Přepnout vstup mikrofonu',
+    cmd_voice_use_mic: 'Klikněte na tlačítko mikrofonu v editoru zprávy.',
+    cmd_webui_only_session: 'Tento příkaz není k dispozici pro relace importované CLI.',
+    cmd_workspace: 'Přepnout pracovní prostor podle názvu',
+    collapse_all: 'Sbalit vše',
+    command_label: 'Příkaz',
+    composer_placeholder_busy_interrupt: 'Enter = přerušení | /queue | /background | /steer',
+    composer_placeholder_busy_queue: 'Enter = fronta | /interrupt | /background | /steer',
+    composer_placeholder_busy_steer: 'Enter = řízení | /queue | /background | /interrupt',
+    compress_complete_label: 'Komprese dokončena',
+    compress_failed_label: 'Komprimace se nezdařila',
+    compress_running_label: 'Komprimace',
+    compressing: 'Vyžaduje se komprese kontextu...',
+    context_block_flush_aria: 'Kontextové bloky budou zahrnuty při odesílání',
+    context_block_name_default: 'Kontext',
+    context_block_remove: 'Odebrat kontextový blok',
+    context_block_rename_aria: 'Přejmenovat kontextový blok',
+    context_block_rename_hint: 'Klikněte nebo stiskněte Enter pro přejmenování',
+    context_compaction_label: 'Komprese kontextu',
+    conversation_cleared: 'Konverzace vymazána',
+    copied: 'Zkopírováno!',
+    copy: 'Kopírovat',
+    copy_failed: 'Kopírování selhalo',
+    copy_file_path: 'Kopírovat cestu souboru',
+    create: 'Vytvořit',
+    ctx_compress_action: '⚠ Komprimovat nyní pro uvolnění kontextu',
+    ctx_compress_hint: 'Komprimujte kontext, abyste uvolnili místo →',
+    delete_confirm: (name) => `Odstranit ${name}?`,
+    delete_dir_confirm: (name) => `Odstranit složku „${name}“ a celý její obsah?`,
+    delete_failed: 'Vymazání se nezdařilo',
+    delete_title: 'Smazat',
+    deleted: 'Odstraněno',
+    dialog_confirm_btn: 'Potvrdit',
+    dialog_confirm_title: 'Potvrdit činnost',
+    dialog_prompt_title: 'Zadejte hodnotu',
+    diff_error: 'Nelze načíst opravný soubor',
+    diff_loading: 'Načítání rozdílu',
+    diff_too_large: 'Záplatový soubor je příliš velký pro zobrazení v řádku',
+    discard: 'Zahodit',
+    double_click_rename: 'Dvakrát klikněte pro přejmenování',
+    download_folder: 'Složka pro stahování',
+    downloading: (name) => `Stahování ${name}\u2026`,
+    edit: 'Upravit',
+    edit_failed: 'Úprava se nezdařila:',
+    edit_message: 'Upravit zprávu',
+    edit_title: 'Upravit tento soubor',
+    expand_all: 'Rozbalit vše',
+    external_link_grant_expired: 'Toto externí zobrazení vypršelo. Znovu otevřete symbolický odkaz únikového cíle a znovu jej autorizujte.',
+    external_link_open_confirm: 'Tento symbolický odkaz ukazuje mimo pracovní prostor. Otevřít v externím zobrazení pouze pro čtení pro tuto relaci prohlížeče?',
+    external_link_read_only: 'Toto externí zobrazení je pouze pro čtení. Vytváření, přejmenování, přesun, odstranění, nahrávání, odhalení a akce editoru zde zůstávají zakázané.',
+    failed_colon: 'Selhalo:',
+    file_open_failed: 'Nelze otevřít soubor',
+    focus_label: 'Zaměření',
+    fork_from_here: 'Rozvětvit odtud',
+    forked_from: 'Rozvětveno z',
+    gateway_auth_label: 'Ověření brány se nezdařilo',
+    gateway_restart: 'Restartovat',
+    gateway_restart_failed: 'Restart gateway selhal',
+    gateway_restart_success: 'Restart gateway dokončen.',
+    gateway_running: 'Běží',
+    gateway_session: 'relace',
+    gateway_sessions: 'relace',
+    gateway_start: 'Spustit',
+    gateway_start_failed: 'Spuštění gateway selhalo',
+    gateway_start_success: 'Spuštění gateway dokončeno.',
+    gateway_status_load_failed: 'Načtení stavu gateway selhalo',
+    gateway_stop: 'Zastavit',
+    gateway_stop_failed: 'Zastavení gateway selhalo',
+    gateway_stop_success: 'Zastavení gateway dokončeno.',
+    goal_achieved: (reason) => `✓ Cíl dosažen: ${reason}`,
+    goal_cleared: 'Cíl vymazán.',
+    goal_continuing: (turns, max_turns, reason) => `↻ Pokračuji k cíli (${turns}/${max_turns}): ${reason}`,
+    goal_continuing_toast: 'Pokračujeme k cíli...',
+    goal_evaluating_progress: 'Vyhodnocování pokroku cíle...',
+    goal_no_goal: 'Žádný aktivní cíl.',
+    goal_paused: (goal) => `⏸ Cíl pozastaven: ${goal}`,
+    goal_paused_budget_exhausted: (turns, max_turns) => `⏸ Cíl pozastaven — využito ${turns}/${max_turns} tahů. Použijte /goal resume pro pokračování nebo /goal clear pro ukončení.`,
+    goal_resumed: (goal) => `▶ Cíl obnoven: ${goal}`,
+    goal_set: (turns, goal) => `⊙ Cíl nastaven (rozpočet ${turns} tahů): ${goal}`,
+    goal_status_active: (turns, max_turns, goal) => `⊙ Cíl (aktivní, ${turns}/${max_turns} tahů): ${goal}`,
+    goal_status_done: (turns, max_turns, goal) => `✓ Cíl splněn (${turns}/${max_turns}): ${goal}`,
+    goal_status_none: 'Žádný aktivní cíl. Nastavte jeden pomocí /goal <text>.',
+    goal_status_paused: (turns, max_turns, reason, goal) => `⏸ Cíl (pozastaveno, ${turns}/${max_turns}${reason ? `, ${reason}` : ''}): ${goal}`,
+    goal_working_toward: 'Práce směrem k cíli...',
+    html_error: 'Vykreslení náhledu HTML se nezdařilo',
+    html_loading: 'Načítání náhledu HTML...',
+    html_open_full: 'Otevřít celou stránku',
+    html_sandbox_label: 'Náhled HTML (v sandboxu)',
+    html_too_large: 'HTML příliš velké pro vložený náhled',
+    image_load_failed: 'Nelze načíst obrázek',
+    image_pasted: 'Vložený obrázek:',
+    import_failed: 'Import selhal',
+    import_invalid_json: 'Neplatná data JSON',
+    jump_to_question: 'na odpověď',
+    jump_to_question_label: 'Skočit na začátek této odpovědi',
+    load_older_messages: '↑ Posunutím nahoru nebo kliknutím načtete starší zprávy',
+    loading: 'Načítání…',
+    mcp_add_server: 'Přidat server',
+    mcp_cancel: 'Zrušit',
+    mcp_command_required: 'Pro přenos stdio je vyžadován příkaz.',
+    mcp_delete_confirm_message: 'Odstranit MCP server „{0}“? Tuto akci nelze vrátit zpět.',
+    mcp_delete_confirm_title: 'Smazat server MCP',
+    mcp_delete_failed: 'Odstranění serveru MCP se nezdařilo.',
+    mcp_deleted: 'MCP server smazán.',
+    mcp_disabled_toast: (name) => `MCP server „${name}“ byl zakázán.`,
+    mcp_enabled_no: 'Zakázáno',
+    mcp_enabled_toast: (name) => `MCP server „${name}“ byl povolen.`,
+    mcp_enabled_yes: 'Povoleno',
+    mcp_field_args: 'Argumenty (oddělené čárkami)',
+    mcp_field_command: 'Příkaz',
+    mcp_field_name: 'Název serveru',
+    mcp_field_timeout: 'Časový limit (sekundy)',
+    mcp_field_url: 'URL',
+    mcp_load_failed: 'Načtení serverů MCP se nezdařilo.',
+    mcp_name_required: 'Je vyžadováno jméno serveru.',
+    mcp_no_servers: 'Nejsou nakonfigurovány žádné servery MCP.',
+    mcp_restart_hint: 'Změny serveru jsou zatím jen pro čtení. Upravte config.yaml a restartujte Hermes, aby se změny projevily.',
+    mcp_save: 'Uložit',
+    mcp_save_failed: 'Uložení serveru MCP se nezdařilo.',
+    mcp_saved: 'MCP server uložen.',
+    mcp_servers_desc: 'Zobrazit servery MCP nakonfigurované v config.yaml.',
+    mcp_servers_title: 'Servery MCP',
+    mcp_status_active: 'Aktivní',
+    mcp_status_configured: 'Nastavené',
+    mcp_status_disabled: 'Zakázáno',
+    mcp_status_invalid_config: 'Neplatná konfigurace',
+    mcp_status_unknown: 'Neznámé',
+    mcp_toggle_failed: 'Aktualizace serveru MCP se nezdařila.',
+    mcp_toggle_followup: 'Povolení/zakázání ovládacích prvků je záměrně odloženo, dokud nebude sémantika opakovaného načtení MCP explicitní.',
+    mcp_tool_count: '{0} nástrojů',
+    mcp_tools_desc: 'Vyhledávejte známé nástroje na aktivních serverech MCP.',
+    mcp_tools_inactive_configured_servers: (servers) => `Nakonfigurováno, ale neaktivní v tomto běhovém prostředí WebUI: ${servers}.`,
+    mcp_tools_load_failed: 'Načtení nástrojů MCP se nezdařilo.',
+    mcp_tools_next_page: 'Následující',
+    mcp_tools_next_page_aria: 'Další stránka nástrojů MCP',
+    mcp_tools_no_matches: 'Vašemu vyhledávání neodpovídají žádné nástroje MCP.',
+    mcp_tools_no_tools: 'Z aktivního běhového inventáře nejsou k dispozici žádné nástroje MCP.',
+    mcp_tools_page_size_prefix: 'Zobrazit',
+    mcp_tools_page_size_suffix: 'na stránku',
+    mcp_tools_pagination_label: 'Stránkování nástrojů MCP',
+    mcp_tools_per_page_aria: 'Nástroje MCP na stránku',
+    mcp_tools_previous_page: 'PŘEDCHOZÍ',
+    mcp_tools_previous_page_aria: 'Předchozí stránka nástrojů MCP',
+    mcp_tools_runtime_note: 'Inventář nástrojů používá pouze již známá aktivní MCP runtime data; WebUI nespouští ani nesonduje servery.',
+    mcp_tools_schema_empty: 'Žádné parametry schématu.',
+    mcp_tools_search_placeholder: 'Hledat nástroje podle názvu, serveru nebo popisu…',
+    mcp_tools_summary_matching: (query) => ` odpovídající „${query}“`,
+    mcp_tools_summary_no_matches: (query,total) => `Žádné MCP nástroje neodpovídají „${query}“ (celkem ${total} MCP nástrojů).`,
+    mcp_tools_summary_none: 'Žádné nástroje MCP k zobrazení.',
+    mcp_tools_summary_showing: (start,end,filtered,searchNote,totalNote,page,pages) => `Zobrazuji ${start}–${end} z ${filtered} MCP nástrojů${searchNote}${totalNote}. Stránka ${page} z ${pages}.`,
+    mcp_tools_summary_total_note: (total) => ` (celkem ${total} MCP nástrojů)`,
+    mcp_tools_title: 'Nástroje MCP',
+    mcp_transport_label: 'Typ transportu',
+    mcp_url_required: 'Pro přenos http je vyžadována adresa URL.',
+    mic_denied: 'Přístup k mikrofonu byl odepřen. Zkontrolujte oprávnění prohlížeče.',
+    mic_error: 'Chyba hlasového vstupu:',
+    mic_insecure_origin: 'Hlasový vstup vyžaduje zabezpečené spojení. Otevřete Hermes přes HTTPS nebo z localhost pro použití mikrofonu.',
+    mic_network: 'Rozpoznávání řeči není k dispozici.',
+    mic_no_speech: 'Žádný rozpoznaný hlas. Zkuste to znovu.',
+    model_custom_label: 'Vlastní model ID',
+    model_custom_placeholder: 'např. openai/gpt-5.4',
+    model_did_you_mean: (m) => ` — měli jste na mysli „${m}“?`,
+    model_group_configured: 'Nastavené',
+    model_not_found_label: 'Model nenalezen',
+    model_scope_advisory: 'Vztahuje se na tuto konverzaci z vaší další zprávy.',
+    model_scope_toast: 'Vztahuje se na tuto konverzaci z vaší další zprávy.',
+    model_search_no_results: 'Nenalezeny žádné modely',
+    model_search_placeholder: 'Hledat modely…',
+    model_show_all_models: 'Zobrazit všech {0} modelů',
+    model_unavailable: '(nedostupné)',
+    model_unavailable_title: 'Tento model již není ve vašem aktuálním seznamu poskytovatelů',
+    model_usage: 'Použití: /model <název>',
+    move_failed: 'Přesun se nezdařil.',
+    moved_to: 'Přesunuto do ',
+    n_messages: (n) => `${n} ${_i18nCsPlural(n,'zpráva','zprávy','zpráv')}`,
+    new_session: 'Vytvořena nová relace',
+    new_session_creating: 'Vytváření nové konverzace...',
+    no_active_session: 'Žádná aktivní relace',
+    no_active_task: 'Žádná aktivní úloha k zastavení.',
+    no_model_match: 'Nevyhovuje žádný model "',
+    no_personalities: 'Nebyly nalezeny žádné osobnosti (přidejte je do ~/.hermes/personalities/)',
+    no_workspace: 'Žádný pracovní prostor',
+    no_workspace_match: 'Žádná shoda pracovního prostoru "',
+    offline_autorefresh: 'Obnovím tuto stránku automaticky, když bude Hermes dosažitelný znovu.',
+    offline_browser_detail: 'Váš prohlížeč hlásí, že zařízení je offline.',
+    offline_check_now: 'Zkontrolovat teď',
+    offline_checking: 'Kontroluje se…',
+    offline_network_detail: 'Hermes není právě dosažitelný z tohoto prohlížeče.',
+    offline_stream_waiting: 'Spojení ztraceno. Čekám na obnovení…',
+    offline_title: 'Spojení ztraceno',
+    onboarding_complete: 'Onboarding dokončen!',
+    onboarding_skip: 'Přeskočit instalaci',
+    open_in_vscode: 'Otevřít ve VS Code',
+    open_in_vscode_failed: 'Otevření ve VS Code se nezdařilo: ',
+    parse_failed_note: 'interpretace se nezdařila',
+    path_copied: 'Cesta k souboru zkopírována do schránky',
+    path_copy_failed: 'Zkopírování se nezdařilo',
+    pdf_download: 'Stáhnout PDF',
+    pdf_error: 'Zobrazení náhledu PDF se nezdařilo',
+    pdf_loading: 'Načítání PDF {0}…',
+    pdf_no_pages: 'PDF nemá žádné stránky',
+    pdf_too_large: 'PDF příliš velké pro vložený náhled',
+    pdf_truncated: 'Zobrazuji prvních {0} z {1} stránek — stáhněte pro celý dokument',
+    personalities_load_failed: 'Načtení osobností se nezdařilo',
+    personality_cleared: 'Osobnost očištěna',
+    personality_set: 'Osobnost: ',
+    personality_switch_hint: '\n\nPoužijte `/personality <název>` pro přepnutí nebo `/personality none` pro vymazání.',
+    preserved_task_list_label: 'Zachovaný seznam úkolů',
+    provider_mismatch_label: 'Neshoda poskytovatele',
+    provider_mismatch_warning: (m,p)=>`"${m}" nemusí fungovat s vaším nakonfigurovaným poskytovatelem (${p}). Přesto odeslat, nebo spusťte \`hermes model\` v terminálu pro přepnutí.`,
+    queued_cancel: 'Zrušit zprávu ve frontě',
+    queued_count: (n) => n === 1 ? '1 ve frontě' : `${n} ve frontě`,
+    queued_label: 'Odešle po odpovědi',
+    raw_view: 'Surový',
+    reconnect_active: 'Odpověď se stále generuje. Znovu načíst, až budete připraveni?',
+    reconnect_finished: 'Když jste naposledy odešli, probíhala odezva. Zprávy mohly být aktualizovány.',
+    reference_only_label: 'Pouze jako odkaz',
+    regen_failed: 'Obnovení selhalo:',
+    regenerate: 'Znovu generovat odpověď',
+    remove: 'Odebrat',
+    rename_failed: 'Přejmenování selhalo:',
+    rename_prompt: 'Nové jméno:',
+    rename_title: 'Přejmenovat',
+    renamed_to: 'Přejmenováno na',
+    retrieval_context_label: 'Indexovaný kontext',
+    retrieval_context_preview: 'Dřívější zprávy jsou uloženy a načteny pomocí kontextových nástrojů',
+    retry_failed: 'Opakování se nezdařilo:',
+    reveal_failed: 'Nepodařilo se odhalit:',
+    reveal_in_finder: 'Otevřít ve správci souborů',
+    save: 'Uložit',
+    save_failed: 'Uložení selhalo',
+    save_title: 'Uložit změny',
+    saved: 'Uloženo',
+    saved_prompts_delete: 'Odstranit výzvu',
+    saved_prompts_empty: 'Žádné uložené prompty zatím.',
+    saved_prompts_empty_input: 'Nejprve zadejte výzvu k uložení',
+    saved_prompts_save_current: 'Uložit aktuální vstup jako prompt',
+    saved_prompts_saved: 'Prompt uložen',
+    selected_text_reply: 'Odpovědět výběrem',
+    selected_text_reply_appended: 'Vybraný text přidán do editoru zprávy',
+    selected_text_reply_title: 'Připojit vybraný text chatu jako citovaný kontext',
+    session_attention_approval: (n) => n === 1 ? 'Schválení' : `${n} schválení`,
+    session_attention_approval_title: 'Čekání na rozhodnutí o povolení',
+    session_attention_clarify: (n) => n === 1 ? 'Otázka' : `${n} ${_i18nCsPlural(n,'otázka','otázky','otázek')}`,
+    session_attention_clarify_title: 'Čekání na vaši odpověď',
+    session_attention_generic: (n) => n === 1 ? 'Upozornění' : `${n} ${_i18nCsPlural(n,'položka','položky','položek')}`,
+    session_attention_generic_title: 'Čekání na akci uživatele',
+    session_copy_link: 'Kopírovat odkaz na konverzaci',
+    session_copy_link_desc: 'Zkopírujte přímý odkaz na tuto konverzaci',
+    session_imported: 'Relace importována',
+    session_jump_end: 'Konec',
+    session_jump_end_label: 'Skok na konec relace',
+    session_jump_start: 'Začátek',
+    session_jump_start_label: 'Skok na začátek relace',
+    session_new_message: 'Nová zpráva',
+    session_new_message_label: 'Nová zpráva k dispozici, přeskoč na konec',
+    session_rename: 'Přejmenovat konverzaci',
+    session_rename_desc: 'Upravit název této konverzace',
+    session_rename_failed_no_row: 'Nelze spustit přejmenování — řádek nebyl nalezen.',
+    session_title_regenerate: 'Znovu vygenerovat název',
+    session_title_regenerate_desc: 'Požádejte Hermese, aby z konverzace vygeneroval nový název',
+    session_title_regenerate_failed: 'Obnovení názvu se nezdařilo:',
+    session_title_regenerated: (title) => `Název byl přegenerován: ${title}`,
+    session_title_regenerating: 'Probíhá regenerace názvu...',
+    session_toolsets: 'Sady nástrojů relace',
+    session_toolsets_applied: 'Sady nástrojů byly aktualizovány',
+    session_toolsets_apply: 'Použít',
+    session_toolsets_clear: 'Použít výchozí',
+    session_toolsets_cleared: 'Použití výchozích hodnot aktivního profilu',
+    session_toolsets_configured_servers: 'Nastavené MCP servers',
+    session_toolsets_custom: 'Vlastní přepsání',
+    session_toolsets_desc: 'Použít výchozí hodnoty aktivního profilu nebo zvolit vlastní seznam nástrojů pro tuto relaci',
+    session_toolsets_failed: 'Aktualizace sad nástrojů se nezdařila:',
+    session_toolsets_global: 'Výchozí hodnoty aktivního profilu',
+    session_toolsets_loading_servers: 'Načítání nakonfigurovaných serverů...',
+    session_toolsets_no_configured_servers: 'Žádné nakonfigurované servery MCP',
+    session_toolsets_placeholder: 'tool1, tool2, …',
+    session_toolsets_profile_defaults: 'Výchozí hodnoty aktivního profilu',
+    session_toolsets_use_profile_defaults: 'Použít výchozí hodnoty aktivního profilu',
+    session_worktree_badge: 'Worktree',
+    settings_desc_busy_placeholder_hint: 'Zobrazuje zástupný symbol editoru zprávy s aktuální zaneprázdněnou akcí, když je relace spuštěna a koncept je prázdný.',
+    settings_desc_fade_text_effect: 'Během odpovědi asistenta vyblednou nově streamovaná slova. Podobně jako OpenWebUI; ve výchozím nastavení vypnuto pro maximální výkon.',
+    settings_desc_max_tokens: 'Omezuje výstup asistenta pro nové streamované tahy. Ponechte prázdné pro použití záložní konfigurace aktivního profilu.',
+    settings_desc_model: 'Používá se pro nové konverzace. Stávající konverzace si zachovají svůj vybraný model.',
+    settings_desc_rtl: 'Převrátí zarovnání chatových zpráv a vstupního pole editoru pro jazyky jako arabština nebo hebrejština. Ovlivňuje pouze oblast chatu — postranní panel a další panely zůstávají zleva doprava.',
+    settings_label_busy_placeholder_hint: 'Zobrazit nápovědu zaneprázdněného zástupného symbolu',
+    settings_label_fade_text_effect: 'Efekt vyblednutí textu',
+    settings_label_language: 'Jazyk',
+    settings_label_max_tokens: 'Maximální výstupní tokeny',
+    settings_label_model: 'Výchozí model',
+    settings_label_rtl: 'Rozložení chatu zprava doleva',
+    settings_label_send_key: 'Klávesa pro odeslání',
+    settings_label_theme: 'Motiv',
+    settings_placeholder_max_tokens_fallback: 'Bez přepsání (výchozí: {0})',
+    settings_placeholder_max_tokens_none: 'Žádné přepsání',
+    slash_skill_badge: 'Dovednost',
+    slash_skill_desc: 'Vyvolat tuto dovednost',
+    status_agent_running: 'Agent běží',
+    status_ephemeral: 'Efemérní snímek — neuložen do historie přepisu.',
+    status_heading: 'Stav relace',
+    status_hermes_home: 'Domovská složka Hermes',
+    status_load_failed: 'Stav se nepodařilo načíst:',
+    status_messages: 'Zprávy',
+    status_model: 'Model',
+    status_no: 'Ne',
+    status_no_tokens: 'Nebyly použity žádné tokeny',
+    status_personality: 'osobnost',
+    status_profile: 'Profil',
+    status_provider: 'Poskytovatel',
+    status_session_id: 'ID relace',
+    status_started: 'Spuštěno',
+    status_title: 'Název',
+    status_tokens: 'Tokeny',
+    status_unknown: 'Neznámé',
+    status_updated: 'Aktualizováno',
+    status_workspace: 'Pracovní prostor',
+    status_yes: 'Ano',
+    steer_fail_agent_lacks_steer: 'Tato verze agenta nepodporuje steer',
+    steer_fail_network_error: 'Chyba sítě — zkontrolujte připojení',
+    steer_fail_no_cached_agent: 'Pro tuto relaci není uložen žádný agent — zkuste aktualizaci',
+    steer_fail_not_running: 'Agent právě neběží',
+    steer_fail_session_not_found: 'Relace nebyla nalezena — mohla vypršet',
+    steer_fail_steer_error: 'Doručení řízení se nezdařilo — agent mohl dokončit',
+    steer_fail_stream_dead: 'Stream agent ukončen',
+    steer_fail_unknown: 'Steer nedostupný',
+    steer_leftover_queued: 'Řízení ve frontě na další tah',
+    steer_recovery_dismiss: 'Zamítnout',
+    steer_recovery_retry: 'Zkusit znovu',
+    stream_stopped: 'Odpověď byla zastavena.',
+    subagent_children: 'Relace subagentů',
+    switched_to: 'Přepnuto na ',
+    switched_workspace: 'Přepnuto na pracovní prostor:',
+    symlink_link_to: 'Symbolický odkaz → {target}',
+    terminal_clear: 'Vymazat',
+    terminal_close: 'Zavřít',
+    terminal_collapse: 'Sbalit',
+    terminal_copy_failed: 'Kopírování se nezdařilo',
+    terminal_copy_output: 'Kopírovat výstup',
+    terminal_error: 'Chyba terminálu',
+    terminal_expand: 'Roztáhnout',
+    terminal_input_failed: 'Vstup terminálu se nezdařil:',
+    terminal_input_placeholder: 'Spustit příkaz:',
+    terminal_no_workspace_title: 'Vyberte pracovní prostor pro otevření terminálu',
+    terminal_open_title: 'Otevřít terminál pracovního prostoru',
+    terminal_remote_backend_unsupported: 'Vestavěný terminál je podporován pouze pro místní backendy terminálů.',
+    terminal_restart: 'Restartovat',
+    terminal_start_failed: 'Spuštění terminálu se nezdařilo:',
+    terminal_title: 'Terminál',
+    text_pasted: 'Vložený text připojen jako',
+    theme_set: 'Šablona:',
+    theme_usage: 'Použití: /theme',
+    thinking: 'myšlení',
+    title_change_hint: 'Pro přejmenování použijte `/title <nový název>`.',
+    title_current: 'Aktuální titul:',
+    title_set: 'Název nastaven na',
+    token_usage_off: 'Využití tokenu vypnuto',
+    token_usage_on: 'Používání tokenu zapnuto',
+    tree_view: 'Strom',
+    type_slash: 'Pro zobrazení příkazů napište /',
+    undid_messages_suffix: 'zpráv(y)',
+    undid_n_messages: 'Odstraněno',
+    undo_exchange: 'Vrátit zpět poslední výměnu',
+    undo_failed: 'Krok zpět selhal',
+    unsaved_confirm: 'Máte neuložené změny v náhledu. Zahodit a přejít?',
+    untitled: 'Bez názvu',
+    usage_cache_hit_detail: 'Cache: {0}% ({1} čtení / {2} zápis)',
+    usage_cached_percent: '{0}% cacheované',
+    usage_default_model: 'výchozí',
+    usage_estimated_cost: 'Odhadované náklady',
+    usage_heading: 'Použití tokenů',
+    usage_input_tokens: 'Vstupní tokeny',
+    usage_load_failed: 'Načtení využití se nezdařilo:',
+    usage_output_tokens: 'Výstupní tokeny',
+    usage_personality_none: 'žádná',
+    usage_settings_tip: 'Poznámka: odhady nákladů jsou přibližné.',
+    usage_total: 'Celkem tokenů',
+    usage_unknown: 'neznámé',
+    voice_dictate: 'Diktovat',
+    voice_dictate_active: 'Zastavit diktování',
+    voice_error: 'Hlas není v tomto prohlížeči podporován',
+    voice_listening: 'Poslech…',
+    voice_mode_active: 'Hlasový režim zapnutý',
+    voice_mode_off: 'Hlasový režim vypnutý',
+    voice_mode_toggle: 'Hlasový režim',
+    voice_mode_toggle_active: 'Ukončit hlasový režim',
+    voice_recording_active: 'Zastavit nahrávání',
+    voice_speaking: 'Mluvení…',
+    voice_thinking: 'myšlení',
+    workspace_empty_dir: 'Tento pracovní prostor je prázdný.',
+    workspace_empty_no_path: 'Není vybrán žádný pracovní prostor. Nastavte pracovní prostor v Nastavení \u2192 Pracovní prostor pro procházení souborů.',
+    workspace_hidden_files_visible: 'skryté viditelné',
+    workspace_hidden_files_visible_title: 'Skryté soubory jsou viditelné — klikněte pro možnosti',
+    workspace_new_worktree_conversation: 'Nová konverzace ve worktree',
+    workspace_new_worktree_conversation_meta: 'Vytvořit izolovaný git worktree pro tento workspace.',
+    workspace_options: 'Možnosti pracovního prostoru',
+    workspace_show_hidden_files: 'Zobrazit skryté soubory',
+    workspace_show_hidden_files_desc: 'Do stromu souborů zahrňte soubory .DS_Store, .git, node_modules a další skryté / systémové soubory.',
+    workspace_switch_failed: 'Přepnutí workspace selhalo: ',
+    workspace_usage: 'Použití: /workspace <jméno>',
+    workspace_worktree_created: 'Worktree konverzace vytvořena',
+    workspace_worktree_failed: 'Vytvoření worktree selhalo: ',
+    ws_no_results: 'Nenalezeny žádné pracovní prostory',
+    ws_search_placeholder: 'Hledat pracovní prostory…',
+    you: 'Vy',
+    // tool/worklog references
+    processed_elapsed: _i18nProcessedElapsedCs,
+    tool_action_label: _i18nToolActionLabelCs,
+    tool_worklog_summary: _i18nToolWorklogSummaryCs,
+    tool_summary_join: _i18nToolSummaryJoinCs,
+  },
   tr: {
 
 
@@ -17923,7 +19766,7 @@ const LOCALES = {
     cancelling: 'İptal ediliyor\u2026',
     cancel_failed: 'İptal başarısız oldu:',
     mic_denied: 'Mikrofon erişimi reddedildi. Tarayıcı izinlerini kontrol edin.',
-    mic_insecure_origin: 'Voice input needs a secure connection. Open Hermes over HTTPS or from localhost to use the microphone.', // TODO: translate
+    mic_insecure_origin: 'Sesli giriş güvenli bir bağlantı gerektirir. Mikrofonu kullanmak için Hermes\'i HTTPS üzerinden veya localhost\'tan açın.',
     mic_no_speech: 'Konuşma algılanmadı. Tekrar deneyin.',
     mic_network: 'Konuşma tanıma kullanılamıyor.',
     mic_error: 'Ses girişi hatası:',
@@ -18368,6 +20211,7 @@ const LOCALES = {
     reveal_in_finder: 'Dosya Yöneticisinde Göster',
     reveal_failed: 'Açıklanamadı:',
     copy_file_path: 'Dosya yolunu kopyala',
+    copy_relative_path: 'Göreli yolu kopyala',
     download_folder: 'İndirme klasörü',
     path_copied: 'Dosya yolu panoya kopyalandı',
     path_copy_failed: 'Yol kopyalanamadı:',
@@ -18500,8 +20344,8 @@ const LOCALES = {
     settings_label_auto_scroll_follow: 'Yeni içeriği otomatik takip et',
     settings_desc_auto_scroll_follow: 'Etkinleştirildiğinde, yeni belirteçler akarken görünüm en alta kaydırılır. Devre dışı bırakıldığında kaydırma konumunu kendiniz kontrol edersiniz.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
-    settings_label_show_titlebar_profile: 'Show profile switcher in titlebar', // TODO: translate
-    settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.', // TODO: translate
+    settings_label_show_titlebar_profile: 'Başlık çubuğunda profil değiştiriciyi göster',
+    settings_desc_show_titlebar_profile: 'Etkinleştirildiğinde, sol üstteki uygulama başlık çubuğunda bir profil değiştirici düğmesi görünür, böylece herhangi bir sekmeden profil değiştirebilirsiniz. Varsayılan olarak kapalıdır; bu ayardan bağımsız olarak oluşturucu altbilgisinde her zaman bir profil değiştirici bulunur.',
     settings_desc_render_user_markdown: 'When enabled, bold, italic, links, and other markdown in your own messages are rendered. Off by default; fenced code blocks and math always render regardless of this setting.',
     settings_label_large_text_paste_as_attachment: 'Attach large pasted text as file',
     settings_desc_large_text_paste_as_attachment: 'When enabled, long pasted text becomes a .md attachment instead of filling the composer.',
@@ -18559,7 +20403,7 @@ const LOCALES = {
     settings_tab_appearance: 'Dış görünüş',
     settings_tab_preferences: 'Tercihler',
     settings_tab_plugins: 'Eklentiler',
-    settings_tab_extensions: 'Extensions',  // TODO: translate
+    settings_tab_extensions: 'Uzantılar',
     settings_extensions_gallery_tab: 'Gallery',
     settings_extensions_installed_tab: 'Installed',
     settings_extensions_diagnostics_tab: 'Diagnostics',
@@ -18881,7 +20725,7 @@ const LOCALES = {
     dashboard_loopback_warning: 'Kontrol Paneli sunucuda yalnızca geri döngüye sahiptir. Ya sunucunun kendisinden göz atın ya da --host 0.0.0.0 (güvenli değil) ile yeniden başlatın.',
     tab_logs: 'Günlükler',
     tab_settings: 'Ayarlar',
-    close_menu: 'Close menu', // TODO: translate
+    close_menu: 'Menüyü kapat',
 
     logs_title: 'Günlükler',
     logs_file: 'Dosya',
@@ -19392,6 +21236,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Haftalık',
     cron_schedule_preset_monthly: 'Aylık',
     cron_schedule_preset_custom: 'Özel',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: 'Saat',
+    cron_schedule_minute_label: 'Dakika',
+    cron_schedule_weekday_label: 'Haftanın günü (0-6, Paz-Cmt)',
+    cron_schedule_month_day_label: 'Gün',
+    cron_schedule_time_hint: 'Saat sunucu saatidir; cron sunucu tarafında çalışır.',
     cron_schedule_hint: "Use 'every 1h' or a cron expression for recurring jobs. Bare durations like '30m' run once.",
     cron_schedule_once_warning: "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.",
     cron_prompt_label: 'Çabuk',
@@ -19530,18 +21391,18 @@ const LOCALES = {
     insights_model_health_cost_per_m: 'Cost / 1M',
     insights_no_usage_data: 'Henüz kullanım verisi yok',
     insights_footer: 'Son {days} günün verileri gösteriliyor',
-    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
-    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
-    insights_skill_usage_total: 'Total invocations',  // TODO: translate
-    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
-    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
-    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
-    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
-    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
-    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
-    insights_skill_usage_col_views: 'Views',  // TODO: translate
-    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
-    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
+    insights_skill_usage_title: 'Beceri kullanımı',
+    insights_skill_usage_sub: 'Araç çağırma sıklığı',
+    insights_skill_usage_total: 'Toplam çağrılar',
+    insights_skill_usage_skills_used: 'Kullanılan beceriler',
+    insights_skill_usage_no_data: 'Henüz beceri kullanım verisi yok',
+    insights_skill_usage_no_data_hint: 'Beceriler, konuşmalarda kullanıldıklarında burada görünür.',
+    insights_skill_usage_footer: '~/.hermes/skills/ konumundan sayımlar',
+    insights_skill_usage_col_skill: 'Beceri',
+    insights_skill_usage_col_uses: 'Kullanımlar',
+    insights_skill_usage_col_views: 'Görüntülemeler',
+    insights_skill_usage_col_share: 'Kullanım %',
+    insights_skill_usage_col_patches: 'Yamalar',
     insights_input_tokens: 'Giriş',
     insights_messages: 'Mesajlar',
     insights_models: 'Modeller',
@@ -20050,6 +21911,7 @@ const LOCALES = {
     reveal_in_finder: 'Pokaż w Menedżerze Plików',
     reveal_failed: 'Nie udało się pokazać: ',
     copy_file_path: 'Kopiuj ścieżkę pliku',
+    copy_relative_path: 'Kopiuj ścieżkę względną',
     open_in_vscode: 'Otwórz w VS Code',
     open_in_vscode_failed: 'Nie udało się otworzyć w VS Code: ',
     download_folder: 'Pobierz folder',
@@ -21145,6 +23007,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Co tydzień',
     cron_schedule_preset_monthly: 'Co miesiąc',
     cron_schedule_preset_custom: 'Niestandardowe',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: 'Godzina',
+    cron_schedule_minute_label: 'Minuta',
+    cron_schedule_weekday_label: 'Dzień tygodnia (0-6, niedz.-sob.)',
+    cron_schedule_month_day_label: 'Dzień',
+    cron_schedule_time_hint: 'Czas jest czasem serwera; cron działa po stronie serwera.',
     cron_schedule_hint: "Użyj 'every 1h' lub wyrażenia cron dla zadań cyklicznych. Same formy czasu trwania, jak '30m', zostaną uruchomione tylko raz.",
     cron_schedule_once_warning: 'Formy czasu trwania, takie jak \'30m\', są uruchamiane raz i usuwane po uruchomieniu. Użyj \'every 30m\', aby utrzymać zadanie cykliczne.',
     cron_prompt_label: 'Monit',
@@ -21670,6 +23549,7 @@ const LOCALES = {
      reveal_in_finder: 'Hiện trong trình quản lý tệp',
      reveal_failed: 'Hiển thị thất bại: ',
      copy_file_path: 'Sao chép đường dẫn file',
+     copy_relative_path: 'Sao chép đường dẫn tương đối',
      open_in_vscode: 'Mở bằng VS Code',
      open_in_vscode_failed: 'Mở bằng VS Code thất bại: ',
      download_folder: 'Tải thư mục',
@@ -22652,6 +24532,23 @@ const LOCALES = {
     cron_schedule_preset_weekly: 'Hàng tuần',
     cron_schedule_preset_monthly: 'Hàng tháng',
     cron_schedule_preset_custom: 'Tùy chỉnh',
+    cron_schedule_time_label: 'Time',
+    cron_schedule_conj_on: 'on',
+    cron_schedule_conj_on_day: 'on day',
+    cron_schedule_conj_at: 'at',
+    cron_schedule_conj_at_minute: 'at minute',
+    cron_weekday_sun: 'Sunday',
+    cron_weekday_mon: 'Monday',
+    cron_weekday_tue: 'Tuesday',
+    cron_weekday_wed: 'Wednesday',
+    cron_weekday_thu: 'Thursday',
+    cron_weekday_fri: 'Friday',
+    cron_weekday_sat: 'Saturday',
+    cron_schedule_hour_label: 'Giờ',
+    cron_schedule_minute_label: 'Phút',
+    cron_schedule_weekday_label: 'Thứ trong tuần (0-6, CN-T7)',
+    cron_schedule_month_day_label: 'Ngày',
+    cron_schedule_time_hint: 'Thời gian dùng giờ máy chủ; cron chạy phía máy chủ.',
     cron_schedule_hint: "Dùng 'every 1h' hoặc biểu thức cron cho job lặp lại. Các khoảng thời gian đơn như '30m' chỉ chạy một lần.",
     cron_schedule_once_warning: "Các dạng thời lượng như '30m' chỉ chạy một lần và sẽ bị xóa sau khi chạy. Dùng 'every 30m' để giữ job lặp lại.",
     cron_prompt_label: 'Prompt',
@@ -23105,6 +25002,53 @@ function _i18nToolSummaryJoinPl(parts) {
   return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';
 }
 function _i18nToolSummaryJoinVi(parts) {
+  return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';
+}
+
+// Czech (cs) tool/worklog helpers — Slavic plural forms (1 / few 2-4 / many 5+ handled by _i18nToolWorklogSummaryFromMap's singular/plural split; UI uses n===1 vs plural).
+function _i18nCsPlural(n, one, few, many) {
+  const abs = Math.abs(Number(n) || 0);
+  if (abs === 1) return one;
+  if (abs >= 2 && abs <= 4) return few;
+  return many;
+}
+const _I18N_TOOL_ACTION_TEXT_CS = {
+    shell: { running: 'Spouštění', done: 'Spuštěno', fail: 'spustit', fallback: 'příkaz' },
+    read: { running: 'Čtení', done: 'Přečteno', fail: 'přečíst', fallback: 'soubor' },
+    list: { running: 'Výpis', done: 'Vypsáno', fail: 'vypsat', fallback: 'soubory' },
+    search: { running: 'Prohledávání', done: 'Prohledáno', fail: 'prohledat', fallback: 'pracovní prostor' },
+    web: { running: 'Kontrola', done: 'Zkontrolováno', fail: 'zkontrolovat', fallback: 'webová data' },
+    write: { running: 'Aktualizace', done: 'Aktualizováno', fail: 'aktualizovat', fallback: 'soubor' },
+    skill: { running: 'Načítání', done: 'Načteno', fail: 'načíst', fallback: 'dovednost' },
+    memory: { running: 'Ukládání', done: 'Uloženo', fail: 'uložit', fallback: 'paměť' },
+    delegate: { running: 'Delegování', done: 'Delegováno', fail: 'delegovat', fallback: 'úkol' },
+    unknown: { running: 'Spouštění', done: 'Spuštěno', fail: 'spustit', fallback: 'nástroj' },
+};
+const _I18N_TOOL_SUMMARY_TEXT_CS = {
+    shell: { running: ['Spouštění příkazu', 'Spouštění {n} příkazů'], done: ['Spuštěn příkaz', 'Spuštěno {n} příkazů'] },
+    read: { running: ['Čtení souboru', 'Čtení {n} souborů'], done: ['Přečten soubor', 'Přečteno {n} souborů'] },
+    list: { running: ['Výpis souboru', 'Výpis {n} souborů'], done: ['Vypsán soubor', 'Vypsáno {n} souborů'] },
+    search: { running: ['Prohledávání prac. prostoru', 'Prohledávání prac. prostoru {n}×'], done: ['Prohledán prac. prostor', 'Prohledán prac. prostor {n}×'] },
+    web: { running: ['Kontrola webu', 'Kontrola webu {n}×'], done: ['Zkontrolován web', 'Zkontrolován web {n}×'] },
+    write: { running: ['Aktualizace souboru', 'Aktualizace {n} souborů'], done: ['Aktualizován soubor', 'Aktualizováno {n} souborů'] },
+    skill: { running: ['Načítání dovednosti', 'Načítání {n} dovedností'], done: ['Načtena dovednost', 'Načteno {n} dovedností'] },
+    memory: { running: ['Ukládání paměti', 'Ukládání {n} záznamů paměti'], done: ['Uložena paměť', 'Uloženo {n} záznamů paměti'] },
+    delegate: { running: ['Delegování úkolu', 'Delegování {n} úkolů'], done: ['Delegován úkol', 'Delegováno {n} úkolů'] },
+    unknown: { running: ['Spouštění nástroje', 'Spouštění {n} nástrojů'], done: ['Spuštěn nástroj', 'Spuštěno {n} nástrojů'] },
+};
+function _i18nProcessedElapsedCs(duration) {
+  return _i18nProcessedElapsed('Zpracováno', duration);
+}
+function _i18nToolActionLabelCs(kind, state, target, display, failed) {
+  const verbs = _I18N_TOOL_ACTION_TEXT_CS[kind] || _I18N_TOOL_ACTION_TEXT_CS.unknown;
+  const object = target || verbs.fallback || display || 'nástroj';
+  if (failed) return `Nepodařilo se ${verbs.fail || 'spustit'} ${object}`;
+  return `${verbs[state] || verbs.running} ${object}`;
+}
+function _i18nToolWorklogSummaryCs(kind, state, count) {
+  return _i18nToolWorklogSummaryFromMap(_I18N_TOOL_SUMMARY_TEXT_CS, kind, state, count);
+}
+function _i18nToolSummaryJoinCs(parts) {
   return Array.isArray(parts) ? parts.filter(Boolean).join(', ') : '';
 }
 

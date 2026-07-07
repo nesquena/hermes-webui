@@ -211,6 +211,78 @@ def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> b
     return bak_ctx_len > live_ctx_len
 
 
+def _session_records_clear_sentinel(session_path: Path, bak_path: Path) -> bool:
+    """Return True when the live sidecar records a provenanced clear sentinel.
+
+    The live sidecar must carry the explicit /api/session/clear marker, and
+    the backup must not carry the same marker. Same-generation backups stay
+    recoverable; unreadable or partial matches fail open.
+    """
+    try:
+        data = json.loads(session_path.read_text(encoding='utf-8'))
+        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict) or not isinstance(bak, dict):
+        return False
+    clear_generation = data.get('clear_generation')
+    if not isinstance(clear_generation, str) or not clear_generation:
+        return False
+    if bak.get('clear_generation') == clear_generation:
+        return False
+    expected = {
+        'messages': [],
+        'context_messages': [],
+        'truncation_watermark': 0.0,
+        'truncation_boundary': 0.0,
+        'active_stream_id': None,
+        'pending_user_message': None,
+        'pending_attachments': [],
+        'pending_started_at': None,
+        'pending_user_source': None,
+    }
+    for key, value in expected.items():
+        if key not in data or data.get(key) != value:
+            return False
+    return True
+
+
+def _live_supersedes_backup_by_clear_generation(session_path: Path, bak_path: Path) -> bool:
+    """Return True when the live sidecar provably post-dates the backup via a
+    clear sentinel even though the user has since sent NEW messages.
+
+    Scope: this handles ONLY the post-clear-message case that the exact-empty
+    sentinel (_session_records_clear_sentinel) can't. After /api/session/clear
+    stamps a unique ``clear_generation`` and resets the truncation boundary to
+    0.0, a pre-clear ``.json.bak`` is stale — restoring it would resurrect
+    cleared history on top of the post-clear message. We require: live carries a
+    ``clear_generation`` the backup lacks, live has a NON-EMPTY transcript, and
+    the live boundary still shows the clear reset (watermark == boundary == 0.0).
+    Empty clear-shaped sidecars stay governed by the exact-empty sentinel and its
+    existing recovery semantics. Same-generation backups stay recoverable;
+    unreadable/partial reads fail open (return False -> normal recovery), so a
+    genuine crash-loss is never suppressed.
+    """
+    try:
+        data = json.loads(session_path.read_text(encoding='utf-8'))
+        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict) or not isinstance(bak, dict):
+        return False
+    clear_generation = data.get('clear_generation')
+    if not isinstance(clear_generation, str) or not clear_generation:
+        return False
+    if bak.get('clear_generation') == clear_generation:
+        return False
+    live_messages = data.get('messages')
+    if not isinstance(live_messages, list) or len(live_messages) == 0:
+        return False
+    if data.get('truncation_watermark') != 0.0 or data.get('truncation_boundary') != 0.0:
+        return False
+    return True
+
+
 def inspect_session_recovery_status(session_path: Path) -> dict:
     """Return a status dict describing whether recovery is recommended.
 
@@ -232,6 +304,17 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
         }
     bak_count = _msg_count(bak_path)
     if bak_count > live_count:
+        if (
+            _session_records_clear_sentinel(session_path, bak_path)
+            or _live_supersedes_backup_by_clear_generation(session_path, bak_path)
+        ):
+            return {
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_clear_truncate": True,
+            }
         if (
             _session_records_intentional_compress_shrink(session_path)
             and _backup_predates_intentional_shrink(session_path, bak_path)
@@ -453,6 +536,9 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
     messages = row.get('messages') if isinstance(row.get('messages'), list) else []
     last_ts = messages[-1].get('timestamp') if messages and isinstance(messages[-1], dict) else started_at
     workspace_value = row.get('workspace') or ''
+    compression_recovery = row.get('compression_recovery')
+    if not isinstance(compression_recovery, dict):
+        compression_recovery = {}
     return {
         'session_id': row.get('id'),
         'title': row.get('title') or 'Recovered WebUI Session',
@@ -484,6 +570,10 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
         'context_length': None,
         'threshold_tokens': None,
         'last_prompt_tokens': None,
+        'compression_recovery': compression_recovery,
+        'recommended_recovery_action': row.get('recommended_recovery_action') or None,
+        'compression_recovery_source_session_id': row.get('compression_recovery_source_session_id') or None,
+        'compression_recovery_action': row.get('compression_recovery_action') or None,
         'gateway_routing': None,
         'gateway_routing_history': [],
         'llm_title_generated': False,

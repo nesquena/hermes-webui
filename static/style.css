@@ -72,6 +72,23 @@
   :root[data-font-size="large"] .msg-body table { font-size: 14px; }
   :root[data-font-size="xlarge"] .msg-body table { font-size: 16px; }
 
+  /* Chat message role header (model name / icon / TPS / timestamp) */
+  :root[data-font-size="small"] .msg-role { font-size: 10px; }
+  :root[data-font-size="large"] .msg-role { font-size: 13px; }
+  :root[data-font-size="xlarge"] .msg-role { font-size: 15px; }
+  :root[data-font-size="small"] .role-icon { width: 18px; height: 18px; font-size: 8px; }
+  :root[data-font-size="large"] .role-icon { width: 22px; height: 22px; font-size: 10px; }
+  :root[data-font-size="xlarge"] .role-icon { width: 24px; height: 24px; font-size: 11px; }
+  :root[data-font-size="small"] .msg-role-name { font-size: 11px; }
+  :root[data-font-size="large"] .msg-role-name { font-size: 14px; }
+  :root[data-font-size="xlarge"] .msg-role-name { font-size: 16px; }
+  :root[data-font-size="small"] .msg-tps-inline { font-size: 9.5px; }
+  :root[data-font-size="large"] .msg-tps-inline { font-size: 12.5px; }
+  :root[data-font-size="xlarge"] .msg-tps-inline { font-size: 14.5px; }
+  :root[data-font-size="small"] .msg-role .msg-time { font-size: 9px; }
+  :root[data-font-size="large"] .msg-role .msg-time { font-size: 12px; }
+  :root[data-font-size="xlarge"] .msg-role .msg-time { font-size: 14px; }
+
   /* Composer textarea (default is 16px in stylesheet) */
   :root[data-font-size="small"] #msg { font-size: 14px; }
   :root[data-font-size="large"] #msg { font-size: 18px; }
@@ -2104,7 +2121,7 @@
    (see line ~681). The rail rule is no longer needed. */
   .rail .nav-tab.active::before{content:'';position:absolute;left:-6px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;background:var(--accent);border-radius:0 2px 2px 0;}
   .dashboard-link{position:relative;}
-  .dashboard-link-visible{display:flex!important;}
+  .dashboard-link-visible,.nav-action-visible{display:flex!important;}
   .dashboard-external-badge{position:absolute;right:5px;top:5px;width:9px;height:9px;border-radius:2px;border:1px solid var(--accent);background:var(--sidebar);box-shadow:0 0 0 2px var(--sidebar);opacity:.95;}
   .dashboard-external-badge::after{content:'';position:absolute;right:-2px;top:-2px;width:5px;height:5px;border-top:1.5px solid var(--accent);border-right:1.5px solid var(--accent);}
   .sidebar-nav .dashboard-external-badge{right:8px;top:7px;width:8px;height:8px;}
@@ -2399,6 +2416,9 @@
   .mermaid-viewer-viewport{position:relative;overflow:hidden;max-width:100%;border:1px solid var(--border);border-radius:8px;background:var(--code-bg);cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;}
   .mermaid-viewer-viewport.is-panning{cursor:grabbing;}
   .mermaid-viewer--inline .mermaid-viewer-viewport{width:100%;max-height:70vh;}
+  @media (max-width: 640px){
+    .mermaid-viewer--inline .mermaid-viewer-viewport{min-height:min(200px,70vh);}
+  }
   .mermaid-viewer--lightbox .mermaid-viewer-viewport{max-width:90vw;max-height:90vh;border:none;box-shadow:0 8px 48px rgba(0,0,0,.6);}
   .mermaid-viewer-canvas{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform;}
   .mermaid-viewer-svg{display:block;width:100%;height:100%;}
@@ -2892,10 +2912,14 @@
   .pwa-sidebar-edge-guard{display:none;}
 
   @media(min-width:901px){
-    html[data-workspace-panel="closed"] .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
-    .layout.workspace-panel-collapsed .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
+    html[data-workspace-panel="closed"] .rightpanel{width:0 !important;min-width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
+    .layout.workspace-panel-collapsed .rightpanel{width:0 !important;min-width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
     html[data-workspace-panel="closed"] .workspace-panel-edge-toggle{display:inline-flex;opacity:1;pointer-events:auto;transform:translateY(-50%);}
     html[data-workspace-panel="open"] .workspace-panel-edge-toggle{display:none;}
+    /* Keep the center readable before the rails hit their resize floor. */
+    .main{flex:1 1 420px;min-width:420px;}
+    .sidebar{flex-shrink:1;min-width:180px;}
+    .rightpanel{flex-shrink:1;min-width:180px;}
   }
 
   /* Sidebar collapse breakpoint matches `_isDesktopWidth()` (min-width:641px) so
@@ -3100,8 +3124,7 @@
     .sidebar-nav .nav-tab svg{width:20px;height:20px;}
     .sidebar-nav .nav-tab.active{background:var(--accent-bg);}
     .sidebar-nav .nav-tab.active::before{left:-4px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;border-radius:0 2px 2px 0;}
-    .sidebar-nav .dashboard-link,
-    .sidebar-nav .dashboard-link.dashboard-link-visible{display:none!important;}
+    .sidebar-nav .dashboard-link:not(.nav-action-visible),.sidebar-nav [data-nav-action-mirror]:not(.nav-action-visible){display:none!important;}
     .sidebar .panel-view{height:100%;margin-left:52px;}
     .sidebar .panel-head{padding-right:52px;}
     .mobile-sidebar-close{display:inline-flex!important;position:absolute;right:4px;top:calc(4px + var(--app-titlebar-safe-top));width:44px;height:44px;z-index:4;background:var(--surface);border:1px solid var(--border);}
@@ -3151,15 +3174,22 @@
   }
 
   @media (max-width: 640px){
-    .panel-head-btn.mobile-sidebar-close{display:inline-flex!important;right:4px;top:calc(4px + var(--app-titlebar-safe-top));width:44px!important;height:44px!important;min-width:44px;min-height:44px;line-height:1;overflow:hidden;}
-    .panel-head-btn.mobile-sidebar-close svg{width:18px;height:18px;display:block;}
+    /* Match the close (X) glyph to the new-conversation (+) button's 14px size
+       (previously 18px — the only 18px panel-head icon, so the X read visibly
+       larger than the +) and align its vertical center with the +. The + sits
+       centered in the 41px panel-head row (center ~20px from the header top); the
+       X is a 44px box, so top:calc(safe-top - 2px) centers it on the same row
+       ((41-44)/2 ≈ -2) while keeping the existing safe-area offset so it still
+       clears the notch. No extra drawer spacing. 44x44 tap target kept for touch. */
+    .panel-head-btn.mobile-sidebar-close{display:inline-flex!important;align-items:center;justify-content:center;right:4px;top:calc(var(--app-titlebar-safe-top) - 2px);width:44px!important;height:44px!important;min-width:44px;min-height:44px;line-height:1;overflow:hidden;}
+    .panel-head-btn.mobile-sidebar-close svg{width:14px;height:14px;display:block;}
     /* Keep mobile send-button reveal motion off: avoids 0.18s pop-in in tight composer layouts,
        which can jitter the 44px hit area while typing/scrolling. */
     .send-btn.visible{animation:none;opacity:1;transform:none;}
     /* Approval card */
     .approval-card{padding-left:10px;padding-right:10px;bottom:8px;overflow:visible;}
     .approval-inner{max-height:min(52vh,360px);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:12px 12px 14px;border-radius:12px;box-shadow:0 -10px 30px rgba(0,0,0,.24);}
-    @supports (height:100dvh){.approval-inner{max-height:min(52dvh,360px);}}
+    @supports (height:100dvh){.approval-inner{max-height:min(60dvh,420px);}}
     .approval-header{margin-bottom:8px;}
     .approval-collapse,.approval-dismiss{width:44px;height:44px;line-height:1;overflow:hidden;}
     .approval-cmd{max-height:86px;margin-bottom:10px;}
@@ -3377,7 +3407,16 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 .preview-path{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow:hidden;min-width:0;}
 .preview-path #previewPathText{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .preview-path #previewBadge{flex-shrink:0;white-space:nowrap;}
-.preview-path #btnDownloadFile,.preview-path #btnEditFile,.preview-path #btnRenderMarkdownAnyway{flex-shrink:0;white-space:nowrap;}
+.preview-path #btnCopyPreviewRelPath,.preview-path #btnDownloadFile,.preview-path #btnEditFile,.preview-path #btnRenderMarkdownAnyway{flex-shrink:0;white-space:nowrap;}
+/* #5548: keep the preview-header action buttons from crushing the path / clipping
+   Download+Edit on a narrow preview pane (worst with long RU/DE labels). The path
+   text keeps priority (ellipsis above); the newest button (Copy relative path) drops
+   its text label to icon-only when the RIGHT PANEL (not the viewport) is narrow —
+   .rightpanel is a named inline-size container, so this fires on pane resize too,
+   staying accessible via the button's title + aria-label. */
+@container rightpanel (max-width:520px){
+  .preview-path #btnCopyPreviewRelPath .preview-btn-label{display:none;}
+}
 
 /* Preview badge typography */
 .preview-badge{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;}
@@ -4219,6 +4258,7 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row .thinking-card.open .thinking-card-body{
   border-top-color:transparent;
   padding:0 0 3px;
+  scrollbar-gutter:stable;
 }
 .transparent-event-row .tool-card-detail > *,
 .transparent-event-row .thinking-card-body > *{min-height:0;}
@@ -4840,15 +4880,57 @@ main.main > #mainPlugin{display:none;}
 #mainSettings .settings-field > div[style*="color: var(--muted)"]{font-size:12px;color:var(--muted);line-height:1.5;}
 
 .model-advanced-row{
+  position:relative;
   display:grid;
   grid-template-columns:minmax(0,1fr) 34px;
   gap:8px;
   align-items:center;
 }
 .model-advanced-row #settingsModel{
+  display:none;
   width:100%!important;
   min-width:0;
   box-sizing:border-box;
+}
+.settings-model-chip{
+  width:100%;
+  min-width:0;
+  box-sizing:border-box;
+  padding:8px 10px;
+  border:1px solid var(--border2);
+  border-radius:6px;
+  background:var(--code-bg);
+  color:var(--text);
+  font:inherit;
+  font-size:13px;
+  text-align:left;
+  cursor:pointer;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.settings-model-chip:hover,.settings-model-chip.active,.settings-model-chip:focus-visible{
+  border-color:var(--accent);
+  outline:none;
+}
+.settings-model-dropdown{
+  top:calc(100% + 4px);
+  bottom:auto;
+  left:0;
+  width:calc(100% - 42px);
+  min-width:min(360px,100%);
+  max-width:100%;
+  max-height:360px;
+  z-index:260;
+  /* This picker opens DOWNWARD (top:100%), unlike the composer picker which opens
+     upward; override the inherited upward shadow so it casts down toward the list. */
+  box-shadow:0 4px 24px rgba(0,0,0,.4);
+}
+.settings-model-dropdown .model-search-row{
+  position:sticky;
+  top:0;
+  background:var(--surface);
+  z-index:1;
 }
 .model-advanced-btn{
   width:32px;
@@ -5524,6 +5606,13 @@ main.main > #mainPlugin{display:none;}
 .session-source-tab:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .session-source-tab.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}
 .session-empty-note{padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;}
+.session-list-error{margin:4px 10px 8px;padding:10px 12px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);color:var(--text);display:flex;flex-direction:column;align-items:flex-start;gap:4px;text-align:left;opacity:1;}
+.session-list-error>div:first-child{font-size:12px;font-weight:600;line-height:1.35;word-break:break-word;}
+.session-list-error-detail{font-size:11px;line-height:1.35;color:var(--muted);word-break:break-word;}
+.session-list-error-retry{margin-top:4px;align-self:flex-start;display:inline-flex;align-items:center;justify-content:center;min-width:0;padding:5px 10px;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);color:var(--text);font-size:11px;font-weight:600;line-height:1.2;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s;}
+.session-list-error-retry:hover:not(:disabled):not([aria-busy="true"]):not([aria-disabled="true"]){background:var(--hover-bg);border-color:var(--accent-bg-strong);color:var(--text);}
+.session-list-error-retry:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;}
+.session-list-error-retry:disabled,.session-list-error-retry[aria-busy="true"],.session-list-error-retry[aria-disabled="true"]{background:var(--surface);border-color:var(--border2);color:var(--muted);cursor:wait;opacity:1;}
 .project-bar{display:flex;gap:4px;padding:4px 10px 8px;flex-wrap:wrap;align-items:center;flex-shrink:0;}
 .project-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:pointer;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation;}
 .project-chip:hover{background:rgba(255,255,255,.08);color:var(--text);}
@@ -5703,6 +5792,52 @@ main.main > #mainPlugin{display:none;}
 
 /* ── Unified indent rail — every child of a turn lines up on --msg-rail ── */
 .msg-row { padding: 12px 0; }
+
+/* On touch devices (iOS/Android PWA), skip layout/paint for off-screen rows
+   so streaming performance doesn't degrade as the chat grows. WKWebView is
+   especially sensitive: every scrollHeight read forces a full-document re-layout.
+   Scoped to pointer:coarse to preserve find-in-page on desktop.
+
+   contain-intrinsic-size: auto 1px keeps off-screen rows in the accessibility
+   tree (VoiceOver) via content-visibility:auto, while the 1px estimate is small
+   enough to avoid scrollHeight recalculation jumps that kill flick-scroll
+   momentum on iOS. */
+@media (pointer: coarse) {
+  /* #5637: content-visibility:auto is kept ONLY for user rows. Assistant rows can
+     contain very tall content (multi-thousand-px tool-result / long-answer rows),
+     and a flat `contain-intrinsic-size` cannot reserve their real off-screen
+     height: `1px` (or any single small value) collapses the reserved height of
+     every off-screen assistant row, so scrollHeight lurches down by tens of
+     thousands of px on a long transcript, the browser force-clamps scrollTop, and
+     the viewport jumps to the top (the mobile scroll jump-back). A value large
+     enough to reserve tall rows would reintroduce the scrollHeight churn the 1px
+     was chosen to avoid — so instead we gate content-visibility off for the tall
+     row class (assistant) and keep it for the short, size-predictable user rows,
+     which is where most of the off-screen-skip win comes from anyway. This mirrors
+     the existing "some rows must stay fully rendered" opt-out pattern for
+     #liveAssistantTurn below. */
+  .msg-row[data-role="user"] { content-visibility: auto; contain-intrinsic-size: auto 96px; contain: layout style; }
+  .msg-row { contain: layout style; }
+  /* Keep the LIVE streaming turn fully rendered while a response streams. The
+     live turn is always id="liveAssistantTurn" (assigned on every render path:
+     Compact Worklog, Transparent Stream, restored-live, etc.), but ONLY the
+     Transparent Stream path also stamps data-live-assistant-turn="1" — so we
+     target the STABLE #liveAssistantTurn id to cover EVERY mode, plus the
+     data-* attribute/segment forms as belt-and-suspenders. Without the id
+     selector, a normal (non-Transparent-Stream) live turn on touch could be
+     content-visibility:auto-skipped and blank out mid-stream. Keeping it visible
+     also keeps its measured height growing so the new-message scroll cue still
+     appears while a reader is scrolled up during streaming.
+     (A child .assistant-segment carrying the un-suffixed data-live-assistant
+     cannot opt a skipped ancestor subtree back in, so we target the turn row.) */
+  #liveAssistantTurn,
+  .msg-row[data-live-assistant-turn],
+  .msg-row[data-live-assistant],
+  .assistant-segment[data-live-assistant] { content-visibility: visible; }
+  /* NOTE: deliberately NOT setting overflow-anchor:none here — it is inert on iOS
+     WebKit and on Android it re-opens the #4856 / #5338 mobile jump-to-top
+     regression the scroll-anchor work fought hard to close. */
+}
 .msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
 .msg-body code,
 .msg-body pre,
@@ -5725,6 +5860,16 @@ main.main > #mainPlugin{display:none;}
 .status-card-label{color:var(--muted);font-weight:550;background:rgba(0,0,0,.015);}
 .status-card-value{color:var(--text);word-break:break-word;font-family:var(--font-mono);}
 @media (max-width:700px){.status-card{margin-left:0;}.status-card-head{flex-direction:column;}.status-card-session-copy{max-width:100%;}.status-card-grid{grid-template-columns:1fr;}.status-card-label{padding-bottom:2px;border-top:1px solid var(--border-subtle);}.status-card-value{padding-top:2px;border-top:0;}}
+.compression-recovery-card{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:12px 0 4px;padding:14px 16px;border:1px solid var(--border-subtle);border-radius:var(--radius-card);background:var(--surface-subtle);box-shadow:0 8px 20px rgba(0,0,0,.04);}
+.compression-recovery-copy{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.compression-recovery-title{color:var(--text);font-size:14px;font-weight:650;line-height:1.35;}
+.compression-recovery-summary{color:var(--muted);font-size:12px;line-height:1.45;}
+.compression-recovery-action{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:32px;padding:6px 11px;border:1px solid var(--accent-bg-strong);border-radius:7px;background:var(--accent-bg);color:var(--accent-text);font:inherit;font-size:12px;font-weight:650;white-space:nowrap;cursor:pointer;}
+.compression-recovery-action:hover{background:var(--accent-bg-strong);color:var(--accent-text);}
+.compression-recovery-action:disabled{opacity:.65;cursor:progress;}
+.compression-recovery-card[data-compression-recovery-consumed="1"]{opacity:.6;}
+.compression-recovery-card[data-compression-recovery-consumed="1"] .compression-recovery-action{opacity:.55;cursor:default;pointer-events:none;}
+@media (max-width:700px){.compression-recovery-card{flex-direction:column;align-items:stretch;margin-left:0;}.compression-recovery-action{width:100%;}}
 .assistant-segment-anchor { display: none; }
 
 /* ── Classic conversation layout: user right, half-width; assistant left ── */
@@ -5754,6 +5899,7 @@ main.main > #mainPlugin{display:none;}
 /* Quieter, always-visible role header (smaller avatar, always-visible timestamp) */
 .msg-role { font-size: 11px; font-weight: 500; margin-bottom: 6px; opacity: .8; letter-spacing: 0; }
 .msg-role:hover { opacity: 1; }
+.msg-role-name { font-size: 12px; }
 .role-icon { width: 20px; height: 20px; font-size: 9px; }
 .msg-tps-inline {
   display: inline-flex;
@@ -6196,6 +6342,8 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-form-row > label{font-size:12px;font-weight:500;color:var(--muted);letter-spacing:.01em;}
 .detail-form-row input[type="text"],
 .detail-form-row input[type="password"],
+.detail-form-row input[type="number"],
+.detail-form-row input[type="time"],
 .detail-form-row input:not([type]),
 .detail-form-row select,
 .detail-form-row textarea{
@@ -6207,10 +6355,23 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 }
 .detail-form-row input[type="text"]:focus,
 .detail-form-row input[type="password"]:focus,
+.detail-form-row input[type="number"]:focus,
 .detail-form-row input:not([type]):focus,
 .detail-form-row select:focus,
 .detail-form-row textarea:focus{border-color:var(--accent,var(--accent-bg-strong,var(--border)));}
 .detail-form-row input:disabled{opacity:.6;cursor:not-allowed;}
+.cron-schedule-preset-shell{display:flex;flex-wrap:wrap;gap:10px;align-items:center;}
+.cron-schedule-preset-shell > select.cron-schedule-preset-select{width:auto;min-width:150px;flex:0 0 auto;}
+.cron-schedule-preset-params{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;min-width:0;}
+.cron-schedule-preset-field{display:inline-flex;flex-direction:row;align-items:center;gap:6px;}
+.cron-schedule-preset-conj{font-size:13px;color:var(--muted);white-space:nowrap;}
+.cron-schedule-preset-field select,.cron-schedule-preset-field input[type="time"]{width:auto;min-width:0;}
+.cron-schedule-preset-field select{min-width:120px;}
+#cronFormScheduleMonthDay{min-width:72px;}
+.cron-schedule-preset-field input[type="time"]{min-width:120px;}
+.cron-schedule-preset-field input[type="number"]{width:64px;}
+.cron-schedule-preset-time-hint{flex-basis:100%;margin-top:2px;}
+.cron-schedule-preview{font-family:'SF Mono',ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text);opacity:.85;}
 .detail-form-row textarea{resize:vertical;font-family:'SF Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;}
 .detail-form-row .detail-form-hint{font-size:11px;color:var(--muted);line-height:1.5;}
 .detail-form-warning{font-size:11px;line-height:1.5;border:1px solid rgba(245,158,11,.35);background:rgba(245,158,11,.1);color:rgba(245,158,11,.98);border-radius:8px;padding:8px 10px;}
@@ -6783,8 +6944,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
 /* OpenWebUI-style streaming word fade (opt-in via Settings → Preferences).
    Opacity-only fade with JS-paced word/paragraph reveal. */
 .stream-fade-active .stream-fade-word{display:inline;}
-.stream-fade-word.is-new{animation:stream-fade-word-in var(--stream-fade-ms,240ms) cubic-bezier(.2,.7,.2,1) both;will-change:opacity;}
-@keyframes stream-fade-word-in{0%{opacity:0;}45%{opacity:.45;}100%{opacity:1;}}
+.stream-fade-word.is-new{animation:stream-fade-word-in var(--stream-fade-ms,620ms) cubic-bezier(.16,.84,.32,1) both;will-change:opacity;}
+@keyframes stream-fade-word-in{0%{opacity:0;}35%{opacity:.18;}70%{opacity:.72;}100%{opacity:1;}}
 @media (prefers-reduced-motion: reduce){.stream-fade-word.is-new{animation:none;will-change:auto;}}
 [data-live-assistant="1"]:last-child .msg-body.stream-fade-active > :last-child::after,
 [data-live-assistant="1"]:last-child .msg-body.stream-fade-active:not(:has(> *))::after{display:none;content:none;}

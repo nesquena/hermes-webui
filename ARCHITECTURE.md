@@ -7,8 +7,8 @@
 >
 > Keep this document updated as architecture changes are made.
 
-> Current shipped build: `v0.51.192` (May 31, 2026).
-> Automated coverage: ~7,150 tests via `pytest tests/ --collect-only -q`. CI runs on
+> Current shipped build: `v0.51.792` (July 1, 2026).
+> Automated coverage: ~11,500 tests via `pytest tests/ --collect-only -q`. CI runs on
 > Python 3.11, 3.12, and 3.13 (3 parallel shards each) against every PR, plus a ruff
 > lint gate, a headless browser smoke test, and a Docker smoke test.
 >
@@ -86,7 +86,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       sw.js                Service worker: offline shell cache, version-pinned assets
     tests/
       conftest.py          Isolated test server/state fixtures
-      ~700 test files      ~7,150 tests collected via pytest (run `pytest --collect-only -q` for exact)
+      ~1,150 test files    ~11,500 tests collected via pytest (run `pytest --collect-only -q` for exact)
       test_regressions.py  Permanent regression gate
     CONTRIBUTING.md        Contributor workflow and PR expectations.
     ROADMAP.md             Feature and product roadmap document.
@@ -718,7 +718,7 @@ Current structure:
         ui.js, workspace.js, sessions.js, messages.js, panels.js, commands.js, boot.js
       tests/
         conftest.py           Isolated test server/state fixtures
-        488 test files        5303 tests collected
+        ~1,150 test files     ~11,500 tests collected
         test_regressions.py   Permanent regression gate
 
 Route extraction to api/routes.py completed in Sprint 11. server.py remains a
@@ -818,7 +818,7 @@ Optional password gate for non-SSH-tunnel deployments.
 
 ### Phase I: Test Infrastructure -- COMPLETE
 
-5303 tests across 488 test files + regression gates. The pytest fixture derives
+~11,500 tests across ~1,150 test files + regression gates. The pytest fixture derives
 an isolated port and state directory from the repo path unless
 `HERMES_WEBUI_TEST_PORT` / `HERMES_WEBUI_TEST_STATE_DIR` pin them explicitly.
 Production data never touched.

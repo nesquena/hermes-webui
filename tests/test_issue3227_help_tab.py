@@ -6,7 +6,7 @@ PANELS_JS  = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 I18N_JS    = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 STYLE_CSS  = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
-LOCALE_COUNT = 14  # en, it, ja, ru, es, de, zh, zh-TW, pt, ko, fr, tr, pl
+LOCALE_COUNT = 15  # en, it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, tr, pl, vi, cs
 
 
 def test_help_nav_button_present():

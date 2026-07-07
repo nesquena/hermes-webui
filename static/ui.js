@@ -201,7 +201,8 @@ else initOfflineMonitor();
 // Redirect to login when the server responds with 401 (auth session expired).
 // Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
 // escaping to the personal site root /login.
-function _redirectIfUnauth(res){if(res&&res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return true;}return false;}
+// #5578: on a login-shaped page, reload 'login' WITHOUT a next (avoid self-nesting).
+function _redirectIfUnauth(res){if(res&&res.status===401){var _p=(window.location.pathname||'').replace(/\/+$/,'');if(/(?:^|\/)login$/.test(_p)){window.location.href='login';}else{window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);}return true;}return false;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
@@ -417,6 +418,109 @@ function _statusCardHtml(card){
   </div>`;
 }
 
+function _compressionRecoveryHtml(recovery, sessionId){
+  if(!recovery||typeof recovery!=='object') return '';
+  if(String(recovery.terminal_state||'')!=='compression_exhausted') return '';
+  const action=String(recovery.recommended_action||'');
+  if(action!=='start_focused_continuation') return '';
+  const sid=String(recovery.source_session_id||sessionId||'');
+  const title=String(recovery.title||'Context compression exhausted');
+  const summary=String(recovery.summary||'Start a focused continuation, then describe the next narrow task.');
+  const actionLabel=String(recovery.action_label||'Start focused continuation');
+  const icon=(typeof li==='function')?li('git-branch',14):'';
+  return `<div class="compression-recovery-card" data-compression-recovery-card="1">
+    <div class="compression-recovery-copy">
+      <div class="compression-recovery-title">${esc(title)}</div>
+      <div class="compression-recovery-summary">${esc(summary)}</div>
+    </div>
+    <button class="compression-recovery-action" type="button" data-recovery-session-id="${esc(sid)}" onclick="startCompressionRecovery(this);event.stopPropagation()">${icon}<span>${esc(actionLabel)}</span></button>
+  </div>`;
+}
+
+function _activeCompressionRecoveryPayload(){
+  if(!S||!S.session) return null;
+  const recovery=S.session.compression_recovery;
+  if(recovery&&typeof recovery==='object'&&String(recovery.terminal_state||'')==='compression_exhausted') return recovery;
+  // A cleared session-level recovery payload is authoritative. Only scan
+  // message metadata for older sessions that never exposed this field.
+  if(Object.prototype.hasOwnProperty.call(S.session,'compression_recovery')) return null;
+  const messages=Array.isArray(S.messages)?S.messages:[];
+  for(let i=messages.length-1;i>=0;i--){
+    const msg=messages[i];
+    const msgRecovery=msg&&msg._compressionRecovery;
+    if(msgRecovery&&typeof msgRecovery==='object'&&String(msgRecovery.terminal_state||'')==='compression_exhausted') return msgRecovery;
+  }
+  return null;
+}
+
+function isGenericCompressionContinuationIntent(text){
+  const raw=String(text||'').trim().toLowerCase();
+  if(!raw) return false;
+  const normalized=raw.replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+  const generic=new Set(['continue','continue please','go on','keep going','resume','proceed','carry on','继续','继续吧','接着','接着做','继续做','继续执行']);
+  if(generic.has(normalized)) return true;
+  const parts=normalized.split(/\s+/).filter(Boolean);
+  return !!parts.length&&parts.length<=2&&parts.every(part=>generic.has(part));
+}
+
+function shouldInterceptCompressionRecoveryContinuation(text, files){
+  const hasFiles=Array.isArray(files)&&files.length>0;
+  if(hasFiles||!isGenericCompressionContinuationIntent(text)) return false;
+  const recovery=_activeCompressionRecoveryPayload();
+  return !!(recovery&&String(recovery.recommended_action||'')==='start_focused_continuation');
+}
+
+function showCompressionRecoveryContinuationHint(){
+  const card=document.querySelector('[data-compression-recovery-card="1"]');
+  if(card&&typeof card.scrollIntoView==='function'){
+    try{card.scrollIntoView({block:'center',behavior:'smooth'});}catch(_){card.scrollIntoView();}
+    const btn=card.querySelector('.compression-recovery-action');
+    if(btn&&typeof btn.focus==='function') setTimeout(()=>btn.focus(),120);
+  }
+  if(typeof showToast==='function') showToast('This session exhausted context compression. Start a focused continuation, then describe the next narrow task.',4500,'warning');
+}
+
+async function startCompressionRecovery(btn){
+  const sourceSid=String((btn&&btn.dataset&&btn.dataset.recoverySessionId)||(S.session&&S.session.session_id)||'').trim();
+  if(!sourceSid) return;
+  let retiredRecoveryCard=false;
+  if(btn){btn.disabled=true;btn.classList.add('loading');}
+  try{
+    const data=await api('/api/session/compression-recovery/start',{method:'POST',body:JSON.stringify({session_id:sourceSid})});
+    const sid=data&&data.session&&data.session.session_id;
+    if(!sid) throw new Error('Compression recovery did not return a session.');
+    try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
+    if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
+    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];syncTopbar();renderMessages();}
+    if(typeof renderSessionList==='function') await renderSessionList();
+    if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
+    if(typeof showToast==='function') showToast((data&&data.message)||'Started focused continuation.',3000,'success');
+    const composer=$('msg');
+    if(composer&&typeof composer.focus==='function') composer.focus();
+  }catch(e){
+    // A 409 means this session no longer has an active recovery action (the
+    // session already moved on — e.g. a substantive prompt cleared it). The
+    // persisted card in the transcript is stale, so retire it and show a neutral
+    // note instead of a raw error. The server is authoritative on availability.
+    if(e&&e.status===409){
+      const staleCard=(btn&&btn.closest&&btn.closest('.compression-recovery-card'))
+        ||document.querySelector('[data-compression-recovery-card="1"]');
+      if(staleCard){
+        staleCard.setAttribute('data-compression-recovery-consumed','1');
+        const staleBtn=staleCard.querySelector('.compression-recovery-action');
+        if(staleBtn){staleBtn.disabled=true;staleBtn.classList.remove('loading');}
+        retiredRecoveryCard=true;
+      }
+      if(typeof showToast==='function') showToast('This conversation already moved on — the focused-continuation action is no longer available.',4000,'info');
+      return;
+    }
+    if(typeof showToast==='function') showToast('Compression recovery failed: '+(e&&e.message||e),5000,'error');
+  }finally{
+    // Do NOT re-enable a button we deliberately retired in the 409 branch.
+    if(btn){if(!retiredRecoveryCard) btn.disabled=false;btn.classList.remove('loading');}
+  }
+}
+
 const MESSAGE_RENDER_WINDOW_DEFAULT=50;
 const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
 const MESSAGE_VIRTUAL_BUFFER_PX=900;
@@ -494,6 +598,7 @@ function _clearMessageVirtualHeightCache(){
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=0;
   _messageVirtualDeferredMeasurement=null;
+  if(typeof _clearUserRowIntrinsicHeightCache==='function') _clearUserRowIntrinsicHeightCache();
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
@@ -759,11 +864,35 @@ function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx){
   }
   return -1;
 }
+function _safeEncodeURIComponent(v){
+  try{return encodeURIComponent(String(v));}
+  catch(e){
+    // encodeURIComponent threw URIError -> one or more lone UTF-16 surrogates.
+    // Walk the string as UTF-16 code units: keep valid high(D800-DBFF) +
+    // low(DC00-DFFF) pairs intact (so emoji survive) and drop lone surrogates.
+    // No regex lookbehind/lookahead so this parses on every browser engine
+    // (some older WebViews / Safari <16.4 don't support lookbehind in regex
+    // literals, which would otherwise brick ui.js at parse time).
+    const s=String(v);
+    let cleaned='';
+    for(let i=0;i<s.length;i++){
+      const c=s.charCodeAt(i);
+      if(c>=0xD800&&c<=0xDBFF){
+        const n=(i+1<s.length)?s.charCodeAt(i+1):0;
+        if(n>=0xDC00&&n<=0xDFFF){cleaned+=s[i]+s[i+1];i++;}
+      }else if(c<0xDC00||c>0xDFFF){
+        cleaned+=s[i];
+      }
+    }
+    return encodeURIComponent(cleaned);
+  }
+}
+
 function _messageViewportAnchorKeyForMessage(m){
   if(typeof _compressionMessageAnchorKey!=='function') return '';
   const key=_compressionMessageAnchorKey(m);
   if(!key) return '';
-  return [key.role||'',key.ts??'',key.attachments??0,key.text||''].map(v=>encodeURIComponent(String(v))).join('|');
+  return [key.role||'',key.ts??'',key.attachments??0,key.text||''].map(v=>_safeEncodeURIComponent(v)).join('|');
 }
 function _messageVisibleIndexForAnchorKey(anchorKey, visWithIdx){
   const key=String(anchorKey||'');
@@ -814,11 +943,22 @@ function _captureMessageViewportAnchor(){
     const rect=row.getBoundingClientRect();
     if(rect.bottom>containerRect.top+1){
       const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
+      // Record the current top-spacer (virtual topPad) height so the compensation
+      // path can fall back to a topPad-delta shift when the anchor row itself is
+      // recycled out of the render window after a measurement-driven re-render.
+      const spacer=container.querySelector('[data-virtual-spacer="before"]');
+      const topPadBefore=spacer?parseFloat(spacer.style.height||'0')||0:0;
       return {
         rawIdx,
         sessionIdx:Number.isFinite(sessionIdx)?sessionIdx:_messageSessionIndexForRawIdx(rawIdx),
         key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):'',
         topOffset:rect.top-containerRect.top,
+        topPadBefore,
+        // Snapshot the scroll height at capture so a later realign can detect that
+        // content grew between capture and restore — the streaming case where the
+        // anchor's topOffset is stale and realigning to it would yank a still reader
+        // backward (issue #5637).
+        scrollHeightAtCapture:container.scrollHeight,
       };
     }
   }
@@ -843,6 +983,67 @@ function _captureMessageViewportAnchor(){
 function _browserOverflowAnchorActive(el){
   if(!el) return false;
   try{ return getComputedStyle(el).overflowAnchor==='auto'; }catch(_){ return false; }
+}
+// iOS/iPadOS WebKit detection for the issue #5637 stale-anchor hold gate. CSS
+// overflow-anchor is INERT on iOS WebKit (see static/style.css — the mobile
+// content-visibility block deliberately does NOT set overflow-anchor:none because
+// it is a no-op on iOS and, on Android, re-opens the #4856/#5338 jump-to-top
+// regression). So `overflow-anchor:auto` computes on `.messages` on iOS but the
+// engine never actually holds the viewport there. The stale-anchor refusal relies
+// on that engine to hold the reader, so it is only safe on Android (working
+// overflow-anchor), NOT iOS — refusing on iOS leaves a scrolled-up reader unheld,
+// the same class as the desktop regression, one platform over.
+// Detection covers classic iPhone/iPod/iPad UAs AND iPadOS 13+, which reports a
+// desktop 'MacIntel' platform but is distinguishable by touch support (a real Mac
+// has maxTouchPoints 0). Excludes MSStream (old IE on Windows Phone false-matched
+// 'like iPhone').
+function _isIOSWebKit(){
+  try{
+    const nav=(typeof navigator!=='undefined')?navigator:null;
+    if(!nav) return false;
+    if(nav.MSStream) return false;
+    const ua=String(nav.userAgent||'');
+    if(/iP(ad|hone|od)/.test(ua)) return true;
+    // iPadOS 13+ masquerades as macOS; a Mac has no touch, an iPad does.
+    if(nav.platform==='MacIntel' && Number(nav.maxTouchPoints)>1) return true;
+  }catch(_){}
+  return false;
+}
+// Stable "native overflow-anchor holds this viewport" predicate for the issue
+// #5637 stale-anchor hold gate. The two stale-anchor refusals below assume the
+// browser's native overflow-anchor layer will hold the viewport once the JS
+// restore is refused. That is only true where the engine ACTUALLY compensates:
+//   - desktop (hover+fine-pointer): CSS keeps `.messages` at overflow-anchor:none
+//     -> engine off -> refusing leaves nothing to hold the reader. Excluded via
+//     matchMedia('(pointer:coarse)') being false.
+//   - iOS WebKit: overflow-anchor is INERT (see _isIOSWebKit) even though it
+//     computes to `auto` -> engine never holds -> refusing strands a scrolled-up
+//     reader. Excluded via _isIOSWebKit().
+//   - Android touch: overflow-anchor:auto AND the engine works -> refusing is safe,
+//     native anchoring holds. This is the ONLY platform the refusal targets.
+// We must NOT decide this with `_browserOverflowAnchorActive(#messages)` alone,
+// because `_restoreMessageViewportAnchor` temporarily writes an inline
+// `overflowAnchor:'none'` on #messages for its own scroll write and only restores
+// it on the next frame; when the realign fires every live tick that inline 'none'
+// persists across ticks, so a computed-value probe would read 'none' mid-realign
+// and wrongly classify a touch device as "desktop", letting the stale realign
+// through. A matchMedia('(pointer:coarse)') test reflects the input device and
+// cannot be mutated by that inline override, so it stays steady mid-realign;
+// desktop (fine pointer) stays false. Fall back to the computed-anchor probe when
+// matchMedia is unavailable.
+function _isTouchLikeMessageViewport(el){
+  // iOS WebKit is touch (pointer:coarse) but overflow-anchor is inert there, so the
+  // refusal's premise fails — treat it like desktop (keep the semantic realign).
+  if(_isIOSWebKit()) return false;
+  try{
+    if(typeof matchMedia==='function' && matchMedia('(pointer:coarse)').matches) return true;
+  }catch(_){}
+  // Best-effort fallback for the (today essentially non-existent) no-matchMedia
+  // environment: the computed-anchor probe can transiently read 'none' during a
+  // realign burst (see comment above), so on such a touch device this could
+  // re-admit the original yank. matchMedia('(pointer:coarse)') is universally
+  // supported in every browser this UI targets, so the primary path is what runs.
+  return _browserOverflowAnchorActive(el);
 }
 function _suppressBrowserOverflowAnchor(container){
   if(!container||!container.style) return null;
@@ -895,6 +1096,37 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const containerRect=container.getBoundingClientRect();
   const rect=row.getBoundingClientRect();
   const targetTop=Number(anchor.topOffset)||0;
+  // Streaming stale-anchor guard (issue #5637). During a live stream, content grows
+  // ABOVE the viewport between anchor capture and this restore, so the anchor's
+  // captured topOffset is stale and the realign delta becomes a spurious few-hundred-px
+  // value that yanks a still reader backward. Detect it by content growth + absence of
+  // real input intent — NOT by a scrollTop diff, because on an overflow-anchor:auto
+  // container the browser itself moves scrollTop to compensate the growth (so a still
+  // reader's scrollTop is not stationary). _recentMessage*ScrollIntent reflects genuine
+  // touch/wheel/key input, which the browser's anchor layer never writes. If content
+  // grew since capture AND there is no recent input intent AND the realign would move
+  // scrollTop non-trivially, refuse it and let the browser overflow-anchor hold. An
+  // actively scrolling reader (recent intent) keeps the legitimate realign; legacy
+  // snapshots without the captured geometry keep prior behavior.
+  //
+  // Desktop guard (issue #5637 gate cert): the refusal is only safe where the
+  // browser's native overflow-anchor layer can actually hold the viewport, i.e.
+  // touch viewports where `.messages` computes to `overflow-anchor:auto`. On
+  // hover+fine-pointer desktops `.messages` is `overflow-anchor:none`, so refusing
+  // the realign would leave NOTHING to hold the reader after above-viewport growth
+  // — the very yank this fixes on mobile, reintroduced on desktop. Gate the refusal
+  // on `_isTouchLikeMessageViewport` so desktop keeps its semantic scrollTop realign.
+  const _realignDelta=(rect.top-containerRect.top)-targetTop;
+  const _shAtCap=Number(anchor.scrollHeightAtCapture);
+  if(Number.isFinite(_shAtCap)){
+    const _grewSinceCapture=(container.scrollHeight-_shAtCap)>4;
+    const _activeIntent=(typeof _recentMessageScrollIntent==='function' && _recentMessageScrollIntent())
+      || (typeof _recentMessageTouchScrollIntent==='function' && _recentMessageTouchScrollIntent());
+    const _touchHold=(typeof _isTouchLikeMessageViewport==='function' && _isTouchLikeMessageViewport(container));
+    if(_touchHold&&_grewSinceCapture&&!_activeIntent&&Math.abs(_realignDelta)>8){
+      return false;
+    }
+  }
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   // Mobile-only jump fix: the resting overflow-anchor on .messages is `auto` on
   // touch devices (CSS media query keeps it `none` only for hover+fine-pointer
@@ -969,8 +1201,43 @@ function _compensateScrollForMeasurementDelta(renderFn){
     const spacer=container.querySelector('[data-virtual-spacer="before"]');
     if(!spacer||parseFloat(spacer.style.height||'0')<=0) return;
   }
-  const row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
-  if(!row) return;
+  // Re-find the anchor row after the measurement-driven re-render. The primary
+  // lookup is by rawIdx (the DOM index), but on a big virtualized session a large
+  // scroll delta can RECYCLE the old anchor row out of the render window entirely
+  // (verified via real-device telemetry: DOM collapsed to 1 row, scrollHeight
+  // lurched by tens of thousands of px). The old code did `if(!row) return` here,
+  // abandoning compensation → the full estimated↔measured height lurch hit
+  // scrollTop uncompensated and threw the viewport to the top (the recurring
+  // mobile scroll jump-back). Fall back to the stable sessionIdx anchor (captured in
+  // _captureMessageViewportAnchor) before giving up, mirroring the "recover via
+  // sessionIdx when the primary anchor key is gone" approach used elsewhere but for
+  // the virtualization-measurement compensation path.
+  let row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
+  if(!row&&Number.isFinite(Number(anchorBefore.sessionIdx))){
+    row=container.querySelector(`[data-session-msg-idx="${anchorBefore.sessionIdx}"]`);
+  }
+  if(!row){
+    // Anchor row is no longer rendered (recycled out of the virtual window). We
+    // cannot measure its live offset, but we CAN keep the viewport visually
+    // stable by compensating for the top-spacer (topPad) height change: the
+    // whole reason scrollHeight lurched is that the estimated topPad was replaced
+    // by a measured one. Shift scrollTop by that same delta so content under the
+    // viewport does not appear to jump. Without this the browser lands at an
+    // uncompensated absolute scrollTop against a wildly different scrollHeight.
+    const spacerAfter=container.querySelector('[data-virtual-spacer="before"]');
+    const topPadAfter=spacerAfter?parseFloat(spacerAfter.style.height||'0')||0:0;
+    const topPadBefore=Number(anchorBefore.topPadBefore);
+    if(Number.isFinite(topPadBefore)){
+      const padDelta=topPadAfter-topPadBefore;
+      if(Math.abs(padDelta)>=2){
+        _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+        container.scrollTop=Math.max(0,scrollTopBefore+padDelta);
+        _lastScrollTop=container.scrollTop;
+        _deferClearProgrammaticScroll();
+      }
+    }
+    return;
+  }
   const containerRect=container.getBoundingClientRect();
   const rowRect=row.getBoundingClientRect();
   const actualOffset=rowRect.top-containerRect.top;
@@ -992,6 +1259,53 @@ function _messageViewportIntersectsRenderedRow(){
   }
   return false;
 }
+// #5637/#5638 follow-up — kill the content-visibility scrollHeight collapse at its
+// source. A virtualization wipe-and-rebuild recreates user rows as FRESH elements, which
+// discards content-visibility:auto's last-remembered size, so an off-screen user row
+// falls back to the flat `contain-intrinsic-size: auto 96px` estimate in the stylesheet.
+// A tall user row (e.g. a long paste) then collapses scrollHeight by (realHeight-96px)
+// the instant it's rebuilt off-screen, and the browser either force-clamps scrollTop
+// (dTop≈dH layer-1 jump) or re-anchors to a far row (dTop≫dH browser re-anchor jump) —
+// both mobile jump-back classes trace to this one collapse. Remember each user row's
+// height keyed by its STABLE session-relative index so a rebuild reserves the real
+// height, not 96px. Measured height (exact) wins; before a row is ever measured, a
+// content-length estimate reserves the bulk so the fresh-element frame doesn't collapse
+// either. Refreshed every measure pass, so edits self-heal. Desktop rests at
+// content-visibility:visible (intrinsic-size ignored) → inert there, zero behavior change.
+const _userRowIntrinsicHeightBySessionIdx=Object.create(null);
+// Cleared on session switch alongside _messageVirtualHeightCache (both are
+// per-session measured-height caches keyed by session-relative index). Without this,
+// keys collide across sessions — _messageSessionIndexForRawIdx = _messageSessionIndexBase()
+// + rawIdx and the base is 0 for the common non-offset session — so a new session's
+// off-screen user rows would inherit the previous session's remembered heights and
+// inflate scrollHeight until each is re-measured. Delete keys in place to keep the
+// const binding stable for any closure that captured it.
+function _clearUserRowIntrinsicHeightCache(){
+  for(const k in _userRowIntrinsicHeightBySessionIdx) delete _userRowIntrinsicHeightBySessionIdx[k];
+}
+function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
+  const key=Number(sessionMsgIdx);
+  if(!Number.isFinite(key)||!(height>0)) return;
+  _userRowIntrinsicHeightBySessionIdx[key]=Math.round(height);
+}
+function _estimateUserRowIntrinsicHeight(rawText){
+  const t=String(rawText||'');
+  if(!t) return 96;
+  // ~48 chars/line at the mobile user-bubble width (≈90% of a phone viewport), ~22px per
+  // line + ~24px row chrome; floored at the stylesheet's 96px so a short row never reserves
+  // LESS than today (estimate can only add reserved height for tall rows, never regress).
+  const explicitLines=(t.match(/\n/g)||[]).length+1;
+  const wrapLines=Math.ceil(t.length/48);
+  const lines=Math.max(explicitLines, wrapLines);
+  return Math.max(96, Math.round(lines*22+24));
+}
+function _applyUserRowIntrinsicHeight(row, rawText){
+  if(!row||!row.style||!row.dataset) return;
+  const key=Number(row.dataset.sessionMsgIdx);
+  let h=Number.isFinite(key)?_userRowIntrinsicHeightBySessionIdx[key]:0;
+  if(!(h>0)) h=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText);
+  if(h>0) row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
+}
 function _measureMessageVirtualRow(inner, entry){
   if(!inner||!entry) return 0;
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
@@ -1005,6 +1319,16 @@ function _measureMessageVirtualRow(inner, entry){
       totalHeight+=Math.max(0, sibling.getBoundingClientRect().height||0);
       sibling=sibling.nextElementSibling;
     }
+  }
+  // Persist the measured height so a later wipe-and-rebuild of this user row reserves its
+  // real off-screen height instead of collapsing to the 96px estimate (the collapse that
+  // clamps/re-anchors the viewport — #5637/#5638 mobile jump-back, both classes). The
+  // typeof guard keeps _measureMessageVirtualRow runnable in the node test harnesses that
+  // extract it without this helper (they stub every collaborator by name).
+  if(totalHeight>0 && primary.dataset && primary.dataset.role==='user'
+     && typeof _rememberUserRowIntrinsicHeight==='function'){
+    _rememberUserRowIntrinsicHeight(primary.dataset.sessionMsgIdx, totalHeight);
+    primary.style.containIntrinsicSize='auto '+Math.round(totalHeight)+'px';
   }
   return totalHeight;
 }
@@ -1289,12 +1613,82 @@ function _dashboardBrowserUrl(status){
   const displayHost=browserHost.includes(':')&&!browserHost.startsWith('[')?'['+browserHost+']':browserHost;
   return source.protocol+'//'+displayHost+':'+status.port;
 }
+function _stripInlineEventHandlers(node){
+  if(!node)return;
+  const strip=el=>{
+    Array.from(el.attributes||[]).forEach(attr=>{
+      if(attr.name&&attr.name.toLowerCase().startsWith('on'))el.removeAttribute(attr.name);
+    });
+    if('onclick' in el)el.onclick=null;
+    Array.from(el.children||[]).forEach(strip);
+  };
+  strip(node);
+}
+function _syncNavActionMirrors(){
+  const rail=document.querySelector('.rail');
+  const sidebar=document.querySelector('.sidebar-nav');
+  if(!rail||!sidebar)return;
+  const sources=Array.from(rail.querySelectorAll('.nav-tab:not([data-panel]):not([data-dashboard-link])')).filter(source=>source.id);
+  const mirrors=Array.from(sidebar.querySelectorAll('[data-nav-action-mirror]'));
+  const sourceIds=new Set(sources.map(source=>source.id));
+  mirrors.forEach(mirror=>{
+    if(!sourceIds.has(mirror.getAttribute('data-nav-action-mirror')))mirror.remove();
+  });
+  sources.forEach(source=>{
+    const sourceVisible=(()=>{
+      if(source.hidden||source.getAttribute('aria-hidden')==='true')return false;
+      if(source.classList.contains('nav-tab-hidden'))return false;
+      if(source.style&&(source.style.display==='none'||source.style.visibility==='hidden'))return false;
+      if(typeof window!=='undefined'&&typeof window.getComputedStyle==='function'){
+        const computed=window.getComputedStyle(source);
+        if(computed&&(computed.display==='none'||computed.visibility==='hidden'))return false;
+      }
+      return true;
+    })();
+    let mirror=mirrors.find(el=>el.getAttribute('data-nav-action-mirror')===source.id);
+    if(!mirror){
+      mirror=source.cloneNode(true);
+      _stripInlineEventHandlers(mirror);
+      mirror.id=source.id+'Mobile';
+      mirror.classList.remove('rail-btn');
+      mirror.classList.add('has-tooltip--bottom');
+      mirror.setAttribute('data-nav-action-mirror',source.id);
+      mirror.addEventListener('click',e=>{
+        e.preventDefault();
+        if(mirror._navActionSource)mirror._navActionSource.click();
+        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
+      });
+      const anchor=sidebar.querySelector('.dashboard-link,[data-dashboard-link]')||sidebar.querySelector('[data-panel="logs"]');
+      sidebar.insertBefore(mirror,anchor||null);
+    }else{
+      mirror.innerHTML=source.innerHTML;
+      _stripInlineEventHandlers(mirror);
+    }
+    mirror._navActionSource=source;
+    mirror.classList.toggle('nav-action-visible',sourceVisible);
+    const label=source.getAttribute('data-tooltip')||source.getAttribute('aria-label')||'';
+    if(label)mirror.setAttribute('data-label',label);
+  });
+}
+function _initNavActionMirrors(){
+  _syncNavActionMirrors();
+  const rail=document.querySelector('.rail');
+  if(rail&&window.MutationObserver)new MutationObserver(_syncNavActionMirrors).observe(rail,{
+    childList:true,
+    subtree:true,
+    attributes:true,
+    attributeFilter:['class','style','hidden','aria-hidden','data-tooltip','aria-label'],
+  });
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',_initNavActionMirrors,{once:true});
+else _initNavActionMirrors();
 function _applyDashboardStatus(status){
   const running=!!(status&&status.running);
   const url=running?_dashboardBrowserUrl(status):'';
   const warning=running&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
   document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
     btn.classList.toggle('dashboard-link-visible',running);
+    btn.classList.toggle('nav-action-visible',running);
     btn.style.display=running?'':'none';
     btn.dataset.dashboardUrl=url;
     const tipText=warning||t('tab_dashboard');
@@ -1421,7 +1815,7 @@ function _mermaidViewerIcon(kind) {
     zoomOut: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"></circle><path d="M7 10h6"></path><path d="M15 15l4 4"></path></svg>',
     reset: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9V4H1"></path><path d="M1 4l4 4"></path><path d="M10 4a8 8 0 1 1-5.66 13.66"></path></svg>',
     fit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"></path></svg>',
-    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"></path></svg>',
+    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"></path><path d="M4 4l5 5M20 4l-5 5M4 20l5-5M20 20l-5-5"></path></svg>',
   };
   return icons[kind] || '';
 }
@@ -2430,23 +2824,41 @@ function _refreshOpenModelDropdown(){
     renderModelDropdown();
     if(typeof _positionModelDropdown==='function') _positionModelDropdown();
   }
+  const sdd=$('settingsModelDropdown');
+  if(sdd&&sdd.classList&&sdd.classList.contains('open')&&typeof renderModelDropdown==='function'){
+    // Re-rendering the OPEN settings picker (e.g. when a late live-model fetch
+    // resolves) must not re-grab search focus on touch — same coarse-pointer rule
+    // as openSettingsModelDropdown, or the mobile keyboard pops after opening.
+    const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+    renderModelDropdown({
+      dropdownId:'settingsModelDropdown',
+      selectId:'settingsModel',
+      forceOpenKey:'settingsModel',
+      closeDropdown:closeSettingsModelDropdown,
+      selectModel:selectSettingsModelFromDropdown,
+      scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
+      autoFocusSearch:!_coarsePointer,
+    });
+  }
 }
 function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   if(!modelId||!sel) return null;
-  const currentState=(sel.id==='modelSelect'&&typeof _modelStateForSelect==='function')
+  const isRichPickerSelect=sel.id==='modelSelect'||sel.id==='settingsModel';
+  const currentState=(isRichPickerSelect&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, sel.value)
     : null;
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
-    if(sel.id==='modelSelect'){
+    if(isRichPickerSelect){
       const resolvedState=typeof _modelStateForSelect==='function'
         ? _modelStateForSelect(sel, resolved)
         : {model:resolved,model_provider:preferredProviderId||null};
       const pickerChanged= !!(opts&&opts.forceRefresh) || !currentState
         || String(currentState.model||'')!==String(resolvedState.model||'')
         || String(currentState.model_provider||'')!==String(resolvedState.model_provider||'');
-      if(typeof syncModelChip==='function') syncModelChip();
+      if(sel.id==='modelSelect'&&typeof syncModelChip==='function') syncModelChip();
+      if(sel.id==='settingsModel'&&typeof syncSettingsModelChip==='function') syncSettingsModelChip();
       if(pickerChanged) _refreshOpenModelDropdown();
     }
     return resolved;
@@ -2470,6 +2882,10 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   sel.value=modelId;
   if(sel.id==='modelSelect'){
     if(typeof syncModelChip==='function') syncModelChip();
+    _refreshOpenModelDropdown();
+  }
+  if(sel.id==='settingsModel'){
+    if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
     _refreshOpenModelDropdown();
   }
   return modelId;
@@ -3078,9 +3494,20 @@ function _mountSearchableModelSelect(opts={}){
 }
 
 function renderModelDropdown(){
-  const dd=$('composerModelDropdown');
-  const sel=$('modelSelect');
+  const opts=arguments[0]||{};
+  const dd=$(opts.dropdownId||'composerModelDropdown');
+  const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
+  // Whether the search input should auto-grab focus on (re-)render. Default true
+  // preserves the composer picker's behavior exactly; the settings picker passes
+  // false on coarse-pointer devices so opening it doesn't pop the mobile keyboard.
+  const _autoFocusSearch=opts.autoFocusSearch!==false;
+  const selectFromDropdown=typeof opts.selectModel==='function'
+    ? opts.selectModel
+    : (value,provider)=>selectModelFromDropdown(value,provider);
+  const closeDropdown=typeof opts.closeDropdown==='function'
+    ? opts.closeDropdown
+    : closeModelDropdown;
   // Group(s) that must render OPEN even though they aren't the selected group —
   // set when the user expands a group's overflow via "Show more" so a later full
   // re-render doesn't re-collapse it (_groupOpenState is rebuilt per render, so
@@ -3089,8 +3516,10 @@ function renderModelDropdown(){
   // #3691 node test driver evals the function body without module scope).
   const _forceOpenGroups=(()=>{
     const _g=(typeof window!=='undefined')?window:(typeof globalThis!=='undefined'?globalThis:{});
-    if(!_g.__modelGroupForceOpen) _g.__modelGroupForceOpen=new Set();
-    return _g.__modelGroupForceOpen;
+    const key=opts.forceOpenKey||'composer';
+    if(!_g.__modelGroupForceOpenByPicker) _g.__modelGroupForceOpenByPicker={};
+    if(!_g.__modelGroupForceOpenByPicker[key]) _g.__modelGroupForceOpenByPicker[key]=new Set();
+    return _g.__modelGroupForceOpenByPicker[key];
   })();
   const _modelData=[];
   const _groupMeta=new Map();
@@ -3187,7 +3616,7 @@ function renderModelDropdown(){
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
   _scopeNote.className='model-scope-note';
-  _scopeNote.textContent=t('model_scope_advisory')||'Applies to this conversation from your next message.';
+  _scopeNote.textContent=opts.scopeNoteText||(t('model_scope_advisory')||'Applies to this conversation from your next message.');
   const _searchRow=document.createElement('div');
   _searchRow.className='model-search-row';
   _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="Clear search">${li('x',10)}</button>`;
@@ -3227,7 +3656,7 @@ function renderModelDropdown(){
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
     row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-    row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+    row.onclick=()=>selectFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
     return row;
   };
   const _expandOverflowGroup=(groupMetaEntry)=>{
@@ -3251,7 +3680,7 @@ function renderModelDropdown(){
     // expander gone, search term reapplied.
     const _fullReRender=()=>{
       const _term=(_si&&_si.value)||'';
-      renderModelDropdown();
+      renderModelDropdown(opts);
       const ns=dd.querySelector('.model-search-input');
       if(ns){ ns.value=_term; (ns._listeners&&ns._listeners.input)?ns._listeners.input():ns.dispatchEvent(new Event('input')); }
     };
@@ -3280,7 +3709,7 @@ function renderModelDropdown(){
       for(const m of extraModels){
         if(!m||!m.id) continue;
         if(_alreadyShown.has(esc(m.id))) continue;
-        const row=_buildModelRow({value:m.id,name:m.label||m.id,id:m.id,group:_plainLabel,groupKey,providerId:(og.dataset&&og.dataset.provider)||''},$('modelSelect'),false);
+        const row=_buildModelRow({value:m.id,name:m.label||m.id,id:m.id,group:_plainLabel,groupKey,providerId:(og.dataset&&og.dataset.provider)||''},sel,false);
         wrap.insertBefore(row,moreEl);
         if(!firstNewRow) firstNewRow=row;
       }
@@ -3346,10 +3775,14 @@ function renderModelDropdown(){
     const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
     const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
     row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-    row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+    row.onclick=()=>selectFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
     return row;
   };
   const _filterModels=(term)=>{
+    // Preserve focus across the re-render if the search input already had it — so a
+    // touch user typing a query (where autoFocusSearch is suppressed to avoid the
+    // initial keyboard pop) doesn't lose focus mid-word on each keystroke re-render.
+    const _hadFocus=(typeof document!=='undefined')&&document.activeElement===_si;
     term=term.trim().toLowerCase();
     const hasSearch=!!term;
     // On a fresh search, expand all groups so every match is visible (#collapse).
@@ -3441,7 +3874,7 @@ function renderModelDropdown(){
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-        row.onclick=()=>selectModelFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
+        row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
     }
@@ -3588,7 +4021,7 @@ function renderModelDropdown(){
       noResult.style.textAlign='center';
       dd.appendChild(noResult);
     }
-    _si.focus();
+    if(_autoFocusSearch||_hadFocus) _si.focus();
   };
   _si.addEventListener('input',()=>_filterModels(_si.value));
   // Keyboard navigation through filtered model rows (#2791).
@@ -3609,7 +4042,7 @@ function renderModelDropdown(){
     if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
   };
   _si.addEventListener('keydown',e=>{
-    if(e.key==='Escape'){closeModelDropdown();return;}
+    if(e.key==='Escape'){closeDropdown();return;}
     if(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Enter'){
       const rows=_visibleModelRows();
       if(!rows.length){if(e.key==='Enter') e.preventDefault();return;}
@@ -3626,9 +4059,9 @@ function renderModelDropdown(){
   _si.addEventListener('click',e=>e.stopPropagation());
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
-  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
+  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectFromDropdown(v,null);_ci.value='';};
   _cb.onclick=_applyCustom;
-  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
+  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
@@ -3693,12 +4126,113 @@ function closeModelDropdown(){
   if(mobileAction) mobileAction.classList.remove('active');
 }
 
+function closeSettingsModelDropdown(){
+  const dd=$('settingsModelDropdown');
+  const chip=$('settingsModelChip');
+  if(dd) dd.classList.remove('open');
+  if(chip){
+    chip.classList.remove('active');
+    chip.setAttribute('aria-expanded','false');
+  }
+}
+
+function syncSettingsModelChip(){
+  const sel=$('settingsModel');
+  const chip=$('settingsModelChip');
+  if(!sel||!chip) return;
+  const opt=sel.selectedOptions&&sel.selectedOptions[0];
+  const text=(opt&&opt.textContent)||getModelLabel(sel.value||'')||t('settings_label_model')||'Default Model';
+  chip.textContent=text;
+  chip.title=sel.value||text;
+}
+
+function selectSettingsModelFromDropdown(value,preferredProviderId){
+  const sel=$('settingsModel');
+  if(!sel){closeSettingsModelDropdown();return;}
+  const provider=String(preferredProviderId||'').trim()||null;
+  if(typeof _ensureModelOptionInDropdown==='function'){
+    _ensureModelOptionInDropdown(value,sel,provider);
+  }else{
+    sel.value=value;
+    if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
+  }
+  closeSettingsModelDropdown();
+  try{
+    if(typeof Event==='function') sel.dispatchEvent(new Event('change',{bubbles:true}));
+    else if(typeof sel.onchange==='function') sel.onchange();
+  }catch(_){}
+}
+
+function openSettingsModelDropdown(){
+  const dd=$('settingsModelDropdown');
+  const sel=$('settingsModel');
+  const chip=$('settingsModelChip');
+  if(!dd||!sel) return;
+  // Auto-focus the search on desktop only. On touch (coarse pointer) grabbing focus
+  // pops the on-screen keyboard the instant the chip is tapped — the composer picker
+  // doesn't do it either, so match that behavior on touch. Computed before render so
+  // renderModelDropdown's own initial focus is suppressed too (not just the outer one).
+  const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+  renderModelDropdown({
+    dropdownId:'settingsModelDropdown',
+    selectId:'settingsModel',
+    forceOpenKey:'settingsModel',
+    closeDropdown:closeSettingsModelDropdown,
+    selectModel:selectSettingsModelFromDropdown,
+    scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
+    autoFocusSearch:!_coarsePointer,
+  });
+  dd.classList.add('open');
+  if(chip){
+    chip.classList.add('active');
+    chip.setAttribute('aria-expanded','true');
+  }
+  if(!_coarsePointer){
+    setTimeout(()=>{
+      const input=dd.querySelector('.model-search-input');
+      if(input) input.focus();
+    },0);
+  }
+}
+
+function toggleSettingsModelDropdown(){
+  const dd=$('settingsModelDropdown');
+  if(dd&&dd.classList.contains('open')){closeSettingsModelDropdown();return;}
+  openSettingsModelDropdown();
+}
+
+function mountSettingsModelPicker(){
+  const chip=$('settingsModelChip');
+  const sel=$('settingsModel');
+  if(!chip||!sel) return;
+  syncSettingsModelChip();
+  if(!chip._settingsModelPickerBound){
+    chip._settingsModelPickerBound=true;
+    chip.addEventListener('click',e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      toggleSettingsModelDropdown();
+    });
+    chip.addEventListener('keydown',e=>{
+      if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
+        e.preventDefault();
+        toggleSettingsModelDropdown();
+      }
+    });
+  }
+}
+
 document.addEventListener('click',e=>{
   if(
     !e.target.closest('#composerModelChip') &&
     !e.target.closest('#composerMobileModelAction') &&
     !e.target.closest('#composerModelDropdown')
   ) closeModelDropdown();
+  if(
+    !e.target.closest('#settingsModelChip') &&
+    !e.target.closest('#settingsModel') &&
+    !e.target.closest('#settingsModelDropdown')
+  ) closeSettingsModelDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');
@@ -4858,6 +5392,10 @@ if(typeof window!=='undefined'){
       }else if(movedDown&&nearBottom){
         _nearBottomCount=_nearBottomCount+1;
         if(_nearBottomCount>=2){
+          // Only re-pin when the reader has genuinely reached the true bottom
+          // tail (<=80px). nearBottom spans a ~250px band, so proximity alone
+          // must NOT clear the sticky unpin flag (#4295) — a reader scanning the
+          // last lines mid-stream would otherwise get yanked back to the bottom.
           if(!_messageUserUnpinned||bottomDistance<=80){
             _messageUserUnpinned=false;
             _scrollPinned=true;
@@ -5516,7 +6054,24 @@ function _settleFinalScroll(token){
 }
 function scrollIfPinned(){
   if(!_autoScrollFollow) return;
-  if(_messageUserUnpinned) return;
+  if(_messageUserUnpinned){
+    // Only scrollToBottom() cleared this flag, so one scroll-up permanently
+    // killed auto-follow. Re-pin ONLY when the reader has genuinely returned to
+    // the true bottom tail (<=80px), NOT on mere near-bottom proximity — the
+    // #4295 invariant is that proximity alone (inside the ~250px band) must not
+    // re-pin, or a reader scanning the last few lines gets yanked to the bottom
+    // mid-stream. Also bail on ANY recent message-pane scroll intent (wheel,
+    // key, touch) and non-message intent, so an active scroll-up near the tail
+    // is never overridden. Uses the same _nearBottomCount debounce as the
+    // scroll listener (~4859-4866).
+    if(_recentNonMessageScrollIntent()||_recentMessageScrollIntent()||_recentMessageTouchScrollIntent()||_recentMessageWheelIntent()||_recentMessageKeyScrollIntent()){ _nearBottomCount=0; return; }
+    if(_messageBottomDistance()>80){ _nearBottomCount=0; return; }
+    _nearBottomCount=_nearBottomCount+1;
+    if(_nearBottomCount<2) return;
+    _nearBottomCount=0;
+    _messageUserUnpinned=false;
+    _scrollPinned=true;
+  }
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
   if(_messageBottomDistance()>500) _setMessageScrollToBottom();
@@ -6061,7 +6616,7 @@ function renderMd(raw){
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   // NOTE: table pass runs BEFORE outer link pass so [label](url) in table cells
   // is handled by inlineMd() only — prevents double-linking.
-  s=s.replace(/((?:^\|.+\|\n?)+)/gm,block=>{
+  s=s.replace(/((?:^ {0,3}\|.+\|[ \t]*\n?)+)/gm,block=>{
     const rows=block.trim().split('\n').filter(r=>r.trim());
     if(rows.length<2)return block;
     const isSep=r=>/^\|[\s|:-]+\|$/.test(r.trim());
@@ -8699,10 +9254,127 @@ function _showUpdateError(target,res){
   } else {
     showToast(msg);
   }
-  // Show "Force update" button when the error is recoverable by a hard reset
+  // Show "Force update" button ONLY for errors recoverable by a destructive
+  // hard reset. Lock-only failures are routed to a separate non-destructive
+  // "Clear lock and retry update" button (BRICK-2 fix for PR #5688: a lock
+  // error should never invoke apply_force_update, which would discard local
+  // modifications).
   if(forceBtn&&(res.conflict||res.diverged)){
     forceBtn.dataset.target=target;
     forceBtn.style.display='inline-block';
+  }
+  // Show "Clear lock and retry update" when the only failure was a stale
+  // git lock. This calls the new non-destructive /api/updates/clear_lock
+  // endpoint, which probes the lock for a holder and refuses if held.
+  const clearLockBtn=$('btnClearUpdateLock');
+  if(clearLockBtn&&res.lock_conflict){
+    clearLockBtn.dataset.target=target;
+    clearLockBtn.style.display='inline-block';
+  }
+}
+async function applyClearUpdateLock(btn){
+  if(window._clearLockInFlight) return;
+  const target=btn.dataset.target;
+  if(!target) return;
+  window._clearLockInFlight=true;
+  btn.disabled=true;
+  const originalLabel=btn.textContent;
+  btn.textContent='Checking lock…';
+  try{
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
+    if(res.ok){
+      sessionStorage.removeItem('hermes-update-checked');
+      sessionStorage.removeItem('hermes-update-dismissed');
+      showToast('Update applied — restarting…');
+      _waitForServerThenReload({});
+    } else if(res.lock_held){
+      // v2.2: server returns manual-instruction. Show the exact `rm`
+      // command + a one-click "I've removed it, retry update" affordance
+      // that POSTs the same endpoint a second time (now that the user
+      // has presumably removed the lock, the server's success branch
+      // runs the normal non-destructive apply).
+      _renderLockManualInstruction(target, res);
+    } else {
+      const msg='Could not check the lock: '+(res.message||'unknown error');
+      const errEl=$('updateError');
+      if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+      else showToast(msg);
+    }
+  }catch(e){
+    const msg='Lock-check request failed: '+((e&&e.message)||String(e));
+    const errEl=$('updateError');
+    if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+    else showToast(msg);
+  }finally{
+    window._clearLockInFlight=false;
+    btn.disabled=false;
+    btn.textContent=originalLabel;
+  }
+}
+function _renderLockManualInstruction(target, res){
+  // Replace the inline `updateError` text with a richer block that shows
+  // the exact manual command and offers a one-click retry button. The
+  // "retry" handler re-invokes `applyClearUpdateLock`; this time, with
+  // the lock gone, the server's success branch runs the normal apply.
+  const cmd = res.manual_command || ('rm -f ' + (res.well_known_lock_path || '.git/index.lock'));
+  const errEl=$('updateError');
+  if(!errEl){
+    showToast('Lock present. Run: '+cmd);
+    return;
+  }
+  errEl.style.display='block';
+  errEl.innerHTML='';
+  const intro=document.createElement('div');
+  intro.style.marginBottom='6px';
+  intro.textContent='A stale .git/index.lock is present. The server cannot remove it safely — please run this command on the host:';
+  errEl.appendChild(intro);
+  const code=document.createElement('pre');
+  code.style.background='rgba(0,0,0,0.05)';
+  code.style.padding='6px';
+  code.style.margin='4px 0';
+  code.style.fontFamily='ui-monospace,monospace';
+  code.style.borderRadius='4px';
+  code.style.whiteSpace='pre-wrap';
+  code.style.wordBreak='break-all';
+  code.textContent=cmd;
+  errEl.appendChild(code);
+  const actions=document.createElement('div');
+  actions.style.display='flex';
+  actions.style.gap='8px';
+  actions.style.flexWrap='wrap';
+  const copyBtn=document.createElement('button');
+  copyBtn.type='button';
+  copyBtn.className='update-btn';
+  copyBtn.textContent='Copy command';
+  copyBtn.onclick=async()=>{
+    try{
+      if(navigator.clipboard&&navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(cmd);
+        copyBtn.textContent='Copied';
+        setTimeout(()=>{ copyBtn.textContent='Copy command'; }, 1500);
+      } else {
+        copyBtn.textContent='Clipboard unavailable';
+      }
+    } catch(_){
+      copyBtn.textContent='Copy failed';
+    }
+  };
+  actions.appendChild(copyBtn);
+  const retryBtn=document.createElement('button');
+  retryBtn.type='button';
+  retryBtn.className='update-btn update-primary';
+  retryBtn.textContent="I've removed the lock — retry update";
+  retryBtn.dataset.target=target;
+  retryBtn.onclick=()=>{ applyClearUpdateLock(retryBtn); };
+  actions.appendChild(retryBtn);
+  errEl.appendChild(actions);
+  if(Array.isArray(res.other_locks)&&res.other_locks.length){
+    const other=document.createElement('div');
+    other.style.marginTop='6px';
+    other.style.fontSize='11px';
+    other.style.opacity='0.85';
+    other.textContent='Other lock files also present: '+res.other_locks.join(', ');
+    errEl.appendChild(other);
   }
 }
 function _normalizeHealthServerIdentity(rawIdentity){
@@ -9210,7 +9882,7 @@ function isTpsDisplayEnabled(){
 function _assistantRoleHtml(tsTitle='', tpsText=''){
   const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
 }
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
@@ -10721,7 +11393,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     node=_decorateTransparentEventRow(buildToolCard(toolCall),{
       type:'tool',
       name:toolCall&&toolCall.name,
-      status:_transparentToolStatus(toolCall,true),
+      status:_transparentToolStatus(toolCall,settled),
       toolCall,
       ...meta,
     });
@@ -11042,7 +11714,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     el.hidden=true;
   });
   const liveFooter=blocks.querySelector('#liveRunStatus');
-  let wrote=false;
+  const renderedRows=[];
   for(const row of rows){
     const node=_anchorSceneTransparentNodeForRow(row,{
       live:true,
@@ -11058,12 +11730,26 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
-    if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(renderedNode,liveFooter);
+    renderedRows.push(renderedNode);
+  }
+  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>!!(
+    node &&
+    node.parentElement===blocks &&
+    node.nextSibling===expectedNextSibling
+  );
+  let expectedNextSibling=(liveFooter&&liveFooter.parentElement===blocks) ? liveFooter : null;
+  for(let i=renderedRows.length-1;i>=0;i--){
+    const renderedNode=renderedRows[i];
+    if(transparentLiveRowAlreadyPositioned(renderedNode,expectedNextSibling)){
+      expectedNextSibling=renderedNode;
+      continue;
+    }
+    if(expectedNextSibling&&expectedNextSibling.parentElement===blocks) blocks.insertBefore(renderedNode,expectedNextSibling);
     else blocks.appendChild(renderedNode);
-    wrote=true;
+    expectedNextSibling=renderedNode;
   }
   preserveByKey.forEach(stale=>stale.remove());
-  if(wrote) _syncTransparentEventControls(turn);
+  if(renderedRows.length) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   if(scrollRebuildGuard&&scrollRebuildGuard.release){
@@ -11073,7 +11759,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     });
   }
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
-  return wrote;
+  return !!renderedRows.length;
 }
 
 function _transparentLiveRowKey(node, streamId){
@@ -11127,6 +11813,7 @@ function _rehydrateTransparentLiveRow(existing, node, preservedState){
   if(!existing) return;
   if(node && Object.prototype.hasOwnProperty.call(node, '_tcData')) existing._tcData = node._tcData;
   else if(Object.prototype.hasOwnProperty.call(existing, '_tcData')) delete existing._tcData;
+  try{ delete node._tcData; }catch(_){}
   const header = existing.querySelector ? existing.querySelector('.tool-card-header,.thinking-card-header') : null;
   if(header){
     if(typeof _wireTransparentHeaderToggle === 'function') _wireTransparentHeaderToggle(header);
@@ -11147,10 +11834,68 @@ function _rehydrateTransparentLiveRow(existing, node, preservedState){
   }
 }
 
-function _refreshTransparentLiveRow(existing, node){
-  if(!existing || !node || !existing.getAttribute) return node;
-  if(existing===node) return existing;
-  const preservedState = _transparentLiveRowInteractiveState(existing);
+function _refreshTransparentThinkingLiveRow(existing, node){
+  if(!existing || !node || !existing.querySelector || !node.querySelector) return false;
+  const existingType = String(existing.getAttribute('data-event-type') || '');
+  const nodeType = String(node.getAttribute('data-event-type') || '');
+  const existingIsThinking = existingType === 'thinking' || (existing.classList&&existing.classList.contains('transparent-thinking-event'));
+  const nodeIsThinking = nodeType === 'thinking' || (node.classList&&node.classList.contains('transparent-thinking-event'));
+  if(!existingIsThinking || !nodeIsThinking) return false;
+  const existingPre = existing.querySelector('.thinking-card-body pre');
+  const nodePre = node.querySelector('.thinking-card-body pre');
+  if(!existingPre || !nodePre) return false;
+  const nextText = String(nodePre.textContent || '');
+  if(existingPre.textContent !== nextText) existingPre.textContent = nextText;
+  const nodePreview = node.querySelector('.transparent-event-thinking-preview');
+  const previewText = nodePreview ? String(nodePreview.textContent || '') : nextText;
+  if(typeof _decorateTransparentEventRow === 'function'){
+    _decorateTransparentEventRow(existing,{type:'thinking',text:nextText,preview:previewText});
+  }
+  return true;
+}
+
+function _bindTransparentFadeCleanup(body){
+  if(!body || body._transparentFadeCleanupBound || typeof body.addEventListener !== 'function') return;
+  body._transparentFadeCleanupBound = true;
+  body.addEventListener('animationend', e=>{
+    const span = e.target;
+    if(!span || !span.classList || !span.classList.contains('stream-fade-word')) return;
+    span.replaceWith(document.createTextNode(span.textContent || ''));
+  });
+}
+
+function _appendTransparentFadeText(body, text){
+  if(!body) return;
+  const value = String(text || '');
+  if(!value) return;
+  _bindTransparentFadeCleanup(body);
+  const reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const frag = document.createDocumentFragment();
+  const wordRe = /(\S+)(\s*)/g;
+  let last = 0, match, changed = false;
+  while((match = wordRe.exec(value))){
+    if(match.index > last) frag.appendChild(document.createTextNode(value.slice(last, match.index)));
+    if(reduceMotion){
+      frag.appendChild(document.createTextNode(match[1]));
+    }else{
+      const span = document.createElement('span');
+      span.className = 'stream-fade-word is-new';
+      span.textContent = match[1];
+      frag.appendChild(span);
+    }
+    if(match[2]) frag.appendChild(document.createTextNode(match[2]));
+    last = match.index + match[0].length;
+    changed = true;
+  }
+  if(!changed) frag.appendChild(document.createTextNode(value));
+  else if(last < value.length) frag.appendChild(document.createTextNode(value.slice(last)));
+  body.appendChild(frag);
+}
+
+function _refreshTransparentFadeProseRow(existing, node, preservedState){
+  let body = existing.querySelector ? existing.querySelector('.msg-body') : null;
+  const nextText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
+  const currentText = String(existing.getAttribute('data-stream-fade-text') || (body && body.textContent) || '');
   const pairs = _transparentLiveRowAttributePairs(node);
   const kept = Object.create(null);
   for(const pair of pairs){
@@ -11165,7 +11910,55 @@ function _refreshTransparentLiveRow(existing, node){
     existing.setAttribute(name, value);
   }
   existing.className = node.className || '';
-  existing.innerHTML = node.innerHTML || '';
+  if(!body){
+    body = document.createElement('div');
+    body.className = 'msg-body';
+    existing.appendChild(body);
+  }
+  if(body.classList) body.classList.add('stream-fade-active');
+  if(!nextText.startsWith(currentText)){
+    body.textContent = '';
+    existing.setAttribute('data-stream-fade-text', '');
+    _appendTransparentFadeText(body, nextText);
+  }else{
+    _appendTransparentFadeText(body, nextText.slice(currentText.length));
+  }
+  existing.setAttribute('data-stream-fade-text', nextText);
+  _rehydrateTransparentLiveRow(existing, node, preservedState);
+  return existing;
+}
+
+function _refreshTransparentLiveRow(existing, node){
+  if(!existing || !node || !existing.getAttribute) return node;
+  if(existing===node) return existing;
+  const preservedState = _transparentLiveRowInteractiveState(existing);
+  const candidateIsFadeProse = node.getAttribute('data-anchor-row-role') === 'prose' &&
+    node.querySelector &&
+    !!node.querySelector('.msg-body.stream-fade-active,.stream-fade-word');
+  if(candidateIsFadeProse){
+    return _refreshTransparentFadeProseRow(existing, node, preservedState);
+  }
+  const pairs = _transparentLiveRowAttributePairs(node);
+  const kept = Object.create(null);
+  for(const pair of pairs){
+    const [name, value] = pair;
+    kept[String(name)] = String(value ?? '');
+  }
+  for(const [name] of _transparentLiveRowAttributePairs(existing)){
+    if(!Object.prototype.hasOwnProperty.call(kept, name)) existing.removeAttribute(name);
+  }
+  for(const pair of pairs){
+    const [name, value] = pair;
+    existing.setAttribute(name, value);
+  }
+  existing.className = node.className || '';
+  if(_refreshTransparentThinkingLiveRow(existing, node)){
+    _rehydrateTransparentLiveRow(existing, node, preservedState);
+    return existing;
+  }
+  const newHtml = node.innerHTML || '';
+  const htmlChanged = existing.innerHTML !== newHtml;
+  if(htmlChanged) existing.innerHTML = newHtml;
   _rehydrateTransparentLiveRow(existing, node, preservedState);
   return existing;
 }
@@ -12719,9 +13512,55 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   if(!restoredViaAnchor){
     const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
     const bottom=Number(snapshot.bottom);
+    // #5637: when the reader has scrolled UP into history (userUnpinned) and the
+    // semantic anchor restore failed, do NOT snap scrollTop to the captured
+    // ABSOLUTE snapshot.top. During streaming, the live activity-scene refresh
+    // fires this every tick; above-viewport height keeps changing, so the old
+    // absolute top no longer maps to the same content and the viewport is nudged
+    // backward by an amount that grows with scrollHeight. Leaving scrollTop
+    // untouched lets the browser's own scroll anchoring hold the reader's
+    // position. Pinned / near-bottom readers still get the tail-relative restore
+    // below (that path is correct and must run).
+    if(snapshot.userUnpinned===true&&snapshot.pinned!==true){
+      _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+      _messageUserUnpinned=true;
+      _scrollPinned=false;
+      _nearBottomCount=0;
+      return;
+    }
     const target=(snapshot.pinned===true&&Number.isFinite(bottom))
       ? maxTop-Math.max(0,bottom)
       : Number(snapshot.top)||0;
+    // Streaming stale-snapshot guard (issue #5637). The userUnpinned check above is
+    // defeated when a live stream re-pins the state machine (a scrollHeight-collapse
+    // scroll event flips userUnpinned back to false even though the reader is up in
+    // history), so this absolute snapshot.top write still fires and yanks a still
+    // reader — snapshot.top was captured before the streaming chunk grew above-viewport
+    // height, so it is stale. Mirror the realign guard: if content grew since the
+    // snapshot AND there is no recent real input intent AND the write would move
+    // scrollTop non-trivially, refuse it and let the browser overflow-anchor hold.
+    // Pinned tail-followers (target is bottom-relative, not snapshot.top) are
+    // unaffected; an actively scrolling reader has intent and keeps the restore.
+    //
+    // Desktop guard (issue #5637 gate cert): like the realign guard, this refusal
+    // only holds where the browser's native overflow-anchor layer is active (touch
+    // viewports, `.messages` computes to `overflow-anchor:auto`). Desktop `.messages`
+    // is `overflow-anchor:none`, so refusing the absolute fallback write there would
+    // leave the reader unheld AND latch `_messageUserUnpinned=true`. Gate on
+    // `_isTouchLikeMessageViewport` so desktop keeps its absolute snapshot.top restore.
+    const _snapSH=Number(snapshot.scrollHeight);
+    const _grewSinceSnap=Number.isFinite(_snapSH)&&_snapSH>0&&(el.scrollHeight-_snapSH)>4;
+    const _fbActiveIntent=(typeof _recentMessageScrollIntent==='function' && _recentMessageScrollIntent())
+      || (typeof _recentMessageTouchScrollIntent==='function' && _recentMessageTouchScrollIntent());
+    const _fbTouchHold=(typeof _isTouchLikeMessageViewport==='function' && _isTouchLikeMessageViewport(el));
+    if(_fbTouchHold && snapshot.pinned!==true && _grewSinceSnap && !_fbActiveIntent
+       && Math.abs((Math.max(0,Math.min(target,maxTop)))-el.scrollTop)>8){
+      _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+      _messageUserUnpinned=true;
+      _scrollPinned=false;
+      _nearBottomCount=0;
+      return;
+    }
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
     el.scrollTop=Math.max(0,Math.min(target,maxTop));
   }
@@ -12865,6 +13704,36 @@ function _assistantTurnAnchorSettledFinalAnswer(message, content, context){
     return null;
   }
 }
+// Re-anchor a pinned/tail-following reader to the settled bottom after a full
+// renderMessages() rebuild, eliminating the one-frame mid-stream jitter. MUST be scheduled
+// in a MICROTASK from the end of renderMessages (see the queueMicrotask call site), NOT run
+// synchronously. Why: the mid-stream re-render bug is that renderMessages wipes #msgInner
+// then rebuilds, and the pinned tail-follow path (scrollIfPinned → scrollToBottom) writes
+// scrollTop while still INSIDE the render sync stack, where the browser reports a TRANSIENT
+// scrollHeight a few px short of the settled value (layout is batched — every geometry read
+// inside the sync stack returns the mid-settle height). So scrollToBottom lands scrollTop a
+// little HIGH (short of the true tail); that intermediate is painted this frame and the
+// settle rAF corrects it the next frame → a fast ~1-row back-and-forth bounce (~82px). A
+// microtask runs AFTER the sync stack unwinds (layout has flushed, so scrollHeight/clientHeight
+// are the settled values) but BEFORE the browser paints — so writing the now-correct settled
+// max here lands the tail exactly and the short intermediate never reaches the screen. Only
+// fires for a pre-wipe tail-follower left short of the settled max, so an unpinned reader
+// parked in history is never moved (orthogonal to the unpinned jump-back class). The
+// _programmaticScroll latch (armed at the wipe) keeps the scroll listener from misreading
+// this write as a manual unpin. Idempotent: a no-op once scrollTop already equals the max.
+function _reanchorPinnedTailAfterRender(wasNearTail){
+  if(!wasNearTail) return;
+  const el=$('messages');
+  if(!el) return;
+  const settledMax=Math.max(0, el.scrollHeight-el.clientHeight);
+  if(el.scrollTop < settledMax-1){
+    _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+    el.scrollTop=settledMax;
+    _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+    _nearBottomCount=2;
+    _scrollPinned=true;
+  }
+}
 function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // Terminal stream renders can happen after S.activeStreamId is cleared.
   // In that case, preserveScroll asks the normal pin-state helper to decide:
@@ -12890,6 +13759,22 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
     return;
   }
   if(S.activeStreamId){
+    // Mid-stream re-render (tool completion, activity-scene refresh, clarify echo).
+    // renderMessages() wipes #msgInner (inner.innerHTML='') then rebuilds; that wipe
+    // collapses scrollHeight toward the empty-table height, and the browser is FORCED
+    // to clamp #messages.scrollTop down to the new (near-zero) max. For a reader who
+    // scrolled UP into history (unpinned), scrollIfPinned() is a no-op — so it does NOT
+    // undo that clamp, and the reader is stranded at the top (the scroll jump-back). The
+    // wipe-to-empty clamp is a browser primitive (device-agnostic; JS never writes the
+    // scrollTop), so the passive no-op cannot preserve position here. renderMessages()
+    // captured a pre-wipe snapshot for exactly this case (its scrollSnapshot init fires
+    // when _messageUserUnpinned), so restore the unpinned reader's viewport instead of
+    // the no-op. Pinned/tail-following readers keep scrollIfPinned() (correct live-follow).
+    if(_messageUserUnpinned && scrollSnapshot){
+      _restoreMessageScrollSnapshot(scrollSnapshot);
+      _maybeShowNewMessageScrollCue(scrollSnapshot);
+      return;
+    }
     scrollIfPinned();
     return;
   }
@@ -13058,6 +13943,20 @@ function renderMessages(options){
   // Mobile scroll-jank fix: temporarily disable overflow-anchor so Chromium
   // cannot re-anchor to the topmost row during the DOM wipe-and-rebuild gap.
   if(window._fixMobileScrollJank) window._fixMobileScrollJank();
+  // Capture whether the reader was at/near the tail BEFORE the wipe. A tail-follower
+  // hit by a mid-stream re-render gets a one-frame jitter: the wipe+rebuild lands the
+  // sync scrollTop write against a transient layout whose above-viewport height is a
+  // few px short of the settled value, so the browser clamps scrollTop a little high;
+  // the settle rAF corrects it the next frame, producing a fast ~1-row back-and-forth
+  // bounce. We remember the pre-wipe near-tail state here (geometry, not closure pin
+  // flags — the wipe's clamp scroll event can transiently perturb those) so the tail
+  // of renderMessages can re-anchor to the settled bottom before the intermediate is
+  // painted. See _reanchorPinnedTailAfterRender + its queueMicrotask call site.
+  const _preWipeNearTail=(()=>{
+    const _m=$('messages');
+    if(!_m) return false;
+    return (_m.scrollHeight-_m.scrollTop-_m.clientHeight)<=8;
+  })();
   // The DOM wipe can briefly collapse #msgInner to zero height, causing the
   // browser to clamp #messages.scrollTop to 0 and emit a scroll event.  That
   // event is a render artifact, not user intent; if the scroll listener sees it
@@ -13347,6 +14246,11 @@ function renderMessages(options){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
     }
+    const recoveryPayload=(!isUser&&m._compressionRecovery)
+      ? m._compressionRecovery
+      : (!isUser&&isLastAssistant&&isTurnFinalAssistant&&typeof _activeCompressionRecoveryPayload==='function' ? _activeCompressionRecoveryPayload() : null);
+    const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
+    if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
@@ -13356,7 +14260,10 @@ function renderMessages(options){
     const readOnlySession=typeof _isReadOnlySession==='function'
       ? _isReadOnlySession(S.session)
       : !!(S.session&&(S.session.read_only||S.session.is_read_only));
-    const forkBtn  = readOnlySession ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
+    const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
+      ? _isBranchableReadOnlySession(S.session)
+      : false;
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
@@ -13408,6 +14315,14 @@ function renderMessages(options){
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
       }
+      // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
+      // does not collapse scrollHeight to the flat 96px estimate (the collapse that
+      // clamps/re-anchors the viewport on mobile — #5637/#5638, both jump classes). Uses
+      // the remembered measured height when this row has been measured before, else a
+      // content-length estimate; the measure pass refines it exactly next frame. The
+      // typeof guard keeps renderMessages runnable in the node test harnesses that
+      // extract it without this helper (they stub every collaborator by name).
+      if(typeof _applyUserRowIntrinsicHeight==='function') _applyUserRowIntrinsicHeight(row, newRawText);
       inner.appendChild(row);
       userRows.set(rawIdx, row);
       continue;
@@ -13541,7 +14456,7 @@ function renderMessages(options){
       if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
     }else if(hasVisibleBody){
@@ -14384,6 +15299,20 @@ function renderMessages(options){
     }
   }
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
+  // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
+  // not synchronously: inside this render sync stack the browser still reports a transient
+  // scrollHeight (layout is batched), so a synchronous re-anchor would read the SAME short
+  // value scrollToBottom already clamped against and be a no-op. The microtask runs after the
+  // stack unwinds (scrollHeight has flushed to the settled value) but before the browser
+  // paints this frame, so writing the settled max lands the tail exactly and the ~1-row high
+  // intermediate never reaches the screen. Only re-anchors a pre-wipe tail-follower left short
+  // of the settled max — an unpinned reader parked in history is never moved (orthogonal to
+  // the unpinned jump-back class). See _reanchorPinnedTailAfterRender for the full rationale.
+  // (typeof guards mirror the _deferClearProgrammaticScroll call below so standalone
+  // renderMessages() test harnesses that don't define these helpers still run.)
+  if(typeof queueMicrotask==='function' && typeof _reanchorPinnedTailAfterRender==='function'){
+    queueMicrotask(()=>_reanchorPinnedTailAfterRender(_preWipeNearTail));
+  }
   _recycleStash.clear();
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll(160);
 }
@@ -16737,7 +17666,18 @@ if(!S._expandedDirs) S._expandedDirs=new Set();
 if(!S._dirCache) S._dirCache={};
 
 function renderFileTree(){
-  const box=$('fileTree');box.innerHTML='';
+  const box=$('fileTree');
+  // #5657: capture the scroll position before wiping the container. box.innerHTML=''
+  // detaches every row, collapsing scrollHeight so the browser clamps scrollTop to 0;
+  // without this, every expand/collapse, breadcrumb nav, refresh, and hidden-files
+  // toggle that re-runs renderFileTree() teleports the reader back to the top of a
+  // long tree. Restored only after the normal render tail below — the two early-return
+  // paths (no-workspace hides the box; empty-dir has nothing to scroll) legitimately
+  // reset. A plain scrollTop restore suffices here: expand/collapse insert/remove rows
+  // BELOW the clicked disclosure, so the clicked row keeps its offset from the top (no
+  // getBoundingClientRect anchor delta needed — that's only for prepend-above cases).
+  const prevScrollTop=box?box.scrollTop:0;
+  box.innerHTML='';
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
@@ -16756,6 +17696,8 @@ function renderFileTree(){
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
+  // #5657: restore the pre-wipe scroll position now that the tree is tall again.
+  if(box) box.scrollTop=prevScrollTop;
 }
 
 let _wsActiveDragPath=null;
@@ -17258,6 +18200,22 @@ function _showFileContextMenu(e, item){
       }
     };
     menu.appendChild(copyPathItem);
+
+    const copyRelPathItem=document.createElement('div');
+    copyRelPathItem.textContent=t('copy_relative_path');
+    copyRelPathItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    copyRelPathItem.onmouseenter=()=>copyRelPathItem.style.background='var(--hover-bg)';
+    copyRelPathItem.onmouseleave=()=>copyRelPathItem.style.background='';
+    copyRelPathItem.onclick=async()=>{
+      menu.remove();
+      try{
+        const rel=_normalizeWorkspaceRelPath(item.path)||item.path;
+        await _copyTextWithFallback(rel,t('path_copied'),t('path_copy_failed'));
+      }catch(err){
+        showToast(t('path_copy_failed')+(err.message||err));
+      }
+    };
+    menu.appendChild(copyRelPathItem);
   }
 
   if(isDirLike){
@@ -17474,18 +18432,65 @@ function addFiles(files){
   }
   renderTray();
 }
-async function uploadPendingFiles(){
-  if(!S.pendingFiles.length||!S.session)return[];
-  const names=[];let failures=0;
+const _uploadPendingFilesProgressBySession=new Map();
+function _uploadPendingFilesCurrentSession(sessionId){
+  return !!(!sessionId||(S.session&&S.session.session_id===sessionId));
+}
+function _uploadPendingFilesHideProgressBar(){
   const bar=$('uploadBar');const barWrap=$('uploadBarWrap');
-  barWrap.classList.add('active');bar.style.width='0%';
-  const total=S.pendingFiles.length;
+  if(!bar||!barWrap)return;
+  barWrap.classList.remove('active');
+  bar.style.width='0%';
+  if(barWrap.dataset)delete barWrap.dataset.uploadSessionId;
+}
+function _uploadPendingFilesShowProgressBar(owner,percent){
+  const bar=$('uploadBar');const barWrap=$('uploadBarWrap');
+  if(!bar||!barWrap)return;
+  if(barWrap.dataset)barWrap.dataset.uploadSessionId=owner;
+  barWrap.classList.add('active');
+  bar.style.width=`${Math.max(0,Math.min(100,Number(percent)||0))}%`;
+}
+function _uploadPendingFilesSyncProgressForSession(sessionId){
+  const owner=String(sessionId||'');
+  const state=owner?_uploadPendingFilesProgressBySession.get(owner):null;
+  if(state){_uploadPendingFilesShowProgressBar(owner,state.percent);return;}
+  _uploadPendingFilesHideProgressBar();
+}
+function _uploadPendingFilesUpdateProgress(sessionId,percent){
+  const bar=$('uploadBar');const barWrap=$('uploadBarWrap');
+  if(!bar||!barWrap)return;
+  const owner=String(sessionId||'');
+  const activeForOwner=barWrap.dataset&&barWrap.dataset.uploadSessionId===owner;
+  if(percent===null){
+    if(owner)_uploadPendingFilesProgressBySession.delete(owner);
+    if(activeForOwner){
+      _uploadPendingFilesHideProgressBar();
+    }
+    return;
+  }
+  const clamped=Math.max(0,Math.min(100,Number(percent)||0));
+  if(owner)_uploadPendingFilesProgressBySession.set(owner,{percent:clamped});
+  if(!_uploadPendingFilesCurrentSession(sessionId)){
+    if(activeForOwner)_uploadPendingFilesHideProgressBar();
+    return;
+  }
+  _uploadPendingFilesShowProgressBar(owner,clamped);
+}
+async function uploadPendingFiles(options={}){
+  const opts=options||{};
+  const pendingFiles=Array.isArray(opts.files)?opts.files.filter(Boolean):[...(S.pendingFiles||[])];
+  const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
+  if(!pendingFiles.length||!sessionId)return[];
+  const clearPending=!(opts&&opts.clearPending===false);
+  const names=[];let failures=0;
+  _uploadPendingFilesUpdateProgress(sessionId,0);
+  const total=pendingFiles.length;
   for(let i=0;i<total;i++){
-    const f=S.pendingFiles[i];
+    const f=pendingFiles[i];
     try{
       if(f&&f.size>MAX_UPLOAD_BYTES)throw new Error(_uploadTooLargeMessage(f));
       const fd=new FormData();
-      fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
+      fd.append('session_id',sessionId);fd.append('file',f,f.name);
       const isArchive=_ARCHIVE_EXTS.test(f.name);
       const url=new URL(isArchive?'api/upload/extract':'api/upload',document.baseURI||location.href).href;
       const res=await fetch(url,{method:'POST',credentials:'include',body:fd});
@@ -17495,15 +18500,16 @@ async function uploadPendingFiles(){
       if(data.error)throw new Error(data.error);
       if(isArchive){
         names.push({name: data.dest, path: data.dest, extracted: data.extracted});
-        if(typeof loadDir==='function')loadDir(S.currentDir||'.');
+        if(typeof loadDir==='function'&&_uploadPendingFilesCurrentSession(sessionId))loadDir(S.currentDir||'.');
       }else{
         names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
       }
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
-    bar.style.width=`${Math.round((i+1)/total*100)}%`;
+    _uploadPendingFilesUpdateProgress(sessionId,Math.round((i+1)/total*100));
   }
-  barWrap.classList.remove('active');bar.style.width='0%';
-  S.pendingFiles=[];renderTray();
+  _uploadPendingFilesUpdateProgress(sessionId,null);
+  if(clearPending&&_uploadPendingFilesCurrentSession(sessionId)){S.pendingFiles=[];renderTray();}
+  else if(typeof renderTray==='function'&&_uploadPendingFilesCurrentSession(sessionId))renderTray();
   if(failures===total&&total>0)throw new Error(t('all_uploads_failed',total));
   // Show extraction summary
   const extracted=names.filter(n=>n.extracted);

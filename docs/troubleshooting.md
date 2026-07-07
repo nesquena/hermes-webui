@@ -121,6 +121,62 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ---
 
+## "Context compression exhausted" after a long-running turn
+
+**Symptom.** A long-running session, often with many tool calls or a small
+context-window model, ends with a `Context compression exhausted` error instead
+of a final answer. The message includes a recovery action labeled `Start focused
+continuation`.
+
+**Why.** Automatic compression could not shrink the current conversation enough
+to continue safely in the same model-facing context. The exhausted session is
+terminal: sending a bare "continue", "go on", or "继续" would usually replay the
+same oversized state and fail again, so the WebUI points the user to a focused
+linked continuation instead.
+
+**Diagnostic.**
+
+1. Open the session JSON under your WebUI state directory, for example:
+   ```bash
+   jq '.recommended_recovery_action, .compression_recovery' \
+     ~/.hermes/webui/sessions/<session_id>.json
+   ```
+2. A recoverable exhausted turn should report:
+   - `recommended_recovery_action: "start_focused_continuation"`
+   - `compression_recovery.terminal_state: "compression_exhausted"`
+   - the final assistant error message carrying `_compressionRecovery`
+
+**Fix.** Use the `Start focused continuation` action in the exhausted message.
+The new linked session preserves the workspace, model, profile, project, and
+toolset lane, but intentionally starts with an empty model-facing transcript so
+the oversized exhausted tail is not replayed. After the new session opens,
+describe the next narrow task explicitly instead of sending a bare continuation.
+
+**When to file a bug.** File a bug if the exhausted message has no recovery
+action, the action creates a session with the old oversized context/messages
+replayed into the model-facing transcript, or a bare "continue" starts another
+turn in the exhausted session instead of being blocked with recovery guidance.
+
+---
+
+## Installed PWA opens to a blank screen after an update
+
+**Symptom.** The installed PWA or home-screen app opens to a blank screen after a WebUI update, while the same URL often works again in a normal browser tab.
+
+**Why.** Reverse proxies are supported, but proxy basic auth can challenge the same-origin `sw.js`, manifest, or versioned `static/*` fetches the installed app needs while its service worker updates the shell.
+
+**Diagnostic.**
+
+1. Open the same WebUI URL in a regular browser tab and confirm whether it loads there.
+2. Check reverse-proxy logs for `401` responses on `/sw.js`, `/manifest.json`, or versioned `/static/*` assets during the update.
+3. Temporarily remove proxy basic auth and use WebUI's built-in password. If the blank screen stops after the next update, the proxy auth challenge was the trigger.
+
+**Fix.** Prefer WebUI's own password for installed PWAs. If you keep proxy basic auth, configure it so the same-origin service-worker and shell update fetches can complete. If the installed shell is already blank, clear site data for the Hermes origin, then reopen or reinstall the PWA after that site-scoped cleanup.
+
+**When to file a bug.** File a WebUI bug if the blank screen still reproduces without proxy basic auth, or after the proxy allows the same-origin service-worker and shell update fetches through.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.
