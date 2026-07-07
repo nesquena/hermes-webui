@@ -5653,14 +5653,19 @@ function syncWorkspaceDisplays(){
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
   if(mobileLabel) mobileLabel.textContent=S._bootReady?label:'';
+  const composerExpanded=!!(composerDropdown&&composerDropdown.classList.contains('open'));
   if(composerChip){
     composerChip.disabled=!hasWorkspace;
     composerChip.title=hasWorkspace?ws:t('no_workspace');
-    composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+    composerChip.setAttribute('aria-label',hasWorkspace?t('workspace_switcher_aria',label):t('no_workspace'));
+    composerChip.setAttribute('aria-expanded',composerExpanded?'true':'false');
+    composerChip.classList.toggle('active',composerExpanded);
   }
   if(mobileAction){
     mobileAction.title=hasWorkspace?ws:t('no_workspace');
-    mobileAction.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+    mobileAction.setAttribute('aria-label',hasWorkspace?t('workspace_switcher_aria',label):t('no_workspace'));
+    mobileAction.setAttribute('aria-expanded',composerExpanded?'true':'false');
+    mobileAction.classList.toggle('active',composerExpanded);
   }
 }
 
@@ -5850,8 +5855,14 @@ function toggleComposerWsDropdown(){
       renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
       dd.classList.add('open');
       _positionComposerWsDropdown();
-      if(chip) chip.classList.add('active');
-      if(mobileAction) mobileAction.classList.add('active');
+      if(chip){
+        chip.classList.add('active');
+        chip.setAttribute('aria-expanded','true');
+      }
+      if(mobileAction){
+        mobileAction.classList.add('active');
+        mobileAction.setAttribute('aria-expanded','true');
+      }
     });
   }
 }
@@ -5863,8 +5874,14 @@ function closeWsDropdown(){
   const mobileAction=$('composerMobileWorkspaceAction');
   if(dd)dd.classList.remove('open');
   if(composerDd)composerDd.classList.remove('open');
-  if(composerChip)composerChip.classList.remove('active');
-  if(mobileAction)mobileAction.classList.remove('active');
+  if(composerChip){
+    composerChip.classList.remove('active');
+    composerChip.setAttribute('aria-expanded','false');
+  }
+  if(mobileAction){
+    mobileAction.classList.remove('active');
+    mobileAction.setAttribute('aria-expanded','false');
+  }
 }
 document.addEventListener('click',e=>{
   if(
