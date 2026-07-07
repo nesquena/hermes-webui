@@ -6248,10 +6248,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof showToast==='function') showToast(d.message||'Gateway offline',4000,'warning');
           return;
         }
-        // Show as a small inline notice, not a full error
+        if(d.type==='fallback'){
+          // Show a persistent inline fallback notice in the chat stream
+          // instead of a 4-second composer status flash that disappears.
+          if(typeof appendFallbackNotice==='function'){
+            appendFallbackNotice(d);
+          }
+          // Also show the brief status bar message for immediate feedback
+          setComposerStatus(d.message||'Fallback activated');
+          setTimeout(()=>setComposerStatus(''),4000);
+          return;
+        }
+        // Generic warning: show in composer status
         setComposerStatus(`${d.message||'Warning'}`);
-        // If it's a fallback notice, show it briefly then clear
-        if(d.type==='fallback') setTimeout(()=>setComposerStatus(''),4000);
       }catch(_){}
     });
 
