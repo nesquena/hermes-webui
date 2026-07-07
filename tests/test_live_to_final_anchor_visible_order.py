@@ -1009,7 +1009,7 @@ def test_live_anchor_scene_snapshot_renders_transparent_rows_before_compact_gate
     row = _function_body(UI_JS, "_anchorSceneTransparentNodeForRow")
 
     transparent_gate = "return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);"
-    compact_gate = "if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;"
+    compact_gate = "if(sceneMode!=='compact_worklog') return false;"
     assert transparent_gate in live
     assert compact_gate in live
     assert live.index(transparent_gate) < live.index(compact_gate), (
@@ -1181,6 +1181,7 @@ global.$=(id)=>{{
   return findById(msgInner,id);
 }};
 let transparentMode=true;
+global.chatActivityMode=()=>transparentMode?'transparent_stream':'compact_worklog';
 global.isTransparentStream=()=>transparentMode;
 global.isCompactWorklogMode=()=>!transparentMode;
 global._anchorSceneRowsForRendering=(scene)=>scene.activity_rows||[];
