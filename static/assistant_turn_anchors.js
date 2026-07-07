@@ -178,6 +178,12 @@
     return typeof value==='string'?value.trim():'';
   }
 
+  function _activityDisplayMode(value){
+    return value==='transparent_stream'||value==='compact_worklog'||value==='hide_all_activity'
+      ? value
+      : 'compact_worklog';
+  }
+
   function _terminalStateKey(value){
     return _cleanString(value).toLowerCase().replace(/[\s-]+/g,'_');
   }
@@ -1013,7 +1019,7 @@
     const anchor=_anchorFromProjectionInput(input);
     const opts=(options&&typeof options==='object')?options:{};
     const requestedMode=_cleanString(_own(opts,'mode'));
-    const mode=requestedMode==='transparent_stream'?'transparent_stream':'compact_worklog';
+    const mode=_activityDisplayMode(requestedMode);
     if(!anchor){
       return Object.freeze({
         version:'activity_scene_v1',
@@ -1319,7 +1325,7 @@
     const item=(input&&typeof input==='object')?input:{};
     const opts=(options&&typeof options==='object')?options:{};
     const requested=_cleanString(_own(item,'mode'))||_cleanString(_own(opts,'mode'));
-    return requested==='transparent_stream'?'transparent_stream':'compact_worklog';
+    return _activityDisplayMode(requested);
   }
 
   function _rendererSnapshotRowsInput(input, options){

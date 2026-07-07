@@ -10240,17 +10240,23 @@ function _thinkingActivityNode(text, open, disclosureKey){
 }
 function chatActivityMode(){
   if(typeof window==='undefined') return 'compact_worklog';
-  return window._chatActivityDisplayMode || (window._transparentStream ? 'transparent_stream' : 'compact_worklog') || 'compact_worklog';
+  const mode=window._chatActivityDisplayMode;
+  if(mode==='compact_worklog'||mode==='transparent_stream'||mode==='hide_all_activity') return mode;
+  return window._transparentStream ? 'transparent_stream' : 'compact_worklog';
 }
 function isTransparentStream(){
   return chatActivityMode()==='transparent_stream';
 }
+function isFinalAnswerOnlyMode(){
+  return chatActivityMode()==='hide_all_activity';
+}
 function isCompactWorklogMode(){
-  return isSimplifiedToolCalling()&&!isTransparentStream();
+  return isSimplifiedToolCalling()&&chatActivityMode()==='compact_worklog';
 }
 if(typeof window!=='undefined'){
   window.chatActivityMode=chatActivityMode;
   window.isTransparentStream=isTransparentStream;
+  window.isFinalAnswerOnlyMode=isFinalAnswerOnlyMode;
   window.isCompactWorklogMode=isCompactWorklogMode;
 }
 function _toolShortName(name){
@@ -11607,10 +11613,19 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
 }
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
-  if(typeof isTransparentStream==='function'&&isTransparentStream()){
+  const requestedMode=opts.mode;
+  const activeMode=chatActivityMode();
+  const sceneMode=activeMode==='hide_all_activity'
+    ? 'hide_all_activity'
+    : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='hide_all_activity'
+    ? requestedMode
+    : activeMode);
+  if(sceneMode==='hide_all_activity') return false;
+  if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
-  if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
+  if(typeof isSimplifiedToolCalling==='function'&&!isSimplifiedToolCalling()) return false;
+  if(sceneMode!=='compact_worklog') return false;
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
@@ -11980,9 +11995,13 @@ function _refreshTransparentLiveRow(existing, node){
   return existing;
 }
 function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
-  const mode=(typeof isTransparentStream==='function'&&isTransparentStream())
-    ? 'transparent_stream'
-    : ((opts&&opts.mode)||'compact_worklog');
+  const requestedMode=opts&&opts.mode;
+  const activeMode=chatActivityMode();
+  const mode=activeMode==='hide_all_activity'
+    ? 'hide_all_activity'
+    : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='hide_all_activity'
+    ? requestedMode
+    : activeMode);
   const scene=_projectLiveAnchorActivitySceneForStream(streamId,mode);
   if(!scene) return false;
   return renderLiveAnchorActivityScene(streamId,scene,{...(opts||{}),sessionId});
@@ -16082,6 +16101,7 @@ function appendLiveToolCard(tc){
   const opts=arguments[1]||{};
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return;
   if(opts.streamId&&S.activeStreamId!==opts.streamId) return;
+  if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(isLiveAnchorActivitySceneOwner(opts.streamId||S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(opts.streamId||S.activeStreamId, opts.sessionId||S.session.session_id, {mode:'compact_worklog'});
     return;
@@ -16278,6 +16298,7 @@ function _setLiveWorklogThinkingPlaceholder(group){
 }
 function ensureLiveWorklogShell(){
   if(!S.session) return null;
+  if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return null;
   const activeStreamId=S.activeStreamId||'';
   if(activeStreamId&&typeof _renderLiveAnchorActivitySceneForStream==='function'&&_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'})){
     _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
@@ -17206,6 +17227,7 @@ function appendThinking(text='', options){
   // without this check they would pollute the new session's DOM.
   options=options||{};
   const allowPendingPlaceholder=!!(options&&options.pending===true);
+  if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
   if(!allowPendingPlaceholder&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id, {mode:'compact_worklog'});
