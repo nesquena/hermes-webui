@@ -781,6 +781,56 @@ def _normalize_disabled_set(values) -> set:
     return {str(v).strip() for v in values if str(v).strip()}
 
 
+# Skills hidden by operator env var, e.g. for Docker multi-tenant installs that
+# want a curated WebUI skill set per container without forking the agent image.
+# Hidden skills never appear in the Skills panel, cron skill picker, or the
+# /api/skills/usage breakdown. They are still on disk and remain usable by the
+# underlying Hermes agent (CLI / cron / Telegram etc.) — this knob is WebUI-only.
+#
+# Set HERMES_WEBUI_HIDDEN_SKILLS to a comma- or whitespace-separated list of
+# skill names (matches the skill's frontmatter `name:` if present, else the
+# containing directory name). Matching is exact and case-insensitive.
+#
+#   export HERMES_WEBUI_HIDDEN_SKILLS="imcrobot-skill, internal-admin"
+_HIDDEN_SKILL_NAMES_CACHE: frozenset[str] | None = None
+
+
+def _hidden_skill_names() -> frozenset[str]:
+    """Return the lowercase set of skill names hidden via env var.
+
+    Reads ``HERMES_WEBUI_HIDDEN_SKILLS`` once per process and caches the parsed
+    result. An unset / empty variable returns an empty frozenset, so the
+    existing call path stays a no-op for operators who never set the knob.
+    """
+    global _HIDDEN_SKILL_NAMES_CACHE
+    if _HIDDEN_SKILL_NAMES_CACHE is not None:
+        return _HIDDEN_SKILL_NAMES_CACHE
+    raw = os.environ.get("HERMES_WEBUI_HIDDEN_SKILLS", "") or ""
+    names: set[str] = set()
+    for chunk in re.split(r"[,\s]+", raw):
+        chunk = chunk.strip()
+        if chunk:
+            names.add(chunk.lower())
+    _HIDDEN_SKILL_NAMES_CACHE = frozenset(names)
+    return _HIDDEN_SKILL_NAMES_CACHE
+
+
+def _skill_name_is_hidden(name: str) -> bool:
+    """True when the skill name is in the operator-hidden set.
+
+    Defensive: a blank name never matches (the listing code already short-
+    circuits blank names), and unknown attribute errors on the cache are
+    treated as "not hidden" so a broken env never silently hides everything.
+    """
+    try:
+        hidden = _hidden_skill_names()
+    except Exception:
+        return False
+    if not hidden or not name:
+        return False
+    return str(name).strip().lower() in hidden
+
+
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
     """List skills using an explicit local skills directory.
 
@@ -823,6 +873,11 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                     continue
                 name = frontmatter.get("name", skill_dir.name)[:64]
                 if name in seen_names:
+                    continue
+                if _skill_name_is_hidden(name):
+                    # Operator-hidden via HERMES_WEBUI_HIDDEN_SKILLS. Skip
+                    # before description parsing so hidden skills cost
+                    # nothing beyond the env lookup.
                     continue
                 description = frontmatter.get("description", "")
                 if not description:
