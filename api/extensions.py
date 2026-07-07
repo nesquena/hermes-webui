@@ -669,6 +669,16 @@ def _manifest_entry_storage_owned(entry: Dict[str, object]) -> bool:
     storage = permissions.get("storage")
     return isinstance(storage, dict) and storage.get("owned") is True
 
+def _manifest_entry_runtime_permissions(entry: Dict[str, object]) -> Dict[str, object]:
+    permissions = entry.get("permissions")
+    if not isinstance(permissions, dict):
+        return {}
+    result: Dict[str, object] = {}
+    observability = permissions.get("observability")
+    if isinstance(observability, dict) and observability.get("events") is True:
+        result["observability"] = {"events": True}
+    return result
+
 def _settings_text(value: object, *, max_len: int = 160) -> str:
     if not isinstance(value, str):
         return ""
@@ -1116,25 +1126,27 @@ def _manifest_extension_state(
         if not manifest_enabled:
             manifest_disabled_ids.add(ext_id)
         settings_schema = _sanitize_settings_schema(entry)
-        extension_entries.append(
-            {
-                "id": ext_id,
-                "name": name or ext_id,
-                "manifest_enabled": manifest_enabled,
-                "user_enabled": (not user_disabled) if can_toggle else False,
-                "user_disabled": user_disabled,
-                "effective_enabled": effective_enabled,
-                "can_toggle": can_toggle,
-                "reload_required": True,
-                "storage_owned": _manifest_entry_storage_owned(entry),
-                "settings_schema": settings_schema,
-                "status": (
-                    "manifest_disabled"
-                    if not manifest_enabled
-                    else ("user_disabled" if user_disabled else "enabled")
-                ),
-            }
-        )
+        extension_entry = {
+            "id": ext_id,
+            "name": name or ext_id,
+            "manifest_enabled": manifest_enabled,
+            "user_enabled": (not user_disabled) if can_toggle else False,
+            "user_disabled": user_disabled,
+            "effective_enabled": effective_enabled,
+            "can_toggle": can_toggle,
+            "reload_required": True,
+            "storage_owned": _manifest_entry_storage_owned(entry),
+            "settings_schema": settings_schema,
+            "status": (
+                "manifest_disabled"
+                if not manifest_enabled
+                else ("user_disabled" if user_disabled else "enabled")
+            ),
+        }
+        runtime_permissions = _manifest_entry_runtime_permissions(entry)
+        if runtime_permissions:
+            extension_entry["permissions"] = runtime_permissions
+        extension_entries.append(extension_entry)
     if invalid_seen:
         _add_diagnostic_warning(diagnostics, "manifest_extension_id_invalid", "manifest:extensions")
     if duplicate_seen:
@@ -1257,14 +1269,16 @@ def _extension_runtime_entries(
         seen_ids.add(ext_id)
         if entry.get("enabled", True) is False or ext_id in disabled_ids:
             continue
-        extensions.append(
-            {
-                "id": ext_id,
-                "name": _manifest_entry_text(entry, "name") or ext_id,
-                "storage_owned": _manifest_entry_storage_owned(entry),
-                "settings_schema": _sanitize_settings_schema(entry),
-            }
-        )
+        extension_entry = {
+            "id": ext_id,
+            "name": _manifest_entry_text(entry, "name") or ext_id,
+            "storage_owned": _manifest_entry_storage_owned(entry),
+            "settings_schema": _sanitize_settings_schema(entry),
+        }
+        runtime_permissions = _manifest_entry_runtime_permissions(entry)
+        if runtime_permissions:
+            extension_entry["permissions"] = runtime_permissions
+        extensions.append(extension_entry)
     return extensions
 
 

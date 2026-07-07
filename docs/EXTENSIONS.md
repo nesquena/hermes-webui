@@ -493,6 +493,16 @@ Rules and guarantees:
   the default `connect-src`. Declare `permissions.network_external` honestly
   based on where it calls.
 
+## Observability events
+
+Extensions can subscribe to a read-only live event stream with `window.HermesExtensionEvents.subscribe(types, handler)`.
+
+- `types` accepts a string, an array of strings, or `null` / empty for all supported event types.
+- The handler receives cloned event objects with `type`, `timestamp`, `session_id`, and `payload`.
+- `subscribe()` returns an unsubscribe function on success.
+- Delivery requires an enabled extension manifest entry with `{"permissions":{"observability":{"events":true}}}`.
+- Phase 1 covers live stream events only. Metrics access is a separate slice.
+
 ## Extension authoring guidance
 
 Extensions share the page with the WebUI app, so they should be additive and

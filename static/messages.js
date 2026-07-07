@@ -1977,6 +1977,7 @@ function closeOtherLiveStreams(activeSid){
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  const publishExtensionEvent=(type,d)=>{try{if(window._publishHermesExtensionEvent)window._publishHermesExtensionEvent(type,{...(d||{}),session_id:(d&&d.session_id)||activeSid,stream_id:streamId});}catch(_){}};
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
   // backgrounded tab. A reconnect with a different streamId re-seeds (the old
@@ -5035,6 +5036,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       const tc=upsertLiveToolCall(d,'start');
       if(!tc) return;
+      publishExtensionEvent('tool',d);
       const pendingDisplayTextBeforeTool=segmentStart===0
         ? (_parseStreamState().displayText||'')
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
@@ -5072,6 +5074,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const tc=upsertLiveToolCall(d,'complete');
       if(!tc) return;
       tc.is_error=!!d.is_error;
+      publishExtensionEvent('tool_complete',d);
       const pendingDisplayTextBeforeComplete=segmentStart===0
         ? (_parseStreamState().displayText||'')
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
@@ -5144,6 +5147,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
+      publishExtensionEvent('approval',d);
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
@@ -5152,6 +5156,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
+      publishExtensionEvent('clarify',d);
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
@@ -5291,6 +5296,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
+      publishExtensionEvent('done',_doneData);
       const _doneEvent=e;
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
@@ -5570,6 +5576,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
+        publishExtensionEvent('stream_end',d);
       }catch(_){}
       if(S.activeStreamId===streamId && _liveStreamEndScenePresent()){
         _scheduleStreamEndRecovery(source);
@@ -5728,6 +5735,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
       const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid));
       if(eventMatchesCurrent){
+        publishExtensionEvent('apperror',d);
         _flushReasoningToAnchor();
         _applyToAnchor('apperror',{
           type:d.type||'error',
@@ -5961,6 +5969,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('cancelled');
       let _cancelData={};
       try{ _cancelData=JSON.parse(e.data||'{}')||{}; }catch(_){ _cancelData={}; }
+      publishExtensionEvent('cancel',_cancelData);
       _flushReasoningToAnchor();
       _applyToAnchor('cancel',{
         status:_cancelData.status||_cancelData.type||'cancelled',

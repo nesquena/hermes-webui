@@ -1201,6 +1201,74 @@ window._hermesTtsSynth=function(id, text, opts){
     });
 };
 
+// ── Extension event stream (observability subscription) ─────────────────────
+const _HERMES_EXTENSION_EVENT_TYPES=new Set(['tool','tool_complete','approval','clarify','done','stream_end','apperror','cancel']);
+const _HERMES_EXTENSION_EVENT_SUBSCRIBERS=new Set();
+function _cloneHermesExtensionEventPayload(value){
+  try{ return JSON.parse(JSON.stringify(value===undefined?{}:value)); }
+  catch(_){ return {}; }
+}
+function _hermesExtensionHasEventPermission(){
+  const cfg=window.__HERMES_EXTENSION_CONFIG__;
+  const extensions=cfg&&Array.isArray(cfg.extensions)?cfg.extensions:[];
+  for(const ext of extensions){
+    if(!ext||typeof ext!=='object') continue;
+    if(ext.enabled===false||ext.effective_enabled===false||ext.user_disabled===true||ext.manifest_enabled===false) continue;
+    if(ext.status==='user_disabled'||ext.status==='manifest_disabled') continue;
+    const observability=ext.permissions&&ext.permissions.observability;
+    if(observability&&observability.events===true) return true;
+  }
+  return false;
+}
+function _normalizeHermesExtensionEventTypes(types){
+  if(types==null) return null;
+  if(typeof types==='string'){
+    const name=types.trim();
+    if(!name) return null;
+    return _HERMES_EXTENSION_EVENT_TYPES.has(name)?new Set([name]):false;
+  }
+  if(!Array.isArray(types)) return false;
+  const out=new Set();
+  for(const type of types){
+    if(typeof type!=='string') return false;
+    const name=type.trim();
+    if(!name) continue;
+    if(!_HERMES_EXTENSION_EVENT_TYPES.has(name)) return false;
+    out.add(name);
+  }
+  return out.size?out:null;
+}
+function _publishHermesExtensionEvent(type, payload){
+  try{
+    if(!_HERMES_EXTENSION_EVENT_TYPES.has(type)) return false;
+    if(!_hermesExtensionHasEventPermission()) return false;
+    const event={
+      type:type,
+      timestamp:new Date().toISOString(),
+      session_id:(payload&&payload.session_id)||null,
+      payload:_cloneHermesExtensionEventPayload(payload||{}),
+    };
+    for(const subscriber of _HERMES_EXTENSION_EVENT_SUBSCRIBERS){
+      if(subscriber.types&&subscriber.types.size&&!subscriber.types.has(type)) continue;
+      try{ subscriber.handler(_cloneHermesExtensionEventPayload(event)); }catch(_){}
+    }
+    return true;
+  }catch(_){ return false; }
+}
+window.HermesExtensionEvents={
+  subscribe:function(types, handler){
+    try{
+      if(typeof handler!=='function') return false;
+      const normalized=_normalizeHermesExtensionEventTypes(types);
+      if(normalized===false) return false;
+      const subscriber={types:normalized,handler};
+      _HERMES_EXTENSION_EVENT_SUBSCRIBERS.add(subscriber);
+      return function(){ _HERMES_EXTENSION_EVENT_SUBSCRIBERS.delete(subscriber); };
+    }catch(_){ return false; }
+  }
+};
+window._publishHermesExtensionEvent=_publishHermesExtensionEvent;
+
 // ── Turn-based voice mode (#1333) ────────────────────────────────────────
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
 (function(){
