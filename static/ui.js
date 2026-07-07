@@ -3657,7 +3657,9 @@ function renderModelDropdown(){
     }
     return 500;
   };
-  const _selectedModelBadge=(m,sel)=>String((m&&m.value)||'')===String((sel&&sel.value)||'')
+  const _selectedModelState=(typeof _modelStateForSelect==='function')?_modelStateForSelect(sel,sel.value):{model:sel&&sel.value||'',model_provider:null};
+  const _modelProviderForSelectedBadge=(m)=>String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
+  const _selectedModelBadge=(m,sel)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'')
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
   const _renderProviderEndpointHint=(entry,parent)=>{

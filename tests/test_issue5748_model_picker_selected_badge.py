@@ -34,7 +34,13 @@ def test_model_picker_renders_selected_badge_without_replacing_configured_badge(
 
 
 def test_selected_badge_is_keyed_to_current_model_value():
-    assert "String((m&&m.value)||'')===String((sel&&sel.value)||'')" in UI_JS
+    assert "String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')" in UI_JS
+
+
+def test_selected_badge_is_keyed_to_current_model_provider():
+    assert "const _selectedModelState=(typeof _modelStateForSelect==='function')?_modelStateForSelect(sel,sel.value)" in UI_JS
+    assert "const _modelProviderForSelectedBadge=(m)=>" in UI_JS
+    assert "String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'')" in UI_JS
 
 
 def test_selected_badge_label_has_locale_entries():
