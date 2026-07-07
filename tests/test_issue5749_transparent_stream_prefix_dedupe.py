@@ -23,34 +23,6 @@ def _run_node(src, script, tmp_path):
     return json.loads(result.stdout)
 
 
-def _extract_js_function(src, name):
-    marker = f"function {name}"
-    start = src.find(marker)
-    assert start != -1, f"{name} not found"
-    params = src.find("(", start)
-    depth = 0
-    close = -1
-    for idx in range(params, len(src)):
-        if src[idx] == "(":
-            depth += 1
-        elif src[idx] == ")":
-            depth -= 1
-            if depth == 0:
-                close = idx
-                break
-    assert close != -1, f"{name} params did not close"
-    brace = src.find("{", close)
-    depth = 0
-    for idx in range(brace, len(src)):
-        if src[idx] == "{":
-            depth += 1
-        elif src[idx] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start:idx + 1]
-    raise AssertionError(f"{name} body did not close")
-
-
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_issue5749_settlement_suppresses_live_token_prefix_rows(tmp_path):
     final_answer = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback so Transparent Stream does not repeat the same prose row."
