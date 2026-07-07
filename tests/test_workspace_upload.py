@@ -18,6 +18,9 @@ import urllib.request
 import urllib.error
 import pathlib
 import zipfile
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
 
@@ -99,6 +102,84 @@ def _make_tar(members: dict[str, bytes], mode: str = "w") -> bytes:
     return buf.getvalue()
 
 
+class _FakeUploadHandler:
+    def __init__(self, content_length: int = 0):
+        self.status = None
+        self.sent_headers = []
+        self.rfile = io.BytesIO()
+        self.wfile = io.BytesIO()
+        self.headers = {
+            "Content-Type": "multipart/form-data; boundary=test",
+            "Content-Length": str(content_length),
+        }
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.sent_headers.append((name, value))
+
+    def end_headers(self):
+        pass
+
+    def json_body(self):
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+
+def _configure_direct_office_upload(monkeypatch, tmp_path):
+    import api.office_documents as office_documents
+    import api.upload as upload
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = SimpleNamespace(workspace=workspace, profile="default")
+
+    monkeypatch.setattr(upload, "get_session", lambda _sid: session)
+    monkeypatch.setattr(upload, "_reject_invisible_session", lambda *_args: False)
+    monkeypatch.setattr(upload, "resolve_trusted_workspace", lambda path: path)
+    return upload, office_documents, workspace
+
+
+def _set_office_upload_payload(monkeypatch, upload, filename, file_bytes):
+    monkeypatch.setattr(
+        upload,
+        "parse_multipart",
+        lambda *_args, **_kwargs: (
+            {"session_id": "session-1", "path": ""},
+            {"file": (filename, file_bytes)},
+        ),
+    )
+
+
+def _set_office_preview(monkeypatch, office_documents, *, content, preview_kind, office_format):
+    monkeypatch.setattr(
+        office_documents,
+        "preview_office_document",
+        lambda path, raw: {
+            "path": path,
+            "content": content,
+            "preview_kind": preview_kind,
+            "office_format": office_format,
+            "size": len(raw),
+        },
+    )
+
+
+class _FailingSidecarWriter:
+    def __init__(self, inner):
+        self._inner = inner
+
+    def write(self, _data):
+        raise OSError("sidecar write failed")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._inner.close()
+        return False
+
+
 # ── Health check ──────────────────────────────────────────────────────────
 
 def test_health():
@@ -126,11 +207,234 @@ class TestWorkspaceUploadHappyPath:
         assert result["filename"] == "hello.txt"
         assert result["size"] == len(content)
         assert result["extracted"] is False
+        assert "sidecar" not in result
+        assert "sidecar_error" not in result
 
         # Verify file actually exists in the workspace
         uploaded = ws / "hello.txt"
         assert uploaded.exists(), f"File not found at {uploaded}"
         assert uploaded.read_bytes() == content
+
+    def test_upload_docx_writes_sidecar_and_metadata(self, monkeypatch, tmp_path):
+        """Office uploads should write a Markdown sidecar and surface it."""
+        docx_bytes = b"fake-docx-bytes"
+
+        upload, office_documents, workspace = _configure_direct_office_upload(monkeypatch, tmp_path)
+        _set_office_upload_payload(monkeypatch, upload, "report.docx", docx_bytes)
+        _set_office_preview(
+            monkeypatch,
+            office_documents,
+            content="# Preview\n\nOffice upload",
+            preview_kind="office-preview",
+            office_format="docx",
+        )
+
+        handler = _FakeUploadHandler(content_length=len(docx_bytes))
+        upload.handle_workspace_upload(handler)
+
+        assert handler.status == 200
+        result = handler.json_body()
+        assert result["filename"] == "report.docx"
+        assert result["sidecar"]["filename"] == "report.docx.md"
+        assert result["sidecar"]["preview_kind"] == "office-preview"
+        assert result["sidecar"]["office_format"] == "docx"
+
+        uploaded = workspace / "report.docx"
+        sidecar = workspace / "report.docx.md"
+        assert uploaded.exists()
+        assert uploaded.read_bytes() == docx_bytes
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="utf-8") == "# Preview\n\nOffice upload"
+
+    def test_upload_docx_preview_failure_returns_generic_sidecar_error(self, monkeypatch, tmp_path):
+        """Preview failures should not leak raw errors or paths."""
+        docx_bytes = b"fake-docx-bytes"
+
+        upload, office_documents, workspace = _configure_direct_office_upload(monkeypatch, tmp_path)
+        _set_office_upload_payload(monkeypatch, upload, "report.docx", docx_bytes)
+
+        def _raise_preview(_path, _raw):
+            raise ValueError(f"preview failed for {workspace}")
+
+        monkeypatch.setattr(office_documents, "preview_office_document", _raise_preview)
+
+        handler = _FakeUploadHandler(content_length=len(docx_bytes))
+        upload.handle_workspace_upload(handler)
+
+        assert handler.status == 200
+        result = handler.json_body()
+        assert result["sidecar_error"] == "Office sidecar extraction failed"
+        assert str(workspace) not in result["sidecar_error"]
+        assert "preview failed" not in result["sidecar_error"]
+
+        uploaded = workspace / "report.docx"
+        sidecar = workspace / "report.docx.md"
+        assert uploaded.exists()
+        assert uploaded.read_bytes() == docx_bytes
+        assert not sidecar.exists()
+
+    @pytest.mark.parametrize(
+        "filename, file_bytes, content, office_format",
+        [
+            ("report.xlsx", b"fake-xlsx-bytes", "# Preview\n\nWorkbook", "xlsx"),
+            ("slides.pptx", b"fake-pptx-bytes", "# Preview\n\nDeck", "pptx"),
+        ],
+    )
+    def test_upload_office_xlsx_and_pptx_write_sidecars(
+        self,
+        monkeypatch,
+        tmp_path,
+        filename,
+        file_bytes,
+        content,
+        office_format,
+    ):
+        upload, office_documents, workspace = _configure_direct_office_upload(monkeypatch, tmp_path)
+        _set_office_upload_payload(monkeypatch, upload, filename, file_bytes)
+        _set_office_preview(
+            monkeypatch,
+            office_documents,
+            content=content,
+            preview_kind="office-preview",
+            office_format=office_format,
+        )
+
+        handler = _FakeUploadHandler(content_length=len(file_bytes))
+        upload.handle_workspace_upload(handler)
+
+        assert handler.status == 200
+        result = handler.json_body()
+        assert result["filename"] == filename
+        assert result["sidecar"]["filename"] == f"{filename}.md"
+        assert result["sidecar"]["preview_kind"] == "office-preview"
+        assert result["sidecar"]["office_format"] == office_format
+
+        uploaded = workspace / filename
+        sidecar = workspace / f"{filename}.md"
+        assert uploaded.exists()
+        assert uploaded.read_bytes() == file_bytes
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="utf-8") == content
+
+    def test_upload_docx_sidecar_write_failure_cleans_up_and_keeps_upload_success(self, monkeypatch, tmp_path):
+        """Sidecar write failures must not fail the original upload."""
+        docx_bytes = b"fake-docx-bytes"
+
+        upload, office_documents, workspace = _configure_direct_office_upload(monkeypatch, tmp_path)
+        _set_office_upload_payload(monkeypatch, upload, "report.docx", docx_bytes)
+        _set_office_preview(
+            monkeypatch,
+            office_documents,
+            content="# Preview\n\nOffice upload",
+            preview_kind="office-preview",
+            office_format="docx",
+        )
+
+        real_fdopen = upload.os.fdopen
+        fdopen_calls = {"count": 0}
+
+        def _failing_fdopen(fd, *args, **kwargs):
+            fdopen_calls["count"] += 1
+            writer = real_fdopen(fd, *args, **kwargs)
+            if fdopen_calls["count"] == 2:
+                return _FailingSidecarWriter(writer)
+            return writer
+
+        monkeypatch.setattr(upload.os, "fdopen", _failing_fdopen)
+
+        handler = _FakeUploadHandler(content_length=len(docx_bytes))
+        upload.handle_workspace_upload(handler)
+
+        assert handler.status == 200
+        result = handler.json_body()
+        assert result["filename"] == "report.docx"
+        assert result["sidecar_error"] == "Office sidecar extraction failed"
+        assert "sidecar write failed" not in result["sidecar_error"]
+        assert "sidecar" not in result
+
+        uploaded = workspace / "report.docx"
+        sidecar = workspace / "report.docx.md"
+        assert uploaded.exists()
+        assert uploaded.read_bytes() == docx_bytes
+        assert not sidecar.exists()
+
+    def test_upload_docx_sidecar_collision_preserves_existing_sidecar(self, monkeypatch, tmp_path):
+        """A pre-existing Markdown sidecar must survive a create collision."""
+        docx_bytes = b"fake-docx-bytes"
+
+        upload, office_documents, workspace = _configure_direct_office_upload(monkeypatch, tmp_path)
+        _set_office_upload_payload(monkeypatch, upload, "report.docx", docx_bytes)
+        _set_office_preview(
+            monkeypatch,
+            office_documents,
+            content="# Preview\n\nOffice upload",
+            preview_kind="office-preview",
+            office_format="docx",
+        )
+
+        sidecar = workspace / "report.docx.md"
+        sidecar.write_text("keep this", encoding="utf-8")
+
+        handler = _FakeUploadHandler(content_length=len(docx_bytes))
+        upload.handle_workspace_upload(handler)
+
+        assert handler.status == 200
+        result = handler.json_body()
+        assert result["filename"] == "report.docx"
+        assert "sidecar" not in result
+        assert result["sidecar_error"] == "Office sidecar extraction failed"
+        assert "report.docx.md" not in result["sidecar_error"]
+
+        uploaded = workspace / "report.docx"
+        assert uploaded.exists()
+        assert uploaded.read_bytes() == docx_bytes
+        assert sidecar.read_text(encoding="utf-8") == "keep this"
+
+    def test_upload_docx_duplicate_names_get_deduped_sidecars(self, monkeypatch, tmp_path):
+        """Repeated Office uploads should dedupe both the file and its sidecar."""
+        upload, office_documents, workspace = _configure_direct_office_upload(monkeypatch, tmp_path)
+        office_uploads = iter([b"first office payload", b"second office payload"])
+        preview_paths = []
+
+        def _next_upload(*_args, **_kwargs):
+            payload = next(office_uploads)
+            return (
+                {"session_id": "session-1", "path": ""},
+                {"file": ("report.docx", payload)},
+            )
+
+        def _preview(path, raw):
+            preview_paths.append(path)
+            return {
+                "path": path,
+                "content": f"# {path}\n\n{raw.decode('utf-8')}",
+                "preview_kind": "office-preview",
+                "office_format": "docx",
+                "size": len(raw),
+            }
+
+        monkeypatch.setattr(upload, "parse_multipart", _next_upload)
+        monkeypatch.setattr(office_documents, "preview_office_document", _preview)
+
+        handler1 = _FakeUploadHandler(content_length=len(b"first office payload"))
+        upload.handle_workspace_upload(handler1)
+        handler2 = _FakeUploadHandler(content_length=len(b"second office payload"))
+        upload.handle_workspace_upload(handler2)
+
+        assert handler1.status == 200
+        assert handler2.status == 200
+        result1 = handler1.json_body()
+        result2 = handler2.json_body()
+        assert result1["filename"] == "report.docx"
+        assert result1["sidecar"]["filename"] == "report.docx.md"
+        assert result2["filename"] == "report-1.docx"
+        assert result2["sidecar"]["filename"] == "report-1.docx.md"
+        assert preview_paths == ["report.docx", "report-1.docx"]
+
+        assert (workspace / "report.docx").read_bytes() == b"first office payload"
+        assert (workspace / "report.docx.md").read_text(encoding="utf-8") == "# report.docx\n\nfirst office payload"
+        assert (workspace / "report-1.docx").read_bytes() == b"second office payload"
+        assert (workspace / "report-1.docx.md").read_text(encoding="utf-8") == "# report-1.docx\n\nsecond office payload"
 
     def test_upload_into_subdirectory(self, cleanup_test_sessions):
         """Upload a file into a subdirectory within the workspace."""
@@ -283,7 +587,7 @@ class TestWorkspaceUploadOversized:
                 {"file": ("big.bin", big)},
             )
             assert status == 413, f"Expected 413, got {status}: {result}"
-        except (urllib.error.URLError, ConnectionResetError, BrokenPipeError):
+        except (urllib.error.URLError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             # Server may close connection after reading Content-Length > limit
             pass
 
@@ -317,6 +621,8 @@ class TestWorkspaceUploadArchive:
 
         # Archive file itself should be removed after extraction
         assert not (ws / "projects" / "vendor.zip").exists()
+        assert "sidecar" not in result
+        assert "sidecar_error" not in result
 
     def test_zip_extracts_to_workspace_root_when_no_subpath(self, cleanup_test_sessions):
         """Zip uploaded without subpath extracts to workspace root."""
