@@ -7352,6 +7352,9 @@ def _run_agent_streaming(
     # write without nonlocal) so it can seed `_last_err` and let the classifier
     # surface the real, actionable cause (model_not_found / auth_mismatch).
     _captured_terminal_error = [None]
+    # Mutable holder so _agent_status_callback can read the live agent's
+    # model/provider to enrich fallback SSE events with structured data.
+    _current_agent = [None]
 
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
@@ -7386,7 +7389,15 @@ def _run_agent_streaming(
         # show them as warnings via the existing messages.js 'warning' listener.
         _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
         if _is_fallback_notice:
-            put('warning', {'type': 'fallback', 'message': _message})
+            _fallback_data = {'type': 'fallback', 'message': _message}
+            # Enrich with from/to model+provider when the agent is available,
+            # so the frontend can show a persistent, informative notice
+            # instead of just a 4-second status bar flash.
+            _agent_ref = _current_agent[0]
+            if _agent_ref is not None:
+                _fallback_data['to_model'] = getattr(_agent_ref, 'model', '') or ''
+                _fallback_data['to_provider'] = getattr(_agent_ref, 'provider', '') or ''
+            put('warning', _fallback_data)
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
     # finally can always reset even if an exception fires before the bind.
@@ -8517,6 +8528,7 @@ def _run_agent_streaming(
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
             if ephemeral:
                 agent = _AIAgent(**_agent_kwargs)
+                _current_agent[0] = agent
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
                 import hashlib as _hashlib
@@ -8643,6 +8655,7 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     agent = _AIAgent(**_agent_kwargs)
+                    _current_agent[0] = agent
                     # Register the new agent with the memory lifecycle so
                     # its commit_memory_session() can be found later.
                     try:
@@ -9315,6 +9328,7 @@ def _run_agent_streaming(
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                             agent = _AIAgent(**_agent_kwargs)
+                            _current_agent[0] = agent
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L

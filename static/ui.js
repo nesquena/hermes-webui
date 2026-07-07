@@ -14068,6 +14068,48 @@ function _compressionCardsNode(state){
   wrap.innerHTML=`<div class="compression-turn-blocks">${_compressionCardsHtml(state)}</div>`;
   return wrap;
 }
+/**
+ * Insert a persistent fallback notice into the chat stream at the current
+ * assistant turn position.  Unlike the 4-second composer status flash, this
+ * stays visible so the user can see that a model fallback occurred and which
+ * model is now serving the response.
+ * @param {Object} data - SSE 'warning' event payload with type='fallback'
+ */
+function appendFallbackNotice(data){
+  if(!S.session) return;
+  const msgInner=$('msgInner');
+  if(!msgInner) return;
+  const toModel=data.to_model||'';
+  const toProvider=data.to_provider||'';
+  const message=data.message||'Fallback activated';
+  // Build the notice element
+  const notice=document.createElement('div');
+  notice.className='fallback-notice';
+  notice.setAttribute('data-fallback-notice','1');
+  const modelLabel=toModel?(toProvider?`${toModel} (${toProvider})`:toModel):'';
+  notice.innerHTML=
+    `<span class="fallback-notice-icon">⚠️</span>`+
+    `<span class="fallback-notice-text">${esc(message)}</span>`+
+    (modelLabel?`<span class="fallback-notice-model">${esc(modelLabel)}</span>`:'');
+  // Find or create the current assistant turn and insert the notice
+  // at the top of its blocks container so it appears before the response.
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    msgInner.appendChild(turn);
+  }
+  const inner=_assistantTurnBlocks(turn);
+  if(inner){
+    // Avoid duplicate notices for the same fallback (same model/provider)
+    const existing=inner.querySelector('[data-fallback-notice="1"]');
+    if(existing) existing.remove();
+    inner.insertBefore(notice, inner.firstChild);
+  }
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+}
+
 function appendLiveCompressionCard(state){
   if(!S.session||!S.activeStreamId||!state) return false;
   if(isLiveAnchorActivitySceneOwner(S.activeStreamId)){
