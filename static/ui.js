@@ -2570,8 +2570,17 @@ function _modelStateForSelect(sel, modelId){
   if(!value) return {model:'',model_provider:null};
   const explicitProvider=_providerFromModelValue(value);
   if(explicitProvider) return {model:value,model_provider:explicitProvider};
-  const opt=sel&&sel.selectedOptions&&sel.selectedOptions[0];
-  const provider=String(_getOptionProviderId(opt)||'').trim();
+  let opt=null;
+  if(sel&&sel.options){
+    opt=Array.from(sel.options).find(o=>o.value===value);
+  }
+  if(!opt){
+    const currentOpt=sel&&sel.selectedOptions&&sel.selectedOptions[0];
+    if(currentOpt&&currentOpt.value===value){
+      opt=currentOpt;
+    }
+  }
+  const provider=String((opt&&_getOptionProviderId(opt))||'').trim();
   return {model:value,model_provider:(provider&&provider!=='default')?provider:null};
 }
 function _captureModelDropdownSelection(sel){
