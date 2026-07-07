@@ -64,7 +64,6 @@ eval(extractFunc('_anchorSceneExistingRowKey'));
 eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
 eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
 eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
-eval(extractFunc('_anchorSceneRowLooksLikeLiveTokenFinalAnswerPrefix'));
 eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
 eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
 eval(extractFunc('_completeSettledAnchorSceneForTurn'));
@@ -179,7 +178,6 @@ eval(extractFunc('_anchorSceneExistingRowKey'));
 eval(extractFunc('_anchorSceneRowHasLiveIdentity'));
 eval(extractFunc('_anchorSceneSettleLiveRunningRow'));
 eval(extractFunc('_anchorSceneRowLooksLikeFinalAnswer'));
-eval(extractFunc('_anchorSceneRowLooksLikeLiveTokenFinalAnswerPrefix'));
 eval(extractFunc('_anchorSceneRowTextOverlapsExisting'));
 eval(extractFunc('_anchorSceneMessageRowsHaveThinking'));
 eval(extractFunc('_completeSettledAnchorSceneForTurn'));
@@ -271,7 +269,6 @@ global._anchorSceneToolCallFromRow = () => ({{}});
 global.buildToolCard = () => new FakeElement('div');
 global._thinkingActivityNode = () => new FakeElement('div');
 eval(extractFunc('_anchorSceneProseMatchesFinalAnswer'));
-eval(extractFunc('_anchorSceneRowLooksLikeLiveTokenFinalAnswerPrefix'));
 eval(extractFunc('_anchorSceneTransparentNodeForRow'));
 const liveRow = {{
   role: 'prose',
@@ -353,7 +350,6 @@ global._anchorSceneToolCallFromRow = () => ({{}});
 global.buildToolCard = () => new FakeElement('div');
 global._thinkingActivityNode = () => new FakeElement('div');
 eval(extractFunc('_anchorSceneProseMatchesFinalAnswer'));
-eval(extractFunc('_anchorSceneRowLooksLikeLiveTokenFinalAnswerPrefix'));
 eval(extractFunc('_anchorSceneTransparentNodeForRow'));
 const variants = [
   {{
