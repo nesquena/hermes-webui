@@ -41,6 +41,8 @@ def test_selected_badge_is_keyed_to_current_model_provider():
     assert "const _selectedModelState=(typeof _modelStateForSelect==='function')?_modelStateForSelect(sel,sel.value)" in UI_JS
     assert "const _modelProviderForSelectedBadge=(m)=>" in UI_JS
     assert "String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'')" in UI_JS
+    assert "const _isSelectedModelRow=(m)=>" in UI_JS
+    assert "row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');" in UI_JS
 
 
 def test_selected_badge_label_has_locale_entries():
