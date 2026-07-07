@@ -3609,11 +3609,38 @@ function _composerPrefillIntentFromLocation(){
     };
   }catch(_e){return empty;}
 }
+function _profileQueryIntentFromLocation(){
+  const empty={hasParam:false,valid:false,name:''};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    if(!qs.has('profile')) return empty;
+    const name=String(qs.get('profile')||'');
+    return {
+      hasParam:true,
+      valid:/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name),
+      name
+    };
+  }catch(_e){return empty;}
+}
+function _consumeProfileQueryParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('profile');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _consumeComposerPrefillParamsFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{
     const current=new URL(window.location.href);
     const before=current.searchParams.toString();
+    current.searchParams.delete('profile');
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
@@ -3638,6 +3665,7 @@ function _sessionUrlForSid(sid){
     const current=new URL(window.location.href);
     current.searchParams.delete('session');
     current.searchParams.delete('session_id');
+    current.searchParams.delete('profile');
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
