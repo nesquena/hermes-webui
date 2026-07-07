@@ -3442,7 +3442,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!String(row.local_id||'').startsWith('live-prose:')) return false;
     const rowTextKey=_anchorSceneTextKey(row.text);
     const finalKey=_anchorSceneTextKey(finalAnswer);
-    return !!rowTextKey&&!!finalKey&&rowTextKey.length<finalKey.length&&finalKey.startsWith(rowTextKey);
+    return !!rowTextKey&&!!finalKey&&rowTextKey.length>=80&&rowTextKey.length<finalKey.length&&finalKey.startsWith(rowTextKey);
   }
   function _anchorSceneRowTextOverlapsExisting(rowTextKey, seenTextKeys){
     if(!rowTextKey||!Array.isArray(seenTextKeys)) return false;

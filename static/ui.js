@@ -11460,7 +11460,7 @@ function _anchorSceneRowLooksLikeLiveTokenFinalAnswerPrefix(row, finalAnswer){
   if(!String(row.local_id||'').startsWith('live-prose:')) return false;
   const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
   const a=norm(row.text), b=norm(finalAnswer);
-  return !!a&&!!b&&a.length<b.length&&b.startsWith(a);
+  return !!a&&!!b&&a.length>=80&&a.length<b.length&&b.startsWith(a);
 }
 function _anchorSceneWorklogGroup(blocks, opts){
   if(!blocks) return null;
