@@ -47,5 +47,56 @@ def test_composer_workspace_dropdown_keeps_aria_expanded_in_sync():
     assert "mobileAction.setAttribute('aria-expanded','false')" in close
 
 
-def test_workspace_switcher_i18n_key_exists_in_english_locale():
+def test_composer_workspace_cue_is_transient_not_a_persistent_editor_description():
+    assert 'id="msg"' in INDEX_HTML
+    assert 'aria-describedby="composerWorkspaceContext"' not in INDEX_HTML
+    assert 'id="composerWorkspaceContext"' in INDEX_HTML
+    assert 'class="sr-only"' in INDEX_HTML
+
+    sync = _block(PANELS_JS, "function syncWorkspaceDisplays", "async function loadWorkspaceList")
+    assert "composerWorkspaceContext" not in sync
+    assert "workspace_context_aria" not in sync
+    assert "workspace_context_none" not in sync
+
+
+def test_new_chat_has_screen_reader_only_workspace_announcer():
+    assert 'id="a11yAnnouncer"' in INDEX_HTML
+    assert 'class="sr-only"' in INDEX_HTML
+    assert 'role="status"' in INDEX_HTML
+    assert 'aria-live="polite"' in INDEX_HTML
+    assert 'aria-atomic="true"' in INDEX_HTML
+    assert 'id="a11yAnnouncer" hidden' not in INDEX_HTML
+    assert 'id="a11yAnnouncer" aria-hidden="true"' not in INDEX_HTML
+
+    assert ".sr-only{" in STYLE_CSS
+    sr_only = _block(STYLE_CSS, ".sr-only{", "body{")
+    assert "display:none" not in sr_only
+    assert "visibility:hidden" not in sr_only
+    assert "clip-path:inset(50%)" in sr_only
+
+
+def test_new_session_announces_started_workspace_without_leaving_stale_browse_text():
+    helper = _block(SESSIONS_JS, "function _setNewSessionWorkspaceCue", "function _setNewSessionPending")
+    new_session = _block(SESSIONS_JS, "async function newSession", "/**\n * Self-heal")
+
+    assert "const announcer=$('a11yAnnouncer')" in helper
+    assert "const composerCue=$('composerWorkspaceContext')" in helper
+    assert "composerCue.textContent=message" in helper
+    assert "msg.setAttribute('aria-describedby',ids.join(' '))" in helper
+    assert "announcer.textContent=message" in helper
+    assert "setTimeout(clear,5000)" in helper
+    assert "announcer.textContent=''" in helper
+    assert "composerCue.textContent=''" in helper
+    assert "msg.removeAttribute('aria-describedby')" in helper
+    assert "getWorkspaceFriendlyName(session.workspace)" in helper
+    assert "t('new_session_workspace_announce',name)" in helper
+    assert "typeof requestAnimationFrame==='function'" in helper
+    assert "if(typeof _announceNewSessionWorkspace==='function') _announceNewSessionWorkspace(S.session);" in new_session
+    assert new_session.index("S.session=data.session") < new_session.index("_announceNewSessionWorkspace(S.session);")
+
+
+def test_workspace_a11y_i18n_keys_exist_in_english_locale():
     assert "workspace_switcher_aria: 'Switch workspace. Current workspace: {0}.'" in I18N_JS
+    assert "workspace_context_aria" not in I18N_JS
+    assert "workspace_context_none" not in I18N_JS
+    assert "new_session_workspace_announce: 'New chat started in workspace: {0}.'" in I18N_JS

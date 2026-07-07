@@ -1050,6 +1050,62 @@ function _clearEmptyComposerModelOverride(){
   _emptyComposerModelOverrideHost._emptyComposerModelOverride=null;
 }
 
+let _newSessionWorkspaceAnnouncementClearTimer=null;
+
+function _setNewSessionWorkspaceCue(message){
+  const announcer=$('a11yAnnouncer');
+  const composerCue=$('composerWorkspaceContext');
+  const msg=$('msg');
+  const cueId='composerWorkspaceContext';
+  if(_newSessionWorkspaceAnnouncementClearTimer&&typeof clearTimeout==='function'){
+    clearTimeout(_newSessionWorkspaceAnnouncementClearTimer);
+    _newSessionWorkspaceAnnouncementClearTimer=null;
+  }
+  const removeComposerCue=()=>{
+    if(composerCue&&composerCue.textContent===message) composerCue.textContent='';
+    if(msg){
+      const ids=(msg.getAttribute('aria-describedby')||'')
+        .split(/\s+/)
+        .filter(Boolean)
+        .filter(id=>id!==cueId);
+      if(ids.length) msg.setAttribute('aria-describedby',ids.join(' '));
+      else msg.removeAttribute('aria-describedby');
+    }
+  };
+  const clear=()=>{
+    if(announcer&&announcer.textContent===message) announcer.textContent='';
+    removeComposerCue();
+    _newSessionWorkspaceAnnouncementClearTimer=null;
+  };
+  const announce=()=>{
+    if(announcer) announcer.textContent=message;
+    if(composerCue&&msg){
+      composerCue.textContent=message;
+      const ids=(msg.getAttribute('aria-describedby')||'')
+        .split(/\s+/)
+        .filter(Boolean)
+        .filter(id=>id!==cueId);
+      ids.push(cueId);
+      msg.setAttribute('aria-describedby',ids.join(' '));
+    }
+    if(typeof setTimeout==='function'){
+      _newSessionWorkspaceAnnouncementClearTimer=setTimeout(clear,5000);
+    }
+  };
+  if(announcer) announcer.textContent='';
+  removeComposerCue();
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(announce);
+  else announce();
+}
+
+function _announceNewSessionWorkspace(session){
+  if(!session||!session.workspace) return;
+  const name=(typeof getWorkspaceFriendlyName==='function')
+    ? getWorkspaceFriendlyName(session.workspace)
+    : String(session.workspace).split('/').filter(Boolean).pop()||session.workspace;
+  _setNewSessionWorkspaceCue(t('new_session_workspace_announce',name));
+}
+
 function _setNewSessionPending(pending){
   const ids=['btnNewChat','btnTitlebarNewChat'];
   for (let i=0;i<ids.length;i++){
@@ -1231,6 +1287,7 @@ async function newSession(flash, options={}){
     }
     updateQueueBadge(S.session.session_id);
     syncTopbar();renderMessages();
+    if(typeof _announceNewSessionWorkspace==='function') _announceNewSessionWorkspace(S.session);
     // Keep new-chat first paint instant. The workspace tree / git badge can
     // refresh right after paint unless this caller explicitly needs it loaded
     // before continuing (profile/default-workspace binding path).
