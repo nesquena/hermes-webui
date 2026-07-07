@@ -1111,6 +1111,7 @@
   :root[data-skin="openui"] .session-item.active{
     position:relative;padding:10px 12px 10px 18px;
     background:var(--accent-bg-strong)!important;border:1px solid var(--border2)!important;
+    color:var(--text)!important;
   }
   :root[data-skin="openui"] .session-item.active.streaming,
   :root[data-skin="openui"] .session-item.active.unread,
@@ -1135,7 +1136,8 @@
   :root[data-skin="openui"] .composer-wrap{
     background:var(--bg)!important;
   }
-  :root[data-skin="openui"] .composer-wrap::before{background:linear-gradient(to bottom,transparent,var(--bg));}
+  :root[data-skin="openui"] .composer-wrap::before{background:linear-gradient(to bottom,transparent,var(--bg))!important;}
+  :root:not(.dark)[data-skin="openui"] .composer-wrap{border-top:none!important;}
 
   /* ── Skin: Zeus ──
      OLED-near-black skin: replaces the default dark-blue/navy surfaces with warm
