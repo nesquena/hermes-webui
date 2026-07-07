@@ -1388,10 +1388,21 @@ function _showSteerRecovery(msg, explicitSteer, fallback) {
   el.appendChild(label);
   const retryBtn = document.createElement('button');
   retryBtn.className = 'steer-recovery-retry';
-  retryBtn.textContent = t('steer_recovery_retry');
+  retryBtn.textContent = t(_steerFallbackIsDeadRun(fallback)?'clarify_send':'steer_recovery_retry');
   retryBtn.addEventListener('click', () => {
     el.remove();
-    void _trySteer(msg, explicitSteer).catch(console.error);
+    if(_steerFallbackIsDeadRun(fallback)&&typeof send==='function'){
+      if(explicitSteer){
+        const inp=$('msg');
+        if(inp){
+          inp.value=String(msg||'').trim();
+          if(typeof autoResize==='function')autoResize();
+        }
+      }
+      void send({literalSlash:true}).catch(console.error);
+    }else{
+      void _trySteer(msg, explicitSteer).catch(console.error);
+    }
   });
   el.appendChild(retryBtn);
   const dismissBtn = document.createElement('button');
@@ -1429,6 +1440,31 @@ function _steerUploadedAttachmentPaths(uploaded){
 
 function _steerOwnerIsCurrent(ownerSid){
   return !!(ownerSid&&typeof S!=='undefined'&&S.session&&S.session.session_id===ownerSid);
+}
+
+function _steerFallbackIsDeadRun(fallback){
+  return fallback==='stream_dead';
+}
+
+function _steerOwnerStreamIsCurrent(ownerSid, ownerStreamId){
+  if(!_steerOwnerIsCurrent(ownerSid)||typeof S==='undefined'||!ownerStreamId)return false;
+  const activeIds=[S.activeStreamId,S.session&&S.session.active_stream_id].filter(Boolean).map(String);
+  return activeIds.length>0&&activeIds.every(id=>id===String(ownerStreamId));
+}
+
+function _steerClearCurrentOwnerDeadRun(ownerSid, ownerStreamId){
+  if(!_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId))return false;
+  let changed=false;
+  if(S.busy){S.busy=false;changed=true;}
+  if(S.activeStreamId){S.activeStreamId=null;changed=true;}
+  if(S.session&&S.session.active_stream_id){S.session.active_stream_id=null;changed=true;}
+  if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[ownerSid]){
+    delete INFLIGHT[ownerSid];
+    changed=true;
+  }
+  if(changed&&typeof clearInflightState==='function')clearInflightState(ownerSid);
+  if(changed&&typeof updateSendBtn==='function')updateSendBtn();
+  return changed;
 }
 
 function _steerSetComposerStatusForOwner(ownerSid,text){
@@ -1498,6 +1534,7 @@ async function _trySteer(msg, explicitSteer){
   let result=null;
   const originalMsg=String(msg||'').trim();
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
+  const ownerStreamId=(typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id)))||null;
   const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
   if(!ownerSid){showToast(t('no_active_session'));return false;}
   let steerText=originalMsg;
@@ -1568,7 +1605,10 @@ async function _trySteer(msg, explicitSteer){
   // Do not fall back to interrupt: Steer failure is not permission to cancel
   // the active run. Restore the draft so the user can explicitly Queue or
   // Interrupt if that is what they want next. Pending files remain staged.
-  if(_steerOwnerIsCurrent(ownerSid)){
+  const fallbackCode = result && result.fallback;
+  const deadRunFallback = _steerFallbackIsDeadRun(fallbackCode);
+  const applyCurrentFailure = !deadRunFallback||_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId);
+  if(_steerOwnerIsCurrent(ownerSid)&&applyCurrentFailure){
     const inp=$('msg');
     if(inp){
       inp.value=_steerRestoreText(originalMsg,explicitSteer);
@@ -1578,9 +1618,9 @@ async function _trySteer(msg, explicitSteer){
   }else{
     await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
   }
-  const fallbackCode = result && result.fallback;
-  showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
-  if(_steerOwnerIsCurrent(ownerSid)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode);
+  const clearedDeadRun=deadRunFallback&&_steerClearCurrentOwnerDeadRun(ownerSid,ownerStreamId);
+  if(!deadRunFallback||applyCurrentFailure)showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
+  if(_steerOwnerIsCurrent(ownerSid)&&(!deadRunFallback||clearedDeadRun)) _showSteerRecovery(originalMsg, explicitSteer, fallbackCode);
   return false;
 }
 

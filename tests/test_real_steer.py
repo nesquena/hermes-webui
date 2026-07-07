@@ -499,6 +499,230 @@ class TestFrontendWiring:
         )
         subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
 
+    def test_dead_steer_fallback_clears_busy_state_and_recovery_sends_normally(self):
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        steer_src = _source_between(
+            self.cmds,
+            "function _showSteerRecovery",
+            "\nasync function cmdTitle",
+        )
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            const steerSrc = {json.dumps(steer_src)};
+            function makeElement(tag){{
+              return {{
+                tag,
+                className:'',
+                textContent:'',
+                children:[],
+                listeners:{{}},
+                appendChild(child){{this.children.push(child);}},
+                remove(){{this.removed=true;}},
+                addEventListener(name,fn){{this.listeners[name]=fn;}},
+                querySelector(sel){{return null;}},
+              }};
+            }}
+            let inner = makeElement('div');
+            const document = {{
+              getElementById(id){{return id==='msgInner'?inner:null;}},
+              createElement: makeElement,
+            }};
+            function t(k){{return k;}}
+            function _steerFailureMessageKey(fallback){{return 'steer_fail_'+fallback;}}
+            function scrollToBottom(){{}}
+            function setComposerStatus(){{}}
+            function showToast(){{}}
+            function renderTray(){{}}
+            function autoResize(){{}}
+            function _showSteerIndicator(){{}}
+            function _clearComposerDraft(){{}}
+            async function uploadPendingFiles(){{return [];}}
+            eval(steerSrc);
+
+            async function runStreamDeadFallback(explicitSteer=false, msg='retry me'){{
+              let input = {{value:''}};
+              let clearInflightCalls = [];
+              let updateSendBtnCalls = 0;
+              let sendCalls = 0;
+              let sendInput = null;
+              let sendOptions = null;
+              let apiPayload = null;
+              inner = makeElement('div');
+              globalThis.S = {{
+                session:{{session_id:'A', active_stream_id:'stream-1'}},
+                activeStreamId:'stream-1',
+                busy:true,
+                pendingFiles:[{{name:'a.pdf'}}],
+              }};
+              globalThis.INFLIGHT = {{A:{{messages:[]}}}};
+              globalThis.$ = id => input;
+              globalThis.clearInflightState = sid => clearInflightCalls.push(sid);
+              globalThis.updateSendBtn = () => {{updateSendBtnCalls += 1;}};
+              globalThis.send = async options => {{sendCalls += 1; sendInput = input.value; sendOptions = options;}};
+              globalThis.api = async (url, options) => {{
+                assert.strictEqual(url, '/api/chat/steer');
+                apiPayload = JSON.parse(options.body);
+                return {{accepted:false, fallback:'stream_dead'}};
+              }};
+
+              const delivered = await _trySteer(msg, explicitSteer);
+              assert.strictEqual(delivered, false);
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg}});
+              assert.strictEqual(S.busy, false);
+              assert.strictEqual(S.activeStreamId, null);
+              assert.strictEqual(S.session.active_stream_id, null);
+              assert.ok(!Object.prototype.hasOwnProperty.call(INFLIGHT, 'A'));
+              assert.deepStrictEqual(clearInflightCalls, ['A']);
+              assert.strictEqual(updateSendBtnCalls, 1);
+              assert.strictEqual(input.value, explicitSteer ? `/steer ${{msg}}` : msg);
+              assert.strictEqual(S.pendingFiles.length, 1);
+              const recovery = inner.children[inner.children.length - 1];
+              const retry = recovery.children[1];
+              assert.strictEqual(retry.textContent, 'clarify_send');
+              retry.listeners.click();
+              await Promise.resolve();
+              assert.strictEqual(sendCalls, 1);
+              assert.strictEqual(sendInput, msg);
+              assert.deepStrictEqual(sendOptions, {{literalSlash:true}});
+            }}
+
+            async function runNoCachedAgentFallback(explicitSteer=false, msg='retry me'){{
+              let input = {{value:''}};
+              let clearInflightCalls = [];
+              let updateSendBtnCalls = 0;
+              let sendCalls = 0;
+              let apiCalls = 0;
+              let apiPayload = null;
+              inner = makeElement('div');
+              globalThis.S = {{
+                session:{{session_id:'A', active_stream_id:'stream-1'}},
+                activeStreamId:'stream-1',
+                busy:true,
+                pendingFiles:[{{name:'a.pdf'}}],
+              }};
+              globalThis.INFLIGHT = {{A:{{messages:[]}}}};
+              globalThis.$ = id => input;
+              globalThis.clearInflightState = sid => clearInflightCalls.push(sid);
+              globalThis.updateSendBtn = () => {{updateSendBtnCalls += 1;}};
+              globalThis.send = async () => {{sendCalls += 1;}};
+              globalThis.api = async (url, options) => {{
+                assert.strictEqual(url, '/api/chat/steer');
+                apiCalls += 1;
+                apiPayload = JSON.parse(options.body);
+                return {{accepted:false, fallback:'no_cached_agent'}};
+              }};
+
+              const delivered = await _trySteer(msg, explicitSteer);
+              assert.strictEqual(delivered, false);
+              assert.deepStrictEqual(apiPayload, {{session_id:'A', text:msg}});
+              assert.strictEqual(S.busy, true);
+              assert.strictEqual(S.activeStreamId, 'stream-1');
+              assert.strictEqual(S.session.active_stream_id, 'stream-1');
+              assert.ok(Object.prototype.hasOwnProperty.call(INFLIGHT, 'A'));
+              assert.deepStrictEqual(clearInflightCalls, []);
+              assert.strictEqual(updateSendBtnCalls, 0);
+              assert.strictEqual(input.value, explicitSteer ? `/steer ${{msg}}` : msg);
+              assert.strictEqual(S.pendingFiles.length, 1);
+              const recovery = inner.children[inner.children.length - 1];
+              const retry = recovery.children[1];
+              assert.strictEqual(retry.textContent, 'steer_recovery_retry');
+              retry.listeners.click();
+              await Promise.resolve();
+              await Promise.resolve();
+              assert.strictEqual(sendCalls, 0);
+              assert.strictEqual(apiCalls, 2);
+            }}
+
+            async function runLateDeadFallbackDoesNotClearNewStream(){{
+              let input = {{value:''}};
+              let clearInflightCalls = [];
+              let updateSendBtnCalls = 0;
+              inner = makeElement('div');
+              globalThis.S = {{
+                session:{{session_id:'A', active_stream_id:'stream-1'}},
+                activeStreamId:'stream-1',
+                busy:true,
+                pendingFiles:[],
+              }};
+              globalThis.INFLIGHT = {{A:{{messages:[]}}}};
+              globalThis.$ = id => input;
+              globalThis.clearInflightState = sid => clearInflightCalls.push(sid);
+              globalThis.updateSendBtn = () => {{updateSendBtnCalls += 1;}};
+              globalThis.send = async () => {{throw new Error('send must not run for a stale dead fallback');}};
+              globalThis.api = async () => {{
+                S.activeStreamId='stream-2';
+                S.session.active_stream_id='stream-2';
+                return {{accepted:false, fallback:'stream_dead'}};
+              }};
+
+              const delivered = await _trySteer('old steer', false);
+              assert.strictEqual(delivered, false);
+              assert.strictEqual(S.busy, true);
+              assert.strictEqual(S.activeStreamId, 'stream-2');
+              assert.strictEqual(S.session.active_stream_id, 'stream-2');
+              assert.ok(Object.prototype.hasOwnProperty.call(INFLIGHT, 'A'));
+              assert.deepStrictEqual(clearInflightCalls, []);
+              assert.strictEqual(updateSendBtnCalls, 0);
+              assert.strictEqual(input.value, '');
+              assert.strictEqual(inner.children.length, 0);
+            }}
+
+            async function runAdjacentLiveFailure(){{
+              let input = {{value:''}};
+              let clearInflightCalls = [];
+              let updateSendBtnCalls = 0;
+              inner = makeElement('div');
+              globalThis.S = {{
+                session:{{session_id:'A', active_stream_id:'stream-1'}},
+                activeStreamId:'stream-1',
+                busy:true,
+                pendingFiles:[{{name:'a.pdf'}}],
+              }};
+              globalThis.INFLIGHT = {{A:{{messages:[]}}}};
+              globalThis.$ = id => input;
+              globalThis.clearInflightState = sid => clearInflightCalls.push(sid);
+              globalThis.updateSendBtn = () => {{updateSendBtnCalls += 1;}};
+              globalThis.send = async () => {{throw new Error('send must not run for live steer failures');}};
+              globalThis.api = async () => {{return {{accepted:false, fallback:'agent_lacks_steer'}};}};
+
+              const delivered = await _trySteer('live hint', false);
+              assert.strictEqual(delivered, false);
+              assert.strictEqual(S.busy, true);
+              assert.strictEqual(S.activeStreamId, 'stream-1');
+              assert.strictEqual(S.session.active_stream_id, 'stream-1');
+              assert.ok(Object.prototype.hasOwnProperty.call(INFLIGHT, 'A'));
+              assert.deepStrictEqual(clearInflightCalls, []);
+              assert.strictEqual(updateSendBtnCalls, 0);
+              assert.strictEqual(input.value, 'live hint');
+              assert.strictEqual(S.pendingFiles.length, 1);
+              const recovery = inner.children[inner.children.length - 1];
+              const retry = recovery.children[1];
+              assert.strictEqual(retry.textContent, 'steer_recovery_retry');
+            }}
+
+            (async()=>{{
+              await runNoCachedAgentFallback();
+              await runNoCachedAgentFallback(true);
+              await runStreamDeadFallback();
+              await runStreamDeadFallback(true);
+              await runStreamDeadFallback(true, '/help');
+              await runLateDeadFallbackDoesNotClearNewStream();
+              await runAdjacentLiveFailure();
+            }})().catch(err=>{{console.error(err); process.exit(1);}});
+            """
+        )
+        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
     def test_send_busy_steer_accepts_file_only_input(self):
         idx = self.msgs.find("if(S.busy||compressionRunning)")
         assert idx >= 0
