@@ -13734,7 +13734,61 @@ function _reanchorPinnedTailAfterRender(wasNearTail){
     _scrollPinned=true;
   }
 }
+// Cold session-switch landing hold. Switching to another session runs loadSession(),
+// which SYNCHRONOUSLY replaces #msgInner with a "Loading conversation..." placeholder
+// (a single centered div) BEFORE the metadata + messages fetch. That collapses
+// #msgInner from the prior transcript's rows to ~one row, so #messages.scrollHeight
+// drops toward the empty-table height and the browser is FORCED to clamp
+// #messages.scrollTop to the new (near-zero) max. During the ensuing network round-trip
+// the viewport is visibly stranded at the top; then renderMessages() rebuilds and
+// scrolls to the bottom, so the reader sees a large yank-to-top then snap-back — the
+// cold switch-back scroll jump. This is a browser scrollTop clamp (device-agnostic;
+// no JS writes the scrollTop), the same wipe-collapse primitive #5681 addressed for the
+// mid-stream re-render branch, but here the trigger is the loadSession() placeholder
+// swap, not renderMessages(). Reserve the pre-swap scrollHeight as a #msgInner
+// min-height so the placeholder swap does NOT collapse scrollHeight, keeping scrollTop
+// where it was until the new transcript renders. _releaseMessageScrollHeightHold()
+// clears it at the start of the next _scrollAfterMessageRender() so the post-render
+// scroll decision runs against the real (new-session) scrollHeight.
+function _holdMessageScrollHeightForColdSwitch(){
+  const messagesEl=$('messages');
+  const msgInner=$('msgInner');
+  if(!messagesEl||!msgInner||!msgInner.style) return;
+  const holdHeight=Math.max(0, messagesEl.scrollHeight);
+  if(holdHeight<=0) return;
+  const holdKey='coldSwitchHoldPreviousMinHeight';
+  if(msgInner.dataset && !Object.prototype.hasOwnProperty.call(msgInner.dataset, holdKey)){
+    msgInner.dataset[holdKey]=msgInner.style.minHeight||'';
+  }
+  msgInner.style.minHeight=`${holdHeight}px`;
+  // Safety net: the normal release happens in _scrollAfterMessageRender() once the
+  // new transcript renders. But loadSession() has several early-return paths (network
+  // failure, 404, stale-load bail) that never reach a render — without a fallback the
+  // held min-height would strand extra blank space below an error placeholder. Auto-
+  // release after a generous delay so a hold can never outlive its load. The normal
+  // render-path release is idempotent (deletes the dataset key), so on the common path
+  // this fallback finds nothing left to clear; it only actually releases when a load
+  // ended without rendering. The delay is longer than a normal cold switch-back render
+  // so it never races the real render on a slow network.
+  if(typeof requestAnimationFrame==='function' && typeof setTimeout==='function'){
+    setTimeout(()=>{ requestAnimationFrame(()=>_releaseMessageScrollHeightHold()); }, 6000);
+  }
+}
+function _releaseMessageScrollHeightHold(){
+  const msgInner=$('msgInner');
+  if(!msgInner||!msgInner.style||!msgInner.dataset) return;
+  const holdKey='coldSwitchHoldPreviousMinHeight';
+  if(!Object.prototype.hasOwnProperty.call(msgInner.dataset, holdKey)) return;
+  msgInner.style.minHeight=msgInner.dataset[holdKey]||'';
+  delete msgInner.dataset[holdKey];
+}
 function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
+  // Release any cold-switch scrollHeight hold (loadSession placeholder swap) now that
+  // the new transcript has rendered, so the scroll decision below reads the real
+  // new-session scrollHeight rather than the held prior-session height. typeof-guarded
+  // so standalone node test-harnesses that extract this function (and don't inject the
+  // helper) don't ReferenceError; production always has the real function.
+  if(typeof _releaseMessageScrollHeightHold==='function') _releaseMessageScrollHeightHold();
   // Terminal stream renders can happen after S.activeStreamId is cleared.
   // In that case, preserveScroll asks the normal pin-state helper to decide:
   // pinned users stay at bottom; users who manually scrolled up get their

@@ -1418,7 +1418,14 @@ async function loadSession(sid){
     }
     _loadingOlder = false;
     const _msgInner = $('msgInner');
-    if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+    if (_msgInner && currentSid !== sid) {
+      // Hold the current scrollHeight before the placeholder swap so the wipe does
+      // not collapse #messages.scrollHeight and trigger a browser scrollTop clamp
+      // (the cold switch-back landing jump). Released after the new transcript
+      // renders, in _scrollAfterMessageRender(). See _holdMessageScrollHeightForColdSwitch().
+      if (typeof _holdMessageScrollHeightForColdSwitch === 'function') _holdMessageScrollHeightForColdSwitch();
+      _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+    }
   }
   // Phase 1: Load metadata only (~1KB) for fast session switching. Keep model
   // resolution out of the first-paint path; old provider-shaped model IDs are
