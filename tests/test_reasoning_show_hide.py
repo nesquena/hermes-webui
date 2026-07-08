@@ -381,6 +381,30 @@ class TestReasoningConfigHelpers:
             "agent.reasoning_effort must be persisted to config.yaml"
         )
 
+    def test_set_reasoning_effort_preserves_env_var_references(self, tmp_path, monkeypatch):
+        """set_reasoning_effort must not expand ${VAR} references when saving
+        config.yaml — regression guard for the env-var leak (#5517)."""
+        import api.config as cfg
+        cfgfile = tmp_path / 'config.yaml'
+        monkeypatch.setenv("TICKTICK_MCP_KEY", "sk-actual-secret")
+        cfgfile.write_text(
+            "agent:\n"
+            "  reasoning_effort: low\n"
+            "mcp_servers:\n"
+            "  ticktick:\n"
+            "    api_key: ${TICKTICK_MCP_KEY}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
+        cfg.set_reasoning_effort('high')
+        raw = cfg._load_yaml_config_file_raw(cfgfile)
+        assert raw["mcp_servers"]["ticktick"]["api_key"] == "${TICKTICK_MCP_KEY}", (
+            "${VAR} reference was expanded — leaked secret into config.yaml"
+        )
+        assert raw["agent"]["reasoning_effort"] == "high", (
+            "reasoning_effort change was not persisted"
+        )
+
     def test_set_reasoning_display_persists_to_config_yaml(self, tmp_path, monkeypatch):
         """set_reasoning_display writes display.show_reasoning to the same
         config.yaml the CLI writes."""

@@ -3768,7 +3768,7 @@ def set_reasoning_display(show: bool) -> dict:
     """
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        config_data = _load_yaml_config_file_raw(config_path)
         display_cfg = config_data.get("display")
         if not isinstance(display_cfg, dict):
             display_cfg = {}
@@ -3802,7 +3802,7 @@ def set_reasoning_effort(
         )
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        config_data = _load_yaml_config_file_raw(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
