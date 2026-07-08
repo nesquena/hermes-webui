@@ -8702,10 +8702,23 @@ def _run_agent_streaming(
                     agent=agent,
                     tool_limit_reached=_ephemeral_tool_limit_reached,
                 )
-                _ephemeral_explicit_error = bool(getattr(agent, '_last_error', None)) or (
-                    isinstance(result, dict)
-                    and 'error' in result
-                    and result.get('error') not in (None, '')
+                # Mirror the non-ephemeral suppression (see explicit_result_error
+                # above): a ``no_response``-typed error is NOT an explicit error,
+                # so it must not force the error card when an answer exists.
+                # Classifying here (instead of treating any _last_error/result
+                # error as explicit) keeps the ephemeral and non-ephemeral paths
+                # in agreement — otherwise a stale no_response would surface an
+                # error card the non-ephemeral path would suppress.
+                _ephemeral_raw_error = getattr(agent, '_last_error', None) or (
+                    result.get('error') if isinstance(result, dict) else None
+                ) or ''
+                _ephemeral_explicit_error = (
+                    bool(_ephemeral_raw_error)
+                    and _classify_provider_error(
+                        str(_ephemeral_raw_error),
+                        _ephemeral_raw_error,
+                        silent_failure=False,
+                    )['type'] != 'no_response'
                 )
                 _ephemeral_terminal_failure = (
                     _agent_result_terminal_failure(result)
