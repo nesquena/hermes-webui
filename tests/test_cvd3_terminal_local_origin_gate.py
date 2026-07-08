@@ -184,6 +184,41 @@ def test_terminal_gate_does_not_trust_x_real_ip_without_forwarded_chain(monkeypa
     assert routes._embedded_terminal_gate_allows(handler) is False
 
 
+def test_terminal_gate_fails_closed_on_x_real_ip_only_loopback_proxy(monkeypatch):
+    """A loopback proxy must not make an X-Real-IP-only public client look local."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+
+    handler = _Handler(
+        client_ip="127.0.0.1",
+        headers={"X-Real-IP": "8.8.8.8"},
+    )
+
+    assert routes._forwarded_client_ip_from_trusted_proxy(handler) == ""
+    assert routes._embedded_terminal_gate_allows(handler) is False
+
+
+def test_terminal_gate_fails_closed_on_forwarded_only_loopback_proxy(monkeypatch):
+    """RFC Forwarded without XFF also indicates a proxy chain we cannot classify."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+
+    handler = _Handler(
+        client_ip="127.0.0.1",
+        headers={"Forwarded": "for=8.8.8.8;proto=https"},
+    )
+
+    assert routes._forwarded_client_ip_from_trusted_proxy(handler) == ""
+    assert routes._embedded_terminal_gate_allows(handler) is False
+
+
 def test_terminal_gate_blocks_public_client_with_trailing_loopback_hop(monkeypatch):
     """Loopback proxy hops are trusted hops and must not become the resolved client."""
     from api import routes

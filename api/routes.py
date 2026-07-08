@@ -5547,11 +5547,19 @@ def _forwarded_client_ip_from_trusted_proxy(handler) -> str:
         if hops:
             return hops[0]
 
-    # Do not fall back to X-Real-IP here. Some proxies pass client-supplied
-    # X-Real-IP through when X-Forwarded-For is absent, which would let a public
-    # caller choose a private client IP. Without XFF, only a same-host loopback
-    # proxy can be treated as local; non-loopback trusted proxies must include
-    # an XFF chain so the original client can be classified.
+    # Do not fall back to X-Real-IP or Forwarded here. Some proxies pass
+    # client-supplied values through when X-Forwarded-For is absent, which would
+    # let a public caller choose a private client IP. If a forwarded-client
+    # header is present but XFF is absent, fail closed instead of ignoring it and
+    # treating the loopback/private proxy hop as the client.
+    x_real_ip = str(handler.headers.get("X-Real-IP", "") or "").strip()
+    forwarded = str(handler.headers.get("Forwarded", "") or "").strip()
+    if x_real_ip or forwarded:
+        return ""
+
+    # Without any forwarded-client header, only a same-host loopback proxy can be
+    # treated as local; non-loopback trusted proxies must include an XFF chain so
+    # the original client can be classified.
     return raw_peer if peer_is_loopback else ""
 
 
