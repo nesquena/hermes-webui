@@ -7,7 +7,7 @@
 //
 // v1 surface:
 //   - engine: 'minimax'  (registered here)
-//   - default voice: English_Exciting_Actor (configurable via tts.minimax.voice_id)
+//   - default voice: English_expressive_narrator (configurable via tts.minimax.voice_id)
 //   - audio: mp3, 32 kHz mono, ~128 kbps (MiniMax defaults)
 //   - streaming: NOT YET — every utterance is one POST + one audio buffer.
 //     v2 will reuse the Edge/voice-mode chunking infra to speak sentence-by-sentence
@@ -20,7 +20,7 @@
     }
     var ok = window.registerHermesTtsEngine({
       id: 'minimax',
-      label: 'MiniMax (Exciting Actor)',
+      label: 'MiniMax',
       synthesize: async function synthesize(text, opts) {
         if (!text || typeof text !== 'string') {
           throw new Error('MiniMax TTS: text is required');
