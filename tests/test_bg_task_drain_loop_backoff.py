@@ -18,7 +18,7 @@ from __future__ import annotations
 import queue
 import threading
 
-from _wakeup_helpers import install_fake_registry
+from tests._wakeup_helpers import install_fake_registry
 
 
 class _CountingStop:
