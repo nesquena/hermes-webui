@@ -299,6 +299,7 @@ global._createAssistantTurn = () => turn;
 global._assistantTurnBlocks = () => turn;
 
 global._anchorSceneTransparentNodeForRow = (row) => null;
+eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
 eval(extractFunc('_anchorSceneTransparentNodeForRow'));
 eval(extractFunc('_transparentLiveRowKey'));
 eval(extractFunc('_transparentLiveRowsCompatible'));

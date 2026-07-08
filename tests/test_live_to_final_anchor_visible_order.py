@@ -1233,6 +1233,7 @@ global._renderAnchorSceneRowsIntoWorklog=(group, rows)=>{{
 }};
 global._syncToolCallGroupSummary=()=>{{}};
 
+    eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
     eval(extractFunc('_anchorSceneTransparentNodeForRow'));
     eval(extractFunc('renderLiveAnchorActivityScene'));
     eval(extractFunc('_transparentLiveRowKey'));
