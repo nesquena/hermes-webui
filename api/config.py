@@ -703,6 +703,13 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
         target = Path(profile_home).expanduser()
     except Exception:
         return get_config()
+    try:
+        from api.profiles import get_active_hermes_home
+
+        if Path(get_active_hermes_home()).expanduser() == target:
+            return get_config()
+    except Exception:
+        pass
     # If the ambient resolver already points at this profile home, defer to
     # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
     # MUST run before the nonexistent-home guard below: a matching ambient home

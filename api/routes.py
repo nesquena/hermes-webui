@@ -2822,6 +2822,7 @@ from api.config import (
     _load_yaml_config_file,
     _save_yaml_config_file,
     reload_config,
+    get_config_for_profile_home,
     _cfg_lock,
     PENDING_BG_TASK_COMPLETIONS,
 )
@@ -13848,6 +13849,15 @@ def handle_post(handler, parsed) -> bool:
         # Lock entries in SESSION_AGENT_LOCKS forever.
         with SESSION_AGENT_LOCKS_LOCK:
             SESSION_AGENT_LOCKS.pop(sid, None)
+        # Prune the completion-dedup entry too. The reaper sweeps it once the
+        # completion is delivered (drained from PENDING); a session deleted
+        # while a completion is still pending would otherwise keep its entry.
+        try:
+            from api.background_process import forget_bg_task_completion_dedup
+
+            forget_bg_task_completion_dedup(sid)
+        except Exception:
+            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
         try:
             from api.terminal import close_terminal
             close_terminal(sid)
@@ -24181,7 +24191,7 @@ def _mcp_tools_from_registry(server_summaries):
 
 def _handle_mcp_tools_list(handler):
     """List known MCP tools from already-available runtime inventory only."""
-    cfg = get_config()
+    cfg = get_config_for_profile_home(get_active_hermes_home())
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
@@ -24695,7 +24705,7 @@ def _handle_notes_item(handler, parsed):
 
 def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
-    cfg = get_config()
+    cfg = get_config_for_profile_home(get_active_hermes_home())
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}

@@ -20,7 +20,7 @@ from contextlib import closing
 from pathlib import Path
 
 from api.config import HOME
-from api.agent_sessions import read_importable_agent_session_rows
+from api.agent_sessions import open_state_db_readonly, read_importable_agent_session_rows
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
         'origin_chat_id', 'origin_user_id', 'platform',
     )
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
             cols = {row[1] for row in cur.fetchall()}
