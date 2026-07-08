@@ -1331,6 +1331,56 @@
   :root.dark[data-skin="verdigris"] .img-lightbox-close:hover{background:rgba(200,154,90,.35);}
   :root.dark[data-skin="verdigris"] .img-lightbox-nav:hover{background:rgba(200,154,90,.40);}
 
+  /* ═══ YUNO — cozy cream light / pink-on-charcoal dark ═══
+     Ported from the Yuno color system (WCAG-validated pink/magenta brand):
+     light mode is the warm "Cozy" cream palette with a pink-800 primary,
+     dark mode is neutral-900 charcoal with the pink-500 accent family. */
+  :root[data-skin="yuno"]{
+    color-scheme:light;
+    --bg:#FFFBF5;--sidebar:#FFF6E8;--surface:#FFFFFF;--surface-subtle:rgba(183,41,91,.03);--surface-subtle-hover:rgba(183,41,91,.06);
+    --border:#E8E8EC;--border2:#D4D4DA;--border-subtle:rgba(24,24,27,.07);--border-muted:rgba(24,24,27,.12);
+    --text:#18181B;--strong:#0A0A0B;--muted:#71717A;--em:#B30066;
+    --accent:#B7295B;--accent-hover:#7A1B3D;--accent-bg:rgba(183,41,91,.08);--accent-bg-strong:rgba(183,41,91,.15);--accent-text:#B30066;
+    --blue:#0088A8;--gold:#D4733E;--focus-ring:rgba(179,0,102,.35);--focus-glow:rgba(179,0,102,.10);
+    --input-bg:rgba(183,41,91,.03);--hover-bg:rgba(183,41,91,.05);
+    --code-bg:#FFF6E8;--code-inline-bg:rgba(183,41,91,.08);--code-text:#A85526;--pre-text:#18181B;
+    --topbar-bg:rgba(255,246,232,.98);--main-bg:rgba(255,251,245,.5);
+    --error:#C81F2E;--success:#067551;--warning:#B45309;--info:#0088A8;
+  }
+  :root.dark[data-skin="yuno"]{
+    color-scheme:dark;
+    --bg:#18181B;--sidebar:#1D1D21;--surface:#27272A;--surface-subtle:rgba(255,255,255,.025);--surface-subtle-hover:rgba(255,255,255,.05);
+    --border:#3F3F46;--border2:#52525B;--border-subtle:rgba(255,255,255,.07);--border-muted:rgba(255,255,255,.12);
+    --text:#FAFAFB;--strong:#FFFFFF;--muted:#A1A1AB;--em:#FFB6C1;
+    --accent:#FF6BB5;--accent-hover:#FF8FB8;--accent-bg:rgba(255,107,181,.08);--accent-bg-strong:rgba(255,107,181,.15);--accent-text:#FF8FB8;
+    --blue:#22D3EE;--gold:#FFB6C1;--focus-ring:rgba(255,61,175,.35);--focus-glow:rgba(255,61,175,.10);
+    --input-bg:rgba(255,255,255,.04);--hover-bg:rgba(255,255,255,.06);
+    --code-bg:#101012;--code-inline-bg:rgba(255,107,181,.10);--code-text:#FFC8DA;--pre-text:#FAFAFB;
+    --topbar-bg:rgba(29,29,33,.98);--main-bg:rgba(24,24,27,.5);
+    --error:#FF335C;--success:#2BC774;--warning:#FFB000;--info:#22D3EE;
+  }
+  /* ── Yuno skin: component-level overrides ──
+     Primary actions follow the Yuno primary-fg rule: white text on the
+     deep pink in light mode, charcoal text on the bright pink in dark. */
+  :root[data-skin="yuno"] .new-chat-btn,
+  :root[data-skin="yuno"] button.send-btn:not(:disabled),
+  :root[data-skin="yuno"] .btn.primary,
+  :root[data-skin="yuno"] .update-primary,
+  :root[data-skin="yuno"] .clarify-submit{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+  :root[data-skin="yuno"] .new-chat-btn:hover,
+  :root[data-skin="yuno"] button.send-btn:not(:disabled):hover,
+  :root[data-skin="yuno"] .btn.primary:hover,
+  :root[data-skin="yuno"] .update-primary:hover,
+  :root[data-skin="yuno"] .clarify-submit:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
+  :root.dark[data-skin="yuno"] .new-chat-btn,
+  :root.dark[data-skin="yuno"] button.send-btn:not(:disabled),
+  :root.dark[data-skin="yuno"] .btn.primary,
+  :root.dark[data-skin="yuno"] .update-primary,
+  :root.dark[data-skin="yuno"] .clarify-submit{color:#18181B;}
+  :root[data-skin="yuno"] ::selection{background:rgba(183,41,91,.25);}
+  :root.dark[data-skin="yuno"] ::selection{background:rgba(255,107,181,.35);color:#fff;}
+  :root.dark[data-skin="yuno"] .session-item.active{background:rgba(255,107,181,.10);border-left:2px solid #FF6BB5;}
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));

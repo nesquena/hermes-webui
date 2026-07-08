@@ -8289,6 +8289,7 @@ _SETTINGS_SKIN_VALUES = {
     "geist-contrast",
     "zeus",
     "verdigris",
+    "yuno",
     "neon",
     "neon-soft",
     "neon-paint",
