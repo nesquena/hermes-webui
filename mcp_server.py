@@ -55,7 +55,7 @@ import api.config as _cfg
 from api.config import (
     STATE_DIR, SESSION_DIR, SESSION_INDEX_FILE, PROJECTS_FILE, HOME,
 )
-from api.models import load_projects, save_projects
+from api.models import load_projects, project_identity_matches, save_projects
 from api.profiles import get_active_profile_name, _is_root_profile, _profiles_match
 
 # ── Apply --profile override before any module uses get_active_profile_name
@@ -198,13 +198,15 @@ def _api_post(endpoint: str, body: dict) -> dict:
 
 async def handle_list_projects(_arguments: dict) -> list[TextContent]:
     """List all projects with session counts, scoped to active profile."""
-    projects = load_projects()
     active = _active_profile()
+    projects = load_projects(include_db=True, profile_name=active)
     index = _load_index()
 
     # Session counts per project (from index)
     counts: dict[str, int] = {}
     for s in index:
+        if not _profiles_match(s.get("profile"), active):
+            continue
         pid = s.get("project_id")
         if pid:
             counts[pid] = counts.get(pid, 0) + 1
@@ -301,13 +303,8 @@ async def handle_rename_project(arguments: dict) -> list[TextContent]:
 
     active = _active_profile()
     projects = load_projects()
-    proj = next((p for p in projects if p["project_id"] == project_id), None)
+    proj = next((p for p in projects if project_identity_matches(p, project_id, active)), None)
     if not proj:
-        return [TextContent(type="text", text=json.dumps(
-            {"error": "Project not found"}, ensure_ascii=False))]
-
-    # #1614: profile ownership check
-    if not _profiles_match(proj.get("profile"), active):
         return [TextContent(type="text", text=json.dumps(
             {"error": "Project not found"}, ensure_ascii=False))]
 
@@ -327,17 +324,12 @@ async def handle_delete_project(arguments: dict) -> list[TextContent]:
 
     active = _active_profile()
     projects = load_projects()
-    proj = next((p for p in projects if p["project_id"] == project_id), None)
+    proj = next((p for p in projects if project_identity_matches(p, project_id, active)), None)
     if not proj:
         return [TextContent(type="text", text=json.dumps(
             {"error": "Project not found"}, ensure_ascii=False))]
 
-    # #1614: profile ownership check
-    if not _profiles_match(proj.get("profile"), active):
-        return [TextContent(type="text", text=json.dumps(
-            {"error": "Project not found"}, ensure_ascii=False))]
-
-    projects = [p for p in projects if p["project_id"] != project_id]
+    projects = [p for p in projects if not project_identity_matches(p, project_id, active)]
     save_projects(projects)
 
     # Unassign sessions only when we can do it cache-safely via the HTTP API.
@@ -370,6 +362,8 @@ async def handle_delete_project(arguments: dict) -> list[TextContent]:
             try:
                 session_data = json.loads(p.read_text(encoding="utf-8"))
                 if session_data.get("project_id") == project_id:
+                    if not _profiles_match(session_data.get("profile"), active):
+                        continue
                     sid = p.stem
                     result = _api_post("/api/session/move",
                                        {"session_id": sid, "project_id": None})
@@ -421,14 +415,16 @@ async def handle_move_session(arguments: dict) -> list[TextContent]:
 
     # If project_id is provided, verify it exists and is profile-accessible
     if project_id is not None:
-        projects = load_projects()
         active = _active_profile()
-        target = next((p for p in projects if p["project_id"] == project_id), None)
+        projects = load_projects(include_db=True, profile_name=active)
+        target = next(
+            (
+                p for p in projects
+                if project_identity_matches(p, project_id, active)
+            ),
+            None,
+        )
         if not target:
-            return [TextContent(type="text", text=json.dumps(
-                {"error": "Project not found"}, ensure_ascii=False))]
-        # #1614: refuse moves into projects owned by another profile
-        if not _profiles_match(target.get("profile"), active):
             return [TextContent(type="text", text=json.dumps(
                 {"error": "Project not found"}, ensure_ascii=False))]
 
