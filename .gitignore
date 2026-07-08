@@ -28,6 +28,12 @@ copilot-instructions.md
 # Generated screenshots and transient artifacts
 screenshot-*.png
 full-UI.png
+# Playwright MCP scratch — directory + ad-hoc PNGs the agent drops while
+# debugging browser sessions. /final-check.png is the convention used by the
+# local agent loop for a one-off end-of-task verification grab; ignore
+# either way so they never sneak into a commit.
+.playwright-mcp/
+final-check.png
 
 # Version file written by Docker/CI build — generated, never committed
 api/_version.py
