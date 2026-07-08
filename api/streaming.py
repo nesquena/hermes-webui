@@ -8795,6 +8795,7 @@ def _run_agent_streaming(
                 if agent is not None:
                     # Refresh per-turn callbacks — these close over request-scoped
                     # objects (put queue, cancel_event) that are new each request.
+                    _current_agent[0] = agent
                     agent.stream_delta_callback = _agent_kwargs.get('stream_delta_callback')
                     agent.tool_progress_callback = _agent_kwargs.get('tool_progress_callback')
                     if hasattr(agent, 'tool_start_callback'):
