@@ -8275,6 +8275,10 @@ _SETTINGS_SKIN_VALUES = {
     "ares",
     "mono",
     "graphite",
+    "github",
+    "codex",
+    "terracotta",
+    "hepburn",
     "slate",
     "poseidon",
     "sisyphus",
@@ -8285,6 +8289,7 @@ _SETTINGS_SKIN_VALUES = {
     "geist-contrast",
     "zeus",
     "verdigris",
+    "neon",
     "neon-soft",
     "neon-paint",
 }
