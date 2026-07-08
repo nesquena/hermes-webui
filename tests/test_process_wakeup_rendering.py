@@ -199,3 +199,11 @@ def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
     assert ".process-wakeup-row" in STYLE_CSS
     assert ".process-wakeup-notice" in STYLE_CSS
     assert ".process-wakeup-text" in STYLE_CSS
+    notice_rule = STYLE_CSS[
+        STYLE_CSS.index(".process-wakeup-notice{") : STYLE_CSS.index(".process-wakeup-label{")
+    ]
+    assert "margin:8px 0 8px var(--msg-rail)" in notice_rule
+    assert "max-width:min(var(--msg-max),760px)" in notice_rule
+    assert "margin-left:30px" not in notice_rule
+    assert "max-width:680px" not in notice_rule
+    assert "@media(max-width:700px){.process-wakeup-notice{margin-left:0;}}" in STYLE_CSS
