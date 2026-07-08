@@ -2062,6 +2062,15 @@ document.addEventListener('keydown',async e=>{
       return;
     }
   }
+  // Cmd/Ctrl+Alt+/ focuses the message composer without creating a chat.
+  if((e.metaKey||e.ctrlKey)&&e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(isText) return;
+    const composer=$('msg');
+    if(composer){e.preventDefault();composer.focus();}
+    return;
+  }
   // Enter on approval card = Allow once (when a button inside the card is focused or
   // card is visible and focus is not on an input/textarea/select)
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
