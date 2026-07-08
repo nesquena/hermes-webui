@@ -42,17 +42,33 @@ SAMPLE_MCP = {
 class TestMcpList:
     """GET /api/mcp/servers — list with masked secrets."""
 
-    @patch('api.routes.get_config')
-    def test_returns_servers_list(self, mock_cfg):
+    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes.get_active_hermes_home')
+    def test_returns_servers_list(self, mock_home, mock_cfg):
+        mock_home.return_value = sentinel_home = object()
         mock_cfg.return_value = {'mcp_servers': SAMPLE_MCP}
         h = _make_handler()
         _handle_mcp_servers_list(h)
         assert h.send_response.called
         status = h.send_response.call_args[0][0]
         assert status == 200
+        mock_cfg.assert_called_once_with(sentinel_home)
 
-    @patch('api.routes.get_config')
-    def test_empty_config(self, mock_cfg):
+    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes.get_active_hermes_home')
+    def test_reads_active_profile_home_for_servers(self, mock_home, mock_cfg):
+        mock_home.return_value = sentinel_home = object()
+        mock_cfg.return_value = {'mcp_servers': {'active': SAMPLE_MCP['searxng']}}
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        assert [srv['name'] for srv in payload['servers']] == ['active']
+        mock_cfg.assert_called_once_with(sentinel_home)
+
+    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes.get_active_hermes_home')
+    def test_empty_config(self, mock_home, mock_cfg):
+        mock_home.return_value = object()
         mock_cfg.return_value = {}
         h = _make_handler()
         _handle_mcp_servers_list(h)
@@ -65,8 +81,10 @@ class TestMcpList:
         assert payload['reload_required'] is True
 
     @patch('api.routes._mcp_runtime_status_by_name')
-    @patch('api.routes.get_config')
-    def test_list_payload_includes_status_tool_counts_and_safe_invalid_config(self, mock_cfg, mock_runtime):
+    @patch('api.routes.get_config_for_profile_home')
+    @patch('api.routes.get_active_hermes_home')
+    def test_list_payload_includes_status_tool_counts_and_safe_invalid_config(self, mock_home, mock_cfg, mock_runtime):
+        mock_home.return_value = object()
         mock_cfg.return_value = {
             'mcp_servers': {
                 'searxng': {'command': 'mcp-searxng', 'args': ['--port', '8888']},
