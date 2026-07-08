@@ -8491,8 +8491,116 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
     )
 
 
+def _metadata_message_count_for_display(session) -> int | None:
+    raw_count = getattr(session, "_metadata_message_count", None)
+    if raw_count is not None:
+        try:
+            count = int(float(_safe_first(raw_count, 0) or 0))
+        except (TypeError, ValueError):
+            return None
+        return count if count >= 0 else None
+    if getattr(session, "_loaded_metadata_only", False):
+        return None
+    try:
+        compact_count = session.compact().get("message_count")
+    except Exception:
+        return None
+    if compact_count is None:
+        return None
+    try:
+        count = int(float(_safe_first(compact_count, 0) or 0))
+    except (TypeError, ValueError):
+        return None
+    return count if count >= 0 else None
+
+
+def _compression_parent_lineage_metadata_count(session, *, max_hops: int = 20) -> int | None:
+    """Return the display-coordinate length of compression snapshot parents.
+
+    This metadata-only helper is used only after the direct child sidecar already
+    satisfies the initial visible tail.  If any hop cannot be classified as a
+    pre-compression snapshot, return None so callers fall back to the full
+    lineage stitch rather than guessing pagination coordinates.
+    """
+    total = 0
+    current = session
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    root_is_fork = source == "fork"
+    seen = {str(getattr(session, "session_id", "") or "")}
+    for _ in range(max(0, int(max_hops))):
+        parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
+        if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
+            break
+        parent = Session.load_metadata_only(parent_id)
+        if not parent or not getattr(parent, "pre_compression_snapshot", False):
+            return None
+        parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
+        if root_is_fork and parent_source != "fork":
+            return None
+        parent_count = _metadata_message_count_for_display(parent)
+        if parent_count is None:
+            return None
+        total += parent_count
+        seen.add(parent_id)
+        current = parent
+    return total
+
+
+def _loaded_prefix_count_before_sidecar(merged_messages, sidecar_messages) -> int:
+    """Return how many rows already precede ``sidecar_messages`` in a merged list."""
+    merged_messages = list(merged_messages or [])
+    sidecar_messages = list(sidecar_messages or [])
+    if not merged_messages or not sidecar_messages:
+        return 0
+    needle = [_session_message_merge_key(msg) for msg in sidecar_messages[:3]]
+    if not needle:
+        return 0
+    for idx in range(0, max(0, len(merged_messages) - len(needle)) + 1):
+        hay = [_session_message_merge_key(msg) for msg in merged_messages[idx : idx + len(needle)]]
+        if hay == needle:
+            return idx
+    return 0
+
+
+def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages, *, limit: int) -> int | None:
+    """Classify a direct compression child sidecar for initial limited loads.
+
+    Returns:
+    - 0 when the child appears cumulative and already includes the parent prefix.
+    - N when the child is a continuation segment and N parent rows are omitted.
+    - None when classification is uncertain and the caller must stitch lineage.
+    """
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id or not is_safe_session_id(parent_id):
+        return None
+    parent = Session.load_metadata_only(parent_id)
+    if not parent or not getattr(parent, "pre_compression_snapshot", False):
+        return None
+    parent_count = _metadata_message_count_for_display(parent)
+    if parent_count is None:
+        return None
+
+    first_ts = None
+    for msg in direct_sidecar_messages:
+        first_ts = _message_timestamp_as_float(msg)
+        if first_ts is not None:
+            break
+    try:
+        parent_updated_at = float(getattr(parent, "updated_at", 0) or 0)
+    except (TypeError, ValueError):
+        parent_updated_at = 0.0
+    if parent_updated_at > 0 and first_ts is not None:
+        if first_ts < parent_updated_at and len(direct_sidecar_messages) >= parent_count + limit:
+            return 0
+        if first_ts >= parent_updated_at:
+            return _compression_parent_lineage_metadata_count(session)
+    if len(direct_sidecar_messages) < parent_count:
+        return _compression_parent_lineage_metadata_count(session)
+    return None
+
+
 def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
-    """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
+    """Return (timestamp floor, sidecar messages, base offset) for bounded tail reads.
 
     The display window limit counts visible transcript rows after WebUI sidecar
     and state.db reconciliation, so this deliberately does not SQL ``LIMIT`` raw
@@ -8502,26 +8610,49 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     path because their correctness depends on older reconciliation rows.
     """
     if msg_limit is None or msg_before is not None:
-        return None, None
+        return None, None, 0
     if getattr(session, "truncation_watermark", None) not in (None, ""):
-        return None, None
+        return None, None, 0
     if getattr(session, "truncation_boundary", None) not in (None, ""):
-        return None, None
-
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
-    if not sidecar_messages:
-        return None, sidecar_messages
-    sidecar_timestamps = [_message_timestamp_as_float(msg) for msg in sidecar_messages]
-    if any(ts is None for ts in sidecar_timestamps):
-        return None, sidecar_messages
+        return None, None, 0
 
     try:
         limit = max(1, int(msg_limit))
     except (TypeError, ValueError):
-        return None, sidecar_messages
+        return None, None, 0
     raw_budget = max(300, limit * 10)
+
+    # Initial msg_limit loads only need enough local sidecar context to render
+    # the tail window.  Compression-continuation sessions can have very long
+    # pre-compression parents; stitching those parents here can take longer than
+    # Apache's 60s local-proxy timeout.  Use the direct child sidecar only when
+    # it has enough renderable rows and metadata can preserve full-coordinate
+    # pagination offsets for either cumulative or continuation child shapes.
+    direct_sidecar_messages = list(getattr(session, "messages", []) or [])
+    if len(direct_sidecar_messages) > raw_budget:
+        renderable_count = sum(
+            1
+            for msg in direct_sidecar_messages
+            if _message_counts_as_renderable_for_window(msg)
+        )
+        if renderable_count >= limit:
+            base_offset = _direct_sidecar_limited_display_base_offset(
+                session,
+                direct_sidecar_messages,
+                limit=limit,
+            )
+            if base_offset is not None:
+                return None, direct_sidecar_messages, base_offset
+
+    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    if not sidecar_messages:
+        return None, sidecar_messages, 0
+    sidecar_timestamps = [_message_timestamp_as_float(msg) for msg in sidecar_messages]
+    if any(ts is None for ts in sidecar_timestamps):
+        return None, sidecar_messages, 0
+
     if len(sidecar_messages) <= raw_budget:
-        return None, sidecar_messages
+        return None, sidecar_messages, 0
 
     floor = min(sidecar_timestamps[-raw_budget:])
     sidecar_before_keys = [
@@ -8535,8 +8666,8 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         profile=getattr(session, "profile", None) or None,
     )
     if state_before_keys is None or state_before_keys != sidecar_before_keys:
-        return None, sidecar_messages
-    return floor, sidecar_messages
+        return None, sidecar_messages, 0
+    return floor, sidecar_messages, 0
 
 
 def _messages_start_with_visible_prefix(messages, prefix) -> bool:
@@ -12335,6 +12466,7 @@ def handle_get(handler, parsed) -> bool:
             state_db_messages = []
             metadata_summary = None
             limited_sidecar_messages = None
+            limited_display_base_offset = 0
             state_db_since_timestamp = None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
@@ -12343,6 +12475,7 @@ def handle_get(handler, parsed) -> bool:
                     (
                         state_db_since_timestamp,
                         limited_sidecar_messages,
+                        limited_display_base_offset,
                     ) = _state_db_since_timestamp_for_limited_display(
                         s,
                         msg_limit,
@@ -12429,13 +12562,30 @@ def handle_get(handler, parsed) -> bool:
             else:
                 _summary_message_count = None
                 _summary_last_message_at = None
+            limited_effective_base_offset = 0
             if load_messages:
+                if (
+                    msg_limit is not None
+                    and limited_display_base_offset
+                    and limited_sidecar_messages is not None
+                    and _all_msgs
+                ):
+                    loaded_prefix_count = _loaded_prefix_count_before_sidecar(
+                        _all_msgs,
+                        limited_sidecar_messages,
+                    )
+                    limited_effective_base_offset = max(
+                        0,
+                        int(limited_display_base_offset) - loaded_prefix_count,
+                    )
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,
                     msg_limit=msg_limit,
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
                 )
+                if limited_effective_base_offset:
+                    _messages_offset += limited_effective_base_offset
                 if msg_limit is not None:
                     _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
                 _truncated_msgs = _hydrate_anchor_activity_scenes(
@@ -12522,7 +12672,11 @@ def handle_get(handler, parsed) -> bool:
                     _messages_offset,
                     len(_truncated_msgs),
                 )
-            _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
+            _merged_message_count = (
+                _summary_message_count
+                if _summary_message_count is not None
+                else len(_all_msgs) + limited_effective_base_offset
+            )
             _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
             if _summary_last_message_at is None and _all_msgs:
                 try:

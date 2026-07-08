@@ -532,6 +532,246 @@ def test_msg_limit_session_load_reads_only_recent_state_db_tail(monkeypatch, tmp
     assert messages[-1]["content"] == "external answer"
 
 
+def test_msg_limit_large_cumulative_compression_child_uses_direct_sidecar_without_lineage(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+
+    child_messages = parent_messages + [
+        {"role": "user", "content": f"sidecar {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    session = models.Session(
+        session_id="cumulative_child",
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    session.save(touch_updated_at=False)
+
+    def fail_if_lineage_loaded(_session):
+        raise AssertionError("initial msg_limit load should not stitch parent lineage")
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", fail_if_lineage_loaded)
+
+    since_timestamp, selected_sidecar, base_offset = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        msg_limit=30,
+    )
+
+    assert since_timestamp is None
+    assert selected_sidecar == child_messages
+    assert base_offset == 0
+
+
+def test_msg_limit_compression_child_fast_path_preserves_pagination_cursor(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_cursor"
+    child_sid = "continuation_child_cursor"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    child_messages = [
+        {"role": "user", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    captured = {"lineage_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+
+    first = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(first, urlparse(first.path))
+
+    assert first.status == 200
+    assert captured["lineage_loads"] == 0
+    first_payload = first.response_json["session"]
+    assert first_payload["message_count"] == len(parent_messages) + len(child_messages)
+    assert first_payload["_messages_offset"] == len(parent_messages) + 470
+    assert [msg["content"] for msg in first_payload["messages"]] == [
+        f"child {idx}" for idx in range(470, 500)
+    ]
+
+    second = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0"
+        f"&msg_limit=30&msg_before={first_payload['_messages_offset']}"
+    )
+    routes.handle_get(second, urlparse(second.path))
+
+    assert second.status == 200
+    assert captured["lineage_loads"] == 1
+    second_payload = second.response_json["session"]
+    assert second_payload["message_count"] == len(parent_messages) + len(child_messages)
+    assert second_payload["_messages_offset"] == len(parent_messages) + 440
+    assert [msg["content"] for msg in second_payload["messages"]] == [
+        f"child {idx}" for idx in range(440, 470)
+    ]
+
+
+def test_msg_limit_unavailable_parent_metadata_count_falls_back_to_lineage(monkeypatch):
+    import api.routes as routes
+
+    class MetadataOnlyParent:
+        pre_compression_snapshot = True
+        session_source = None
+        parent_session_id = None
+        _metadata_message_count = None
+        _loaded_metadata_only = True
+        updated_at = 200.0
+
+        def compact(self):
+            return {"message_count": 0}
+
+    direct_sidecar_messages = [
+        {"role": "user", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    lineage_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ] + direct_sidecar_messages
+    session = type(
+        "Session",
+        (),
+        {
+            "session_id": "metadata_count_unavailable_child",
+            "messages": direct_sidecar_messages,
+            "parent_session_id": "metadata_count_unavailable_parent",
+            "truncation_watermark": None,
+            "truncation_boundary": None,
+            "profile": None,
+        },
+    )()
+    captured = {"lineage_loaded": False}
+
+    monkeypatch.setattr(
+        routes.Session,
+        "load_metadata_only",
+        staticmethod(lambda _sid: MetadataOnlyParent()),
+    )
+
+    def lineage_loader(_session):
+        captured["lineage_loaded"] = True
+        return lineage_messages
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lineage_loader)
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_keys_before_timestamp",
+        lambda *_args, **_kwargs: None,
+    )
+
+    since_timestamp, selected_sidecar, base_offset = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        msg_limit=30,
+    )
+
+    assert since_timestamp is None
+    assert base_offset == 0
+    assert captured["lineage_loaded"] is True
+    assert selected_sidecar == lineage_messages
+
+
+def test_msg_limit_hidden_heavy_compression_child_stitches_lineage_when_visible_tail_short(
+    monkeypatch,
+):
+    import api.routes as routes
+
+    hidden_tool_rows = [
+        {"role": "tool", "content": f"hidden tool {idx}", "timestamp": float(idx)}
+        for idx in range(310)
+    ]
+    direct_visible_rows = [
+        {"role": "assistant", "content": f"child visible {idx}", "timestamp": 400.0 + idx}
+        for idx in range(10)
+    ]
+    parent_visible_rows = [
+        {"role": "user", "content": f"parent visible {idx}", "timestamp": 100.0 + idx}
+        for idx in range(30)
+    ]
+    direct_sidecar_messages = hidden_tool_rows + direct_visible_rows
+    lineage_messages = parent_visible_rows + direct_sidecar_messages
+    session = type(
+        "Session",
+        (),
+        {
+            "session_id": "hidden_heavy_child",
+            "messages": direct_sidecar_messages,
+            "parent_session_id": "parent_compression_snapshot",
+            "truncation_watermark": None,
+            "truncation_boundary": None,
+            "profile": None,
+        },
+    )()
+    captured = {"lineage_loaded": False}
+
+    def lineage_loader(_session):
+        captured["lineage_loaded"] = True
+        return lineage_messages
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lineage_loader)
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_message_keys_before_timestamp",
+        lambda *_args, **_kwargs: None,
+    )
+
+    since_timestamp, selected_sidecar, base_offset = routes._state_db_since_timestamp_for_limited_display(
+        session,
+        msg_limit=30,
+    )
+
+    assert since_timestamp is None
+    assert base_offset == 0
+    assert captured["lineage_loaded"] is True
+    assert selected_sidecar == lineage_messages
+
+
 def test_msg_limit_session_load_matches_full_read_with_null_state_db_timestamp(monkeypatch, tmp_path):
     import api.routes as routes
 
