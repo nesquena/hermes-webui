@@ -1381,6 +1381,91 @@
   :root.dark[data-skin="yuno"] ::selection{background:rgba(255,107,181,.35);color:#fff;}
   :root.dark[data-skin="yuno"] .session-item.active{background:rgba(255,107,181,.10);border-left:2px solid #FF6BB5;}
 
+  /* ═══ YUNO CYBERPUNK — neon magenta operator night palette (dark-only) ═══
+     Dark-focused; falls back to the default light palette in light mode. */
+  :root.dark[data-skin="yuno-cyberpunk"]{
+    --bg:#0A0E27;--sidebar:#070A1F;--surface:#1F1B3A;--code-bg:#050817;
+    --topbar-bg:rgba(7,10,31,.98);--main-bg:rgba(10,14,39,.6);
+    --border:#4D002D;--border2:rgba(255,20,147,.35);
+    --border-subtle:rgba(255,20,147,.10);--border-muted:rgba(255,20,147,.18);
+    --text:#FAFAFB;--strong:#FFFFFF;--muted:#FFA8DD;--em:#4DEEEA;
+    --accent:#FF1493;--accent-hover:#FF3DAF;--accent-bg:rgba(255,20,147,.10);--accent-bg-strong:rgba(255,20,147,.20);--accent-text:#FF6BC6;
+    --blue:#4DEEEA;--gold:#FF6BC6;--focus-ring:rgba(0,229,255,.40);--focus-glow:rgba(255,20,147,.12);
+    --input-bg:rgba(255,20,147,.04);--hover-bg:rgba(255,20,147,.06);
+    --surface-subtle:rgba(255,20,147,.04);--surface-subtle-hover:rgba(255,20,147,.08);
+    --code-inline-bg:rgba(255,20,147,.10);--code-text:#FFA8DD;--pre-text:#E8E6FF;
+    --error:#FF335C;--success:#2BC774;--warning:#FFB000;--info:#4DEEEA;
+  }
+  /* ── Yuno Cyberpunk skin: component-level overrides ── */
+  :root.dark[data-skin="yuno-cyberpunk"] ::selection{background:rgba(255,20,147,.35);color:#fff;}
+  :root.dark[data-skin="yuno-cyberpunk"] .session-item.active{background:rgba(255,20,147,.10);border-left:2px solid #FF1493;}
+  :root.dark[data-skin="yuno-cyberpunk"] textarea:focus,
+  :root.dark[data-skin="yuno-cyberpunk"] input[type="text"]:focus,
+  :root.dark[data-skin="yuno-cyberpunk"] input[type="password"]:focus,
+  :root.dark[data-skin="yuno-cyberpunk"] select:focus{box-shadow:0 0 16px rgba(0,229,255,.18);}
+  :root.dark[data-skin="yuno-cyberpunk"] button.send-btn{box-shadow:0 0 14px rgba(255,20,147,.25);}
+  :root.dark[data-skin="yuno-cyberpunk"] button.send-btn:hover{box-shadow:0 0 24px rgba(255,20,147,.45);}
+  :root.dark[data-skin="yuno-cyberpunk"] .new-chat-btn,
+  :root.dark[data-skin="yuno-cyberpunk"] button.send-btn:not(:disabled),
+  :root.dark[data-skin="yuno-cyberpunk"] .btn.primary,
+  :root.dark[data-skin="yuno-cyberpunk"] .update-primary,
+  :root.dark[data-skin="yuno-cyberpunk"] .clarify-submit{background:var(--accent);border-color:var(--accent);color:#050817;font-weight:600;}
+  :root.dark[data-skin="yuno-cyberpunk"] .new-chat-btn:hover,
+  :root.dark[data-skin="yuno-cyberpunk"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="yuno-cyberpunk"] .btn.primary:hover,
+  :root.dark[data-skin="yuno-cyberpunk"] .update-primary:hover,
+  :root.dark[data-skin="yuno-cyberpunk"] .clarify-submit:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#050817;}
+  :root.dark[data-skin="yuno-cyberpunk"] .app-dialog{background:linear-gradient(180deg,rgba(31,27,58,.99),rgba(10,14,39,.99));border-color:rgba(255,20,147,.25);}
+  :root.dark[data-skin="yuno-cyberpunk"] .app-dialog-overlay{background:rgba(0,0,0,.72);}
+  :root.dark[data-skin="yuno-cyberpunk"] .kanban-modal{background:linear-gradient(180deg,rgba(31,27,58,.99),rgba(10,14,39,.99));border-color:rgba(255,20,147,.25);}
+  :root.dark[data-skin="yuno-cyberpunk"] .kanban-modal-overlay{background:rgba(0,0,0,.72);}
+  :root.dark[data-skin="yuno-cyberpunk"] .kanban-board-switcher-menu{background:linear-gradient(180deg,rgba(31,27,58,.99),rgba(10,14,39,.99));border-color:rgba(255,20,147,.20);}
+  :root.dark[data-skin="yuno-cyberpunk"]::-webkit-scrollbar-thumb{background:rgba(255,20,147,.18);border-radius:3px;}
+  :root.dark[data-skin="yuno-cyberpunk"]::-webkit-scrollbar-thumb:hover{background:rgba(255,20,147,.30);}
+  :root.dark[data-skin="yuno-cyberpunk"]{scrollbar-width:thin;scrollbar-color:rgba(255,20,147,.18) transparent;}
+  :root.dark[data-skin="yuno-cyberpunk"] a{color:var(--info);transition:text-shadow .2s;}
+  :root.dark[data-skin="yuno-cyberpunk"] a:hover{text-shadow:0 0 10px rgba(77,238,234,.5);}
+
+  /* ═══ YUNO HC — high-contrast AAA black/white/pink (dark-only) ═══
+     Accessibility-first: pure black canvas, white text and borders,
+     solid focus indicators. Falls back to the default light palette in
+     light mode. */
+  :root.dark[data-skin="yuno-hc"]{
+    --bg:#000000;--sidebar:#0A0A0A;--surface:#0A0A0A;--code-bg:#0A0A0A;
+    --topbar-bg:rgba(0,0,0,.98);--main-bg:#000000;
+    --border:#FFFFFF;--border2:#FFFFFF;
+    --border-subtle:rgba(255,255,255,.6);--border-muted:rgba(255,255,255,.8);
+    --text:#FFFFFF;--strong:#FFFFFF;--muted:#E5E5E5;--em:#4DEEEA;
+    --accent:#FF6BC6;--accent-hover:#FFA8DD;--accent-bg:rgba(255,107,198,.15);--accent-bg-strong:rgba(255,107,198,.28);--accent-text:#FF6BC6;
+    --blue:#4DEEEA;--gold:#FFD966;--focus-ring:#FF6BC6;--focus-glow:rgba(255,107,198,.30);
+    --input-bg:#000000;--hover-bg:rgba(255,255,255,.12);
+    --surface-subtle:rgba(255,255,255,.06);--surface-subtle-hover:rgba(255,255,255,.12);
+    --code-inline-bg:rgba(255,255,255,.12);--code-text:#FFA8DD;--pre-text:#FFFFFF;
+    --error:#FF6688;--success:#5DD695;--warning:#FFD966;--info:#4DEEEA;
+  }
+  /* ── Yuno HC skin: component-level overrides ── */
+  :root.dark[data-skin="yuno-hc"] ::selection{background:#FF6BC6;color:#000;}
+  :root.dark[data-skin="yuno-hc"] textarea:focus,
+  :root.dark[data-skin="yuno-hc"] input[type="text"]:focus,
+  :root.dark[data-skin="yuno-hc"] input[type="password"]:focus,
+  :root.dark[data-skin="yuno-hc"] select:focus{outline:2px solid #FF6BC6;outline-offset:1px;}
+  :root.dark[data-skin="yuno-hc"] .new-chat-btn,
+  :root.dark[data-skin="yuno-hc"] button.send-btn:not(:disabled),
+  :root.dark[data-skin="yuno-hc"] .btn.primary,
+  :root.dark[data-skin="yuno-hc"] .update-primary,
+  :root.dark[data-skin="yuno-hc"] .clarify-submit{background:#FF6BC6;border-color:#FF6BC6;color:#000000;font-weight:600;}
+  :root.dark[data-skin="yuno-hc"] .new-chat-btn:hover,
+  :root.dark[data-skin="yuno-hc"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="yuno-hc"] .btn.primary:hover,
+  :root.dark[data-skin="yuno-hc"] .update-primary:hover,
+  :root.dark[data-skin="yuno-hc"] .clarify-submit:hover{background:#FFA8DD;border-color:#FFA8DD;color:#000000;}
+  :root.dark[data-skin="yuno-hc"] .session-item.active{background:rgba(255,107,198,.20);border-left:2px solid #FF6BC6;color:#FFFFFF;}
+  :root.dark[data-skin="yuno-hc"] .app-dialog{background:#0A0A0A;border:1px solid #FFFFFF;}
+  :root.dark[data-skin="yuno-hc"] .app-dialog-overlay{background:rgba(0,0,0,.85);}
+  :root.dark[data-skin="yuno-hc"] .kanban-modal{background:#0A0A0A;border:1px solid #FFFFFF;}
+  :root.dark[data-skin="yuno-hc"] .kanban-modal-overlay{background:rgba(0,0,0,.85);}
+  :root.dark[data-skin="yuno-hc"] .kanban-board-switcher-menu{background:#0A0A0A;border:1px solid #FFFFFF;}
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));

@@ -8290,6 +8290,8 @@ _SETTINGS_SKIN_VALUES = {
     "zeus",
     "verdigris",
     "yuno",
+    "yuno-cyberpunk",
+    "yuno-hc",
     "neon",
     "neon-soft",
     "neon-paint",
