@@ -2841,6 +2841,10 @@ from api.helpers import (
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
+from api.session_lifecycle import (
+    get_recent_memory_commit_errors,
+    submit_commit_session_memory,
+)
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
 
@@ -2924,18 +2928,20 @@ def _clear_stale_stream_state(session) -> bool:
                              # successful clear, avoiding one ghost SSE
                              # reconnect on the very next /api/session GET.
     if getattr(session, "_loaded_metadata_only", False):
+        # Metadata-only stub: we cannot safely call save() on it, and we must
+        # not leave stale stream flags on disk. Reload the full session, clear
+        # the flags under the session lock, and persist. This costs one full
+        # load+save per stale stream, but it happens only when the stream is
+        # actually stale, not on every metadata poll.
         try:
             from api.models import get_session as _get_session
             session = _get_session(session.session_id, metadata_only=False)
         except Exception:
-            # If we cannot upgrade to a full load (file gone, decode error,
-            # etc.) bail without clearing — better to leave a stale
-            # active_stream_id than to wipe the conversation.
             logger.warning(
                 "_clear_stale_stream_state: refused to clear stale stream %s "
                 "for session %s — full reload failed and we will not save a "
                 "metadata-only stub. See #1558.",
-                stream_id, getattr(session, "session_id", "?"),
+                stream_id, getattr(original_stub, "session_id", "?"),
             )
             return False
         if session is None:
@@ -11491,6 +11497,7 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/health/agent":
         payload = build_agent_health_payload()
         payload["gateway_chat"] = gateway_chat_config_status()
+        payload["memory_commit_errors"] = get_recent_memory_commit_errors(limit=4)
         j(handler, payload)
         return True
 
@@ -13209,7 +13216,10 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), status=400)
         # Use the profile sent by the client tab (if any) so that two tabs on
         # different profiles never clobber each other via the process-level global.
-        # ── Memory lifecycle: commit the previous session before starting a new one ──
+        # Memory lifecycle: commit the previous session before starting a new one.
+        # This is a session boundary, but the commit can invoke a slow memory-provider
+        # network extraction. Run it in a background thread so the new-session response
+        # is not blocked by the previous session's size (#perf).
         prev_session_id = body.get("prev_session_id")
         if prev_session_id:
             if not _session_id_visible_to_request_profile(
@@ -13220,49 +13230,13 @@ def handle_post(handler, parsed) -> bool:
                 # the new session (#5420).
                 prev_session_id = None
             if prev_session_id:
-                # Fire-and-forget: commit_memory_session() can take 1-5+ seconds
-                # (extraction call to the memory provider), and blocking the
-                # response here made "+ New Chat" feel slow/unresponsive.
-                # commit_session_memory() already serialises overlapping commits
-                # for a session via its own in-flight guard, so running it off
-                # the request thread is safe.
-                def _commit_prev_session_memory(_sid=prev_session_id):
-                    try:
-                        from api.session_lifecycle import commit_session_memory
-                        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                        prev_agent = None
-                        with SESSION_AGENT_CACHE_LOCK:
-                            _cached = SESSION_AGENT_CACHE.get(_sid)
-                            if _cached:
-                                prev_agent = _cached[0]
-                        commit_session_memory(_sid, agent=prev_agent)
-                    except Exception:
-                        logger.warning(
-                            "Lifecycle commit for prev_session %s failed",
-                            _sid,
-                            exc_info=True,
-                        )
-                    finally:
-                        # Self-unregister so the background-commit registry does
-                        # not leak completed threads; drain only tracks live ones.
-                        try:
-                            from api.session_lifecycle import _unregister_background_commit_thread
-                            _unregister_background_commit_thread(threading.current_thread())
-                        except Exception:
-                            pass
-
-                t = threading.Thread(
-                    target=_commit_prev_session_memory,
-                    daemon=True,
-                    name=f"commit-memory-{prev_session_id}",
-                )
-                from api.session_lifecycle import _register_background_commit_thread
-                # Refused only if shutdown draining has already begun; in that
-                # window the inline drain commits the pending generation instead,
-                # so skipping the worker start is safe (avoids a late daemon
-                # thread the drain snapshot already missed).
-                if _register_background_commit_thread(t):
-                    t.start()
+                from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                prev_agent = None
+                with SESSION_AGENT_CACHE_LOCK:
+                    _cached = SESSION_AGENT_CACHE.get(prev_session_id)
+                    if _cached:
+                        prev_agent = _cached[0]
+                submit_commit_session_memory(prev_session_id, agent=prev_agent)
         s = new_session(
             workspace=workspace,
             model=model,

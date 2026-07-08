@@ -37,8 +37,73 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 
 logger = logging.getLogger(__name__)
+
+# Recent background memory-commit failures surfaced in /api/health/agent.
+_MEMORY_COMMIT_ERRORS: deque[dict] = deque(maxlen=16)
+_MEMORY_COMMIT_ERRORS_LOCK = threading.Lock()
+
+
+def _record_memory_commit_error(session_id: str, exc: BaseException) -> None:
+    with _MEMORY_COMMIT_ERRORS_LOCK:
+        _MEMORY_COMMIT_ERRORS.append({
+            "session_id": session_id,
+            "error": f"{type(exc).__name__}: {exc}",
+            "ts": time.time(),
+        })
+
+
+def get_recent_memory_commit_errors(limit: int = 8) -> list[dict]:
+    """Return recent background memory-commit failures for diagnostics."""
+    with _MEMORY_COMMIT_ERRORS_LOCK:
+        return list(_MEMORY_COMMIT_ERRORS)[-limit:]
+
+
+def submit_commit_session_memory(session_id: str, agent=None) -> None:
+    """Submit a fire-and-forget memory commit using the upstream registry/drain.
+
+    The thread is tracked in ``_background_commit_threads`` so
+    ``drain_all_on_shutdown()`` can join it before interpreter teardown. Errors
+    are captured in ``_MEMORY_COMMIT_ERRORS`` for health/monitoring and logged.
+    """
+    if not session_id:
+        return
+
+    def _worker():
+        try:
+            ok = commit_session_memory(session_id, agent=agent)
+            if not ok:
+                _record_memory_commit_error(
+                    session_id,
+                    Exception("commit_session_memory returned False"),
+                )
+                logger.warning("Background memory commit returned False for %s", session_id)
+        except BaseException as exc:
+            _record_memory_commit_error(session_id, exc)
+            logger.exception("Background memory commit failed for %s", session_id)
+        finally:
+            try:
+                _unregister_background_commit_thread(threading.current_thread())
+            except Exception:
+                pass
+
+    t = threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f"commit-memory-{session_id}",
+    )
+    if _register_background_commit_thread(t):
+        t.start()
+    else:
+        # Shutdown draining has begun; do a best-effort inline commit without
+        # blocking the request path.
+        try:
+            commit_session_memory(session_id, agent=agent, wait=False)
+        except Exception:
+            logger.exception("Inline fallback memory commit failed for %s", session_id)
+
 
 _lock = threading.Lock()
 _condition = threading.Condition(_lock)
