@@ -134,6 +134,31 @@ def test_credentialed_json_helper_refuses_redirects():
     ]
 
 
+def test_config_credentialed_json_helper_refuses_redirects():
+    from api import config
+
+    servers = _RedirectPair()
+    try:
+        result = config._credentialed_json_get_no_redirect(
+            f"{servers.base_v1}/models",
+            {"Authorization": "Bearer CANARY_SECRET"},
+            timeout=3,
+        )
+    except Exception:
+        result = None
+    finally:
+        servers.close()
+
+    assert result is None
+    assert servers.captured == [
+        {
+            "host": "redirector",
+            "path": "/v1/models",
+            "authorization": "Bearer CANARY_SECRET",
+        }
+    ]
+
+
 def test_custom_live_models_does_not_forward_key_to_redirect_target(monkeypatch):
     from api import routes
 
@@ -186,7 +211,14 @@ def test_openai_compat_live_models_does_not_forward_key_to_redirect_target(monke
             "model": {"provider": "deepseek"},
         },
     )
-    monkeypatch.setitem(__import__("sys").modules, "hermes_cli.models", SimpleNamespace(provider_model_ids=lambda provider: []))
+    def provider_model_ids(provider):
+        raise AssertionError("credentialed agent live probe should be skipped")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "hermes_cli.models",
+        SimpleNamespace(provider_model_ids=provider_model_ids),
+    )
 
     handler = _Handler("/api/models/live?provider=deepseek")
     try:
