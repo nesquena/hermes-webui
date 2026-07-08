@@ -1325,10 +1325,28 @@ def _drain_loop() -> None:
         return
     logger.info("bg_task_complete drain thread started")
     while not _DRAIN_STOP.is_set():
+        # Read the queue defensively: a rebuilt/partially-initialized registry
+        # may not expose ``completion_queue`` (mirrors streaming.py's
+        # ``getattr(process_registry, 'completion_queue', None)`` guard). Direct
+        # attribute access here would raise AttributeError, which the old broad
+        # ``except Exception: continue`` swallowed silently and re-tried with no
+        # backoff — a 100%-CPU tight loop. Back off on the stop event instead.
+        q = getattr(process_registry, "completion_queue", None)
+        if q is None:
+            _DRAIN_STOP.wait(1.0)
+            continue
         try:
-            evt = process_registry.completion_queue.get(timeout=1.0)
+            evt = q.get(timeout=1.0)
+        except queue.Empty:
+            # Nothing to drain this second — re-check the stop flag and loop.
+            continue
         except Exception:
-            # queue.Empty or transient — re-check stop flag and continue.
+            # Unexpected queue failure: log it (not silent) and back off on the
+            # stop event so a persistent error can't spin the thread hot.
+            logger.warning(
+                "bg_task_complete drain queue read failed", exc_info=True
+            )
+            _DRAIN_STOP.wait(1.0)
             continue
         if not isinstance(evt, dict):
             continue
