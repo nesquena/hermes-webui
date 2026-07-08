@@ -11,6 +11,7 @@ import errno
 import io
 import gzip
 import json
+import math
 from api.sse_chunked import end_sse_headers
 import logging
 import os
@@ -8573,18 +8574,46 @@ def _state_db_has_no_timestamped_rows_before_sidecar(session, direct_sidecar_mes
     The direct-child fast path omits the full lineage stitch, so it may publish
     metadata-derived parent offsets only when state.db has no timestamped rows
     that would be inserted before the first direct child sidecar row by the full
-    merge path.  If the DB/schema cannot prove this cheaply, fail closed to the
-    full stitch path.
+    merge path.  Equal-timestamp state.db rows are only safe when they replay the
+    direct sidecar's same-boundary prefix exactly; otherwise the full merge may
+    sort them before the child sidecar and shift pagination coordinates.  If the
+    DB/schema cannot prove this cheaply, fail closed to the full stitch path.
     """
     first_ts = _first_message_timestamp(direct_sidecar_messages)
-    if first_ts is None:
+    if first_ts is None or not math.isfinite(first_ts):
         return False
     state_before_keys = get_state_db_session_message_keys_before_timestamp(
         getattr(session, "session_id", None),
         first_ts,
         profile=getattr(session, "profile", None) or None,
     )
-    return state_before_keys == []
+    if state_before_keys != []:
+        return False
+
+    state_boundary_keys = get_state_db_session_message_keys_before_timestamp(
+        getattr(session, "session_id", None),
+        math.nextafter(first_ts, math.inf),
+        profile=getattr(session, "profile", None) or None,
+    )
+    if state_boundary_keys is None:
+        return False
+    if not state_boundary_keys:
+        return True
+
+    sidecar_boundary_keys = []
+    for msg in direct_sidecar_messages or []:
+        timestamp = _message_timestamp_as_float(msg)
+        if timestamp is None:
+            if sidecar_boundary_keys:
+                break
+            continue
+        if timestamp != first_ts:
+            if sidecar_boundary_keys:
+                break
+            continue
+        sidecar_boundary_keys.append(_session_message_visible_key(msg))
+
+    return state_boundary_keys == sidecar_boundary_keys[: len(state_boundary_keys)]
 
 
 def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages, *, limit: int) -> int | None:
