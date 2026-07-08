@@ -218,8 +218,14 @@ def test_process_wakeup_label_key_exists_in_all_locales():
         r"^\s{2}(?:'(?P<quoted>[A-Za-z0-9-]+)'|(?P<plain>[A-Za-z0-9-]+))\s*:\s*\{",
         re.MULTILINE,
     )
-    locales = [m.group("quoted") or m.group("plain") for m in locale_pattern.finditer(I18N_JS)]
-    assert locales, "expected at least the English locale"
-    key_defs = re.findall(r"\bprocess_wakeup_label\s*:", I18N_JS)
-    assert len(key_defs) >= len(locales), "process_wakeup_label must be defined in every locale"
+    locale_matches = list(locale_pattern.finditer(I18N_JS))
+    assert locale_matches, "expected at least the English locale"
+    for idx, match in enumerate(locale_matches):
+        name = match.group("quoted") or match.group("plain")
+        start = match.end()
+        end = locale_matches[idx + 1].start() if idx + 1 < len(locale_matches) else I18N_JS.find("\n};", start)
+        block = I18N_JS[start:end]
+        assert re.search(r"\bprocess_wakeup_label\s*:", block), (
+            f"process_wakeup_label missing from locale {name}"
+        )
     assert "process_wakeup_label:'Background wakeup'" in I18N_JS
