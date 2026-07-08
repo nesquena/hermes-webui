@@ -1,6 +1,7 @@
 """Tests for issue #538 — MCP server management API."""
 import json, pytest
 from unittest.mock import patch, MagicMock, call
+import yaml
 from api.routes import (
     _handle_mcp_servers_list,
     _handle_mcp_server_update,
@@ -140,6 +141,41 @@ class TestMcpList:
     def test_numeric_zero_enabled_flag_is_disabled(self):
         """YAML numeric false-y values should not show a disabled server as enabled."""
         assert _parse_mcp_enabled(0) is False
+
+    def test_active_home_list_reads_external_config_override_used_by_writes(self, monkeypatch, tmp_path):
+        """HERMES_CONFIG_PATH outside the active home remains the read/write authority."""
+        from api import config, profiles, routes
+
+        active_home = tmp_path / 'active-home'
+        override_path = tmp_path / 'override-dir' / 'config.yaml'
+        active_home.mkdir()
+        override_path.parent.mkdir()
+        active_home.joinpath('config.yaml').write_text(
+            yaml.safe_dump({'mcp_servers': {'wrong-home': {'command': 'wrong'}}}, sort_keys=False),
+            encoding='utf-8',
+        )
+        override_path.write_text(
+            yaml.safe_dump({'mcp_servers': {'override-srv': {'command': 'override'}}}, sort_keys=False),
+            encoding='utf-8',
+        )
+        monkeypatch.setenv('HERMES_CONFIG_PATH', str(override_path))
+        monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: active_home)
+        monkeypatch.setattr(routes, 'get_active_hermes_home', lambda: active_home)
+        monkeypatch.setattr(routes, '_mcp_runtime_status_by_name', lambda: {})
+        config.reload_config()
+
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        assert [srv['name'] for srv in payload['servers']] == ['override-srv']
+
+        h = _make_handler()
+        h.command = 'PUT'
+        _handle_mcp_server_update(h, 'new-srv', {'command': 'new-command'})
+        saved = yaml.safe_load(override_path.read_text(encoding='utf-8'))
+        active_home_saved = yaml.safe_load(active_home.joinpath('config.yaml').read_text(encoding='utf-8'))
+        assert 'new-srv' in saved['mcp_servers']
+        assert 'new-srv' not in active_home_saved['mcp_servers']
 
 
 class TestMcpSave:
