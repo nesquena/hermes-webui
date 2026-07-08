@@ -44,25 +44,40 @@ def test_onboarding_local_gate_ignores_forwarded_ip_unless_trusted(monkeypatch):
     assert routes._onboarding_request_is_local(handler) is False
 
 
-def test_onboarding_local_gate_uses_forwarded_ip_when_explicitly_trusted(monkeypatch):
+def test_onboarding_local_gate_rejects_forwarded_ip_from_untrusted_peer(monkeypatch):
     from api import routes
 
     monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.delenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", raising=False)
     handler = _Handler(
         client_ip="8.8.8.8",
         headers={"X-Forwarded-For": "10.0.0.2", "X-Real-IP": "203.0.113.11"},
     )
 
-    assert routes._onboarding_request_is_local(handler) is True
+    assert routes._onboarding_request_is_local(handler) is False
 
 
-def test_onboarding_trusted_forwarded_for_uses_proxy_appended_rightmost_ip(monkeypatch):
+def test_onboarding_local_gate_uses_forwarded_ip_from_trusted_proxy(monkeypatch):
     from api import routes
 
     monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
     handler = _Handler(
         client_ip="10.0.0.10",
-        headers={"X-Forwarded-For": "127.0.0.1, 8.8.8.8"},
+        headers={"X-Forwarded-For": "10.0.0.2, 10.0.0.10"},
+    )
+
+    assert routes._onboarding_request_is_local(handler) is True
+
+
+def test_onboarding_trusted_forwarded_for_uses_original_non_proxy_ip(monkeypatch):
+    from api import routes
+
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    handler = _Handler(
+        client_ip="10.0.0.10",
+        headers={"X-Forwarded-For": "8.8.8.8, 10.0.0.10"},
     )
 
     assert routes._onboarding_request_is_local(handler) is False
