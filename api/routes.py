@@ -18224,6 +18224,25 @@ def _handle_clarify_inject(handler, parsed):
     return j(handler, {"error": "session_id required"}, status=400)
 
 
+def _credentialed_json_get_no_redirect(url: str, headers: dict[str, str], *, timeout: float):
+    """Fetch JSON for credentialed provider probes without following redirects.
+
+    ``urllib.request.urlopen`` preserves request headers across redirects.  Model
+    discovery attaches provider credentials, so a 3xx from the configured models
+    endpoint must fail closed instead of forwarding ``Authorization`` to the
+    redirect target.
+    """
+
+    class _NoRedirectProviderProbeHandler(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    req = Request(url, headers=headers)
+    opener = build_opener(ProxyHandler({}), _NoRedirectProviderProbeHandler())
+    with opener.open(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
 def _handle_live_models(handler, parsed):
     """Return the live model list for a provider.
 
@@ -18405,13 +18424,11 @@ def _handle_live_models(handler, parsed):
                         else:
                             _models_url = f"{_ep}/v1/models"
                         
-                        _req = urllib.request.Request(
+                        _body = _credentialed_json_get_no_redirect(
                             _models_url,
-                            headers={"Authorization": f"Bearer {_api_key}"},
+                            {"Authorization": f"Bearer {_api_key}"},
+                            timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
                         )
-                        
-                        with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
-                            _body = json.loads(_resp.read())
                         
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
                         if isinstance(_body, dict):
@@ -18471,12 +18488,11 @@ def _handle_live_models(handler, parsed):
                             if _active_provider == provider:
                                 _key = _model_cfg.get("api_key")
                     if _key:
-                        _req = urllib.request.Request(
+                        _body = _credentialed_json_get_no_redirect(
                             f"{_ep}/models",
-                            headers={"Authorization": f"Bearer {_key}"},
+                            {"Authorization": f"Bearer {_key}"},
+                            timeout=8,
                         )
-                        with urllib.request.urlopen(_req, timeout=8) as _resp:
-                            _body = json.loads(_resp.read())
                         ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
                         logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
                 except Exception as _fetch_err:
