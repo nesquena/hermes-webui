@@ -20,10 +20,11 @@ def _function_body(src: str, name: str) -> str:
     raise AssertionError(f"{name} body not found")
 
 
-def test_settled_scene_limits_live_token_prefix_dedupe_to_duplicate_rows():
+def test_settled_scene_keys_live_token_prefix_dedupe_to_final_answer_identity():
     settle_body = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
     final_overlap_body = _function_body(MESSAGES_JS, "_anchorSceneRowLooksLikeFinalAnswer")
 
-    assert "rowHasNonLiveDuplicate(row,textKey)" in settle_body
+    assert "rowIsLiveTokenFinalPrefix(row,textKey)" in settle_body
+    assert "rowHasNonLiveDuplicate" not in settle_body
     assert "_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)" in settle_body
     assert "(shorter/longer)>=0.9" in final_overlap_body

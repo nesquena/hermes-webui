@@ -11391,8 +11391,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     const text=String(row.text||'').trim();
     if(!text) return null;
     const finalAnswer=String((opts&&opts.finalAnswer)||'').trim();
-    const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
-    const rowKey=norm(text), finalKey=norm(finalAnswer);
+    if(_anchorSceneLiveTokenFinalPrefix(row,text,finalAnswer)) return null;
     if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)) return null;
     node=_anchorSceneNodeForRow(row,{settled});
     if(!node) return null;
@@ -11434,6 +11433,14 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   if(opts&&opts.sessionId) node.setAttribute('data-session-id',String(opts.sessionId));
   if(live) node.setAttribute('data-live-stream-owned','1');
   return node;
+}
+function _anchorSceneLiveTokenFinalPrefix(row, proseText, finalAnswer){
+  if(!row||row.role!=='prose'||row.kind!=='process_prose') return false;
+  if(String(row.source_event_type||'')!=='token') return false;
+  if(!String(row.local_id||'').startsWith('live-prose:')) return false;
+  const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const rowKey=norm(proseText), finalKey=norm(finalAnswer);
+  return !!(rowKey&&finalKey&&rowKey.length<finalKey.length&&finalKey.startsWith(rowKey));
 }
 // Whitespace-insensitive compare so a scene prose row that IS the final answer
 // (possibly re-wrapped) is recognized and not duplicated against the segment.

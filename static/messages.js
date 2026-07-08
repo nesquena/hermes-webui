@@ -3496,14 +3496,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seen=new Set();
     const seenTextKeys=[];
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
-    const rowIsLiveTokenFinalPrefix=(row,textKey)=>row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length>=80&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
-    const rowHasNonLiveDuplicate=(row,textKey)=>projectedRows.some(other=>other&&other!==row&&other.role==='prose'&&other.kind==='process_prose'&&!(String(other.source_event_type||'')==='token'&&String(other.local_id||'').startsWith('live-prose:'))&&_anchorSceneTextKey(other.text)===textKey);
+    const rowIsLiveTokenFinalPrefix=(row,textKey)=>row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
     const pushRow=(row)=>{
       if(!row||typeof row!=='object') return;
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
       if(!row||typeof row!=='object') return;
       const textKey=_anchorSceneTextKey(row.text);
-      if(rowIsLiveTokenFinalPrefix(row,textKey)&&rowHasNonLiveDuplicate(row,textKey)) return;
+      if(rowIsLiveTokenFinalPrefix(row,textKey)) return;
       const isTextual=row.role==='prose'||row.role==='thinking';
       if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
       if(isTextual&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;

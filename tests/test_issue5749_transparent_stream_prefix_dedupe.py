@@ -138,9 +138,9 @@ process.stdout.write(JSON.stringify({{
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_issue5749_short_live_token_prefix_rows_survive_settlement(tmp_path):
+def test_issue5749_distinct_live_token_prefix_rows_survive_settlement(tmp_path):
     final_answer = "The solution is to preserve short legitimate live-token prefixes while still suppressing longer duplicated final-answer spans."
-    prefix_text = "The"
+    prefix_text = "Checking context"
     script = f"""
 const src = {json.dumps(MESSAGES_JS)};
 function extractFunc(name) {{
@@ -219,7 +219,7 @@ process.stdout.write(JSON.stringify(scene.activity_rows.map(row => row.text)));
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_issue5749_long_live_progress_prefix_survives_without_settled_duplicate(tmp_path):
+def test_issue5749_long_live_progress_prefix_is_suppressed_without_settled_duplicate(tmp_path):
     final_answer = "I checked the logs, identified the failing deterministic shard, and now I am applying the narrow render-path fix before rerunning the exact test file. The final answer continues with validation details and the pushed commit."
     prefix_text = "I checked the logs, identified the failing deterministic shard, and now I am applying the narrow render-path fix before rerunning the exact test file."
     script = f"""
@@ -300,11 +300,11 @@ process.stdout.write(JSON.stringify(scene.activity_rows.map(row => ({{
 }}))));
 """
     data = _run_node(MESSAGES_JS, script, tmp_path)
-    assert data == [{"local_id": "live-prose:stream-long:1", "text": prefix_text, "status": "completed"}]
+    assert data == []
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_issue5749_render_fallback_preserves_persisted_live_progress_prefix_rows(tmp_path):
+def test_issue5749_render_fallback_suppresses_persisted_live_progress_prefix_rows(tmp_path):
     final_answer = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback so Transparent Stream does not repeat the same prose row."
     prefix_text = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback"
     script = f"""
@@ -354,6 +354,7 @@ global._anchorSceneToolCallFromRow = () => ({{}});
 global.buildToolCard = () => new FakeElement('div');
 global._thinkingActivityNode = () => new FakeElement('div');
 eval(extractFunc('_anchorSceneProseMatchesFinalAnswer'));
+eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
 eval(extractFunc('_anchorSceneTransparentNodeForRow'));
 const liveRow = {{
   role: 'prose',
@@ -379,7 +380,7 @@ process.stdout.write(JSON.stringify({{
 }}));
 """
     data = _run_node(UI_JS, script, tmp_path)
-    assert data["liveResult"] is False
+    assert data["liveResult"] is True
     assert data["boundaryResult"] is True
     assert data["boundaryRowId"] == "session-prose:stream-1:2"
 
@@ -435,6 +436,7 @@ global._anchorSceneToolCallFromRow = () => ({{}});
 global.buildToolCard = () => new FakeElement('div');
 global._thinkingActivityNode = () => new FakeElement('div');
 eval(extractFunc('_anchorSceneProseMatchesFinalAnswer'));
+eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
 eval(extractFunc('_anchorSceneTransparentNodeForRow'));
 const liveRow = {{
   role: 'prose',
@@ -501,6 +503,7 @@ global._anchorSceneToolCallFromRow = () => ({{}});
 global.buildToolCard = () => new FakeElement('div');
 global._thinkingActivityNode = () => new FakeElement('div');
 eval(extractFunc('_anchorSceneProseMatchesFinalAnswer'));
+eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
 eval(extractFunc('_anchorSceneTransparentNodeForRow'));
 const variants = [
   {{
