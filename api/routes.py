@@ -5471,39 +5471,94 @@ def _request_client_ip(handler) -> str:
     return ""
 
 
+def _trusted_proxy_networks():
+    """Return explicitly trusted reverse-proxy CIDRs for forwarded client IPs."""
+    import ipaddress
+
+    raw = os.getenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "")
+    networks = []
+    for item in raw.replace(";", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid HERMES_WEBUI_TRUSTED_PROXY_CIDRS entry: %s", item)
+    return tuple(networks)
+
+
+def _ip_is_loopback_or_private(raw: str) -> bool:
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(str(raw or "").strip())
+    except ValueError:
+        return False
+    return bool(addr.is_loopback or addr.is_private)
+
+
+def _ip_in_networks(raw: str, networks) -> bool:
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(str(raw or "").strip())
+    except ValueError:
+        return False
+    return any(addr in network for network in networks)
+
+
+def _forwarded_client_ip_from_trusted_proxy(handler) -> str:
+    """Resolve the original client IP from trusted forwarded headers.
+
+    ``X-Forwarded-For`` chains are ordered as ``client, proxy1, proxy2``.  The
+    previous implementation used the rightmost value, which is commonly a
+    private/loopback proxy hop and can make a public client look local.  Only
+    trust forwarded headers when the immediate socket peer is trusted, then walk
+    from right to left and return the first non-proxy hop.
+    """
+    raw_peer = _request_client_ip(handler)
+    if not raw_peer:
+        return ""
+
+    trusted_networks = _trusted_proxy_networks()
+    peer_is_loopback = _ip_is_loopback_or_private(raw_peer) and str(raw_peer).startswith(("127.", "::1"))
+    peer_is_trusted = _ip_in_networks(raw_peer, trusted_networks) if trusted_networks else peer_is_loopback
+    if not peer_is_trusted:
+        return ""
+
+    xff = str(handler.headers.get("X-Forwarded-For", "") or "").strip()
+    if xff:
+        hops = [part.strip() for part in xff.split(",") if part.strip()]
+        for hop in reversed(hops):
+            if trusted_networks and _ip_in_networks(hop, trusted_networks):
+                continue
+            return hop
+        if hops:
+            return hops[0]
+
+    x_real_ip = str(handler.headers.get("X-Real-IP", "") or "").strip()
+    if x_real_ip:
+        return x_real_ip
+
+    return raw_peer
+
+
 def _onboarding_request_is_local(handler) -> bool:
     """Return True when an unauthenticated onboarding request is local/private.
 
     Forwarded client-IP headers are ignored by default because direct clients can
     spoof them. Operators behind a trusted reverse proxy may opt in with
-    HERMES_WEBUI_TRUST_FORWARDED_FOR=1, matching the explicit forwarded-header
-    trust model used elsewhere in the server.
-
-    When forwarded headers are PRESENT but not trusted, the request arrived
-    through a proxy, so the raw socket address is the proxy's (typically
-    loopback/private) and tells us nothing about the real client's locality.
-    In that case we deny rather than fall back to the proxy socket — otherwise a
-    public client behind any reverse proxy would be treated as local. Operators
-    who front the WebUI with a trusted proxy must set
-    HERMES_WEBUI_TRUST_FORWARDED_FOR=1 (or HERMES_WEBUI_ONBOARDING_OPEN=1).
+    HERMES_WEBUI_TRUST_FORWARDED_FOR=1.  In that mode, forwarded headers are
+    honored only from a loopback proxy or a proxy listed in
+    HERMES_WEBUI_TRUSTED_PROXY_CIDRS, and the resolved client is the original
+    non-proxy hop rather than the rightmost/private proxy hop.
     """
-    import ipaddress
-
     trust_forwarded = _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR")
     if trust_forwarded:
-        candidates = [
-            handler.headers.get("X-Forwarded-For", "").split(",")[-1].strip(),
-            handler.headers.get("X-Real-IP", "").strip(),
-            _request_client_ip(handler),
-        ]
-        for raw in candidates:
-            if not raw:
-                continue
-            try:
-                addr = ipaddress.ip_address(raw)
-            except ValueError:
-                continue
-            return bool(addr.is_loopback or addr.is_private)
+        forwarded_client = _forwarded_client_ip_from_trusted_proxy(handler)
+        if forwarded_client:
+            return _ip_is_loopback_or_private(forwarded_client)
         return False
 
     # Untrusted forwarded headers present → the request arrived through a proxy.
@@ -5511,9 +5566,7 @@ def _onboarding_request_is_local(handler) -> bool:
     # counts as local in that case: a loopback raw socket is a genuine same-host
     # client (or a same-host proxy the operator controls), whereas a PRIVATE/LAN
     # raw socket is a separate proxy box that could be forwarding an arbitrary
-    # (public) client we can't see without trusting the header. Operators who
-    # front the WebUI with a LAN proxy must set HERMES_WEBUI_TRUST_FORWARDED_FOR=1
-    # (or HERMES_WEBUI_ONBOARDING_OPEN=1).
+    # (public) client we can't see without trusting the header.
     forwarded_present = bool(
         handler.headers.get("X-Forwarded-For", "").strip()
         or handler.headers.get("X-Real-IP", "").strip()
@@ -5521,13 +5574,9 @@ def _onboarding_request_is_local(handler) -> bool:
     raw = _request_client_ip(handler)
     if not raw:
         return False
-    try:
-        addr = ipaddress.ip_address(raw)
-    except ValueError:
-        return False
     if forwarded_present:
-        return bool(addr.is_loopback)
-    return bool(addr.is_loopback or addr.is_private)
+        return _ip_is_loopback_or_private(raw) and str(raw).startswith(("127.", "::1"))
+    return _ip_is_loopback_or_private(raw)
 
 
 def _onboarding_gate_allows(handler, auth_enabled: bool | None = None) -> bool:

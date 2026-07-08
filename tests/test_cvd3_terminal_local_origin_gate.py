@@ -51,6 +51,7 @@ def _no_auth(monkeypatch):
     monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
     monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
     monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", raising=False)
 
 
 # --------------------------------------------------------------------------
@@ -109,6 +110,60 @@ def test_terminal_gate_honors_onboarding_open_escape_hatch(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_ONBOARDING_OPEN", "1")
     handler = _Handler(client_ip="8.8.8.8", headers={})
     assert routes._embedded_terminal_gate_allows(handler) is True
+
+
+def test_terminal_gate_blocks_public_client_behind_trusted_proxy_chain(monkeypatch):
+    """Trusted XFF mode must resolve the original client, not the private proxy hop."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+
+    handler = _Handler(
+        client_ip="10.0.0.10",
+        headers={"X-Forwarded-For": "8.8.8.8, 10.0.0.10"},
+    )
+
+    assert routes._forwarded_client_ip_from_trusted_proxy(handler) == "8.8.8.8"
+    assert routes._embedded_terminal_gate_allows(handler) is False
+
+
+def test_terminal_gate_allows_private_client_behind_trusted_proxy_chain(monkeypatch):
+    """Trusted proxy mode still admits real private clients after XFF resolution."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+
+    handler = _Handler(
+        client_ip="10.0.0.10",
+        headers={"X-Forwarded-For": "192.168.1.50, 10.0.0.10"},
+    )
+
+    assert routes._forwarded_client_ip_from_trusted_proxy(handler) == "192.168.1.50"
+    assert routes._embedded_terminal_gate_allows(handler) is True
+
+
+def test_terminal_gate_does_not_trust_forwarded_header_from_unlisted_proxy(monkeypatch):
+    """Opting into XFF is not enough; the immediate proxy must also be trusted."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "192.168.0.0/16")
+
+    handler = _Handler(
+        client_ip="10.0.0.10",
+        headers={"X-Forwarded-For": "127.0.0.1"},
+    )
+
+    assert routes._forwarded_client_ip_from_trusted_proxy(handler) == ""
+    assert routes._embedded_terminal_gate_allows(handler) is False
 
 
 # --------------------------------------------------------------------------
