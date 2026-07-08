@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- New Space saves now render a “Space create receipt” in the browser after the Spaces home refresh, showing active-space-instructions prompt preflight, supervised action-policy/model-route evidence, metadata-only `space.create:<space_id>` progress, Memory Tree advisory/no-authority, and output-compaction stats. The checked-out UI regression proves hostile trusted-memory/raw-memory/renderer/script/API-auth/credential/token/secret fixture fields stay out of the DOM while the safe revision handle and receipt counts remain visible.
+
 - Space edit/save results now render a “Space update receipt” in the browser, showing active-space-instructions prompt preflight, supervised action-policy/model-route evidence, metadata-only `space.update:<space_id>` progress, Memory Tree advisory/no-authority, and output-compaction stats. The checked-out UI regression proves hostile trusted-memory/raw-memory/renderer/script/API-auth/credential/token/secret fixture fields stay out of the DOM while the safe revision handle and receipt counts remain visible.
 
 - Active Space lifecycle receipts now render visibly after `Use in chat` and `Clear from chat`: the checked-out `static/spaces.js` behavior tests cover activation and deactivation result cards with active-space-switch prompt preflight, supervised autonomy/model-route evidence, metadata-only progress, Memory Tree advisory/no-authority, and output-compaction stats. Hostile trusted-memory/raw-context/renderer/script/source/data/API-auth/credential/token/secret fixture fields stay out of the DOM while safe `untrusted_advisory`, gate-bypass false, required gates, run ids, and compaction counts remain visible.
