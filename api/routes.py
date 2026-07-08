@@ -15298,13 +15298,15 @@ def handle_post(handler, parsed) -> bool:
             _record_login_attempt(client_ip)
             return bad(handler, str(e), status=401)
         cookie_val = create_session()
+        body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
         handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
+        handler.wfile.write(body)
         return True
 
     if parsed.path == "/api/auth/passkey/register/options":
