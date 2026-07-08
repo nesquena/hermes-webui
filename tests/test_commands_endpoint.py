@@ -639,6 +639,111 @@ def test_curator_command_blocks_state_changing_subcommands(monkeypatch):
         assert commands._run_curator_command(f"/curator {allowed}".strip()) == "ok"
 
 
+def _fake_cli_module(monkeypatch, name, attr, fn):
+    import sys
+    import types
+
+    if "hermes_cli" not in sys.modules:
+        pkg = types.ModuleType("hermes_cli")
+        pkg.__path__ = []  # mark as package
+        monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
+    mod = types.ModuleType(name)
+    setattr(mod, attr, fn)
+    monkeypatch.setitem(sys.modules, name, mod)
+
+
+def test_kanban_command_blocks_mutations_and_worker_spawns(monkeypatch):
+    """WebUI-safe: only read-only kanban subcommands run; mutations, dispatch/swarm
+    (spawn workers) and tail/daemon (block the request thread) are rejected."""
+    from api import commands
+
+    ran = []
+    _fake_cli_module(monkeypatch, "hermes_cli.kanban", "run_slash",
+                     lambda a: ran.append(a) or f"kb:{a}")
+    for blocked in ("create x", "assign 1 me", "complete 1", "archive 1", "edit 1",
+                    "block 1", "swarm", "dispatch", "daemon --force", "tail 1",
+                    "boards create b", "boards rm b"):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_kanban_command(blocked)
+    assert ran == [], "a blocked kanban subcommand reached run_slash"
+    for allowed in ("", "list", "ls", "show 1", "boards list"):
+        assert commands._run_kanban_command(allowed) == f"kb:{allowed}"
+
+
+def test_blueprint_command_blocks_direct_create(monkeypatch):
+    """WebUI-safe: `/blueprint <name> slot=value` (direct create_job) is rejected;
+    catalog listing and the agent-seed path stay allowed."""
+    import types
+
+    from api import commands
+
+    for blocked in ("morning slot=x", "daily hour=9 minute=0", "x a=b"):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_blueprint_command(blocked)
+
+    seen = []
+
+    def _fake_handle(arg):
+        seen.append(arg)
+        return types.SimpleNamespace(text="ok", agent_seed=None)
+
+    _fake_cli_module(monkeypatch, "hermes_cli.blueprint_cmd",
+                     "handle_blueprint_command", _fake_handle)
+    for allowed in ("", "morning", "list"):
+        commands._run_blueprint_command(allowed)
+    assert seen == ["", "morning", "list"]
+
+
+def test_suggestions_command_blocks_subcommands(monkeypatch):
+    """WebUI-safe: only the bare `/suggestions` listing runs; state-changing
+    subcommands (accept/add/schedule/dismiss/reject/clear) are rejected."""
+    from api import commands
+
+    seen = []
+    _fake_cli_module(monkeypatch, "hermes_cli.suggestions_cmd",
+                     "handle_suggestions_command",
+                     lambda a, origin=None: seen.append(a) or "sg")
+    for blocked in ("accept 1", "add foo", "schedule 2", "dismiss 1", "reject 1", "clear"):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_suggestions_command(blocked)
+    assert seen == [], "a blocked suggestions subcommand reached the handler"
+    assert commands._run_suggestions_command("") == "sg"
+
+
+def test_memory_command_blocks_shared_config_approval_toggle(monkeypatch):
+    """WebUI-safe: `/memory approval on|off` writes memory.write_approval to the
+    shared Hermes config (cross-session) and is blocked; pending/approve/reject
+    (in-session) and bare `approval` (status) pass through."""
+    import sys
+    import types
+
+    from api import commands
+
+    for blocked in ("/memory approval on", "/memory approval off"):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_memory_command(blocked)
+
+    seen = []
+    wac = types.ModuleType("hermes_cli.write_approval_commands")
+    wac.handle_pending_subcommand = (
+        lambda mem, args, memory_store=None, set_mode_fn=None: seen.append(list(args)) or "mem-ok"
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli.write_approval_commands", wac)
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    wa = types.ModuleType("tools.write_approval")
+    wa.MEMORY = "MEMORY"
+    monkeypatch.setitem(sys.modules, "tools.write_approval", wa)
+    mt = types.ModuleType("tools.memory_tool")
+    mt.load_on_disk_store = lambda: {}
+    monkeypatch.setitem(sys.modules, "tools.memory_tool", mt)
+
+    for allowed in ("/memory pending", "/memory approve 1", "/memory reject 1", "/memory approval"):
+        assert commands._run_memory_command(allowed) == "mem-ok"
+    assert ["pending"] in seen and ["approval"] in seen
+
+
 def test_webui_safe_agent_commands_are_allowlisted(monkeypatch):
     """Safe non-CLI agent commands should be accepted by the executor allowlist."""
     from api import commands

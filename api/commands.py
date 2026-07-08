@@ -94,6 +94,14 @@ def _shellish_args(command: str) -> list[str]:
         return str(command or "").split()[1:]
 
 
+def _tokenize_args(arg_string: str) -> list[str]:
+    """Tokenize a command's ARG string (already stripped of the leading /command)."""
+    try:
+        return shlex.split(arg_string or "")
+    except ValueError:
+        return str(arg_string or "").split()
+
+
 def _text_or_no_output(value: Any) -> str:
     text = str(value or "").strip()
     return text or "(no output)"
@@ -469,6 +477,17 @@ def _build_webui_learn_prompt(user_request: str) -> str:
 
 
 def _run_blueprint_command(arg_string: str) -> dict[str, Any] | str:
+    # WebUI-safe: block the deterministic direct-create shortcut
+    # (``/blueprint <name> slot=value …``), which fills the blueprint and calls
+    # ``create_job()`` to materialize a cron job non-interactively. ``/blueprint``
+    # (catalog listing) and ``/blueprint <name>`` (seed the agent to gather the
+    # slots through a normal, approval-gated turn) stay allowed.
+    if any("=" in _tok for _tok in _tokenize_args(arg_string)):
+        raise RuntimeError(
+            "Creating a blueprint job directly (`/blueprint <name> slot=value`) is not "
+            "available from the WebUI — it would materialize a cron job without review. Use "
+            "`/blueprint <name>` to have the agent walk you through the slots, or the terminal."
+        )
     try:
         from hermes_cli.blueprint_cmd import handle_blueprint_command
     except Exception as exc:
@@ -547,7 +566,28 @@ def _run_curator_command(command: str) -> str:
     return _text_or_no_output(output)
 
 
+# WebUI-safe kanban: only read-only subcommands. run_slash() otherwise mutates
+# the board (create/assign/edit/complete/block/archive/link/comment/…), spawns
+# workers (dispatch/swarm), or blocks the request thread (tail/daemon) — those
+# stay terminal-only. ``boards`` is a nested group; only ``boards list`` is read-only.
+_KANBAN_WEBUI_READONLY_SUBCOMMANDS = frozenset({"list", "ls", "show"})
+
+
 def _run_kanban_command(arg_string: str) -> str:
+    _tokens = _tokenize_args(arg_string)
+    _sub = _tokens[0] if _tokens else ""
+    _readonly = (
+        _sub == ""  # bare /kanban lists tasks
+        or _sub in _KANBAN_WEBUI_READONLY_SUBCOMMANDS
+        or (_sub == "boards" and (len(_tokens) < 2 or _tokens[1] in {"list", "ls"}))
+    )
+    if not _readonly:
+        raise RuntimeError(
+            f"'/kanban {_sub}' is not available from the WebUI. Only read-only kanban "
+            f"subcommands are allowed here (list, show, boards list). Creating/assigning/"
+            f"completing/archiving tasks, dispatch and swarm (spawn workers), and "
+            f"tail/daemon (block the request) stay terminal-only."
+        )
     try:
         from hermes_cli.kanban import run_slash
         return _text_or_no_output(run_slash(arg_string or ""))
@@ -558,6 +598,18 @@ def _run_kanban_command(arg_string: str) -> str:
 
 def _run_memory_command(command: str) -> str:
     args = _shellish_args(command)
+    # WebUI-safe: `/memory approval on|off` writes memory.write_approval to the
+    # SHARED Hermes config (set_config_value), silently changing write-approval for
+    # every CLI session under the same HERMES_HOME — a persistent cross-boundary
+    # mutation. Block that toggle; `pending`/`approve`/`reject` act on in-session
+    # pending writes and stay allowed, and bare `approval` just reports status.
+    if args and args[0] == "approval" and len(args) > 1:
+        raise RuntimeError(
+            "`/memory approval on|off` is not available from the WebUI — it changes "
+            "write-approval in the shared Hermes config, affecting every CLI session under "
+            "the same HERMES_HOME. Use `/memory pending`, `approve`, or `reject` here; "
+            "toggle the persistent setting from the terminal."
+        )
     try:
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
@@ -584,6 +636,16 @@ def _run_memory_command(command: str) -> str:
 
 
 def _run_suggestions_command(arg_string: str) -> str:
+    # WebUI-safe: only the bare read-only listing. Subcommands mutate state —
+    # accept/add/schedule create cron jobs, dismiss/reject latch state, clear
+    # deletes records — so they stay terminal-only.
+    if _tokenize_args(arg_string):
+        raise RuntimeError(
+            "Subcommands of `/suggestions` (accept, add, schedule, dismiss, reject, clear) "
+            "are not available from the WebUI — they change state (accept/add/schedule "
+            "create cron jobs, clear deletes records). Only the bare read-only listing is; "
+            "use the terminal for the rest."
+        )
     try:
         from hermes_cli.suggestions_cmd import handle_suggestions_command
         return _text_or_no_output(handle_suggestions_command(arg_string or "", origin={"platform": "webui"}))
