@@ -1275,6 +1275,23 @@ global.fetch = async function(path, opts = {}) {
           source: 'generated renderer source SECRET_VALUE_DO_NOT_LEAK',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         },
+        memory_advisory: {
+          metadata_only: true,
+          advisory_context: true,
+          context_authority: 'untrusted_advisory',
+          can_bypass_safety_gates: false,
+          required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+          trusted_system_memory: 'TRUSTED_SYSTEM_MEMORY_DO_NOT_LEAK',
+          raw_context: 'RAW_CONTEXT_DO_NOT_LEAK renderer <script>bad()</script>',
+          renderer: '<script>bad()</script>',
+          script: '<script>bad()</script>',
+          source: 'HOSTILE_SOURCE_FIELD_DO_NOT_LEAK',
+          data: 'HOSTILE_DATA_FIELD_DO_NOT_LEAK',
+          api_auth: 'API_AUTH_DO_NOT_LEAK',
+          credentials: 'CREDENTIALS_DO_NOT_LEAK',
+          token: 'TOKEN_DO_NOT_LEAK',
+          secret: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
         spec: {
           space: { space_id: 'creator-lab', name: 'Creator Lab <Safe>', description: 'Metadata-only preview', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
           widgets: [
@@ -1460,6 +1477,23 @@ global.fetch = async function(path, opts = {}) {
           raw_prompt: 'Build SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>',
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
+        memory_advisory: {
+          metadata_only: true,
+          advisory_context: true,
+          context_authority: 'untrusted_advisory',
+          can_bypass_safety_gates: false,
+          required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+          trusted_system_memory: 'TRUSTED_SYSTEM_MEMORY_DO_NOT_LEAK',
+          raw_context: 'RAW_CONTEXT_DO_NOT_LEAK renderer <script>bad()</script>',
+          renderer: '<script>bad()</script>',
+          script: '<script>bad()</script>',
+          source: 'HOSTILE_SOURCE_FIELD_DO_NOT_LEAK',
+          data: 'HOSTILE_DATA_FIELD_DO_NOT_LEAK',
+          api_auth: 'API_AUTH_DO_NOT_LEAK',
+          credentials: 'CREDENTIALS_DO_NOT_LEAK',
+          token: 'TOKEN_DO_NOT_LEAK',
+          secret: 'SECRET_VALUE_DO_NOT_LEAK',
         },
         visual_qa_event: {
           event_id: 'creator-visual-qa-event-1',
@@ -8959,6 +8993,41 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "api_key" not in out["rootHtml"].lower()
     assert "raw_prompt" not in out["rootHtml"]
     assert "generated_code" not in out["rootHtml"]
+
+
+def test_creator_preview_and_commit_render_memory_advisory_receipts_safely(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitConfirmed")
+    preview_html = out["beforeHtml"].split('<section class="capy-spaces-product-home"', 1)[0]
+    commit_html = out["rootHtml"].split('<section class="capy-spaces-product-home"', 1)[0]
+
+    for html, heading in (
+        (preview_html, "Creator preview ready"),
+        (commit_html, "Creator commit saved"),
+    ):
+        assert heading in html
+        assert "Memory advisory" in html
+        assert "Authority: untrusted_advisory" in html
+        assert "Advisory context: yes" in html
+        assert "Can bypass safety gates: no" in html
+        assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in html
+        assert html.index("Prompt preflight") < html.index("Memory advisory") < html.index("Compaction evidence")
+        for unsafe in (
+            "trusted_system_memory",
+            "TRUSTED_SYSTEM_MEMORY_DO_NOT_LEAK",
+            "raw_context",
+            "RAW_CONTEXT_DO_NOT_LEAK",
+            "renderer",
+            "<script",
+            "HOSTILE_SOURCE_FIELD_DO_NOT_LEAK",
+            "HOSTILE_DATA_FIELD_DO_NOT_LEAK",
+            "API_AUTH_DO_NOT_LEAK",
+            "api_auth",
+            "api-auth",
+            "CREDENTIALS_DO_NOT_LEAK",
+            "TOKEN_DO_NOT_LEAK",
+            "SECRET_VALUE_DO_NOT_LEAK",
+        ):
+            assert unsafe not in html
 
 
 def test_creator_preview_action_policy_renders_selected_model_route_safely(driver_path):
