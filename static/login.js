@@ -175,7 +175,7 @@ document.addEventListener('DOMContentLoaded', function () {
             // Server is reachable — if we were in retry mode, reload so the
             // page reflects the correct auth state (expired session, etc.).
             if (retryTimer !== null) {
-              clearTimeout(retryTimer);
+              clearInterval(retryTimer);
               retryTimer = null;
               window.location.reload();
             }
