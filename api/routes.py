@@ -8559,6 +8559,34 @@ def _loaded_prefix_count_before_sidecar(merged_messages, sidecar_messages) -> in
     return 0
 
 
+def _first_message_timestamp(messages) -> float | None:
+    for msg in messages or []:
+        timestamp = _message_timestamp_as_float(msg)
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
+def _state_db_has_no_timestamped_rows_before_sidecar(session, direct_sidecar_messages) -> bool:
+    """Return True only when state.db cannot add rows before the direct sidecar.
+
+    The direct-child fast path omits the full lineage stitch, so it may publish
+    metadata-derived parent offsets only when state.db has no timestamped rows
+    that would be inserted before the first direct child sidecar row by the full
+    merge path.  If the DB/schema cannot prove this cheaply, fail closed to the
+    full stitch path.
+    """
+    first_ts = _first_message_timestamp(direct_sidecar_messages)
+    if first_ts is None:
+        return False
+    state_before_keys = get_state_db_session_message_keys_before_timestamp(
+        getattr(session, "session_id", None),
+        first_ts,
+        profile=getattr(session, "profile", None) or None,
+    )
+    return state_before_keys == []
+
+
 def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages, *, limit: int) -> int | None:
     """Classify a direct compression child sidecar for initial limited loads.
 
@@ -8634,7 +8662,13 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
                 direct_sidecar_messages,
                 limit=limit,
             )
-            if base_offset is not None:
+            if (
+                base_offset is not None
+                and _state_db_has_no_timestamped_rows_before_sidecar(
+                    session,
+                    direct_sidecar_messages,
+                )
+            ):
                 return None, direct_sidecar_messages, base_offset
 
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
