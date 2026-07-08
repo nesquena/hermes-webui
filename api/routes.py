@@ -13849,6 +13849,15 @@ def handle_post(handler, parsed) -> bool:
         # Lock entries in SESSION_AGENT_LOCKS forever.
         with SESSION_AGENT_LOCKS_LOCK:
             SESSION_AGENT_LOCKS.pop(sid, None)
+        # Prune the completion-dedup entry too. The reaper sweeps it once the
+        # completion is delivered (drained from PENDING); a session deleted
+        # while a completion is still pending would otherwise keep its entry.
+        try:
+            from api.background_process import forget_bg_task_completion_dedup
+
+            forget_bg_task_completion_dedup(sid)
+        except Exception:
+            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
         try:
             from api.terminal import close_terminal
             close_terminal(sid)

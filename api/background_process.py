@@ -377,6 +377,32 @@ def _reaper_loop() -> None:
                     for sid in collected:
                         _LAST_EMIT_TS.pop(sid, None)
                 logger.debug("SessionChannel reaper collected: %s", collected)
+            # Sweep the per-session completion-dedup map by DELIVERY lifecycle,
+            # not channel collection. ``BG_TASK_COMPLETE_EVENTS_SEEN`` gains a
+            # ``session_id -> set[process_id]`` entry the first time a bg task
+            # completes for a session — in ``_process_one``, whether or not any
+            # tab/SSE channel ever existed — and is otherwise never deleted, so it
+            # grows unbounded. Coupling the prune to channel collection (an
+            # earlier version of this fix) missed the dominant case: a headless
+            # completion (task fires, tab closed or never opened) has no channel
+            # to collect. Instead, once a completion has been drained (its
+            # ``session_id`` removed from ``PENDING_BG_TASK_COMPLETIONS``), the
+            # short ``_move_to_finished`` dedup window is closed and the entry is
+            # pure leak — so sweep every delivered (not-pending) session here,
+            # every tick. The registry's own per-``process_id``
+            # ``_completion_consumed`` gate remains the primary idempotency
+            # backstop, so sweeping a delivered session's set can never resurrect
+            # an already-delivered completion (even in the tiny window between
+            # this module's ``SEEN.add`` and ``PENDING.add`` in ``_process_one``).
+            from api import config as _cfg
+
+            with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+                for sid in [
+                    s
+                    for s in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN
+                    if s not in _cfg.PENDING_BG_TASK_COMPLETIONS
+                ]:
+                    _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)
         # Wait but wake up promptly on stop.
@@ -1326,6 +1352,21 @@ def unregister_process_session(session_key: str) -> None:
 
     with _cfg.PROCESS_SESSION_INDEX_LOCK:
         _cfg.PROCESS_SESSION_INDEX.pop(str(session_key), None)
+
+
+def forget_bg_task_completion_dedup(session_id: str) -> None:
+    """Drop a session's ``BG_TASK_COMPLETE_EVENTS_SEEN`` entry.
+
+    Called on session deletion so a session deleted while a completion is still
+    pending (undelivered) — which the reaper's delivery-gated sweep deliberately
+    keeps — can't leak its dedup set forever. Safe for unknown ids (no-op).
+    """
+    if not session_id:
+        return
+    from api import config as _cfg
+
+    with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+        _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(str(session_id), None)
 
 
 def start_drain_thread() -> bool:
