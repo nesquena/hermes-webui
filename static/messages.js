@@ -4181,6 +4181,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
       if(!parent||_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
+      // MEDIA-in-stream: if this chunk carries a MEDIA:<ref> token, defer to
+      // the shared interceptor so the token becomes a real media element
+      // instead of plain text. The fade renderer would otherwise wrap every
+      // word in a stream-fade-word span, leaving MEDIA: paths visible.
+      if(/MEDIA:/.test(String(text||''))){
+        _smdMediaAwareAddText(baseAddText, parent, data, text);
+        return;
+      }
       const frag=document.createDocumentFragment();
       const wordRe=/(\S+)(\s*)/g;
       const value=String(text||'');
@@ -4238,9 +4246,79 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // DOM nodes as plain text nodes (no animation spans). Used on the non-fade
   // streaming path to eliminate _sanitizeSmdLinks(assistantBody) O(DOM) scans
   // on every token event (#WebUI-perf).
+  // MEDIA-in-stream fix: also wraps add_text so MEDIA:<ref> tokens that arrive
+  // mid-turn are converted to inline media elements at insert time, matching
+  // what the full renderMd() pipeline does on the settled assistant message.
+  // Without this, streamed prose shows MEDIA:C:\... as literal text until the
+  // turn settles and the full re-render swaps it for the real <img>.
+  function _smdMediaAwareAddText(baseAddText, parent, data, text){
+    const value=String(text||'');
+    // Fast path: no MEDIA in this chunk OR no DOM parent to attach to —
+    // hand the whole text to the underlying smd behaviour exactly once.
+    // baseAddText may itself be the fade renderer's word-wrap (which can
+    // recurse into MEDIA detection on plain runs), so AVOID calling it when
+    // we KNOW we have a MEDIA token and have already spliced the result.
+    if(!value){baseAddText&&baseAddText(data,value);return;}
+    if(!parent||!/MEDIA:/.test(value)) {
+      // Even if a MEDIA token is absent, delegate fully to baseAddText so
+      // the fade renderer keeps its word-fade semantics for plain prose.
+      if(baseAddText) baseAddText(data,value);
+      return;
+    }
+    // Split the chunk into runs of plain text + MEDIA references, converting
+    // each MEDIA token into the same DOM the renderMd() MEDIA restore emits
+    // (via _inlineMediaHtmlForRef, exported from ui.js earlier in the
+    // script load order).
+    const re=/MEDIA:([^\s\)\]]+)/g;
+    let last=0, m, html='';
+    while((m=re.exec(value))){
+      if(m.index>last) html+=value.slice(last,m.index);
+      const rawRef=m[1];
+      try{
+        const mediaHtml=typeof _inlineMediaHtmlForRef==='function'
+          ? _inlineMediaHtmlForRef(rawRef)
+          : '';
+        if(mediaHtml) html+=mediaHtml;
+        else html+=m[0];
+      }catch(_){ html+=m[0]; }
+      last=m.index+m[0].length;
+    }
+    if(last<value.length) html+=value.slice(last);
+    // Render the composed HTML into a detached container, then splice its
+    // children into the smd parent in order. Using a detached template via
+    // DOMParser keeps us from executing <script> tags.
+    let host=null;
+    try{
+      const doc=new DOMParser().parseFromString('<div>'+html+'</div>','text/html');
+      host=doc.body&&doc.body.firstChild;
+    }catch(_){ host=null; }
+    if(!host||!host.childNodes||!host.childNodes.length){
+      // Nothing splittable: render the original text faithfully via baseAddText
+      // (no recursion, because we already failed to detect MEDIA in any form).
+      if(baseAddText) baseAddText(data,value);
+      return;
+    }
+    // Move children out of host into a fragment so we don't import host's
+    // wrapping <div> (which would also break any subsequent sibling that
+    // smd expects to come next at parent level).
+    const frag=document.createDocumentFragment();
+    while(host.firstChild) frag.appendChild(host.firstChild);
+    parent.appendChild(frag);
+    // NOTE: we deliberately do NOT call baseAddText here. The fade renderer
+    // would otherwise re-wrap each word in stream-fade-word spans or, in the
+    // non-fade path, append an empty text node — both are unnecessary since
+    // we have already appended the real DOM directly to the smd parent, and
+    // smd's position bookkeeping only cares about the parent cursor, which
+    // is now updated by the appended nodes.
+  }
   function _safeSmdRenderer(el){
     const renderer=window.smd.default_renderer(el);
     const baseSetAttr=renderer.set_attr;
+    const baseAddText=renderer.add_text;
+    renderer.add_text=(data,text)=>{
+      const parent=data&&data.nodes&&data.nodes[data.index];
+      _smdMediaAwareAddText(baseAddText, parent, data, text);
+    };
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;

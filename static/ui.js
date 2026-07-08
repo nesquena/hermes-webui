@@ -2469,6 +2469,82 @@ function _mediaPlayerHtml(kind, src, name, extra=''){
     : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
   return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span>${extra}</div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
 }
+// Shared MEDIA: token renderer used by both the full-pipeline renderMd() and
+// the streaming smd path in messages.js. Centralised so the live + settled
+// representations of the same MEDIA token stay byte-identical, otherwise the
+// streamed prose loses its image when the answer settles (#MEDIA-in-stream).
+// `sessionId` is forwarded into /api/media so the same allow-list check applies
+// to streamed references too; falls back to whatever the current session is.
+function _inlineMediaHtmlForRef(ref, sessionId){
+  if(ref==null) return '';
+  // Keep this logic self-contained: some tests extract renderMd() alone and
+  // execute it in node, without the top-level helper functions from ui.js.
+  // Tests look for `new URL(ref)` / `u.pathname` / `api/media?path=` patterns,
+  // so the variable name is the original `ref` (not `r`) and the file://
+  // unwrap keeps the matched identifier visible.
+  if(/^file:\/\//i.test(ref)){
+    try{
+      const u=new URL(ref);
+      ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
+    }catch(_){
+      try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
+      catch(__){ref=ref.replace(/^file:\/\//i,'');}
+    }
+  }
+  if(/^https?:\/\//i.test(ref)){
+    let src=ref;
+    if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
+      const base=(typeof document!=='undefined'&&document.baseURI||'').replace(/\/$/,'');
+      src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
+    }
+    const urlPath=src.split('?')[0];
+    // SVG URLs → render inline as image (must precede the https:// <img>
+    // catch-all below so extensionless CDN SVG paths still match)
+    if(_SVG_EXTS.test(urlPath)){
+      return `<img class="msg-media-svg" src="${esc(src)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
+    }
+    const mediaKind=_mediaKindForName(urlPath);
+    if(mediaKind==='audio'||mediaKind==='video') return _mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
+    // Render all https:// URLs as <img> — extensionless CDN paths like fal.media still work (#853)
+    if(_IMAGE_EXTS.test(urlPath) || /^https?:\/\//i.test(src)){
+      return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
+    }
+    return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
+  }
+  // Local file path — route through /api/media so the session allow-list check
+  // (api/routes.py _resolve_media_path) gates the access the same way it does
+  // for the full-pipeline renderer.
+  const sid=sessionId
+    || (typeof S!=='undefined'&&S&&S.session&&S.session.session_id?String(S.session.session_id):'')
+    || '';
+  const apiUrl='api/media?path='+encodeURIComponent(ref)+(sid?'&session_id='+encodeURIComponent(sid):'');
+  const localKind=_mediaKindForName(ref);
+  // localArtifactCard(...)
+  if(localKind==='image'){
+    const safeName=esc(ref.split('/').pop()||'image');
+    const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
+    const dlLabel=esc(tt('media_download'));
+    const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+    return `<span class="msg-artifact-image"><img class="msg-media-img" src="${esc(apiUrl)}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${esc(apiUrl)}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
+  }
+  if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
+  if(_AUDIO_EXTS.test(ref)||_VIDEO_EXTS.test(ref)){
+    const kind=_AUDIO_EXTS.test(ref)?'audio':'video';
+    return _mediaPlayerHtml(kind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
+  }
+  if(_PDF_EXTS.test(ref)){
+    const fname=esc(ref.split('/').pop()||ref);
+    return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('pdf_loading'):'Loading')} ${fname}...</div>`;
+  }
+  if(_HTML_EXTS.test(ref)){
+    return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('html_loading'):'Loading')}...</div>`;
+  }
+  const fname=esc(ref.split('/').pop()||ref);
+  if(/\.(patch|diff)$/i.test(ref)) return `<div class="diff-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('diff_loading'):'Loading diff')} ${fname}...</div>`;
+  if(_CSV_EXTS.test(ref)) return `<div class="csv-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('csv_loading'):'Loading')} ${fname}...</div>`;
+  if(_EXCALIDRAW_EXTS.test(ref)) return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('excalidraw_loading'):'Loading')} ${fname}...</div>`;
+  return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
+}
 function _renderAttachmentHtml(fname, url){
   const kind=_mediaKindForName(fname);
   if(kind==='image') return `<img class="msg-media-img" src="${esc(url)}" alt="${esc(fname)}" loading="lazy">`;
@@ -6955,115 +7031,7 @@ function renderMd(raw){
   s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|table|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
-  s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
-    let ref=media_stash[+i];
-    // Keep this logic self-contained: some tests extract renderMd() alone and
-    // execute it in node, without the top-level helper functions from ui.js.
-    const mediaKindForName=(name='')=>{
-      const clean=String(name||'').split('?')[0].toLowerCase();
-      if(/\.(mp3|wav|m4a|aac|ogg|oga|opus|flac)$/i.test(clean)) return 'audio';
-      if(/\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(clean)) return 'video';
-      if(_IMAGE_EXTS.test(clean)) return 'image';
-      return '';
-    };
-    const mediaPlayerHtml=(kind,src,name)=>{
-      if(typeof _mediaPlayerHtml==='function') return _mediaPlayerHtml(kind,src,name);
-      const safeName=esc(name||kind||'media');
-      const safeSrc=esc(src);
-      const tag=kind==='video'
-        ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
-        : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
-      return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div></div>`;
-    };
-    const localArtifactCard=(src,name)=>{
-      const safeSrc=esc(src);
-      const safeName=esc(name||'image');
-      const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
-      // Clean inline image (keeps the existing .msg-media-img lightbox-on-click
-      // behavior) with a hover/focus-revealed Download action overlaid top-right,
-      // matching the ChatGPT/Claude/Gemini pattern. The image stays the hero —
-      // no permanent card chrome. Download is the one affordance the lightbox
-      // (zoom-on-click) doesn't already provide.
-      const dlLabel=esc(tt('media_download'));
-      const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
-      return `<span class="msg-artifact-image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${safeSrc}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
-    };
-    if(/^file:\/\//i.test(ref)){
-      try{
-        const u=new URL(ref);
-        ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
-      }catch(_){
-        try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
-        catch(__){ref=ref.replace(/^file:\/\//i,'');}
-      }
-    }
-    // HTTP(S) URL
-    if(/^https?:\/\//i.test(ref)){
-      // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
-      // users (VPN, Docker, deployed) can load agent-generated images (#642).
-      // Strip the trailing slash from document.baseURI so the URL's own path
-      // joins cleanly — this preserves any subpath mount (e.g. /hermes/).
-      let src=ref;
-      if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
-        const base=(document.baseURI||'').replace(/\/$/,'');
-        src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
-      }
-      // MEDIA: tokens are usually tool-generated images. Render all https://
-      // URLs as <img> so extensionless CDN paths still work (#853), while
-      // preserving explicit audio/video/SVG URLs with their proper handlers.
-      const urlPath=src.split('?')[0];
-      const mediaKind=mediaKindForName(urlPath);
-      // SVG URLs → render inline as image
-      if(_SVG_EXTS.test(urlPath)){
-        return `<img class="msg-media-svg" src="${esc(src)}" alt="${t('media_svg_label')}" loading="lazy">`;
-      }
-      if(mediaKind==='audio'||mediaKind==='video') return mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
-      // Render all https:// URLs as <img> — extensionless CDN paths like fal.media still work (#853)
-      if(_IMAGE_EXTS.test(urlPath) || /^https?:\/\//i.test(src)){
-        return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
-      }
-      return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
-    }
-    // Local file path
-    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
-    const apiUrl='api/media?path='+encodeURIComponent(ref)+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
-    const localKind=mediaKindForName(ref);
-    if(localKind==='image'){
-      return localArtifactCard(apiUrl,ref.split('/').pop()||'image');
-    }
-    // SVG → inline image (no download, render directly)
-    if(_SVG_EXTS.test(ref)){
-      return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${t('media_svg_label')}" loading="lazy">`;
-    }
-    // Audio/video → inline player with speed controls; use &inline=1 for byte-range seeking
-    if(_AUDIO_EXTS.test(ref)||_VIDEO_EXTS.test(ref)){
-      const kind=_AUDIO_EXTS.test(ref)?'audio':'video';
-      return _mediaPlayerHtml(kind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
-    }
-    // PDF files → render first page preview with lazy-load
-    if(_PDF_EXTS.test(ref)){
-      const fname=esc(ref.split('/').pop()||ref);
-      return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${t('pdf_loading')} ${fname}...</div>`;
-    }
-    // HTML files → render inline in sandboxed iframe with lazy-load
-    if(_HTML_EXTS.test(ref)){
-      return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${t('html_loading')}</div>`;
-    }
-    // .patch/.diff files → render inline as colored diff instead of download
-    const fname=esc(ref.split('/').pop()||ref);
-    if(/\.(patch|diff)$/i.test(ref)){
-      return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
-    }
-    // CSV files → lazy-load and render as table
-    if(_CSV_EXTS.test(ref)){
-      return `<div class="csv-inline-load" data-path="${esc(ref)}">${t('csv_loading')} ${fname}...</div>`;
-    }
-    // Excalidraw files → lazy-load inline embed
-    if(_EXCALIDRAW_EXTS.test(ref)){
-      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${t('excalidraw_loading')} ${fname}...</div>`;
-    }
-    return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
-  });
+  s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>_inlineMediaHtmlForRef(media_stash[+i]));
 
   // ── End MEDIA restore ──────────────────────────────────────────────────────
   // Restore blockquote stash. Done last so the inner HTML (already produced
