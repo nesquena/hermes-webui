@@ -4956,8 +4956,9 @@ main.main > #mainKanban,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
+main.main > #mainDashboard,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-dashboard):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
@@ -4966,6 +4967,7 @@ main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
 main.main.showing-profiles > #mainProfiles{display:flex;}
 main.main.showing-logs > #mainLogs{display:flex;}
+main.main.showing-dashboard > #mainDashboard{display:flex;overflow-y:auto;}
 main.main.showing-plugin > #mainPlugin{display:flex;}
 main.main > #mainPlugin{display:none;}
 #mainPlugin .main-view-body{flex:1;display:flex;flex-direction:column;overflow:hidden;}
@@ -6614,6 +6616,37 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .html-preview-iframe{width:100%;height:400px;border:none;display:block;background:#fff;}
 .html-preview-fallback{padding:8px;font-size:13px;}
 .html-preview-spinner{animation:pulse 1.5s ease-in-out infinite;}
+
+/* ── Dashboard panel ──────────────────────────────────────────────────────── */
+/* Theme-variable-only styling so every skin (incl. yuno family) applies. */
+.dash-kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:16px;}
+.dash-kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-card);padding:12px 14px;text-align:left;cursor:pointer;color:var(--text);font:inherit;display:flex;flex-direction:column;gap:6px;transition:border-color .15s,background .15s;}
+.dash-kpi:hover{border-color:var(--accent);background:var(--surface-subtle-hover);}
+.dash-kpi:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px;}
+.dash-kpi-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.dash-kpi-label{font-size:11px;color:var(--muted);letter-spacing:.02em;}
+.dash-kpi-icon{color:var(--muted);display:inline-flex;}
+.dash-kpi-value{font-size:22px;font-weight:700;color:var(--strong);font-variant-numeric:tabular-nums;line-height:1.1;}
+.dash-sparkline{width:100%;height:24px;display:block;}
+.dash-columns{display:grid;grid-template-columns:3fr 2fr;gap:12px;align-items:start;}
+.dash-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;}
+.dash-card-link{background:transparent;border:0;color:var(--accent-text);font-size:11px;cursor:pointer;padding:2px 4px;border-radius:4px;}
+.dash-card-link:hover{background:var(--accent-bg);}
+.dash-feed-item{display:flex;align-items:center;gap:8px;width:100%;background:transparent;border:0;border-bottom:1px solid var(--border-subtle);padding:7px 2px;cursor:pointer;color:var(--text);font-size:12px;text-align:left;}
+.dash-feed-item:last-child{border-bottom:0;}
+.dash-feed-item:hover{background:var(--hover-bg);}
+.dash-feed-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.dash-feed-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;}
+.dash-feed-meta{color:var(--muted);font-size:11px;flex-shrink:0;font-variant-numeric:tabular-nums;}
+.dash-log-tail{background:var(--code-bg);color:var(--pre-text);border:1px solid var(--border-subtle);border-radius:var(--radius-md);font-size:11px;line-height:1.5;padding:8px 10px;margin:0;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;}
+.dash-memory-input{width:100%;box-sizing:border-box;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-md);padding:7px 10px;font-size:12px;outline:none;font-family:inherit;}
+.dash-memory-input:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--focus-glow);}
+.dash-memory-results{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:220px;overflow-y:auto;}
+.dash-memory-hit{font-size:12px;color:var(--text);padding:5px 8px;background:var(--surface-subtle);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);line-height:1.45;word-break:break-word;}
+.dash-memory-hit-src{display:inline-block;font-size:10px;font-weight:700;color:var(--accent-text);background:var(--accent-bg);border-radius:999px;padding:1px 6px;margin-right:6px;vertical-align:1px;}
+.dash-health .system-health-metrics{margin-top:4px;}
+@media (max-width:900px){.dash-columns{grid-template-columns:1fr;}}
+@media (max-width:640px){.dash-kpi-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));}}
 
 /* ── Insights panel (#464) ────────────────────────────────────────────────── */
 main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}

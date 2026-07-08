@@ -287,6 +287,16 @@
         </select>
       </div>
     </div>
+    <!-- Dashboard panel -->
+    <div class="panel-view" id="panelDashboard">
+      <div class="panel-head">
+        <span data-i18n="tab_dashboard">Dashboard</span>
+        <div class="panel-head-actions">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="dashboardRefreshBtn" onclick="loadDashboard(true)" data-tooltip="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+        </div>
+      </div>
+      <div class="panel-head-sub" style="padding:0 12px 8px;font-size:11px;color:var(--muted)" data-i18n="dashboard_desc">Live overview of sessions, jobs, skills and system health.</div>
+    </div>
     <!-- Workspaces panel -->
     <div class="panel-view" id="panelWorkspaces">
       <div class="panel-head">
@@ -900,6 +910,17 @@
         <div class="insights-card wiki-status-card" id="llmWikiStatusCard">
           <div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div>
         </div>
+      </div>
+    </div>
+    <div id="mainDashboard" class="main-view">
+      <div class="main-view-header">
+        <div class="main-view-title" data-i18n="dashboard_title">Dashboard</div>
+        <div class="main-view-actions">
+          <button type="button" class="logs-copy compact dashboard-link" id="dashboardExternalBtn" data-dashboard-link style="display:none" onclick="openHermesDashboard(event)" title="Hermes Dashboard" data-i18n-title="tab_dashboard"><span class="dashboard-external-badge" aria-hidden="true"></span><span data-i18n="dashboard_open_external">Open external dashboard</span></button>
+        </div>
+      </div>
+      <div class="main-view-content" id="dashboardContent" style="padding:16px;overflow-y:auto">
+        <div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div>
       </div>
     </div>
     <div id="mainLogs" class="main-view">
