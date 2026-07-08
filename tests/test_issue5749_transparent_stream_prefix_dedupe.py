@@ -65,7 +65,7 @@ def test_issue5749_reproduction_fixture_matches_lone_live_prefix_shape():
 
 @pytest.mark.reproduction
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_issue5749_settlement_suppresses_live_token_prefix_rows(tmp_path):
+def test_issue5749_settlement_preserves_pre_tool_live_token_prefix_rows(tmp_path):
     fixture_scene, fixture_row = _issue5749_captured_scene()
     final_answer = fixture_scene["final_answer"]
     prefix_text = fixture_row["text"]
@@ -164,8 +164,10 @@ process.stdout.write(JSON.stringify({{
 """
     data = _run_node(MESSAGES_JS, script, tmp_path)
     assert data["final_answer"] == final_answer
-    assert [row["local_id"] for row in data["rows"]] == ["tool-row-1"]
-    assert data["rows"][0]["role"] == "tool"
+    assert [row["local_id"] for row in data["rows"]] == [fixture_row["local_id"], "tool-row-1"]
+    assert data["rows"][0]["text"] == prefix_text
+    assert data["rows"][0]["role"] == "prose"
+    assert data["rows"][1]["role"] == "tool"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -398,7 +400,11 @@ const liveRow = {{
   local_id: {json.dumps(fixture_row["local_id"])},
   text: {json.dumps(prefix_text)},
 }};
-const liveResult = _anchorSceneTransparentNodeForRow(liveRow, {{ settled: true, finalAnswer: {json.dumps(final_answer)} }});
+const liveResult = _anchorSceneTransparentNodeForRow(liveRow, {{
+  settled: true,
+  finalAnswer: {json.dumps(final_answer)},
+  liveTokenFinalPrefixEligible: true,
+}});
 process.stdout.write(JSON.stringify({{
   liveResult: liveResult === null,
 }}));
@@ -467,11 +473,91 @@ const liveRow = {{
   local_id: 'live-prose:stream-1:near',
   text: {json.dumps(prefix_text)},
 }};
-const liveResult = _anchorSceneTransparentNodeForRow(liveRow, {{ settled: true, finalAnswer: {json.dumps(final_answer)} }});
+const liveResult = _anchorSceneTransparentNodeForRow(liveRow, {{
+  settled: true,
+  finalAnswer: {json.dumps(final_answer)},
+  liveTokenFinalPrefixEligible: true,
+}});
 process.stdout.write(JSON.stringify(liveResult === null));
 """
     data = _run_node(UI_JS, script, tmp_path)
     assert data is True
+
+
+@pytest.mark.reproduction
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_issue5749_render_fallback_preserves_pre_tool_live_token_prefix_rows(tmp_path):
+    fixture_scene, fixture_row = _issue5749_captured_scene()
+    final_answer = fixture_scene["final_answer"]
+    prefix_text = fixture_row["text"]
+    script = f"""
+const src = {json.dumps(UI_JS)};
+function extractFunc(name) {{
+  const start = src.indexOf('function ' + name);
+  if (start === -1) throw new Error(name + ' not found');
+  const params = src.indexOf('(', start);
+  let depth = 0, close = -1;
+  for (let i = params; i < src.length; i++) {{
+    if (src[i] === '(') depth++;
+    else if (src[i] === ')') {{
+      depth--;
+      if (depth === 0) {{ close = i; break; }}
+    }}
+  }}
+  const brace = src.indexOf('{{', close);
+  depth = 0;
+  for (let i = brace; i < src.length; i++) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') {{
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1);
+    }}
+  }}
+  throw new Error(name + ' body did not close');
+}}
+class FakeElement {{
+  constructor(tag) {{
+    this.tagName = String(tag || 'div').toUpperCase();
+    this.attributes = Object.create(null);
+    this.dataset = Object.create(null);
+  }}
+  setAttribute(name, value) {{
+    this.attributes[name] = String(value);
+    if (name.startsWith('data-')) {{
+      const key = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      this.dataset[key] = String(value);
+    }}
+  }}
+}}
+global.window = {{}};
+global.document = {{ createElement(tag) {{ return new FakeElement(tag); }} }};
+global._anchorSceneNodeForRow = () => new FakeElement('div');
+global._decorateTransparentEventRow = node => node;
+global._anchorSceneToolCallFromRow = () => ({{}});
+global.buildToolCard = () => new FakeElement('div');
+global._thinkingActivityNode = () => new FakeElement('div');
+eval(extractFunc('_anchorSceneProseMatchesFinalAnswer'));
+eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
+eval(extractFunc('_anchorSceneTransparentNodeForRow'));
+const liveRow = {{
+  role: 'prose',
+  kind: 'process_prose',
+  source_event_type: 'token',
+  local_id: {json.dumps(fixture_row["local_id"])},
+  text: {json.dumps(prefix_text)},
+}};
+const liveResult = _anchorSceneTransparentNodeForRow(liveRow, {{
+  settled: true,
+  finalAnswer: {json.dumps(final_answer)},
+  liveTokenFinalPrefixEligible: false,
+}});
+process.stdout.write(JSON.stringify({{
+  visible: !!liveResult,
+  rowId: liveResult && liveResult.attributes && liveResult.attributes['data-anchor-row-id'] || '',
+}}));
+"""
+    data = _run_node(UI_JS, script, tmp_path)
+    assert data == {"visible": True, "rowId": fixture_row["local_id"]}
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

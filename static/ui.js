@@ -11391,7 +11391,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     const text=String(row.text||'').trim();
     if(!text) return null;
     const finalAnswer=String((opts&&opts.finalAnswer)||'').trim();
-    if(_anchorSceneLiveTokenFinalPrefix(row,text,finalAnswer)) return null;
+    if(opts&&opts.liveTokenFinalPrefixEligible&&_anchorSceneLiveTokenFinalPrefix(row,text,finalAnswer)) return null;
     if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)) return null;
     node=_anchorSceneNodeForRow(row,{settled});
     if(!node) return null;
@@ -11441,6 +11441,10 @@ function _anchorSceneLiveTokenFinalPrefix(row, proseText, finalAnswer){
   const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
   const rowKey=norm(proseText), finalKey=norm(finalAnswer);
   return !!(rowKey&&finalKey&&rowKey.length<finalKey.length&&finalKey.startsWith(rowKey));
+}
+function _anchorSceneLastNonTerminalWorkRowIndex(rows){
+  if(!Array.isArray(rows)) return -1;
+  return rows.reduce((last,row,idx)=>(row&&row.role==='tool')?idx:last,-1);
 }
 // Whitespace-insensitive compare so a scene prose row that IS the final answer
 // (possibly re-wrapped) is recognized and not duplicated against the segment.
@@ -12039,6 +12043,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   const scene=message._anchor_activity_scene;
   const rows=_anchorSceneRowsForRendering(scene,{settled:true});
   if(!rows.length) return false;
+  const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   // The assistant segment owns the final answer; pass it so intermediate prose
   // rows render but the final-answer-duplicate prose row is suppressed.
   const finalAnswer=String(
@@ -12057,8 +12062,9 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
     }
   });
   let wrote=false;
-  for(const row of rows){
-    const node=_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer});
+  for(let idx=0;idx<rows.length;idx+=1){
+    const row=rows[idx];
+    const node=_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer,liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex});
     if(!node) continue;
     if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
     else blocks.appendChild(node);
