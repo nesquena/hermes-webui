@@ -5488,24 +5488,30 @@ def _trusted_proxy_networks():
     return tuple(networks)
 
 
-def _ip_is_loopback_or_private(raw: str) -> bool:
+def _ip_address(raw: str):
     import ipaddress
 
     try:
         addr = ipaddress.ip_address(str(raw or "").strip())
     except ValueError:
-        return False
-    return bool(addr.is_loopback or addr.is_private)
+        return None
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped or addr
+
+
+def _ip_is_loopback(raw: str) -> bool:
+    addr = _ip_address(raw)
+    return bool(addr and addr.is_loopback)
+
+
+def _ip_is_loopback_or_private(raw: str) -> bool:
+    addr = _ip_address(raw)
+    return bool(addr and (addr.is_loopback or addr.is_private))
 
 
 def _ip_in_networks(raw: str, networks) -> bool:
-    import ipaddress
-
-    try:
-        addr = ipaddress.ip_address(str(raw or "").strip())
-    except ValueError:
-        return False
-    return any(addr in network for network in networks)
+    addr = _ip_address(raw)
+    return bool(addr and any(addr in network for network in networks))
 
 
 def _forwarded_client_ip_from_trusted_proxy(handler) -> str:
@@ -5522,7 +5528,7 @@ def _forwarded_client_ip_from_trusted_proxy(handler) -> str:
         return ""
 
     trusted_networks = _trusted_proxy_networks()
-    peer_is_loopback = _ip_is_loopback_or_private(raw_peer) and str(raw_peer).startswith(("127.", "::1"))
+    peer_is_loopback = _ip_is_loopback(raw_peer)
     peer_is_trusted = _ip_in_networks(raw_peer, trusted_networks) if trusted_networks else peer_is_loopback
     if not peer_is_trusted:
         return ""
@@ -5537,11 +5543,12 @@ def _forwarded_client_ip_from_trusted_proxy(handler) -> str:
         if hops:
             return hops[0]
 
-    x_real_ip = str(handler.headers.get("X-Real-IP", "") or "").strip()
-    if x_real_ip:
-        return x_real_ip
-
-    return raw_peer
+    # Do not fall back to X-Real-IP here. Some proxies pass client-supplied
+    # X-Real-IP through when X-Forwarded-For is absent, which would let a public
+    # caller choose a private client IP. Without XFF, only a same-host loopback
+    # proxy can be treated as local; non-loopback trusted proxies must include
+    # an XFF chain so the original client can be classified.
+    return raw_peer if peer_is_loopback else ""
 
 
 def _onboarding_request_is_local(handler) -> bool:
@@ -5575,7 +5582,7 @@ def _onboarding_request_is_local(handler) -> bool:
     if not raw:
         return False
     if forwarded_present:
-        return _ip_is_loopback_or_private(raw) and str(raw).startswith(("127.", "::1"))
+        return _ip_is_loopback(raw)
     return _ip_is_loopback_or_private(raw)
 
 

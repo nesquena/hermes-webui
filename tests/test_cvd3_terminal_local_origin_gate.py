@@ -166,6 +166,42 @@ def test_terminal_gate_does_not_trust_forwarded_header_from_unlisted_proxy(monke
     assert routes._embedded_terminal_gate_allows(handler) is False
 
 
+def test_terminal_gate_does_not_trust_x_real_ip_without_forwarded_chain(monkeypatch):
+    """X-Real-IP alone may be client-controlled; trusted non-loopback proxies need XFF."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+
+    handler = _Handler(
+        client_ip="10.0.0.10",
+        headers={"X-Real-IP": "127.0.0.1"},
+    )
+
+    assert routes._forwarded_client_ip_from_trusted_proxy(handler) == ""
+    assert routes._embedded_terminal_gate_allows(handler) is False
+
+
+def test_terminal_gate_allows_ipv4_mapped_loopback_proxy(monkeypatch):
+    """IPv4-mapped loopback peers should be treated as loopback proxies."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.delenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", raising=False)
+
+    handler = _Handler(
+        client_ip="::ffff:127.0.0.1",
+        headers={"X-Forwarded-For": "192.168.1.50"},
+    )
+
+    assert routes._forwarded_client_ip_from_trusted_proxy(handler) == "192.168.1.50"
+    assert routes._embedded_terminal_gate_allows(handler) is True
+
+
 # --------------------------------------------------------------------------
 # Handler dispatch — the RCE-bearing endpoints refuse public clients (403)
 # without ever reaching the PTY-spawning code.
