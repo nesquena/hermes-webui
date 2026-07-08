@@ -6444,7 +6444,9 @@ def _space_creator_preview_spec(draft: dict[str, Any]) -> dict[str, Any]:
     return {"space": copy.deepcopy(draft["space"]), "widgets": widgets, "widget_count": len(widgets)}
 
 
-def _space_creator_preview_compaction(draft: dict[str, Any], *, command: str) -> dict[str, Any]:
+def _space_creator_preview_compaction(
+    draft: dict[str, Any], *, command: str, memory_advisory: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Return metadata-only compaction evidence for a creator preview receipt."""
     from api.capy_compaction import compact_output
 
@@ -6460,6 +6462,7 @@ def _space_creator_preview_compaction(draft: dict[str, Any], *, command: str) ->
         f"space_name: {space.get('name') or 'Creator Preview'}",
         f"widget_count: {len(widgets)}",
     ]
+    lines.extend(_space_current_context_memory_advisory_lines(memory_advisory))
     for widget in widgets[:20]:
         if not isinstance(widget, dict):
             continue
@@ -6497,6 +6500,7 @@ def _space_creator_commit_compaction(
     created: dict[str, Any],
     *,
     command: str,
+    memory_advisory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for a creator commit receipt."""
     from api.capy_compaction import compact_output
@@ -6519,6 +6523,7 @@ def _space_creator_commit_compaction(
         "visual QA verified: yes",
         "explicit approval verified: yes",
     ]
+    lines.extend(_space_current_context_memory_advisory_lines(memory_advisory))
     for widget in widgets[:20]:
         if not isinstance(widget, dict):
             continue
@@ -6565,7 +6570,7 @@ def _space_creator_commit_compaction(
         tool="capy-spaces-creator-loop",
         command=command,
         exit_status=0,
-        max_chars=600,
+        max_chars=900,
         artifact_handles=artifact_handles,
         citations=_space_creator_memory_citations(draft),
     )
@@ -7023,6 +7028,7 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
     preview_id = _space_creator_store_preview_receipt(draft)
     from api.capy_policy import action_policy_receipt
 
+    memory_advisory = _memory_advisory_public_envelope()
     response = {
         "ok": True,
         "action": name,
@@ -7047,7 +7053,12 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
             "requires_visual_qa": True,
             "commit_requires_revision": True,
         },
-        "output_compaction": _space_creator_preview_compaction(draft, command=name),
+        "memory_advisory": memory_advisory,
+        "output_compaction": _space_creator_preview_compaction(
+            draft,
+            command=name,
+            memory_advisory=memory_advisory,
+        ),
         "model_route_invocation": _space_creator_model_route_invocation_receipt(draft),
         "progress_event": _record_creator_preview_progress_event(preview_id, draft["space"]["space_id"]),
         "space": draft["space"],
@@ -7200,6 +7211,7 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
     widgets = [read_widget_detail(created["space_id"], widget["id"]) for widget in draft["widget_payloads"]]
     space_detail = read_space_detail(created["space_id"])
     space_detail["widget_count"] = len(widgets)
+    memory_advisory = _memory_advisory_public_envelope()
     response = {
         "ok": True,
         "action": name,
@@ -7220,7 +7232,13 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
         "space": space_detail,
         "widgets": widgets,
         "widget_count": len(widgets),
-        "output_compaction": _space_creator_commit_compaction(draft, created, command=name),
+        "memory_advisory": memory_advisory,
+        "output_compaction": _space_creator_commit_compaction(
+            draft,
+            created,
+            command=name,
+            memory_advisory=memory_advisory,
+        ),
         "revision_event_id": created.get("revision_event_id"),
         "safety": draft["safety"],
     }
