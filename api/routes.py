@@ -5514,6 +5514,10 @@ def _ip_in_networks(raw: str, networks) -> bool:
     return bool(addr and any(addr in network for network in networks))
 
 
+def _ip_is_trusted_proxy_hop(raw: str, trusted_networks) -> bool:
+    return _ip_is_loopback(raw) or _ip_in_networks(raw, trusted_networks)
+
+
 def _forwarded_client_ip_from_trusted_proxy(handler) -> str:
     """Resolve the original client IP from trusted forwarded headers.
 
@@ -5529,7 +5533,7 @@ def _forwarded_client_ip_from_trusted_proxy(handler) -> str:
 
     trusted_networks = _trusted_proxy_networks()
     peer_is_loopback = _ip_is_loopback(raw_peer)
-    peer_is_trusted = _ip_in_networks(raw_peer, trusted_networks) if trusted_networks else peer_is_loopback
+    peer_is_trusted = peer_is_loopback or _ip_in_networks(raw_peer, trusted_networks)
     if not peer_is_trusted:
         return ""
 
@@ -5537,7 +5541,7 @@ def _forwarded_client_ip_from_trusted_proxy(handler) -> str:
     if xff:
         hops = [part.strip() for part in xff.split(",") if part.strip()]
         for hop in reversed(hops):
-            if trusted_networks and _ip_in_networks(hop, trusted_networks):
+            if _ip_is_trusted_proxy_hop(hop, trusted_networks):
                 continue
             return hop
         if hops:

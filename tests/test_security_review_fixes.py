@@ -83,6 +83,32 @@ def test_onboarding_trusted_forwarded_for_uses_original_non_proxy_ip(monkeypatch
     assert routes._onboarding_request_is_local(handler) is False
 
 
+def test_onboarding_trusted_forwarded_for_skips_trailing_loopback_hop(monkeypatch):
+    from api import routes
+
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    handler = _Handler(
+        client_ip="127.0.0.1",
+        headers={"X-Forwarded-For": "8.8.8.8, 127.0.0.1"},
+    )
+
+    assert routes._onboarding_request_is_local(handler) is False
+
+
+def test_onboarding_trusts_loopback_peer_even_when_cidrs_are_configured(monkeypatch):
+    from api import routes
+
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    handler = _Handler(
+        client_ip="127.0.0.1",
+        headers={"X-Forwarded-For": "192.168.1.50"},
+    )
+
+    assert routes._onboarding_request_is_local(handler) is True
+
+
 def test_docker_env_log_obfuscates_password_and_secret_names():
     src = Path("docker_init.bash").read_text(encoding="utf-8")
     line = next(l for l in src.splitlines() if l.startswith("export ENV_OBFUSCATE_PART="))

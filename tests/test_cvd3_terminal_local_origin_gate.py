@@ -184,6 +184,42 @@ def test_terminal_gate_does_not_trust_x_real_ip_without_forwarded_chain(monkeypa
     assert routes._embedded_terminal_gate_allows(handler) is False
 
 
+def test_terminal_gate_blocks_public_client_with_trailing_loopback_hop(monkeypatch):
+    """Loopback proxy hops are trusted hops and must not become the resolved client."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+
+    handler = _Handler(
+        client_ip="127.0.0.1",
+        headers={"X-Forwarded-For": "8.8.8.8, 127.0.0.1"},
+    )
+
+    assert routes._forwarded_client_ip_from_trusted_proxy(handler) == "8.8.8.8"
+    assert routes._embedded_terminal_gate_allows(handler) is False
+
+
+def test_terminal_gate_allows_loopback_proxy_when_cidrs_are_configured(monkeypatch):
+    """Configuring trusted proxy CIDRs must not stop trusting the local proxy peer."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.delenv("HERMES_WEBUI_ONBOARDING_OPEN", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+
+    handler = _Handler(
+        client_ip="127.0.0.1",
+        headers={"X-Forwarded-For": "192.168.1.50"},
+    )
+
+    assert routes._forwarded_client_ip_from_trusted_proxy(handler) == "192.168.1.50"
+    assert routes._embedded_terminal_gate_allows(handler) is True
+
+
 def test_terminal_gate_allows_ipv4_mapped_loopback_proxy(monkeypatch):
     """IPv4-mapped loopback peers should be treated as loopback proxies."""
     from api import routes
