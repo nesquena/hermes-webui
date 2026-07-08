@@ -8,6 +8,7 @@ preceded the notification and the assistant response produced by the wakeup.
 """
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS_PATH = ROOT / "static" / "ui.js"
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -193,6 +195,8 @@ def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
     assert "process-wakeup-notice" in process_branch
     assert "data-role='process_wakeup'" in process_branch or "dataset.role='process_wakeup'" in process_branch
     assert "${filesHtml}" in process_branch
+    assert "t('process_wakeup_label')" in process_branch
+    assert "Background wakeup" not in process_branch
     assert "const rowDisplayContent=displayContent;" in ui
     assert "const rowDisplayContent=isProcessWakeup?content:displayContent;" not in ui
 
@@ -207,3 +211,15 @@ def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
     assert "margin-left:30px" not in notice_rule
     assert "max-width:680px" not in notice_rule
     assert "@media(max-width:700px){.process-wakeup-notice{margin-left:0;}}" in STYLE_CSS
+
+
+def test_process_wakeup_label_key_exists_in_all_locales():
+    locale_pattern = re.compile(
+        r"^\s{2}(?:'(?P<quoted>[A-Za-z0-9-]+)'|(?P<plain>[A-Za-z0-9-]+))\s*:\s*\{",
+        re.MULTILINE,
+    )
+    locales = [m.group("quoted") or m.group("plain") for m in locale_pattern.finditer(I18N_JS)]
+    assert locales, "expected at least the English locale"
+    key_defs = re.findall(r"\bprocess_wakeup_label\s*:", I18N_JS)
+    assert len(key_defs) >= len(locales), "process_wakeup_label must be defined in every locale"
+    assert "process_wakeup_label:'Background wakeup'" in I18N_JS
