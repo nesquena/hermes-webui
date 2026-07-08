@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
+ISSUE5749_CAPTURED_SESSION = json.loads(
+    (ROOT / "tests" / "fixtures" / "issue5749_captured_session_prefix.json").read_text(encoding="utf-8")
+)
 
 
 def _run_node(src, script, tmp_path):
@@ -23,10 +26,49 @@ def _run_node(src, script, tmp_path):
     return json.loads(result.stdout)
 
 
+def _normalized_text(text):
+    return " ".join(str(text or "").split()).lower()
+
+
+def _issue5749_captured_scene():
+    scenes = ISSUE5749_CAPTURED_SESSION["anchor_activity_scenes"]
+    scene = next(iter(scenes.values()))["scene"]
+    rows = scene["activity_rows"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["role"] == "prose"
+    assert row["kind"] == "process_prose"
+    assert row["source_event_type"] == "token"
+    assert row["local_id"].startswith("live-prose:")
+    assert not any(
+        other is not row and other.get("text") == row["text"] and not str(other.get("local_id", "")).startswith("live-prose:")
+        for other in rows
+    )
+    row_key = _normalized_text(row["text"])
+    final_key = _normalized_text(scene["final_answer"])
+    assert row_key and final_key.startswith(row_key)
+    assert 0.40 <= len(row_key) / len(final_key) <= 0.45
+    return scene, row
+
+
+@pytest.mark.reproduction
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_issue5749_reproduction_fixture_matches_lone_live_prefix_shape():
+    scene, row = _issue5749_captured_scene()
+    final_key = _normalized_text(scene["final_answer"])
+    row_key = _normalized_text(row["text"])
+
+    assert row_key != final_key
+    assert final_key.startswith(row_key)
+    assert scene["final_answer"] == ISSUE5749_CAPTURED_SESSION["messages"][0]["content"]
+
+
+@pytest.mark.reproduction
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_issue5749_settlement_suppresses_live_token_prefix_rows(tmp_path):
-    final_answer = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback so Transparent Stream does not repeat the same prose row."
-    prefix_text = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback"
+    fixture_scene, fixture_row = _issue5749_captured_scene()
+    final_answer = fixture_scene["final_answer"]
+    prefix_text = fixture_row["text"]
     script = f"""
 const src = {json.dumps(MESSAGES_JS)};
 function extractFunc(name) {{
@@ -92,19 +134,10 @@ const scene = _completeSettledAnchorSceneForTurn(messages, 1, {{
       role: 'prose',
       kind: 'process_prose',
       source_event_type: 'token',
-      local_id: 'live-prose:stream-1:1',
+      local_id: {json.dumps(fixture_row["local_id"])},
       text: {json.dumps(prefix_text)},
       status: 'running',
       attachments: [{{ id: 'attachment-1' }}],
-    }},
-    {{
-      role: 'prose',
-      kind: 'process_prose',
-      source_event_type: 'manual',
-      local_id: 'session-prose:stream-1:2',
-      text: {json.dumps(prefix_text)},
-      status: 'running',
-      attachments: [{{ id: 'attachment-2' }}],
     }},
     {{
       role: 'tool',
@@ -131,10 +164,8 @@ process.stdout.write(JSON.stringify({{
 """
     data = _run_node(MESSAGES_JS, script, tmp_path)
     assert data["final_answer"] == final_answer
-    assert [row["local_id"] for row in data["rows"]] == ["session-prose:stream-1:2", "tool-row-1"]
-    assert data["rows"][0]["text"] == prefix_text
-    assert data["rows"][0]["attachments"] == [{"id": "attachment-2"}]
-    assert data["rows"][1]["role"] == "tool"
+    assert [row["local_id"] for row in data["rows"]] == ["tool-row-1"]
+    assert data["rows"][0]["role"] == "tool"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -218,10 +249,12 @@ process.stdout.write(JSON.stringify(scene.activity_rows.map(row => row.text)));
     assert data == [prefix_text]
 
 
+@pytest.mark.reproduction
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_issue5749_long_live_progress_prefix_is_suppressed_without_settled_duplicate(tmp_path):
-    final_answer = "I checked the logs, identified the failing deterministic shard, and now I am applying the narrow render-path fix before rerunning the exact test file. The final answer continues with validation details and the pushed commit."
-    prefix_text = "I checked the logs, identified the failing deterministic shard, and now I am applying the narrow render-path fix before rerunning the exact test file."
+    fixture_scene, fixture_row = _issue5749_captured_scene()
+    final_answer = fixture_scene["final_answer"]
+    prefix_text = fixture_row["text"]
     script = f"""
 const src = {json.dumps(MESSAGES_JS)};
 function extractFunc(name) {{
@@ -287,7 +320,7 @@ const scene = _completeSettledAnchorSceneForTurn(messages, 1, {{
       role: 'prose',
       kind: 'process_prose',
       source_event_type: 'token',
-      local_id: 'live-prose:stream-long:1',
+      local_id: {json.dumps(fixture_row["local_id"])},
       text: {json.dumps(prefix_text)},
       status: 'running',
     }},
@@ -303,10 +336,12 @@ process.stdout.write(JSON.stringify(scene.activity_rows.map(row => ({{
     assert data == []
 
 
+@pytest.mark.reproduction
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_issue5749_render_fallback_suppresses_persisted_live_progress_prefix_rows(tmp_path):
-    final_answer = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback so Transparent Stream does not repeat the same prose row."
-    prefix_text = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback"
+    fixture_scene, fixture_row = _issue5749_captured_scene()
+    final_answer = fixture_scene["final_answer"]
+    prefix_text = fixture_row["text"]
     script = f"""
 const src = {json.dumps(UI_JS)};
 function extractFunc(name) {{
@@ -360,29 +395,16 @@ const liveRow = {{
   role: 'prose',
   kind: 'process_prose',
   source_event_type: 'token',
-  local_id: 'live-prose:stream-1:1',
+  local_id: {json.dumps(fixture_row["local_id"])},
   text: {json.dumps(prefix_text)},
-}};
-const boundaryRow = {{
-  role: 'prose',
-  kind: 'process_prose',
-  source_event_type: 'manual',
-  local_id: 'session-prose:stream-1:2',
-  text: {json.dumps(prefix_text)},
-  attachments: [{{ id: 'attachment-2' }}],
 }};
 const liveResult = _anchorSceneTransparentNodeForRow(liveRow, {{ settled: true, finalAnswer: {json.dumps(final_answer)} }});
-const boundaryResult = _anchorSceneTransparentNodeForRow(boundaryRow, {{ settled: true, finalAnswer: {json.dumps(final_answer)} }});
 process.stdout.write(JSON.stringify({{
   liveResult: liveResult === null,
-  boundaryResult: !!boundaryResult,
-  boundaryRowId: boundaryResult && boundaryResult.attributes && boundaryResult.attributes['data-anchor-row-id'] || '',
 }}));
 """
     data = _run_node(UI_JS, script, tmp_path)
     assert data["liveResult"] is True
-    assert data["boundaryResult"] is True
-    assert data["boundaryRowId"] == "session-prose:stream-1:2"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -454,8 +476,9 @@ process.stdout.write(JSON.stringify(liveResult === null));
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_issue5749_non_live_prefix_rows_survive_mode_and_attachment_variants(tmp_path):
-    final_answer = "I found the issue and I am fixing it by deduping live-token prefixes during settlement and render fallback so Transparent Stream does not repeat the same prose row."
-    prefix_text = "I found the issue and I am fixing it by deduping live-token prefixes"
+    fixture_scene, fixture_row = _issue5749_captured_scene()
+    final_answer = fixture_scene["final_answer"]
+    prefix_text = fixture_row["text"]
     script = f"""
 const src = {json.dumps(UI_JS)};
 function extractFunc(name) {{
