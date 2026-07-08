@@ -1654,6 +1654,29 @@
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
+  function renderActiveSpaceLifecycleReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Active space progress');
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
+    const action = String(result.autonomy_policy && result.autonomy_policy.action || result.prompt_preflight && result.prompt_preflight.action || '').toLowerCase();
+    const stateLabel = action.indexOf('deactivate') !== -1 ? 'cleared' : 'switched';
+    return '<div class="capy-spaces-card" role="status"><h3>Active space receipt</h3>' +
+      '<div class="capy-spaces-muted">Active Space '+escapeHtml(stateLabel)+' with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence. Raw chat messages, prompts, widget bodies, memory context, and secrets stay omitted.</div>' +
+      preflight + policy + progress + advisory + compaction + '</div>';
+  }
+
+  function prependActiveSpaceLifecycleReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderActiveSpaceLifecycleReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
   function renderSharedDataDeleteReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
@@ -3262,6 +3285,7 @@
       if (data && data.session && typeof S !== 'undefined') S.session = data.session;
       if (typeof syncCapyActiveSpaceContext === 'function') syncCapyActiveSpaceContext();
       await loadCapySpaces();
+      prependActiveSpaceLifecycleReceipt(data || {});
       return;
     }
     if (action === 'clearActiveSpace') {
@@ -3272,6 +3296,7 @@
       else if (typeof S !== 'undefined' && S.session) S.session.active_space_id = null;
       if (typeof syncCapyActiveSpaceContext === 'function') syncCapyActiveSpaceContext();
       await loadCapySpaces();
+      prependActiveSpaceLifecycleReceipt(data || {});
       return;
     }
     if (action === 'createSpaceFromSession') {

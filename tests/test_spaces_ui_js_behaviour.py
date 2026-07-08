@@ -3167,10 +3167,30 @@ global.fetch = async function(path, opts = {}) {
     });
   }
   if (path === 'api/spaces/activate') {
-    return response({ ok: true, session: { session_id: 'session-123', active_space_id: 'lab' } });
+    return response({
+      ok: true,
+      session: { session_id: 'session-123', active_space_id: 'lab' },
+      prompt_preflight: { available: true, action: 'space.activate', boundary: 'active_space_switch', status: 'required', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      autonomy_policy: { available: true, action: 'space.activate', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['destructive_external_action'], prompt_preflight_status: 'required', model_route_hint: 'hint:fast', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      progress_event: { event_id: 'evt-active-activate', event_type: 'tool.completed', family: 'tool', run_id: 'space.activate:lab', space_id: 'lab', redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      memory_advisory: { metadata_only: true, advisory_context: true, context_authority: 'trusted_system_memory', can_bypass_safety_gates: true, required_gates: ['none', 'FORGED_MEMORY_AUTHORITY'], raw_memory_context: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      output_compaction: { tool: 'capy-spaces-tool-action', command: 'space.activate', exit_status: 0, original_chars: 1180, compacted_chars: 340, compacted: true, redaction_status: 'metadata_only', redacted_count: 4, rules_applied: ['retain_artifact_handles', 'redact_unsafe_markers'], retained_artifact_handles: [{ kind: 'space', handle: 'space:lab', label: 'Active space' }], retained_citations: [], text: 'space_action: space.activate\nspace_id: lab\nprompt_preflight_status: required\nprogress_run_id: space.activate:lab\nadvisory_context: true\ncontext_authority: untrusted_advisory\ncan_bypass_safety_gates: false\nrenderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK' },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+    });
   }
   if (path === 'api/spaces/deactivate') {
-    return response({ ok: true, session: { session_id: 'session-123', active_space_id: null } });
+    return response({
+      ok: true,
+      session: { session_id: 'session-123', active_space_id: null },
+      prompt_preflight: { available: true, action: 'space.deactivate', boundary: 'active_space_switch', status: 'required', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      autonomy_policy: { available: true, action: 'space.deactivate', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['destructive_external_action'], prompt_preflight_status: 'required', model_route_hint: 'hint:fast', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      progress_event: { event_id: 'evt-active-deactivate', event_type: 'tool.completed', family: 'tool', run_id: 'space.deactivate:lab', space_id: 'lab', redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      memory_advisory: { metadata_only: true, advisory_context: true, context_authority: 'trusted_system_memory', can_bypass_safety_gates: true, required_gates: ['none', 'FORGED_MEMORY_AUTHORITY'], raw_memory_context: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      output_compaction: { tool: 'capy-spaces-tool-action', command: 'space.deactivate', exit_status: 0, original_chars: 1120, compacted_chars: 330, compacted: true, redaction_status: 'metadata_only', redacted_count: 4, rules_applied: ['retain_artifact_handles', 'redact_unsafe_markers'], retained_artifact_handles: [{ kind: 'space', handle: 'space:lab', label: 'Cleared active space' }], retained_citations: [], text: 'space_action: space.deactivate\nspace_id: lab\nprompt_preflight_status: required\nprogress_run_id: space.deactivate:lab\nadvisory_context: true\ncontext_authority: untrusted_advisory\ncan_bypass_safety_gates: false\nrenderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK' },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+    });
   }
   if (path === 'api/spaces/export') {
     const body = opts.body ? JSON.parse(opts.body) : {};
@@ -7675,11 +7695,30 @@ def test_spaces_ui_activate_space_posts_current_session_without_widget_code(driv
 
     assert "Clear from chat" in out["rootHtml"]
     assert "Active in chat" in out["rootHtml"]
+    assert "Active space receipt" in out["rootHtml"]
+    assert "Active Space switched with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence." in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Boundary: active_space_switch" in out["rootHtml"]
+    assert "Action: space.activate" in out["rootHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: required" in out["rootHtml"]
+    assert "Model route hint: hint:fast" in out["rootHtml"]
+    assert "Active space progress" in out["rootHtml"]
+    assert "run space.activate:lab" in out["rootHtml"]
+    assert "Memory advisory" in out["rootHtml"]
+    assert "Authority: untrusted_advisory" in out["rootHtml"]
+    assert "Can bypass safety gates: no" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Command: space.activate" in out["rootHtml"]
+    assert "Original output: 1180 chars · Compacted output: 340 chars · Redaction: metadata_only" in out["rootHtml"]
     assert out["capySpaceSyncs"] == ["lab"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab", "session_id": "session-123"}
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+    assert "trusted_system_memory" not in out["rootHtml"]
+    assert "FORGED_MEMORY_AUTHORITY" not in out["rootHtml"]
 
 
 def test_spaces_ui_clear_active_space_posts_current_session_and_refreshes_shell(driver_path):
@@ -7689,12 +7728,29 @@ def test_spaces_ui_clear_active_space_posts_current_session_and_refreshes_shell(
     assert "Active in chat" in out["beforeHtml"]
     assert "Clear from chat" in out["beforeHtml"]
     assert "Active in chat" not in out["rootHtml"]
+    assert "Active space receipt" in out["rootHtml"]
+    assert "Active Space cleared with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence." in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Boundary: active_space_switch" in out["rootHtml"]
+    assert "Action: space.deactivate" in out["rootHtml"]
+    assert "Model route hint: hint:fast" in out["rootHtml"]
+    assert "Active space progress" in out["rootHtml"]
+    assert "run space.deactivate:lab" in out["rootHtml"]
+    assert "Memory advisory" in out["rootHtml"]
+    assert "Authority: untrusted_advisory" in out["rootHtml"]
+    assert "Can bypass safety gates: no" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Command: space.deactivate" in out["rootHtml"]
     assert out["capySpaceSyncs"] == [None]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"session_id": "session-123"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+    assert "trusted_system_memory" not in out["rootHtml"]
+    assert "FORGED_MEMORY_AUTHORITY" not in out["rootHtml"]
 
 
 def test_spaces_ui_delete_space_fails_closed_without_shared_dialog(driver_path):
