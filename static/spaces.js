@@ -1685,7 +1685,7 @@
     const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
     if (!preflight && !policy && !progress && !advisory && !compaction) return '';
     return '<div class="capy-spaces-card" role="status"><h3>Space delete receipt</h3>' +
-      '<div class="capy-spaces-muted">Confirmed Space deletion completed with metadata-only policy and progress evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
+      '<div class="capy-spaces-muted">Confirmed Space deletion completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence. Raw widget bodies, prompts, memory context, implementation fields, and secrets stay omitted.</div>' +
       preflight + policy + progress + advisory + compaction + '</div>';
   }
 

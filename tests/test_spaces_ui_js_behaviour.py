@@ -7740,7 +7740,7 @@ def test_spaces_ui_delete_space_posts_to_delete_and_refreshes_spaces(driver_path
     assert json.loads(post["body"]) == {"space_id": "lab"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "Space delete receipt" in out["rootHtml"]
-    assert "Confirmed Space deletion completed with metadata-only policy and progress evidence." in out["rootHtml"]
+    assert "Confirmed Space deletion completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence." in out["rootHtml"]
     assert "Prompt preflight" in out["rootHtml"]
     assert "Status: pass" in out["rootHtml"]
     assert "Boundary: creator_commit" in out["rootHtml"]
