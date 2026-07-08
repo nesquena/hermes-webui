@@ -18238,7 +18238,7 @@ def _credentialed_json_get_no_redirect(url: str, headers: dict[str, str], *, tim
             return None
 
     req = Request(url, headers=headers)
-    opener = build_opener(ProxyHandler({}), _NoRedirectProviderProbeHandler())
+    opener = build_opener(_NoRedirectProviderProbeHandler())
     with opener.open(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
