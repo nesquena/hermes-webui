@@ -31,7 +31,11 @@ _AGENT_COMMAND_ALIASES = {
     'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
 }
-_AGENT_COMMANDS_RETURNING_AGENT_MESSAGE = frozenset({'learn', 'blueprint'})
+# NB: which commands seed an agent turn is NOT a static list — a handler opts in
+# purely by returning a ``{"output": ..., "message": ...}`` dict (``message`` is
+# the agent seed). The frontend (static/messages.js) branches on
+# ``_agentResult.message`` to fall through to the send pipeline. Add the behavior
+# to the handler's return value; there is no parallel registry to keep in sync.
 _ALLOWED_AGENT_COMMANDS = frozenset({
     'agents', 'blueprint', 'bundles', 'codex-runtime', 'credits', 'curator',
     'debug', 'fast', 'footer', 'insights', 'kanban', 'learn', 'memory', 'profile',
