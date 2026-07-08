@@ -57,6 +57,14 @@ _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
 _REAPER_INTERVAL_SECS = 60.0
 
+# Serializes the check-then-start of the module's daemon threads
+# (``start_drain_thread`` / ``start_session_channel_reaper``). Without it two
+# concurrent callers can both observe ``is_alive() == False`` and each spawn a
+# thread; the loser's thread is never referenced by the module global and runs
+# forever, un-joinable. A dedicated lock (not the purpose-bound
+# ``SESSION_CHANNELS_LOCK`` / ``_EMIT_COALESCE_LOCK``) keeps this narrow.
+_THREAD_LIFECYCLE_LOCK = threading.Lock()
+
 # T3: per-session coalesce gate for the public bg_task_complete SSE emit.
 # The server-side wakeup path remains immediate; only the browser-observation
 # frame is throttled so a burst of background task completions does not flood an
@@ -387,16 +395,17 @@ def _reaper_loop() -> None:
 def start_session_channel_reaper() -> bool:
     """Start the SessionChannel reaper thread. Idempotent; returns True on first start."""
     global _REAPER_THREAD
-    if _REAPER_THREAD is not None and _REAPER_THREAD.is_alive():
-        return False
-    _REAPER_STOP.clear()
-    _REAPER_THREAD = threading.Thread(
-        target=_reaper_loop,
-        name="hermes-webui-session-channel-reaper",
-        daemon=True,
-    )
-    _REAPER_THREAD.start()
-    return True
+    with _THREAD_LIFECYCLE_LOCK:
+        if _REAPER_THREAD is not None and _REAPER_THREAD.is_alive():
+            return False
+        _REAPER_STOP.clear()
+        _REAPER_THREAD = threading.Thread(
+            target=_reaper_loop,
+            name="hermes-webui-session-channel-reaper",
+            daemon=True,
+        )
+        _REAPER_THREAD.start()
+        return True
 
 
 def stop_session_channel_reaper(timeout: float = 2.0) -> None:
@@ -1331,16 +1340,17 @@ def unregister_process_session(session_key: str) -> None:
 def start_drain_thread() -> bool:
     """Start the background drain thread idempotently. Returns True on first start."""
     global _DRAIN_THREAD
-    if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
-        return False
-    _DRAIN_STOP.clear()
-    _DRAIN_THREAD = threading.Thread(
-        target=_drain_loop,
-        name="hermes-webui-bg-task-complete-drain",
-        daemon=True,
-    )
-    _DRAIN_THREAD.start()
-    return True
+    with _THREAD_LIFECYCLE_LOCK:
+        if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
+            return False
+        _DRAIN_STOP.clear()
+        _DRAIN_THREAD = threading.Thread(
+            target=_drain_loop,
+            name="hermes-webui-bg-task-complete-drain",
+            daemon=True,
+        )
+        _DRAIN_THREAD.start()
+        return True
 
 
 def stop_drain_thread(timeout: float = 2.0) -> None:
