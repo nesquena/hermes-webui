@@ -1423,6 +1423,11 @@ async function send(){
     return;
   }
   let _slashDisplayTextOverride=null;
+  // Set when an agent-command path has ALREADY pushed the user bubble locally
+  // (e.g. to show the command + its immediate output before seeding the turn).
+  // The regular send pipeline below then skips its own user-bubble push so the
+  // originating command isn't rendered twice.
+  let _userTurnAlreadyRendered=false;
   let _pendingMoaConfig=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
@@ -1501,6 +1506,10 @@ async function send(){
             S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
             S.messages.push({role:'assistant',content:_agentOutput,_ts:Date.now()/1000});
             renderMessages();
+            // The user command + its output are now shown; don't let the send
+            // pipeline push the command a second time (it seeds the turn from
+            // _agentResult.message but displays the original command via override).
+            _userTurnAlreadyRendered=true;
           }
           _slashDisplayTextOverride=text;
           text=_agentResult.message.trim();
@@ -1655,7 +1664,8 @@ async function send(){
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
+    if(_userTurnAlreadyRendered){renderMessages();setBusy(true);}
+    else{S.messages.push(userMsg);renderMessages();setBusy(true);}
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else appendThinking('',{pending:true});
