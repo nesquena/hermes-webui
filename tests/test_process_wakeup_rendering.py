@@ -71,6 +71,8 @@ const heightStart = src.indexOf('const MESSAGE_RENDER_WINDOW_DEFAULT');
 const heightEnd = src.indexOf('const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS', heightStart);
 if(heightStart !== -1 && heightEnd !== -1) eval(src.slice(heightStart, heightEnd));
 if(src.indexOf('function _isProcessWakeupMessage') !== -1) eval(extractFunc('_isProcessWakeupMessage'));
+eval(extractFunc('_stripWorkspaceDisplayPrefix'));
+eval(extractFunc('_stripAttachedFilesMarkerForDisplay'));
 eval(extractFunc('_messageIsRenderable'));
 eval(extractFunc('_getVisibleMessagesWithIdx'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
@@ -105,12 +107,26 @@ const virtualRole = _messageVirtualRoleForEntry({m: wakeup});
 const virtualHeight = typeof _messageVirtualDefaultHeightForRole === 'function'
   ? _messageVirtualDefaultHeightForRole(virtualRole)
   : null;
+const attachmentOnlyWakeup = {
+  role: 'user',
+  content: '',
+  _source: 'process_wakeup',
+  attachments: [{name: 'result.txt'}],
+};
+const markerWakeupContent = [
+  '[Workspace::v1: /tmp/hermes]',
+  'Visible wakeup text',
+  '',
+  '[Attached files: result.txt]',
+].join(String.fromCharCode(10));
 
 process.stdout.write(JSON.stringify({
   visible: visible.map(e => ({rawIdx: e.rawIdx, role: e.m.role, source: e.m._source || '', text: String(e.m.content).slice(0, 32)})),
   turns,
   virtualRole,
   virtualHeight,
+  attachmentOnlyRenderable: _messageIsRenderable(attachmentOnlyWakeup),
+  strippedWakeupDisplay: _stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(markerWakeupContent)),
 }));
 """
 
@@ -151,6 +167,13 @@ def test_process_wakeup_has_its_own_virtual_height_role():
     assert 1 <= result["virtualHeight"] <= 120
 
 
+def test_attachment_only_process_wakeup_is_visible_and_display_markers_are_stripped():
+    result = _run_driver()
+
+    assert result["attachmentOnlyRenderable"] is True
+    assert result["strippedWakeupDisplay"] == "Visible wakeup text"
+
+
 def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
     ui = UI_JS_PATH.read_text(encoding="utf-8")
     marker = "const isProcessWakeup="
@@ -169,6 +192,9 @@ def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
     assert "process-wakeup-row" in process_branch
     assert "process-wakeup-notice" in process_branch
     assert "data-role='process_wakeup'" in process_branch or "dataset.role='process_wakeup'" in process_branch
+    assert "${filesHtml}" in process_branch
+    assert "const rowDisplayContent=displayContent;" in ui
+    assert "const rowDisplayContent=isProcessWakeup?content:displayContent;" not in ui
 
     assert ".process-wakeup-row" in STYLE_CSS
     assert ".process-wakeup-notice" in STYLE_CSS
