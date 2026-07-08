@@ -8515,35 +8515,32 @@ def _metadata_message_count_for_display(session) -> int | None:
 
 
 def _compression_parent_lineage_metadata_count(session, *, max_hops: int = 20) -> int | None:
-    """Return the display-coordinate length of compression snapshot parents.
+    """Return the immediate parent snapshot length for safe metadata pagination.
 
-    This metadata-only helper is used only after the direct child sidecar already
-    satisfies the initial visible tail.  If any hop cannot be classified as a
-    pre-compression snapshot, return None so callers fall back to the full
-    lineage stitch rather than guessing pagination coordinates.
+    The full stitch path merges/deduplicates cumulative snapshot ancestors.  A
+    metadata-only count cannot know whether a parent with its own parent already
+    includes that ancestor prefix, so multi-hop lineages must fall back to the
+    full stitch rather than summing counts and publishing inflated cursors.
     """
-    total = 0
-    current = session
+    try:
+        if int(max_hops) < 1:
+            return None
+    except (TypeError, ValueError):
+        return None
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id or not is_safe_session_id(parent_id):
+        return None
+    parent = Session.load_metadata_only(parent_id)
+    if not parent or not getattr(parent, "pre_compression_snapshot", False):
+        return None
+    parent_parent_id = str(getattr(parent, "parent_session_id", "") or "").strip()
+    if parent_parent_id:
+        return None
     source = str(getattr(session, "session_source", "") or "").strip().lower()
-    root_is_fork = source == "fork"
-    seen = {str(getattr(session, "session_id", "") or "")}
-    for _ in range(max(0, int(max_hops))):
-        parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
-        if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
-            break
-        parent = Session.load_metadata_only(parent_id)
-        if not parent or not getattr(parent, "pre_compression_snapshot", False):
-            return None
-        parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
-        if root_is_fork and parent_source != "fork":
-            return None
-        parent_count = _metadata_message_count_for_display(parent)
-        if parent_count is None:
-            return None
-        total += parent_count
-        seen.add(parent_id)
-        current = parent
-    return total
+    parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
+    if source == "fork" and parent_source != "fork":
+        return None
+    return _metadata_message_count_for_display(parent)
 
 
 def _loaded_prefix_count_before_sidecar(merged_messages, sidecar_messages) -> int:
@@ -8565,10 +8562,9 @@ def _loaded_prefix_count_before_sidecar(merged_messages, sidecar_messages) -> in
 def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages, *, limit: int) -> int | None:
     """Classify a direct compression child sidecar for initial limited loads.
 
-    Returns:
-    - 0 when the child appears cumulative and already includes the parent prefix.
-    - N when the child is a continuation segment and N parent rows are omitted.
-    - None when classification is uncertain and the caller must stitch lineage.
+    Returns the omitted immediate parent row count when the child is safely
+    classified as a single-hop continuation segment, or None when classification
+    is uncertain and the caller must stitch lineage.
     """
     parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
     if not parent_id or not is_safe_session_id(parent_id):
@@ -8589,12 +8585,9 @@ def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages
         parent_updated_at = float(getattr(parent, "updated_at", 0) or 0)
     except (TypeError, ValueError):
         parent_updated_at = 0.0
-    if parent_updated_at > 0 and first_ts is not None:
-        if first_ts < parent_updated_at and len(direct_sidecar_messages) >= parent_count + limit:
-            return 0
-        if first_ts >= parent_updated_at:
-            return _compression_parent_lineage_metadata_count(session)
-    if len(direct_sidecar_messages) < parent_count:
+    if parent_updated_at > 0 and first_ts is not None and first_ts >= parent_updated_at:
+        return _compression_parent_lineage_metadata_count(session)
+    if first_ts is not None and len(direct_sidecar_messages) < parent_count:
         return _compression_parent_lineage_metadata_count(session)
     return None
 
@@ -8627,7 +8620,7 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     # pre-compression parents; stitching those parents here can take longer than
     # Apache's 60s local-proxy timeout.  Use the direct child sidecar only when
     # it has enough renderable rows and metadata can preserve full-coordinate
-    # pagination offsets for either cumulative or continuation child shapes.
+    # pagination offsets for a safely classified single-hop continuation child.
     direct_sidecar_messages = list(getattr(session, "messages", []) or [])
     if len(direct_sidecar_messages) > raw_budget:
         renderable_count = sum(
