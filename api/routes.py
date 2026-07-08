@@ -18265,18 +18265,29 @@ def _configured_provider_api_key_for_live_probe(provider: str, cfg: dict) -> str
             if key:
                 return key
 
-    env_names_by_provider = {
-        "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
-        "deepseek": ("DEEPSEEK_API_KEY",),
-        "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-        "minimax": ("MINIMAX_API_KEY",),
-        "mistralai": ("MISTRAL_API_KEY",),
-        "nvidia": ("NVIDIA_API_KEY",),
-        "openrouter": ("OPENROUTER_API_KEY",),
-        "xai": ("XAI_API_KEY",),
-        "zai": ("ZAI_API_KEY", "GLM_API_KEY"),
-    }
-    for env_name in env_names_by_provider.get(provider, ()):  # pragma: no branch - tiny tuple
+    try:
+        from api.config import _AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER
+    except Exception:
+        _AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER = {
+            "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+            "deepseek": ("DEEPSEEK_API_KEY",),
+            "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+            "gmi": ("GMI_API_KEY",),
+            "lmstudio": ("LM_API_KEY", "LMSTUDIO_API_KEY"),
+            "minimax": ("MINIMAX_API_KEY",),
+            "mistralai": ("MISTRAL_API_KEY",),
+            "nvidia": ("NVIDIA_API_KEY",),
+            "openai": ("OPENAI_API_KEY",),
+            "openai-api": ("OPENAI_API_KEY",),
+            "openrouter": ("OPENROUTER_API_KEY",),
+            "stepfun": ("STEPFUN_API_KEY",),
+            "xai": ("XAI_API_KEY",),
+            "zai": ("ZAI_API_KEY", "GLM_API_KEY"),
+        }
+    for env_name in _AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER.get(
+        provider,
+        (),
+    ):  # pragma: no branch - tiny tuple
         key = str(os.getenv(env_name) or "").strip()
         if key:
             return key
@@ -18285,9 +18296,14 @@ def _configured_provider_api_key_for_live_probe(provider: str, cfg: dict) -> str
 
 def _should_skip_agent_provider_model_ids(provider: str, cfg: dict) -> bool:
     """Avoid agent live probes when they may attach credentials we cannot redirect-harden."""
-    if provider == "copilot":
-        # Copilot discovery is OAuth-backed inside hermes_cli; WebUI cannot wrap
-        # those urllib calls with a no-redirect opener, so fall back locally.
+    try:
+        from api.config import _AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS
+    except Exception:
+        _AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS = frozenset({"copilot", "copilot-acp", "nous"})
+    if provider in _AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS:
+        # These providers can resolve OAuth/token-pool credentials inside
+        # hermes_cli; WebUI cannot wrap those urllib calls with a no-redirect
+        # opener, so fall back locally.
         return True
     return bool(_configured_provider_api_key_for_live_probe(provider, cfg))
 

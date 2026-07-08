@@ -1258,6 +1258,26 @@ def _get_anthropic_fallback_env_vars() -> tuple[str, ...]:
         return fallback
 
 
+_AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER = {
+    "anthropic": _get_anthropic_fallback_env_vars(),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "gmi": ("GMI_API_KEY",),
+    "lmstudio": ("LM_API_KEY", "LMSTUDIO_API_KEY"),
+    "minimax": ("MINIMAX_API_KEY",),
+    "mistralai": ("MISTRAL_API_KEY",),
+    "nvidia": ("NVIDIA_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "openai-api": ("OPENAI_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+    "stepfun": ("STEPFUN_API_KEY",),
+    "xai": ("XAI_API_KEY",),
+    "zai": ("ZAI_API_KEY", "GLM_API_KEY"),
+}
+
+_AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS = frozenset({"copilot", "copilot-acp", "nous"})
+
+
 def _resolve_provider_alias(name: str) -> str:
     """Return the canonical provider slug for *name*.
 
@@ -5637,19 +5657,10 @@ def _configured_provider_api_key_for_live_probe(provider_id: str) -> str:
             if key:
                 return key
 
-    env_names_by_provider = {
-        "anthropic": _get_anthropic_fallback_env_vars(),
-        "deepseek": ("DEEPSEEK_API_KEY",),
-        "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-        "lmstudio": ("LM_API_KEY", "LMSTUDIO_API_KEY"),
-        "minimax": ("MINIMAX_API_KEY",),
-        "mistralai": ("MISTRAL_API_KEY",),
-        "nvidia": ("NVIDIA_API_KEY",),
-        "openrouter": ("OPENROUTER_API_KEY",),
-        "xai": ("XAI_API_KEY",),
-        "zai": ("ZAI_API_KEY", "GLM_API_KEY"),
-    }
-    for env_name in env_names_by_provider.get(provider, ()):  # pragma: no branch - tiny tuple
+    for env_name in _AGENT_CREDENTIAL_ENV_NAMES_BY_PROVIDER.get(
+        provider,
+        (),
+    ):  # pragma: no branch - tiny tuple
         key = str(os.getenv(env_name) or "").strip()
         if key:
             return key
@@ -5670,7 +5681,10 @@ def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     if not pid:
         return []
     resolved_pid = _resolve_provider_alias(pid)
-    if resolved_pid == "copilot" or _configured_provider_api_key_for_live_probe(resolved_pid):
+    if (
+        resolved_pid in _AGENT_ALWAYS_SKIP_PROVIDER_MODEL_IDS_PROVIDERS
+        or _configured_provider_api_key_for_live_probe(resolved_pid)
+    ):
         # Credentialed provider_model_ids() calls live endpoints inside
         # hermes_cli, where WebUI cannot enforce no-redirect transport. Fall
         # back to WebUI-owned static/direct discovery unless the probe is known

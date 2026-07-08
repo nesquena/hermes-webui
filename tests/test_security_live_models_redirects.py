@@ -233,3 +233,86 @@ def test_openai_compat_live_models_does_not_forward_key_to_redirect_target(monke
     assert handler.status == 200
     assert {item["host"] for item in servers.captured} == {"redirector"}
     assert servers.captured[0]["authorization"] == "Bearer CANARY_SECRET"
+
+
+def test_openai_env_key_skips_agent_live_probe(monkeypatch):
+    from api import routes
+
+    routes._clear_live_models_cache()
+    monkeypatch.setenv("OPENAI_API_KEY", "CANARY_SECRET")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "redirect-test-openai-env")
+    monkeypatch.setattr(
+        "api.config.get_config",
+        lambda: {"model": {"provider": "openai"}},
+    )
+
+    def provider_model_ids(provider):
+        raise AssertionError("credentialed OpenAI agent live probe should be skipped")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "hermes_cli.models",
+        SimpleNamespace(provider_model_ids=provider_model_ids),
+    )
+
+    handler = _Handler("/api/models/live?provider=openai")
+    try:
+        routes._handle_live_models(
+            handler,
+            SimpleNamespace(path="/api/models/live", query="provider=openai"),
+        )
+    finally:
+        routes._clear_live_models_cache()
+
+    assert handler.status == 200
+    assert _json_response_body(handler)["provider"] == "openai"
+
+
+def test_openai_api_env_key_skips_config_agent_live_probe(monkeypatch):
+    from api import config
+
+    monkeypatch.setenv("OPENAI_API_KEY", "CANARY_SECRET")
+
+    def provider_model_ids(provider):
+        raise AssertionError("credentialed OpenAI API agent live probe should be skipped")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "hermes_cli.models",
+        SimpleNamespace(provider_model_ids=provider_model_ids),
+    )
+
+    assert config._read_live_provider_model_ids("openai-api") == []
+
+
+def test_copilot_acp_skips_agent_live_probe(monkeypatch):
+    from api import routes
+
+    routes._clear_live_models_cache()
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "redirect-test-copilot-acp")
+    monkeypatch.setattr(
+        "api.config.get_config",
+        lambda: {"model": {"provider": "copilot-acp"}},
+    )
+
+    def provider_model_ids(provider):
+        raise AssertionError("credentialed Copilot ACP agent live probe should be skipped")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "hermes_cli.models",
+        SimpleNamespace(provider_model_ids=provider_model_ids),
+    )
+
+    handler = _Handler("/api/models/live?provider=copilot-acp")
+    try:
+        routes._handle_live_models(
+            handler,
+            SimpleNamespace(path="/api/models/live", query="provider=copilot-acp"),
+        )
+    finally:
+        routes._clear_live_models_cache()
+
+    assert handler.status == 200
+    assert _json_response_body(handler)["provider"] == "copilot-acp"
