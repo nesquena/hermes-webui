@@ -614,6 +614,31 @@ def test_curator_command_uses_subprocess_capture(monkeypatch):
     )]
 
 
+def test_curator_command_blocks_state_changing_subcommands(monkeypatch):
+    """WebUI-safe: only read-only curator subcommands run; destructive ones (which
+    archive/consolidate skills on disk) are rejected without spawning a process."""
+    import pytest
+
+    from api import commands
+
+    ran: list = []
+    monkeypatch.setattr(commands.subprocess, "run", lambda *a, **k: ran.append(a))
+
+    for destructive in ("run", "prune", "archive", "restore", "pin", "unpin",
+                        "pause", "resume", "backup", "prune --yes"):
+        with pytest.raises(RuntimeError, match="not available from the WebUI"):
+            commands._run_curator_command(f"/curator {destructive}")
+    assert ran == [], "a blocked curator subcommand must not spawn a subprocess"
+
+    # Read-only subcommands (and their flags) are still allowed.
+    def _ok(cmd, **kw):
+        return commands.subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+    monkeypatch.setattr(commands.subprocess, "run", _ok)
+    for allowed in ("status", "usage", "usage --json", "list-archived", ""):
+        assert commands._run_curator_command(f"/curator {allowed}".strip()) == "ok"
+
+
 def test_webui_safe_agent_commands_are_allowlisted(monkeypatch):
     """Safe non-CLI agent commands should be accepted by the executor allowlist."""
     from api import commands

@@ -506,8 +506,25 @@ def _run_bundles_command() -> str:
     return "\n".join(lines)
 
 
+# WebUI-safe curator surface: only read-only subcommands may be invoked from the
+# browser. The curator CLI also exposes state-changing / destructive operations
+# (run, prune, archive, restore, pin/unpin, pause/resume, backup) that archive or
+# consolidate skills on disk — those must stay terminal-only, not one slash
+# command away for any WebUI user. Gate on the subcommand (first token) so args
+# to the allowed read-only subcommands (e.g. `usage --json`) still pass through.
+_CURATOR_WEBUI_ALLOWED_SUBCOMMANDS = frozenset({"status", "usage", "list-archived"})
+
+
 def _run_curator_command(command: str) -> str:
     tokens = _shellish_args(command) or ["status"]
+    _subcommand = tokens[0]
+    if _subcommand not in _CURATOR_WEBUI_ALLOWED_SUBCOMMANDS:
+        raise RuntimeError(
+            f"'/curator {_subcommand}' is not available from the WebUI. Only read-only "
+            f"curator subcommands are allowed here: "
+            f"{', '.join(sorted(_CURATOR_WEBUI_ALLOWED_SUBCOMMANDS))}. Use the terminal "
+            f"for state-changing operations (run, prune, archive, restore, pin, ...)."
+        )
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "hermes_cli.main", "curator", *tokens],
