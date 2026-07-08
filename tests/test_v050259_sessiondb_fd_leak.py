@@ -24,7 +24,6 @@ Policy now (``_adopt_session_db_for_cached_agent``):
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -81,7 +80,36 @@ def test_adopt_and_is_open_helpers_exist():
     assert "logger.debug" in adopt_block
 
 
-# ── 2: source-level pin: LRU eviction path still closes _session_db ────────
+def test_cached_agent_reuse_sets_current_agent_for_fallback_warning_metadata():
+    """The cached-agent reuse path must publish the reused agent to the
+    per-request status callback holder before refreshing status_callback.
+
+    `_agent_status_callback()` enriches fallback warning SSE payloads with the
+    live agent's model/provider via `_current_agent[0]`. `_run_agent_streaming`
+    is per-request, so a cache-hit turn starts with `_current_agent = [None]`;
+    without assigning the reused cached agent in this block, mid-conversation
+    fallback notices still render but lose the model/provider badge.
+    """
+    src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+
+    reuse_idx = src.find("Refresh per-turn callbacks")
+    assert reuse_idx != -1, "cached-agent reuse block missing"
+    block = src[reuse_idx : reuse_idx + 1200]
+
+    current_agent_idx = block.find("_current_agent[0] = agent")
+    status_callback_idx = block.find("agent.status_callback = _agent_kwargs.get('status_callback')")
+    assert current_agent_idx != -1, (
+        "cached-agent reuse must set _current_agent[0] so fallback warning "
+        "events include to_model/to_provider on normal multi-turn cache hits."
+    )
+    assert status_callback_idx != -1, "cached-agent reuse must refresh status_callback"
+    assert current_agent_idx < status_callback_idx, (
+        "_current_agent[0] must be set before the refreshed status_callback can "
+        "emit fallback warning metadata for the reused agent."
+    )
+
+
+# ── 2: source-level pin: LRU eviction path also closes _session_db ──────────
 
 
 def test_lru_eviction_closes_evicted_agent_session_db():
