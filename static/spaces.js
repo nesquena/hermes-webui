@@ -747,6 +747,7 @@
         '<div class="capy-spaces-product-space-actions">' +
         '<button type="button" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Open">→</button>' +
         '<button type="button" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'" aria-label="Edit">✎</button>' +
+        '<button type="button" data-capy-action="duplicateSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" aria-label="Duplicate">⧉</button>' +
         '<button type="button" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Delete">×</button>' +
         '</div>' +
         '</article>';
@@ -794,6 +795,7 @@
         '<button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open</button>' +
         activeAction +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'">Edit</button>' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="duplicateSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'">Duplicate</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button>' +
         resetAction +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'">Delete</button>' +
@@ -1672,6 +1674,27 @@
     const root = document.getElementById('capySpacesRoot');
     if (!root) return;
     const receipt = renderSpaceUpdateReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
+  function renderSpaceDuplicateReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Space duplicate progress');
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Space duplicate receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed Space duplicate completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence. Raw prompts, widget bodies, memory context, implementation fields, and secrets stay omitted.</div>' +
+      preflight + policy + progress + advisory + compaction + '</div>';
+  }
+
+  function prependSpaceDuplicateReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderSpaceDuplicateReceipt(data);
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
@@ -3966,6 +3989,16 @@
       const deleteResult = await postSpacesJson('api/spaces/delete', {space_id: spaceId});
       await loadCapySpaces();
       prependSpaceDeleteReceipt(deleteResult || {});
+      return;
+    }
+    if (action === 'duplicateSpace') {
+      if (typeof showConfirmDialog !== 'function') return;
+      const spaceName = safeDisplayMetadataText(button.dataset.spaceName || spaceId, spaceId) || spaceId;
+      const ok = await showConfirmDialog({title: 'Duplicate Capy Space?', message: 'Duplicate space "'+spaceName+'" through the metadata-only safety boundary?', confirmLabel: 'Duplicate', danger: false, focusCancel: true});
+      if (!ok) return;
+      const duplicateResult = await postSpacesJson('api/spaces/duplicate', {space_id: spaceId});
+      await loadCapySpaces();
+      prependSpaceDuplicateReceipt(duplicateResult || {});
       return;
     }
     if (action === 'restoreRevision') {

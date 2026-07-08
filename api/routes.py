@@ -5624,6 +5624,27 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Space not found", 404)
 
+    if parsed.path == "/api/spaces/duplicate":
+        from api import spaces as capy_spaces
+        try:
+            _route_reject_ambient_current_selectors()
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
+            payload = {"space_id": space_id}
+            target_space_id = _route_alias_value("target_space_id", "targetSpaceId")
+            if target_space_id:
+                payload["target_space_id"] = target_space_id
+            return j(handler, capy_spaces.run_space_tool("space.spaces.duplicateSpace", payload))
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileExistsError:
+            return bad(handler, "Space already exists", 409)
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
     if parsed.path == "/api/spaces/templates/install":
         from api import spaces as capy_spaces
         try:

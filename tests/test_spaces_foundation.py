@@ -25303,6 +25303,137 @@ def _route_post(path, body):
     return handled, handler.status, handler.json_body()
 
 
+def test_direct_duplicate_space_route_returns_native_metadata_only_safety_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "route-duplicate-receipts-lab",
+            "name": "Route Duplicate Receipts Lab",
+            "description": "Safe duplicate source",
+            "agent_instructions": "Duplicate through the supervised safety boundary only.",
+            "widgets": [
+                {
+                    "id": "duplicate-widget",
+                    "kind": "markdown",
+                    "title": "Duplicate widget",
+                    "renderer": "<script>DUPLICATE_ROUTE_SECRET_DO_NOT_LEAK</script>",
+                    "api_key": "DUPLICATE_ROUTE_SECRET_DO_NOT_LEAK",
+                    "source": "DUPLICATE_ROUTE_SOURCE_DO_NOT_LEAK",
+                }
+            ],
+        }
+    )
+
+    handled, status, missing = _route_post("/api/spaces/duplicate", {})
+    assert handled is None
+    assert status == 400
+    assert "Missing space_id" in missing["error"]
+
+    handled, status, conflict = _route_post(
+        "/api/spaces/duplicate",
+        {"space_id": created["space_id"], "spaceId": "other-route-duplicate-lab"},
+    )
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in conflict["error"]
+
+    handled, status, target_conflict = _route_post(
+        "/api/spaces/duplicate",
+        {
+            "space_id": created["space_id"],
+            "target_space_id": "route-duplicate-target-a",
+            "targetSpaceId": "route-duplicate-target-b",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in target_conflict["error"]
+    assert _progress_log_rows_for_run("space.duplicate:route-duplicate-target-a") == []
+    assert _progress_log_rows_for_run("space.duplicate:route-duplicate-target-b") == []
+
+    handled, status, duplicated = _route_post(
+        "/api/spaces/duplicate",
+        {"space_id": created["space_id"], "target_space_id": "route-duplicate-receipts-copy"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert duplicated["ok"] is True
+    assert duplicated["action"] == "space.spaces.duplicatespace"
+    assert duplicated["source_space_id"] == created["space_id"]
+    assert duplicated["space_id"] == "route-duplicate-receipts-copy"
+    assert duplicated["space"]["space_id"] == "route-duplicate-receipts-copy"
+    assert duplicated["space"]["widget_count"] == 1
+    assert duplicated["prompt_preflight"]["boundary"] == "active_space_instructions"
+    assert duplicated["prompt_preflight"]["metadata_only"] is True
+    assert duplicated["autonomy_policy"]["action"] == "space.spaces.duplicatespace"
+    assert duplicated["autonomy_policy"]["approval_required"] is True
+    assert duplicated["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert duplicated["progress_event"]["run_id"] == "space.duplicate:route-duplicate-receipts-copy"
+    assert duplicated["progress_event"]["redaction_status"] == "metadata_only"
+    assert [event["event_type"] for event in duplicated["progress_events"]] == ["tool.started", "tool.completed"]
+    for event in duplicated["progress_events"]:
+        assert event["family"] == "tool"
+        assert event["run_id"] == "space.duplicate:route-duplicate-receipts-copy"
+        assert event["space_id"] == "route-duplicate-receipts-copy"
+        assert event["redaction_status"] == "metadata_only"
+    assert duplicated["progress_event"] == duplicated["progress_events"][-1]
+    _assert_space_tool_progress_lifecycle_log(
+        "space.duplicate:route-duplicate-receipts-copy",
+        space_id="route-duplicate-receipts-copy",
+    )
+    assert duplicated["memory_advisory"]["context_authority"] == "untrusted_advisory"
+    assert duplicated["memory_advisory"]["can_bypass_safety_gates"] is False
+    compaction = duplicated["output_compaction"]
+    assert compaction["command"] == "space.spaces.duplicatespace"
+    assert compaction["redaction_status"] == "metadata_only"
+    assert any(
+        artifact.get("handle") == "space:route-duplicate-receipts-copy"
+        for artifact in compaction.get("retained_artifact_handles") or []
+    )
+
+    serialized = json.dumps(duplicated).lower()
+    for unsafe in (
+        "duplicate_route_secret_do_not_leak",
+        "duplicate_route_source_do_not_leak",
+        "<script",
+        "api_key",
+        "trusted_system_memory",
+        "raw_memory_context",
+        "can_bypass_safety_gates: true",
+    ):
+        assert unsafe not in serialized
+
+    handled, status, camel_duplicated = _route_post(
+        "/api/spaces/duplicate",
+        {"spaceId": created["space_id"], "targetSpaceId": "route-duplicate-receipts-camel-copy"},
+    )
+    assert handled is None
+    assert status == 200
+    assert camel_duplicated["space_id"] == "route-duplicate-receipts-camel-copy"
+    assert camel_duplicated["progress_event"]["run_id"] == "space.duplicate:route-duplicate-receipts-camel-copy"
+
+    before_existing_target_rows = _progress_log_rows_for_run("space.duplicate:route-duplicate-receipts-copy")
+    handled, status, existing_target = _route_post(
+        "/api/spaces/duplicate",
+        {"space_id": created["space_id"], "target_space_id": "route-duplicate-receipts-copy"},
+    )
+    assert handled is None
+    assert status == 409
+    assert "already exists" in existing_target["error"].lower()
+    assert "progress_event" not in existing_target
+    assert _progress_log_rows_for_run("space.duplicate:route-duplicate-receipts-copy") == before_existing_target_rows
+
+    handled, status, missing_source = _route_post(
+        "/api/spaces/duplicate",
+        {"space_id": "missing-duplicate-source", "target_space_id": "missing-duplicate-target"},
+    )
+    assert handled is None
+    assert status == 404
+    assert "not found" in missing_source["error"].lower()
+    assert _progress_log_rows_for_run("space.duplicate:missing-duplicate-target") == []
+
+
 def test_widget_mutation_routes_return_native_metadata_only_safety_receipts(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "route-widget-receipts-lab", "name": "Route Widget Receipts Lab"})
