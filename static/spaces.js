@@ -1633,6 +1633,27 @@
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
+  function renderSpaceUpdateReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Space update progress');
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Space update receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed Space metadata update completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence. Raw prompts, widget bodies, memory context, implementation fields, and secrets stay omitted.</div>' +
+      preflight + policy + progress + advisory + compaction + '</div>';
+  }
+
+  function prependSpaceUpdateReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderSpaceUpdateReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
   function renderSpaceDeleteReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
@@ -3906,12 +3927,14 @@
       const editingSpaceId = root && root.dataset ? String(root.dataset.editingSpaceId || '').trim() : '';
       const name = nameInput ? nameInput.value : '';
       const description = descriptionInput ? descriptionInput.value : '';
+      let saveResult = null;
       if (editingSpaceId) {
-        await postSpacesJson('api/spaces/update', {space_id: editingSpaceId, updates: {name: name, description: description}});
+        saveResult = await postSpacesJson('api/spaces/update', {space_id: editingSpaceId, updates: {name: name, description: description}, includeSafetyReceipts: true});
       } else {
-        await postSpacesJson('api/spaces/create', {space_id: idInput ? idInput.value : '', name: name, description: description});
+        saveResult = await postSpacesJson('api/spaces/create', {space_id: idInput ? idInput.value : '', name: name, description: description});
       }
       await loadCapySpaces();
+      if (editingSpaceId) prependSpaceUpdateReceipt(saveResult || {});
       return;
     }
     if (action === 'deleteSpace') {
