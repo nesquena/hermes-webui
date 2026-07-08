@@ -285,7 +285,22 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
     if not session_journal_dir.exists():
         return False
     shutil.rmtree(session_journal_dir, ignore_errors=True)
-    return not session_journal_dir.exists()
+    removed = not session_journal_dir.exists()
+    # Evict any writer locks the removed runs left behind. `_lock_for` keys are
+    # ``(str(path.parent), path.name, pid)`` and every run file for this session
+    # lives directly under ``session_journal_dir``, so drop all keys whose parent
+    # dir matches — pid-independent — to keep `_WRITER_LOCKS` from growing forever.
+    # Guard on confirmed removal: `rmtree(ignore_errors=True)` can silently leave
+    # the directory (locked files on Windows, permission transients). If the files
+    # still exist their locks are still live — evicting them would hand a later
+    # `_lock_for` caller a brand-new Lock, breaking mutual exclusion with a writer
+    # still holding the old one.
+    if removed:
+        dir_key = str(session_journal_dir)
+        with _WRITER_LOCKS_GUARD:
+            for key in [k for k in _WRITER_LOCKS if k[0] == dir_key]:
+                del _WRITER_LOCKS[key]
+    return removed
 
 
 def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | None = None) -> dict | None:
