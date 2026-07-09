@@ -5517,6 +5517,32 @@ def _trusted_proxy_networks():
     return nets
 
 
+def _ip_in_networks(addr, networks) -> bool:
+    """Family-aware membership test.
+
+    Checks the parsed address against each network, and — for an IPv4-mapped
+    IPv6 address (e.g. ``::ffff:10.9.9.9``) — ALSO checks its embedded IPv4 form
+    against IPv4 networks. Without this, a mapped-IPv6 proxy peer would never
+    match an IPv4 CIDR allowlist: the trusted proxy would be treated as
+    untrusted (locking out legitimate clients behind it) and, inside an XFF
+    chain, a mapped trusted hop would be mis-returned as the client (admitting a
+    public client that preceded it). See #5764.
+    """
+    candidates = [addr]
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        candidates.append(mapped)
+    for cand in candidates:
+        for net in networks:
+            try:
+                if cand in net:
+                    return True
+            except TypeError:
+                # IPv4/IPv6 family mismatch between candidate and net → skip.
+                continue
+    return False
+
+
 def _raw_peer_is_trusted_proxy(handler) -> bool:
     """True when the immediate socket peer is loopback or an allowlisted proxy.
 
@@ -5532,14 +5558,7 @@ def _raw_peer_is_trusted_proxy(handler) -> bool:
         addr = ipaddress.ip_address(raw)
     except ValueError:
         return False
-    for net in _trusted_proxy_networks():
-        try:
-            if addr in net:
-                return True
-        except TypeError:
-            # IPv4/IPv6 family mismatch between addr and net → not a match.
-            continue
-    return False
+    return _ip_in_networks(addr, _trusted_proxy_networks())
 
 
 def _forwarded_client_ip_from_trusted_proxy(handler):
@@ -5576,13 +5595,7 @@ def _forwarded_client_ip_from_trusted_proxy(handler):
                 addr = ipaddress.ip_address(ip_str)
             except ValueError:
                 return False
-            for net in trusted_nets:
-                try:
-                    if addr in net:
-                        return True
-                except TypeError:
-                    continue
-            return False
+            return _ip_in_networks(addr, trusted_nets)
 
         for hop in reversed(hops):
             if not hop:

@@ -293,6 +293,18 @@ import pytest
         # --- opt-in OFF: raw peer authoritative, header ignored ---
         ("trust_off_loopback_proxy_xff_public", "127.0.0.1", {"X-Forwarded-For": "8.8.8.8"}, {}, True),
         ("trust_off_lan_peer_with_header", "10.0.0.5", {"X-Real-IP": "203.0.113.7"}, {}, False),
+        # --- #5764 re-gate: IPv4-mapped-IPv6 must be family-aware ---
+        # mapped-IPv6 proxy peer matches an IPv4 CIDR allowlist -> trusted -> private client local
+        ("mapped_ipv6_proxy_peer_in_ipv4_cidr", "::ffff:10.9.9.9", {"X-Forwarded-For": "192.168.1.50"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1", "HERMES_WEBUI_TRUSTED_PROXY_CIDRS": "10.9.9.0/24"}, True),
+        # mapped-IPv6 proxy peer, public client -> DENY
+        ("mapped_ipv6_proxy_peer_public_client", "::ffff:10.9.9.9", {"X-Forwarded-For": "8.8.8.8"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1", "HERMES_WEBUI_TRUSTED_PROXY_CIDRS": "10.9.9.0/24"}, False),
+        # mapped-IPv6 TRUSTED HOP inside the chain must be skipped so the preceding
+        # PUBLIC client is returned -> DENY (the security-critical case).
+        ("mapped_ipv6_trusted_hop_hides_public", "127.0.0.1",
+         {"X-Forwarded-For": "8.8.8.8, ::ffff:10.9.9.9"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1", "HERMES_WEBUI_TRUSTED_PROXY_CIDRS": "10.9.9.0/24"}, False),
     ],
 )
 def test_onboarding_local_gate_trust_model_truth_table(
