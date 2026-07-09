@@ -1795,6 +1795,14 @@ function _applyDashboardStatus(status){
 }
 async function refreshDashboardStatus(force=false){
   const now=Date.now();
+  // Skip the interval-driven poll while the tab is hidden: the 60s interval
+  // equals the cache TTL, so every background tick was a real /api/dashboard/status
+  // fetch that never hit the cache — a needless wakeup on a tab nobody is
+  // looking at (battery/CPU, #2476). Forced calls (settings save, init, the
+  // visibilitychange catch-up) still run. A visible tab keeps its live status.
+  if(!force&&typeof document!=='undefined'&&document.hidden){
+    return _dashboardStatusCache;
+  }
   if(!force&&_dashboardStatusCache&&(now-_dashboardStatusFetchedAt)<DASHBOARD_STATUS_TTL_MS){
     _applyDashboardStatus(_dashboardStatusCache);
     return _dashboardStatusCache;
@@ -1860,6 +1868,13 @@ function _initDashboardLinkProbe(){
   loadDashboardSettings();
   refreshDashboardStatus(true);
   setInterval(refreshDashboardStatus,DASHBOARD_STATUS_TTL_MS);
+  // Catch up once when the tab becomes visible again, since the interval poll
+  // was skipped while hidden and its cache is now stale.
+  if(typeof document!=='undefined'&&typeof document.addEventListener==='function'){
+    document.addEventListener('visibilitychange',()=>{
+      if(!document.hidden) refreshDashboardStatus(true);
+    });
+  }
 }
 if(document.readyState==='complete'){
   _initDashboardLinkProbe();
