@@ -191,7 +191,10 @@ def _write_auth_json(data: dict[str, Any], auth_path: Path | None = None) -> Pat
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     try:
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())  # durable before rename: no truncated auth.json on power loss
         try:
             tmp.chmod(0o600)
         except OSError as exc:
