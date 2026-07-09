@@ -320,7 +320,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 | Thing | How it finds it |
 |---|---|
-| Hermes agent dir | `HERMES_WEBUI_AGENT_DIR` env, then `$HERMES_HOME/hermes-agent` (Windows default `%LOCALAPPDATA%\hermes\hermes-agent`, POSIX default `~/.hermes/hermes-agent`), then sibling `../hermes-agent` |
+| Hermes agent dir | `HERMES_WEBUI_AGENT_DIR`, then known checkout paths, the `hermes` launcher on `PATH`, and finally the installed `run_agent` module exposed by `HERMES_WEBUI_PYTHON` |
 | Python executable | Agent venv first, then `.venv` in this repo, then system `python3` |
 | State directory | `HERMES_WEBUI_STATE_DIR` env, then `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) |
 | Default workspace | `HERMES_WEBUI_DEFAULT_WORKSPACE` env, then `~/workspace`, then state dir |
@@ -350,7 +350,7 @@ Full list of environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HERMES_WEBUI_AGENT_DIR` | auto-discovered | Path to the hermes-agent checkout |
+| `HERMES_WEBUI_AGENT_DIR` | auto-discovered | Path to the Hermes Agent source or installed module root |
 | `HERMES_WEBUI_PYTHON` | auto-discovered | Python executable |
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
@@ -396,35 +396,38 @@ Then add the module and configure it in `nixosModules`:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    hermes-agent.url = "github:NousResearch/hermes-agent";
     hermes-webui.url = "github:nesquena/hermes-webui";
   };
 
-  outputs = { self, nixpkgs, hermes-webui, ... }: {
+  outputs = { self, nixpkgs, hermes-agent, hermes-webui, ... }: {
     nixosConfigurations.<host> = nixpkgs.lib.nixosSystem {
       modules = [
+        hermes-agent.nixosModules.default
         hermes-webui.nixosModules.default
+        ({ pkgs, ... }: {
+          services.hermes-agent.enable = true;
+          services.hermes-webui = {
+            enable = true;
+            host = "127.0.0.1";
+            port = 8787;
+            stateDir = "/var/lib/hermes-webui";
+            user = "hermes";
+            group = "hermes";
+            hermesHome = "/var/lib/hermes/.hermes";
+            agent.package = hermes-agent.packages.${pkgs.stdenv.hostPlatform.system}.default;
+            environmentFiles = [ "/run/secrets/hermes-webui.env" ];
+          };
+        })
       ];
     };
   };
 }
 ```
 
-Service example:
-
-```nix
-services.hermes-webui = {
-  enable = true;
-  host = "127.0.0.1";
-  port = 8787;
-  stateDir = "/var/lib/hermes-webui";
-  agent.dir = "/var/lib/hermes/hermes-agent";
-  environmentFiles = [ "/run/secrets/hermes-webui.env" ];
-};
-```
-
 The module defaults to `127.0.0.1`. Set `host = "0.0.0.0"` and `openFirewall = true` only when you want direct network access, and pair that with auth, for example `HERMES_WEBUI_PASSWORD` via `environmentFiles`.
 
-You can also set `agent.package` instead of `agent.dir` when you are using a compatible Hermes Agent package layout. This path depends on package metadata that the current published Hermes Agent flake may not expose yet, so explicit `agent.dir` and `agent.python` are the reliable integration options for existing agent packages. When the package exposes `passthru.hermesAgentDir`, the module derives `HERMES_WEBUI_AGENT_DIR` from that path. When it exposes `passthru.hermesVenv`, the module derives `HERMES_WEBUI_PYTHON` from the venv interpreter so bootstrap can use agent dependencies without creating a local `.venv`.
+The published Hermes Agent package exposes `passthru.hermesVenv`, so the module derives `HERMES_WEBUI_PYTHON` from its interpreter. Bootstrap then locates the installed `run_agent.py` through that interpreter without importing Agent code and exports its parent as `HERMES_WEBUI_AGENT_DIR`. Packages may expose `passthru.hermesAgentDir` as a direct path instead. Use `agent.dir` and `agent.python` as explicit overrides for custom package layouts.
 
 When WebUI reads shared Hermes Agent state, run the service as a user that can already read that state. For a co-located Hermes Agent service, set `user` and `group` to the agent service account; the module only creates the default `hermes-webui` account and never changes ownership of an existing `hermesHome`.
 

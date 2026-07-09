@@ -147,7 +147,7 @@ in
       package = lib.mkOption {
         type = lib.types.nullOr lib.types.package;
         default = null;
-        description = "Package to derive HERMES_WEBUI_AGENT_DIR from passthru.hermesAgentDir and HERMES_WEBUI_PYTHON from passthru.hermesVenv.";
+        description = "Package to derive HERMES_WEBUI_PYTHON from passthru.hermesVenv and optionally HERMES_WEBUI_AGENT_DIR from passthru.hermesAgentDir.";
       };
 
       dir = lib.mkOption {

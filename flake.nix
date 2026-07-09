@@ -41,8 +41,32 @@
                 }
               ];
             };
+            packageOnlyAgentVenv = pkgs.runCommand "hermes-agent-package-only-venv-${system}" { } ''
+              mkdir -p "$out/bin"
+              touch "$out/bin/python3"
+            '';
+            packageOnlyAgentPackage = pkgs.runCommand "hermes-agent-package-only-${system}" {
+              passthru.hermesVenv = packageOnlyAgentVenv;
+            } ''
+              touch "$out"
+            '';
+            packageOnlyModuleConfig = nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                hermesModule
+                {
+                  services.hermes-webui = {
+                    enable = true;
+                    package = package;
+                    agent.package = packageOnlyAgentPackage;
+                  };
+                }
+              ];
+            };
             moduleServiceEnvironment = nixpkgs.lib.concatStringsSep "\n" moduleConfig.config.systemd.services.hermes-webui.serviceConfig.Environment;
             envProbe = pkgs.writeText "hermes-webui-nixos-env-${system}.txt" moduleServiceEnvironment;
+            packageOnlyServiceEnvironment = nixpkgs.lib.concatStringsSep "\n" packageOnlyModuleConfig.config.systemd.services.hermes-webui.serviceConfig.Environment;
+            packageOnlyEnvProbe = pkgs.writeText "hermes-webui-nixos-package-only-env-${system}.txt" packageOnlyServiceEnvironment;
           in
           {
             module-env-mapping = pkgs.runCommand "hermes-webui-nixos-module-${system}" {
@@ -52,6 +76,8 @@
               grep -q 'HERMES_WEBUI_PORT=8787' ${envProbe}
               grep -q 'HERMES_WEBUI_STATE_DIR=/var/lib/hermes-webui' ${envProbe}
               grep -q 'HERMES_WEBUI_AGENT_DIR=/var/lib/hermes-agent' ${envProbe}
+              grep -q 'HERMES_WEBUI_PYTHON=${packageOnlyAgentVenv}/bin/python3' ${packageOnlyEnvProbe}
+              ! grep -q 'HERMES_WEBUI_AGENT_DIR=' ${packageOnlyEnvProbe}
               touch "$out"
             '';
             runtime-layout = pkgs.runCommand "hermes-webui-runtime-layout-${system}" {

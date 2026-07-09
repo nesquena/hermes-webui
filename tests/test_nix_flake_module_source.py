@@ -52,6 +52,19 @@ def test_nixos_module_uses_explicit_agent_dir_passthru_when_available():
     assert legacy_agent_share_dir not in MODULE_NIX
 
 
+def test_flake_checks_package_with_only_hermes_venv_metadata():
+    assert "packageOnlyAgentPackage" in FLAKE_NIX
+    assert "passthru.hermesVenv = packageOnlyAgentVenv;" in FLAKE_NIX
+    assert "HERMES_WEBUI_PYTHON=${packageOnlyAgentVenv}/bin/python3" in FLAKE_NIX
+    assert "! grep -q 'HERMES_WEBUI_AGENT_DIR=' ${packageOnlyEnvProbe}" in FLAKE_NIX
+
+
+def test_readme_wires_published_agent_flake_package():
+    assert 'hermes-agent.url = "github:NousResearch/hermes-agent";' in README
+    assert "agent.package = hermes-agent.packages.${pkgs.stdenv.hostPlatform.system}.default;" in README
+    assert 'hermesHome = "/var/lib/hermes/.hermes";' in README
+
+
 def test_nixos_module_does_not_chown_existing_hermes_home():
     assert "d ${cfg.hermesHome}" not in MODULE_NIX
 

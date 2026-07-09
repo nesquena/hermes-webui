@@ -1,15 +1,16 @@
-"""Tests for `discover_agent_dir` shebang-based fallback.
+"""Tests for `discover_agent_dir` launcher and interpreter fallbacks.
 
 When the standard candidate paths (`~/.hermes/hermes-agent`, `~/hermes-agent`,
 `<webui-parent>/hermes-agent`, `HERMES_WEBUI_AGENT_DIR`) don't match, bootstrap
-should fall back to introspecting the `hermes` console-script's shebang —
-that's a reliable pointer to the install root because the installer writes the
-venv-relative interpreter path there.
+bootstrap checks the `hermes` launcher, then asks the configured Python for the
+installed `run_agent` module without importing it.
 """
 
 from __future__ import annotations
 
 import textwrap
+
+import pytest
 
 import bootstrap
 
@@ -75,6 +76,8 @@ def _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes_path):
     monkeypatch.setattr(bootstrap.shutil, "which", lambda name: str(hermes_path) if name == "hermes" else None)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "no-such-hermes-home"))
     monkeypatch.delenv("HERMES_WEBUI_AGENT_DIR", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_PYTHON", raising=False)
+    monkeypatch.setattr(bootstrap, "_agent_dir_from_python", lambda _python: None)
     # Force REPO_ROOT.parent to a dir that won't accidentally contain a
     # `hermes-agent` sibling on the dev machine running these tests.
     monkeypatch.setattr(bootstrap, "REPO_ROOT", tmp_path / "isolated-repo-root")
@@ -133,6 +136,11 @@ def test_explicit_candidate_takes_precedence_over_shebang(monkeypatch, tmp_path)
     hermes = _make_hermes_cli(tmp_path, str(venv_python))
     _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes)
     monkeypatch.setenv("HERMES_WEBUI_AGENT_DIR", str(explicit_install))
+    monkeypatch.setattr(
+        bootstrap,
+        "_agent_dir_from_python",
+        lambda _python: (_ for _ in ()).throw(AssertionError("Python probe must not run")),
+    )
 
     assert bootstrap.discover_agent_dir() == explicit_install.resolve()
 
@@ -189,3 +197,112 @@ def test_bash_wrapper_without_agent_target_returns_none(monkeypatch, tmp_path):
     _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes)
 
     assert bootstrap.discover_agent_dir() is None
+
+
+def test_discovers_installed_agent_dir_from_configured_python(monkeypatch, tmp_path):
+    agent_dir = tmp_path / "site-packages"
+    python_exe = str(tmp_path / "venv" / "python")
+    run_agent = agent_dir / "run_agent.py"
+    agent_dir.mkdir()
+    run_agent.write_text("raise AssertionError('must not import run_agent')", encoding="utf-8")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return bootstrap.subprocess.CompletedProcess(argv, 0, stdout=f"{run_agent}\n", stderr="")
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+
+    assert bootstrap._agent_dir_from_python(python_exe) == agent_dir.resolve()
+    argv, kwargs = calls[0]
+    assert argv[:2] == [python_exe, "-c"]
+    assert 'find_spec("run_agent")' in argv[2]
+    assert "import run_agent" not in argv[2]
+    assert kwargs == {"capture_output": True, "text": True}
+
+
+def test_python_probe_returns_none_when_run_agent_spec_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda argv, **kwargs: bootstrap.subprocess.CompletedProcess(argv, 0, stdout="\n", stderr=""),
+    )
+
+    assert bootstrap._agent_dir_from_python(str(tmp_path / "python")) is None
+
+
+def test_python_probe_rejects_malformed_relative_origin(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda argv, **kwargs: bootstrap.subprocess.CompletedProcess(argv, 0, stdout="run_agent.py\n", stderr=""),
+    )
+
+    assert bootstrap._agent_dir_from_python(str(tmp_path / "python")) is None
+
+
+def test_python_probe_rejects_non_file_origin(monkeypatch, tmp_path):
+    missing = tmp_path / "site-packages" / "run_agent.py"
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda argv, **kwargs: bootstrap.subprocess.CompletedProcess(argv, 0, stdout=f"{missing}\n", stderr=""),
+    )
+
+    assert bootstrap._agent_dir_from_python(str(tmp_path / "python")) is None
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError(), PermissionError()])
+def test_python_probe_returns_none_when_interpreter_cannot_start(monkeypatch, tmp_path, error):
+    monkeypatch.setattr(bootstrap.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+    assert bootstrap._agent_dir_from_python(str(tmp_path / "python")) is None
+
+
+def test_python_probe_returns_none_on_nonzero_exit(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda argv, **kwargs: bootstrap.subprocess.CompletedProcess(argv, 1, stdout="", stderr="probe failed"),
+    )
+
+    assert bootstrap._agent_dir_from_python(str(tmp_path / "python")) is None
+
+
+def test_python_probe_accepts_valid_origin_with_benign_stderr(monkeypatch, tmp_path):
+    run_agent = tmp_path / "site-packages" / "run_agent.py"
+    run_agent.parent.mkdir()
+    run_agent.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda argv, **kwargs: bootstrap.subprocess.CompletedProcess(argv, 0, stdout=f"{run_agent}\n", stderr="warning\n"),
+    )
+
+    assert bootstrap._agent_dir_from_python(str(tmp_path / "python")) == run_agent.parent.resolve()
+
+
+def test_python_probe_rejects_existing_file_with_wrong_name(monkeypatch, tmp_path):
+    origin = tmp_path / "site-packages" / "agent_entry.py"
+    origin.parent.mkdir()
+    origin.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda argv, **kwargs: bootstrap.subprocess.CompletedProcess(argv, 0, stdout=f"{origin}\n", stderr=""),
+    )
+
+    assert bootstrap._agent_dir_from_python(str(tmp_path / "python")) is None
+
+
+def test_hermes_cli_takes_precedence_over_configured_python(monkeypatch, tmp_path):
+    install, venv_python = _make_agent_install(tmp_path)
+    hermes = _make_hermes_cli(tmp_path, str(venv_python))
+    _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes)
+    monkeypatch.setattr(
+        bootstrap,
+        "_agent_dir_from_python",
+        lambda _python: (_ for _ in ()).throw(AssertionError("Python probe must not run")),
+    )
+
+    assert bootstrap.discover_agent_dir() == install.resolve()
