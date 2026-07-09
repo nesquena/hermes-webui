@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- **Steering a live *gateway-owned* run no longer errors and drops your message.** When you steered a stream backed by a gateway run (which has no process-local agent in `SESSION_AGENT_CACHE`), the old path showed a misleading "No agent cached for this session" toast and lost the text you'd typed. WebUI now detects the live gateway run and queues your steer as the next turn on that session (snapshotting model/provider/profile first), updates the queue badge, clears the composer draft, and shows a "Steer queued for next turn" notice — without cancelling the active stream. This is the gateway sibling of the existing local-agent queued-steer fallback. Thanks @rodboev. (#5823, #5585)
+
 - **CORS preflight (`OPTIONS`) responses are now framed with `Content-Length: 0`.** Under HTTP/1.1 keep-alive the preflight `200` was sent with no `Content-Length`, so a browser/proxy/curl client read the body until connection close (RFC 7230 §3.3.3) — a keep-alive preflight would hang to the 30s timeout and couldn't reuse the connection. The handler now emits `Content-Length: 0` before `end_headers()`; status stays `200` and CORS headers are unchanged. Thanks @ai-ag2026. (#5828)
 
 - **The session index is now parsed from bytes instead of a decoded string.** The `_index.json` read sites decoded to `str` before `json.loads`; they now pass `read_bytes()` directly (`json.loads` accepts bytes with RFC-4627 auto-detect), which is behavior-equivalent for the BOM-less UTF-8 the app writes and slightly more tolerant of a BOM. Shaves a redundant decode off the session-list hot path. Thanks @ai-ag2026. (#5834)
