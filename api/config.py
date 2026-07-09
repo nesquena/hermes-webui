@@ -8668,6 +8668,64 @@ _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").Lock()
 
 
+def _atomic_write_settings_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically (temp file + fsync + os.replace).
+
+    ``settings.json`` was rewritten with a plain ``Path.write_text``, which
+    truncates the file in place: a crash or full disk mid-write leaves it
+    truncated/empty, so the next start loses every persisted setting (theme,
+    workspace, tab order, and the login ``password_hash``). Writing to a
+    sibling temp file, fsyncing, then ``os.replace`` keeps the old contents
+    intact until the rename commits the new ones in one step.  Mirrors the
+    tempfile+fsync+os.replace pattern already used by
+    ``webui_session_db.WebUIJsonSessionDB._atomic_write``.
+
+    The existing file's mode is carried onto the replacement: ``os.replace``
+    swaps in the temp file's inode, and a plain ``open`` respects the umask
+    (typically 0644), so without this an operator-hardened ``settings.json``
+    (chmod 0600 because it holds the password hash) would be silently loosened
+    on the next save.  New files fall back to the umask-adjusted default.
+
+    A symlinked target is written through to its referent (same follow-through
+    as the ``Path.write_text`` this replaces), rather than replacing the link
+    itself with a regular file.
+    """
+    path = Path(path)
+    write_path = path.resolve(strict=False) if path.is_symlink() else path
+    tmp = write_path.with_name(
+        f".{write_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        mode = os.stat(write_path).st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o666 & ~_current_umask()
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, write_path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _current_umask() -> int:
+    """Read the process umask without leaving it changed.
+
+    ``os.umask`` has no read-only form (it sets and returns the prior value),
+    so we set-then-restore. Called only on the new-``settings.json`` path, which
+    is rare; the tiny set-to-0 window is acceptable here (unlike a per-write
+    hot path).
+    """
+    umask = os.umask(0)
+    os.umask(umask)
+    return umask
+
+
 def _coerce_provider_cost_budget(value: Any) -> float | None:
     """Normalize a monthly budget to the persisted two-decimal representation."""
     try:
@@ -8827,9 +8885,9 @@ def save_settings(settings: dict) -> dict:
     effective_persisted_speech_keys.update(applied_speech_keys)
     persisted = _settings_payload_for_write(current, effective_persisted_speech_keys)
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(
+    _atomic_write_settings_text(
+        SETTINGS_FILE,
         json.dumps(persisted, ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
     global _SETTINGS_WRITE_VERSION
     with _SETTINGS_WRITE_LOCK:
@@ -8870,7 +8928,8 @@ if _settings_file_exists:
             startup_persisted_speech_keys = _extract_persisted_speech_keys(
                 _read_raw_settings_file()
             )
-            SETTINGS_FILE.write_text(
+            _atomic_write_settings_text(
+                SETTINGS_FILE,
                 json.dumps(
                     _settings_payload_for_write(
                         _startup_settings, startup_persisted_speech_keys
@@ -8878,7 +8937,6 @@ if _settings_file_exists:
                     ensure_ascii=False,
                     indent=2,
                 ),
-                encoding="utf-8",
             )
         except Exception:
             pass
