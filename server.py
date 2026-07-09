@@ -439,6 +439,9 @@ class Handler(BaseHTTPRequestHandler):
         self._req_t0 = time.time()
         self.send_response(200)
         apply_cors_preflight_headers(self)
+        # Frame the empty preflight: without Content-Length an HTTP/1.1 keep-alive
+        # 200 is read-until-close, hanging the client until the 30s timeout.
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_DELETE(self) -> None:

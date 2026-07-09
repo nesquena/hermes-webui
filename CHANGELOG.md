@@ -11,6 +11,10 @@
 
 ### Fixed
 
+- **CORS preflight (`OPTIONS`) responses are now framed with `Content-Length: 0`.** Under HTTP/1.1 keep-alive the preflight `200` was sent with no `Content-Length`, so a browser/proxy/curl client read the body until connection close (RFC 7230 §3.3.3) — a keep-alive preflight would hang to the 30s timeout and couldn't reuse the connection. The handler now emits `Content-Length: 0` before `end_headers()`; status stays `200` and CORS headers are unchanged. Thanks @ai-ag2026. (#5828)
+
+- **The session index is now parsed from bytes instead of a decoded string.** The `_index.json` read sites decoded to `str` before `json.loads`; they now pass `read_bytes()` directly (`json.loads` accepts bytes with RFC-4627 auto-detect), which is behavior-equivalent for the BOM-less UTF-8 the app writes and slightly more tolerant of a BOM. Shaves a redundant decode off the session-list hot path. Thanks @ai-ag2026. (#5834)
+
 - **Creating a worktree-backed session no longer fails when another `cli` package shadows the agent's `cli.py`.** The worktree helper imported the agent's `cli` module with a bare `from cli import ...`, which an unrelated `cli/` namespace package earlier on `sys.path` (e.g. a dependency like `stringzilla`) could preempt — bricking worktree creation. It now loads the agent's `cli.py` by absolute path via `importlib`, bypassing `sys.path` resolution, and preserves the existing failure contract. Thanks @silent-reader-cn. (#5832)
 
 - **`settings.json` is now written atomically so a crash mid-write can't wipe your settings.** `save_settings()` and the startup default-workspace rewrite used a truncating in-place write, so a crash, full disk, or power loss between truncate and full write could leave `settings.json` empty — losing theme, workspace, tab order, and the login `password_hash` (silently dropping to no-auth). Both writes now go through a same-directory temp file → `fsync` → `os.replace`, preserving the file's existing permission mode (a hardened `0600` stays `0600`) and writing through symlinks. Thanks @ai-ag2026. (#5829)
