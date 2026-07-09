@@ -3713,6 +3713,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   window.__anchorProseIncrementalNode=_anchorProseIncrementalNode;
   function _clearAnchorProseIncrementalNode(){
     if(typeof window!=='undefined'&&window.__anchorProseIncrementalNode===_anchorProseIncrementalNode) window.__anchorProseIncrementalNode=null;
+    // Clear the per-parser MEDIA tail for each cached smd parser.
+    // _anchorProseSmdCache is a Map<key, {parser, ...}>; we can't
+    // iterate a WeakMap to clean up, but WeakMap keys become eligible
+    // for GC once the parser objects are released by the cache clear
+    // below, so the WeakMap entries are automatically removed. The
+    // explicit _smdMediaTailClear per-parser is a best-effort guard
+    // for cache entries that may hold the last strong reference.
+    if(typeof _anchorProseSmdCache!=='undefined'&&_anchorProseSmdCache.size){
+      _anchorProseSmdCache.forEach(function(st){
+        if(st&&st.parser&&typeof _smdMediaTailClear==='function'){
+          _smdMediaTailClear(st.parser);
+        }
+      });
+    }
     _anchorProseSmdCache.clear();
   }
   function _anchorHasReasoningEvents(){
@@ -4024,9 +4038,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // re-sanitize the body before the DOM is handed off to highlightCode / renderMessages.
       if(assistantBody){_sanitizeSmdLinks(assistantBody);enhanceMarkdownTables(assistantBody);}
     }
+    // Clear the per-parser MEDIA tail buffer — any incomplete MEDIA
+    // prefix the parser was holding is no longer relevant.
+    if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(_smdParser);
     _smdParser=null;
     _smdWrittenLen=0;
     _smdWrittenText='';
+    // Clear the per-parser MEDIA tail buffer — any incomplete MEDIA
+    // prefix the parser was holding is no longer relevant.
+    if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(null);
   }
   function _scheduleStreamingKatex(){
     if(_streamingKatexTimer) return;
@@ -4179,7 +4199,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const baseAddText=renderer.add_text;
     const baseSetAttr=renderer.set_attr;
     const parserFor = (data)=>{
-      return (data && data.parser) || (el && el.__smdParser) || (data && data.nodes && data.nodes[data.index]) || ('__default__');
+      return (data && data.parser) || (el && el.__smdParser) || (data && data.nodes && data.nodes[data.index]) || __SMD_PARSER_FALLBACK;
     };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
@@ -4351,15 +4371,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // keep their own pending bytes. Cleared inside _smdEndParser /
   // _clearAnchorProseIncrementalNode on stream end.
   const _SMD_MEDIA_TAIL = (typeof WeakMap!=='undefined') ? new WeakMap() : new Map();
+  // Sentinel for parserFor fallback — a dedicated object instead of
+  // a string, so WeakMap.set doesn't throw TypeError when all three
+  // parser-identity sources are unavailable (Greptile #3).
+  const __SMD_PARSER_FALLBACK = {};
   function _smdMediaTailClear(parser){
     if(_SMD_MEDIA_TAIL && parser) _SMD_MEDIA_TAIL.delete(parser);
+    // Also clear the fallback key if it was ever set
+    if(_SMD_MEDIA_TAIL && parser === __SMD_PARSER_FALLBACK) _SMD_MEDIA_TAIL.delete(parser);
   }
   function _safeSmdRenderer(el){
     const renderer=window.smd.default_renderer(el);
     const baseSetAttr=renderer.set_attr;
     const baseAddText=renderer.add_text;
     const parserFor = (data)=>{
-      return (data && data.parser) || (el && el.__smdParser) || (data && data.nodes && data.nodes[data.index]) || ('__default__');
+      return (data && data.parser) || (el && el.__smdParser) || (data && data.nodes && data.nodes[data.index]) || __SMD_PARSER_FALLBACK;
     };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
