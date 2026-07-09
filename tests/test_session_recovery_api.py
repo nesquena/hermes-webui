@@ -67,10 +67,49 @@ def test_audit_session_recovery_returns_metadata_only_progress_event_without_hos
     assert progress["event_type"] == "tool.completed"
     assert progress["family"] == "tool"
     assert progress["run_id"] == "session.recovery.audit"
+    assert progress["stored"] is False
+    assert progress["queued"] is False
     assert progress["redaction_status"] == "metadata_only"
     assert result["progress_events"] == [progress]
-    serialized_progress = json.dumps(
-        {"progress_event": progress, "progress_events": result["progress_events"]},
+    assert result["prompt_preflight"] == {
+        "available": True,
+        "action": "session.recovery.audit",
+        "boundary": "recovery_action",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["shared_confirmation_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+    policy = result["autonomy_policy"]
+    assert policy["action"] == "session.recovery.audit"
+    assert policy["approval_required"] is False
+    assert policy["approval_gates"] == []
+    assert policy["prompt_preflight_status"] == "required"
+    assert policy["model_route_hint"] == "hint:reasoning"
+    assert policy["metadata_only"] is True
+    assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
+    compaction = result["output_compaction"]
+    assert compaction["tool"] == "capy-session-recovery"
+    assert compaction["command"] == "session.recovery.audit"
+    assert compaction["metadata_only"] is True
+    assert "audit_status: warn" in compaction["text"]
+    assert "repairable_sessions: 1" in compaction["text"]
+    assert "unsafe_sessions: 0" in compaction["text"]
+    assert "approval_required: no" in compaction["text"]
+    assert "progress_run_id: session.recovery.audit" in compaction["text"]
+    assert "advisory_context: true" in compaction["text"]
+    serialized_receipts = json.dumps(
+        {
+            "prompt_preflight": result["prompt_preflight"],
+            "autonomy_policy": result["autonomy_policy"],
+            "memory_advisory": result["memory_advisory"],
+            "progress_event": progress,
+            "progress_events": result["progress_events"],
+            "output_compaction": result["output_compaction"],
+        },
         sort_keys=True,
     ).lower()
     for unsafe in (
@@ -78,7 +117,7 @@ def test_audit_session_recovery_returns_metadata_only_progress_event_without_hos
         str(live).lower(),
         str(backup).lower(),
         sid.lower(),
-        "raw_prompt",
+        '"raw_prompt":',
         "<script",
         "api_auth",
         "bearer",
@@ -87,12 +126,21 @@ def test_audit_session_recovery_returns_metadata_only_progress_event_without_hos
         "unsafe-source",
         "secret_path",
     ):
-        assert unsafe not in serialized_progress
+        assert unsafe not in serialized_receipts
+    assert not (tmp_path / "progress.jsonl").exists()
 
     missing_result = audit_session_recovery(tmp_path / "missing_SECRET_session_dir")
     assert missing_result["status"] == "ok"
     assert missing_result["progress_event"]["run_id"] == "session.recovery.audit"
-    assert "missing_secret_session_dir" not in json.dumps(missing_result["progress_event"], sort_keys=True).lower()
+    assert missing_result["progress_event"]["stored"] is False
+    assert missing_result["autonomy_policy"]["approval_required"] is False
+    assert "missing_secret_session_dir" not in json.dumps(
+        {
+            "progress_event": missing_result["progress_event"],
+            "output_compaction": missing_result["output_compaction"],
+        },
+        sort_keys=True,
+    ).lower()
 
 
 def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_path, monkeypatch):

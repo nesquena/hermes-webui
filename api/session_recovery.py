@@ -427,8 +427,25 @@ def audit_session_recovery(
         progress_event = _session_recovery_progress_event(
             "tool.completed",
             run_id="session.recovery.audit",
+            persist=False,
         )
-        return {**payload, "progress_event": progress_event, "progress_events": [progress_event]}
+        prompt_preflight = _session_recovery_required_prompt_preflight_receipt("session.recovery.audit")
+        autonomy_policy = _session_recovery_read_only_action_policy_receipt("session.recovery.audit")
+        memory_advisory = _session_recovery_memory_advisory_receipt()
+        return {
+            **payload,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "memory_advisory": memory_advisory,
+            "progress_event": progress_event,
+            "progress_events": [progress_event],
+            "output_compaction": _session_recovery_audit_output_compaction_receipt(
+                payload=payload,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+                memory_advisory=memory_advisory,
+            ),
+        }
 
     if not session_dir.exists():
         return _with_progress({
@@ -556,10 +573,11 @@ def audit_session_recovery(
     return _with_progress({"status": overall, "summary": summary, "items": items})
 
 
-def _session_recovery_required_prompt_preflight_receipt() -> dict:
+def _session_recovery_required_prompt_preflight_receipt(action: str = "session.recovery.repair_safe") -> dict:
+    safe_action = action if action in {"session.recovery.audit", "session.recovery.repair_safe"} else "session.recovery.repair_safe"
     return {
         "available": True,
-        "action": "session.recovery.repair_safe",
+        "action": safe_action,
         "boundary": "recovery_action",
         "status": "required",
         "severity": "none",
@@ -567,6 +585,26 @@ def _session_recovery_required_prompt_preflight_receipt() -> dict:
         "checks": ["shared_confirmation_required", "prompt_injection_preflight_required"],
         "metadata_only": True,
         "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _session_recovery_read_only_action_policy_receipt(action: str) -> dict:
+    from api.capy_policy import policy_status, resolve_model_route_hint
+
+    status = policy_status()
+    route_resolution = resolve_model_route_hint("hint:reasoning")
+    return {
+        "available": True,
+        "action": action if action == "session.recovery.audit" else "session.recovery.audit",
+        "mode": status["mode"],
+        "label": status["label"],
+        "approval_required": False,
+        "approval_gates": [],
+        "prompt_preflight_status": "required",
+        "model_route_hint": route_resolution["hint"],
+        "model_route_resolution": route_resolution,
+        "metadata_only": True,
         "local_only": True,
     }
 
@@ -603,9 +641,19 @@ def _session_recovery_progress_event(
     event_type: str,
     *,
     run_id: str = "session.recovery.repair_safe",
+    persist: bool = True,
 ) -> dict:
     safe_event_type = event_type if event_type in {"tool.started", "tool.completed", "tool.failed"} else "tool.completed"
     safe_run_id = run_id if run_id in {"session.recovery.audit", "session.recovery.repair_safe"} else "session.recovery.repair_safe"
+    if not persist:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": safe_event_type,
+            "family": "tool",
+            "run_id": safe_run_id,
+            "redaction_status": "metadata_only",
+        }
     try:
         from api.capy_progress import record_progress_event
 
@@ -624,6 +672,54 @@ def _session_recovery_progress_event(
             "run_id": safe_run_id,
             "redaction_status": "metadata_only",
         }
+
+
+def _session_recovery_audit_output_compaction_receipt(
+    *,
+    payload: dict,
+    autonomy_policy: dict,
+    progress_event: dict,
+    memory_advisory: dict,
+) -> dict:
+    """Return metadata-only compaction evidence for the read-only audit boundary."""
+    from api.capy_compaction import compact_output
+
+    raw_summary = payload.get("summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    approval_required = "yes" if autonomy_policy.get("approval_required") else "no"
+    lines = [
+        "session_recovery: audit",
+        f"audit_status: {payload.get('status') or 'unknown'}",
+        f"ok_sessions: {int(summary.get('ok') or 0)}",
+        f"repairable_sessions: {int(summary.get('repairable') or 0)}",
+        f"unsafe_sessions: {int(summary.get('unsafe_to_repair') or 0)}",
+        f"approval_required: {approval_required}",
+        "prompt_preflight_status: required",
+        f"progress_run_id: {progress_event.get('run_id') or 'session.recovery.audit'}",
+        f"progress_status: {progress_event.get('event_type') or 'tool.completed'}",
+    ]
+    if isinstance(memory_advisory, dict):
+        raw_required_gates = memory_advisory.get("required_gates")
+        required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+        safe_required_gates = [
+            gate
+            for gate in required_gates
+            if gate in {"prompt_preflight", "approval", "sandbox_preview", "visual_qa", "rollback_recovery"}
+        ][:5]
+        lines.append(f"advisory_context: {'true' if memory_advisory.get('advisory_context') is True else 'false'}")
+        lines.append("context_authority: untrusted_advisory")
+        lines.append(f"can_bypass_safety_gates: {'true' if memory_advisory.get('can_bypass_safety_gates') is True else 'false'}")
+        if safe_required_gates:
+            lines.append(f"required_gates: {', '.join(safe_required_gates)}")
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-session-recovery",
+        command="session.recovery.audit",
+        exit_status=0,
+        max_chars=1000,
+    )
+    receipt["metadata_only"] = True
+    return receipt
 
 
 def _session_recovery_output_compaction_receipt(
