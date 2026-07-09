@@ -16087,11 +16087,15 @@ def recovery_snapshot() -> dict[str, Any]:
         latest_module_repair = module_events[0]
         counts["queued_event_count"] += len(module_events)
         module_summary["queued_repair_count"] = len(module_events)
-        module_summary["latest_repair_event"] = {
+        latest_module_repair_event: dict[str, Any] = {
             "event_id": _context_value(latest_module_repair.get("event_id"), 120),
             "event_name": _context_value(latest_module_repair.get("event_name"), 120),
             "status": _context_value(latest_module_repair.get("status") or "queued", 80),
         }
+        latest_module_memory_advisory = latest_module_repair.get("memory_advisory")
+        if isinstance(latest_module_memory_advisory, dict):
+            latest_module_repair_event["memory_advisory"] = _memory_advisory_public_summary(latest_module_memory_advisory)
+        module_summary["latest_repair_event"] = latest_module_repair_event
     for manifest in manifests_dir().glob("*/space.json"):
         try:
             space = json.loads(manifest.read_text(encoding="utf-8"))
@@ -16114,6 +16118,9 @@ def recovery_snapshot() -> dict[str, Any]:
                 latest_autonomy_policy = latest_space_repair.get("autonomy_policy")
                 if isinstance(latest_autonomy_policy, dict):
                     latest_space_repair_event["autonomy_policy"] = _action_policy_receipt_metadata_summary(latest_autonomy_policy)
+                latest_memory_advisory = latest_space_repair.get("memory_advisory")
+                if isinstance(latest_memory_advisory, dict):
+                    latest_space_repair_event["memory_advisory"] = _memory_advisory_public_summary(latest_memory_advisory)
                 summary["latest_space_repair_event"] = latest_space_repair_event
             queued_events_by_widget: dict[str, list[dict[str, Any]]] = {}
             for event in list_widget_events(summary["space_id"], limit=100):

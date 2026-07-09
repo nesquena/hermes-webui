@@ -848,7 +848,12 @@ def test_module_repair_event_list_persists_server_memory_advisory_receipt(monkey
     }
     assert listed[0]["payload_summary"] == {"reason": "safe repair metadata"}
 
-    serialized = json.dumps({"queued": queued, "listed": listed[0]}, sort_keys=True).lower()
+    snapshot = spaces.recovery_snapshot()
+    module_summary = next(module for module in snapshot["modules"] if module["module_id"] == "module-repair-memory-lab")
+    assert module_summary["latest_repair_event"]["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(module_summary["latest_repair_event"])
+
+    serialized = json.dumps({"queued": queued, "listed": listed[0], "snapshot": snapshot}, sort_keys=True).lower()
     assert "trusted_system_memory" not in serialized
     assert "forged_memory_authority" not in serialized
     assert "secret_value_do_not_leak" not in serialized
@@ -1227,7 +1232,12 @@ def test_space_repair_event_list_persists_server_memory_advisory_receipt(monkeyp
     assert legacy_summary is not None
     assert "memory_advisory" not in legacy_summary
 
-    serialized = json.dumps({"queued": queued, "listed": listed[0]}, sort_keys=True).lower()
+    snapshot = spaces.recovery_snapshot()
+    space_summary = next(space for space in snapshot["spaces"] if space["space_id"] == created["space_id"])
+    assert space_summary["latest_space_repair_event"]["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(space_summary["latest_space_repair_event"])
+
+    serialized = json.dumps({"queued": queued, "listed": listed[0], "snapshot": snapshot}, sort_keys=True).lower()
     assert "trusted_system_memory" not in serialized
     assert "forged_memory_authority" not in serialized
     assert "secret_value_do_not_leak" not in serialized
@@ -21990,11 +22000,12 @@ def test_queue_recovery_module_repair_event_metadata_only(monkeypatch, tmp_path)
     assert event["details"]["autonomy_policy"]["metadata_only"] is True
     assert snapshot["summary"]["queued_event_count"] == 1
     assert snapshot["modules"][0]["queued_repair_count"] == 1
-    assert snapshot["modules"][0]["latest_repair_event"] == {
-        "event_id": queued["event_id"],
-        "event_name": "agent.repair",
-        "status": "queued",
-    }
+    latest_repair_event = snapshot["modules"][0]["latest_repair_event"]
+    assert latest_repair_event["event_id"] == queued["event_id"]
+    assert latest_repair_event["event_name"] == "agent.repair"
+    assert latest_repair_event["status"] == "queued"
+    assert latest_repair_event["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(latest_repair_event)
     assert "source" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
