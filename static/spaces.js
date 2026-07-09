@@ -164,11 +164,12 @@
     const eventName = String(result && result.event_name || 'widget.event').trim();
     const widgetId = String(result && result.widget_id || '').trim();
     const eventId = String(result && result.event_id || '').trim();
-    const title = eventName === 'widget.refresh' ? 'Weather refresh queued' : (eventName === 'agent.prompt' ? 'Weather prompt queued' : 'Widget event queued');
+    const eventLabel = eventName === 'widget.refresh' ? 'Weather refresh queued' : (eventName === 'agent.prompt' ? 'Weather prompt queued' : 'Widget event queued');
     const meta = [widgetId, eventName, eventId].filter(Boolean).join(' · ');
-    return '<div class="capy-spaces-card" role="status"><h3>'+escapeHtml(title)+'</h3>' +
-      '<div class="capy-spaces-muted">'+escapeHtml(meta || 'Metadata-only event queued')+'</div>' +
-      '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div>' +
+    const summary = eventLabel + (meta ? ' · '+meta : '');
+    return '<div class="capy-spaces-card" role="status"><h3>Widget event receipt</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(summary || 'Metadata-only event queued')+'</div>' +
+      '<div class="capy-spaces-muted">Metadata-only preflight, policy, progress, memory advisory/no-authority, and compaction evidence. Prompt bodies and generated widget code stay redacted.</div>' +
       renderPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
       renderPackageProgressEvidence(result && result.progress_event, 'Widget event progress') +

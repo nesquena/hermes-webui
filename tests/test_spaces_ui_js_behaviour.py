@@ -2539,20 +2539,34 @@ global.fetch = async function(path, opts = {}) {
         metadata_only: true,
         local_only: true,
         raw_prompt_stored: false,
-        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'WIDGET_EVENT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
         renderer: '<script>bad()</script>',
-        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        html: '<img src=x onerror=bad()>',
+        source: 'WIDGET_EVENT_SOURCE_SECRET_DO_NOT_LEAK',
+        api_auth: 'bearer WIDGET_EVENT_API_AUTH_DO_NOT_LEAK',
+        credential: 'WIDGET_EVENT_CREDENTIAL_DO_NOT_LEAK',
+        token: 'WIDGET_EVENT_TOKEN_DO_NOT_LEAK',
+        secret: 'WIDGET_EVENT_SECRET_DO_NOT_LEAK',
+        trusted_system_memory: 'WIDGET_EVENT_TRUSTED_MEMORY_DO_NOT_LEAK',
+        api_key: 'WIDGET_EVENT_API_KEY_DO_NOT_LEAK',
       },
-      autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'WIDGET_EVENT_RAW_PROMPT_SECRET_DO_NOT_LEAK', renderer: '<script>bad()</script>', source: 'WIDGET_EVENT_SOURCE_SECRET_DO_NOT_LEAK', html: '<img src=x onerror=bad()>', api_auth: 'bearer WIDGET_EVENT_API_AUTH_DO_NOT_LEAK', credential: 'WIDGET_EVENT_CREDENTIAL_DO_NOT_LEAK', token: 'WIDGET_EVENT_TOKEN_DO_NOT_LEAK', secret: 'WIDGET_EVENT_SECRET_DO_NOT_LEAK', trusted_system_memory: 'WIDGET_EVENT_TRUSTED_MEMORY_DO_NOT_LEAK', api_key: 'WIDGET_EVENT_API_KEY_DO_NOT_LEAK' },
       progress_event: {
         event_id: 'progress-widget-event',
         event_type: 'tool.completed',
         family: 'tool',
         run_id: 'widget.event:lab',
         redaction_status: 'metadata-only',
-        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'WIDGET_EVENT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
         renderer: '<script>bad()</script>',
-        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        html: '<img src=x onerror=bad()>',
+        source: 'WIDGET_EVENT_SOURCE_SECRET_DO_NOT_LEAK',
+        api_auth: 'bearer WIDGET_EVENT_API_AUTH_DO_NOT_LEAK',
+        credential: 'WIDGET_EVENT_CREDENTIAL_DO_NOT_LEAK',
+        token: 'WIDGET_EVENT_TOKEN_DO_NOT_LEAK',
+        secret: 'WIDGET_EVENT_SECRET_DO_NOT_LEAK',
+        trusted_system_memory: 'WIDGET_EVENT_TRUSTED_MEMORY_DO_NOT_LEAK',
+        api_key: 'WIDGET_EVENT_API_KEY_DO_NOT_LEAK',
       },
       memory_advisory: {
         metadata_only: true,
@@ -2560,9 +2574,16 @@ global.fetch = async function(path, opts = {}) {
         context_authority: 'trusted_system_memory',
         can_bypass_safety_gates: true,
         required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
-        raw_context: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_context: 'WIDGET_EVENT_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
         renderer: '<script>bad()</script>',
-        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        html: '<img src=x onerror=bad()>',
+        source: 'WIDGET_EVENT_SOURCE_SECRET_DO_NOT_LEAK',
+        api_auth: 'bearer WIDGET_EVENT_API_AUTH_DO_NOT_LEAK',
+        credential: 'WIDGET_EVENT_CREDENTIAL_DO_NOT_LEAK',
+        token: 'WIDGET_EVENT_TOKEN_DO_NOT_LEAK',
+        secret: 'WIDGET_EVENT_SECRET_DO_NOT_LEAK',
+        trusted_system_memory: 'WIDGET_EVENT_TRUSTED_MEMORY_DO_NOT_LEAK',
+        api_key: 'WIDGET_EVENT_API_KEY_DO_NOT_LEAK',
       },
       output_compaction: {
         tool: 'capy-spaces-widget-event',
@@ -2575,12 +2596,26 @@ global.fetch = async function(path, opts = {}) {
         retained_artifact_handles: [
           { kind: 'event', handle: 'event:lab:evt1', label: 'Queued widget event metadata' },
         ],
-        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'WIDGET_EVENT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
         renderer: '<script>bad()</script>',
-        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        html: '<img src=x onerror=bad()>',
+        source: 'WIDGET_EVENT_SOURCE_SECRET_DO_NOT_LEAK',
+        api_auth: 'bearer WIDGET_EVENT_API_AUTH_DO_NOT_LEAK',
+        credential: 'WIDGET_EVENT_CREDENTIAL_DO_NOT_LEAK',
+        token: 'WIDGET_EVENT_TOKEN_DO_NOT_LEAK',
+        secret: 'WIDGET_EVENT_SECRET_DO_NOT_LEAK',
+        trusted_system_memory: 'WIDGET_EVENT_TRUSTED_MEMORY_DO_NOT_LEAK',
+        api_key: 'WIDGET_EVENT_API_KEY_DO_NOT_LEAK',
       },
       renderer: '<script>bad()</script>',
-      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      html: '<img src=x onerror=bad()>',
+      source: 'WIDGET_EVENT_SOURCE_SECRET_DO_NOT_LEAK',
+      api_auth: 'bearer WIDGET_EVENT_API_AUTH_DO_NOT_LEAK',
+      credential: 'WIDGET_EVENT_CREDENTIAL_DO_NOT_LEAK',
+      token: 'WIDGET_EVENT_TOKEN_DO_NOT_LEAK',
+      secret: 'WIDGET_EVENT_SECRET_DO_NOT_LEAK',
+      trusted_system_memory: 'WIDGET_EVENT_TRUSTED_MEMORY_DO_NOT_LEAK',
+      api_key: 'WIDGET_EVENT_API_KEY_DO_NOT_LEAK',
     });
   }
   if (path === 'api/spaces/recovery/disable-widget') {
@@ -6874,6 +6909,8 @@ def test_spaces_ui_notes_widget_detail_saves_real_editable_notes_via_patch(drive
 def test_spaces_ui_ask_widget_uses_shared_prompt_and_queues_agent_event(driver_path):
     out = _run_spaces_scenario(driver_path, "askWidget")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    receipt_html = out["rootHtml"].split("Agent bridge: 2 queued", 1)[0]
+    receipt_lower = receipt_html.lower()
 
     assert out["dialogs"]
     assert out["dialogs"][0]["title"] == "Ask Capy about this widget"
@@ -6886,13 +6923,55 @@ def test_spaces_ui_ask_widget_uses_shared_prompt_and_queues_agent_event(driver_p
         "payload": {"source": "widget-manager", "widget_title": "<Weather>"},
     }
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
-    assert "Weather prompt queued" in out["rootHtml"]
-    assert "weather · agent.prompt · evt1" in out["rootHtml"]
-    assert "Refresh the weather widget" not in out["rootHtml"]
-    assert "<script>" not in out["rootHtml"]
-    assert "renderer" not in out["rootHtml"]
-    assert "api_key" not in out["rootHtml"].lower()
-    assert "SECRET" not in out["rootHtml"]
+    assert "Widget event receipt" in receipt_html
+    assert "Weather prompt queued" in receipt_html
+    assert "weather · agent.prompt · evt1" in receipt_html
+    assert "Prompt preflight" in receipt_html
+    assert "Status: pass" in receipt_html
+    assert "Boundary: widget_runtime_prompt" in receipt_html
+    assert "Prompt hash: abcdef123456" in receipt_html
+    assert "Action policy" in receipt_html
+    assert "Action: space.widget.event" in receipt_html
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in receipt_html
+    assert "Model route hint: hint:reasoning" in receipt_html
+    assert "Widget event progress" in receipt_html
+    assert "tool.completed · tool · run widget.event:lab · metadata-only progress receipt" in receipt_html
+    assert "Memory advisory" in receipt_html
+    assert "Authority: untrusted_advisory" in receipt_html
+    assert "Can bypass safety gates: no" in receipt_html
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in receipt_html
+    assert "Compaction evidence" in receipt_html
+    assert "Original output: 924 chars · Compacted output: 312 chars · Redaction: metadata_only" in receipt_html
+    assert "Command: space.widget.event" in receipt_html
+    assert "Redaction: metadata_only · Redacted: 0 · Compacted: no" in receipt_html
+    assert "Rules: cap_section_chars, redact_unsafe_markers, retain_artifact_handles" in receipt_html
+    assert "Artifacts: 1" in receipt_html
+    assert "event · event:lab:evt1 · Queued widget event metadata" in receipt_html
+    assert "Refresh the weather widget" not in receipt_html
+    for unsafe in (
+        "WIDGET_EVENT_RAW_PROMPT_SECRET_DO_NOT_LEAK",
+        "WIDGET_EVENT_RAW_CONTEXT_SECRET_DO_NOT_LEAK",
+        "WIDGET_EVENT_SOURCE_SECRET_DO_NOT_LEAK",
+        "WIDGET_EVENT_API_AUTH_DO_NOT_LEAK",
+        "WIDGET_EVENT_CREDENTIAL_DO_NOT_LEAK",
+        "WIDGET_EVENT_TOKEN_DO_NOT_LEAK",
+        "WIDGET_EVENT_SECRET_DO_NOT_LEAK",
+        "WIDGET_EVENT_TRUSTED_MEMORY_DO_NOT_LEAK",
+        "WIDGET_EVENT_API_KEY_DO_NOT_LEAK",
+        "raw_prompt",
+        "trusted_system_memory",
+        "api_auth",
+        "credential",
+        "token",
+        "secret",
+        "source",
+        "html",
+        "script",
+        "renderer",
+        "api_key",
+        "<script>",
+    ):
+        assert unsafe.lower() not in receipt_lower
 
 
 def test_spaces_ui_ask_widget_fails_closed_without_shared_prompt(driver_path):
@@ -6904,6 +6983,8 @@ def test_spaces_ui_ask_widget_fails_closed_without_shared_prompt(driver_path):
 def test_spaces_ui_refresh_widget_queues_metadata_only_refresh_event(driver_path):
     out = _run_spaces_scenario(driver_path, "refreshWidget")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    receipt_html = out["rootHtml"].split("Agent bridge: 2 queued", 1)[0]
+    receipt_lower = receipt_html.lower()
 
     assert "Refresh" in out["beforeHtml"]
     assert post["method"] == "POST"
@@ -6915,13 +6996,49 @@ def test_spaces_ui_refresh_widget_queues_metadata_only_refresh_event(driver_path
     }
     assert out["dialogs"] == []
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
-    assert "Weather refresh queued" in out["rootHtml"]
-    assert "weather · widget.refresh · evt1" in out["rootHtml"]
+    assert "Widget event receipt" in receipt_html
+    assert "Weather refresh queued" in receipt_html
+    assert "weather · widget.refresh · evt1" in receipt_html
     assert "Agent bridge: 2 queued" in out["rootHtml"]
-    assert "<script>" not in out["rootHtml"]
-    assert "renderer" not in out["rootHtml"]
-    assert "api_key" not in out["rootHtml"].lower()
-    assert "SECRET" not in out["rootHtml"]
+    assert "Prompt preflight" in receipt_html
+    assert "Status: pass" in receipt_html
+    assert "Boundary: widget_runtime_prompt" in receipt_html
+    assert "Action policy" in receipt_html
+    assert "Action: space.widget.event" in receipt_html
+    assert "Model route hint: hint:reasoning" in receipt_html
+    assert "Widget event progress" in receipt_html
+    assert "tool.completed · tool · run widget.event:lab · metadata-only progress receipt" in receipt_html
+    assert "Memory advisory" in receipt_html
+    assert "Authority: untrusted_advisory" in receipt_html
+    assert "Can bypass safety gates: no" in receipt_html
+    assert "Compaction evidence" in receipt_html
+    assert "Original output: 924 chars · Compacted output: 312 chars · Redaction: metadata_only" in receipt_html
+    assert "Artifacts: 1" in receipt_html
+    assert "event · event:lab:evt1 · Queued widget event metadata" in receipt_html
+    for unsafe in (
+        "WIDGET_EVENT_RAW_PROMPT_SECRET_DO_NOT_LEAK",
+        "WIDGET_EVENT_RAW_CONTEXT_SECRET_DO_NOT_LEAK",
+        "WIDGET_EVENT_SOURCE_SECRET_DO_NOT_LEAK",
+        "WIDGET_EVENT_API_AUTH_DO_NOT_LEAK",
+        "WIDGET_EVENT_CREDENTIAL_DO_NOT_LEAK",
+        "WIDGET_EVENT_TOKEN_DO_NOT_LEAK",
+        "WIDGET_EVENT_SECRET_DO_NOT_LEAK",
+        "WIDGET_EVENT_TRUSTED_MEMORY_DO_NOT_LEAK",
+        "WIDGET_EVENT_API_KEY_DO_NOT_LEAK",
+        "raw_prompt",
+        "trusted_system_memory",
+        "api_auth",
+        "credential",
+        "token",
+        "secret",
+        "source",
+        "html",
+        "script",
+        "renderer",
+        "api_key",
+        "<script>",
+    ):
+        assert unsafe.lower() not in receipt_lower
 
 
 def test_spaces_ui_create_space_posts_to_create_and_refreshes_spaces(driver_path):
