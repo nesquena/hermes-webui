@@ -4178,6 +4178,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const renderer=window.smd.default_renderer(el);
     const baseAddText=renderer.add_text;
     const baseSetAttr=renderer.set_attr;
+    const parserFor = (data)=>{
+      return (data && data.parser) || (el && el.__smdParser) || (data && data.nodes && data.nodes[data.index]) || ('__default__');
+    };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
       if(!parent||_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
@@ -4186,7 +4189,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // instead of plain text. The fade renderer would otherwise wrap every
       // word in a stream-fade-word span, leaving MEDIA: paths visible.
       if(/MEDIA:/.test(String(text||''))){
-        _smdMediaAwareAddText(baseAddText, parent, data, text);
+        _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parserFor(data));
         return;
       }
       const frag=document.createDocumentFragment();
@@ -4251,73 +4254,116 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // what the full renderMd() pipeline does on the settled assistant message.
   // Without this, streamed prose shows MEDIA:C:\... as literal text until the
   // turn settles and the full re-render swaps it for the real <img>.
-  function _smdMediaAwareAddText(baseAddText, parent, data, text){
+  // SAFETY & CROSS-CHUNK SPLITS (Greptile #1 + #2):
+  //   1. Prose slices go back to baseAddText (which calls createTextNode),
+  //      NOT through DOMParser — mixed prose with HTML entities /
+  //      malicious <img onerror> stays as literal text.
+  //   2. Each MEDIA token's HTML (from _inlineMediaHtmlForRef) is handed
+  //      to DOMParser one at a time — only trusted markup is parsed.
+  //   3. A MEDIA prefix split across smd flushes (e.g. "MEDIA:" then
+  //      "foo.png") is buffered in a per-parser tail buffer and completed
+  //      on the next add_text call.
+  const _MEDIA_TAIL_MAX = 4096; // bytes; defensive cap on per-parser buffer
+  function _smdMediaTailSet(tailMap, parser, chunk){
+    if(chunk) tailMap.set(parser, chunk);
+    else tailMap.delete(parser);
+  }
+  function _smdMediaAwareAddText(baseAddText, parent, data, text, tailMap, parser){
     const value=String(text||'');
-    // Fast path: no MEDIA in this chunk OR no DOM parent to attach to —
-    // hand the whole text to the underlying smd behaviour exactly once.
-    // baseAddText may itself be the fade renderer's word-wrap (which can
-    // recurse into MEDIA detection on plain runs), so AVOID calling it when
-    // we KNOW we have a MEDIA token and have already spliced the result.
-    if(!value){baseAddText&&baseAddText(data,value);return;}
-    if(!parent||!/MEDIA:/.test(value)) {
-      // Even if a MEDIA token is absent, delegate fully to baseAddText so
-      // the fade renderer keeps its word-fade semantics for plain prose.
-      if(baseAddText) baseAddText(data,value);
+    const tails=tailMap||(typeof _SMD_MEDIA_TAIL!=='undefined'&&_SMD_MEDIA_TAIL)||null;
+    if(!value){
+      if(baseAddText) baseAddText(data,'');
       return;
     }
-    // Split the chunk into runs of plain text + MEDIA references, converting
-    // each MEDIA token into the same DOM the renderMd() MEDIA restore emits
-    // (via _inlineMediaHtmlForRef, exported from ui.js earlier in the
-    // script load order).
-    const re=/MEDIA:([^\s\)\]]+)/g;
-    let last=0, m, html='';
-    while((m=re.exec(value))){
-      if(m.index>last) html+=value.slice(last,m.index);
-      const rawRef=m[1];
-      try{
-        const mediaHtml=typeof _inlineMediaHtmlForRef==='function'
-          ? _inlineMediaHtmlForRef(rawRef)
-          : '';
-        if(mediaHtml) html+=mediaHtml;
-        else html+=m[0];
-      }catch(_){ html+=m[0]; }
-      last=m.index+m[0].length;
+    // Pull any pending tail from a previous (split) chunk.
+    let lead = tails && parser && tails.get ? tails.get(parser) : null;
+    if(lead){
+      tails.delete(parser);
+      // If lead by itself matches a complete MEDIA: token, emit it now
+      // and process `value` from scratch; otherwise prepend and try to
+      // match across the boundary.
+      const m0 = /^MEDIA:(\S+?)(?=[\s)\]]*$)/.exec(lead);
+      if(m0 && lead === 'MEDIA:'+m0[1]){
+        _smdAppendMediaNode(parent, m0[1]);
+        lead = null;
+      }
     }
-    if(last<value.length) html+=value.slice(last);
-    // Render the composed HTML into a detached container, then splice its
-    // children into the smd parent in order. Using a detached template via
-    // DOMParser keeps us from executing <script> tags.
+    // Fast path: no MEDIA tokens in the (possibly combined) string.
+    if(!/MEDIA:/.test(lead + value)){
+      if(baseAddText) baseAddText(data, lead ? lead + value : value);
+      if(lead && tails && parser) _smdMediaTailSet(tails, parser, null);
+      return;
+    }
+    // Walk the combined string, slicing into prose + MEDIA token runs.
+    // Prose runs go through baseAddText (text nodes). MEDIA tokens go
+    // through the single-token DOMParser helper.
+    const combined = lead ? lead + value : value;
+    const re=/MEDIA:([^\s\)\]]+)/g;
+    let last=0, m;
+    let unmatchedTail=null;
+    while((m=re.exec(combined))){
+      if(m.index>last){
+        const slice = combined.slice(last, m.index);
+        if(baseAddText) baseAddText(data, slice);
+      }
+      _smdAppendMediaNode(parent, m[1]);
+      last = m.index + m[0].length;
+    }
+    // Tail buffer — hold trailing bytes that look like an unterminated
+    // MEDIA prefix; write through plain prose, clear empty rests.
+    const rest = combined.slice(last);
+    if(rest){
+      const endsWithBarePrefix = rest.endsWith('MEDIA:');
+      const mEnd = /MEDIA:([^\s)\]]*?)$/.exec(rest);
+      const endsWithOpenRef = !!(mEnd && mEnd[1].length > 0);
+      if((endsWithBarePrefix || endsWithOpenRef)
+         && rest.length < _MEDIA_TAIL_MAX){
+        unmatchedTail = rest;
+      } else if(baseAddText){
+        baseAddText(data, rest);
+      }
+    }
+    if(tails && parser){
+      _smdMediaTailSet(tails, parser, unmatchedTail);
+    }
+  }
+  // Single-token DOM splice. Only ever fed the output of
+  // _inlineMediaHtmlForRef (trusted markup fragment). Plain text
+  // goes through baseAddText → createTextNode — NEVER here.
+  function _smdAppendMediaNode(parent, rawRef){
+    if(!parent||!rawRef) return;
+    const mediaHtml = (typeof _inlineMediaHtmlForRef==='function')
+      ? _inlineMediaHtmlForRef(String(rawRef))
+      : '';
+    if(!mediaHtml) return;
     let host=null;
     try{
-      const doc=new DOMParser().parseFromString('<div>'+html+'</div>','text/html');
+      const doc=new DOMParser().parseFromString('<div>'+mediaHtml+'</div>','text/html');
       host=doc.body&&doc.body.firstChild;
     }catch(_){ host=null; }
-    if(!host||!host.childNodes||!host.childNodes.length){
-      // Nothing splittable: render the original text faithfully via baseAddText
-      // (no recursion, because we already failed to detect MEDIA in any form).
-      if(baseAddText) baseAddText(data,value);
-      return;
-    }
-    // Move children out of host into a fragment so we don't import host's
-    // wrapping <div> (which would also break any subsequent sibling that
-    // smd expects to come next at parent level).
+    if(!host||!host.childNodes||!host.childNodes.length) return;
     const frag=document.createDocumentFragment();
     while(host.firstChild) frag.appendChild(host.firstChild);
     parent.appendChild(frag);
-    // NOTE: we deliberately do NOT call baseAddText here. The fade renderer
-    // would otherwise re-wrap each word in stream-fade-word spans or, in the
-    // non-fade path, append an empty text node — both are unnecessary since
-    // we have already appended the real DOM directly to the smd parent, and
-    // smd's position bookkeeping only cares about the parent cursor, which
-    // is now updated by the appended nodes.
+  }
+  // Per-parser tail buffer keyed by parser instance so concurrent
+  // smd parsers (live prose + anchor-scene rows + tool-card streams)
+  // keep their own pending bytes. Cleared inside _smdEndParser /
+  // _clearAnchorProseIncrementalNode on stream end.
+  const _SMD_MEDIA_TAIL = (typeof WeakMap!=='undefined') ? new WeakMap() : new Map();
+  function _smdMediaTailClear(parser){
+    if(_SMD_MEDIA_TAIL && parser) _SMD_MEDIA_TAIL.delete(parser);
   }
   function _safeSmdRenderer(el){
     const renderer=window.smd.default_renderer(el);
     const baseSetAttr=renderer.set_attr;
     const baseAddText=renderer.add_text;
+    const parserFor = (data)=>{
+      return (data && data.parser) || (el && el.__smdParser) || (data && data.nodes && data.nodes[data.index]) || ('__default__');
+    };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
-      _smdMediaAwareAddText(baseAddText, parent, data, text);
+      _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parserFor(data));
     };
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;
