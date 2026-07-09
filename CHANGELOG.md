@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **Appending run-journal events no longer gets slower as a session's journal grows.** The next sequence number was recomputed by scanning existing entries on every append (O(n²) over a session's lifetime); it's now cached per journal path (guarded by a dedicated lock, evicted on journal delete), making each append O(1). Thanks @ai-ag2026. (#5799)
+
 - **The login page's connectivity retry timer is now cleared correctly.** The retry poller is started with `setInterval` but was cleared with `clearTimeout`, so once the server came back the interval kept firing (a zombie timer) instead of stopping and reloading once. It now uses `clearInterval`. Thanks @ai-ag2026. (#5801)
 
 - **A background wakeup no longer eats the assistant reply that preceded it.** When a background-process wakeup prompt arrived after an assistant response, the response could disappear from the interactive transcript (it remained in the DB and export). Background wakeups now render as their own distinct "Background wakeup" status row aligned to the message rail — with attachment support — leaving the prior reply intact. Thanks @Isla-Liu. (#5766)
