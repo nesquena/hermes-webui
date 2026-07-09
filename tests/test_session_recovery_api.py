@@ -89,6 +89,14 @@ def test_audit_session_recovery_returns_metadata_only_progress_event_without_hos
     assert policy["approval_gates"] == []
     assert policy["prompt_preflight_status"] == "required"
     assert policy["model_route_hint"] == "hint:reasoning"
+    route_resolution = policy["model_route_resolution"]
+    assert route_resolution["hint"] == "hint:reasoning"
+    assert route_resolution["label"] == "Reasoning"
+    assert route_resolution["resolved_provider"]
+    assert route_resolution["resolved_model"]
+    assert route_resolution["resolution"] in {"configured", "default_fallback"}
+    assert route_resolution["metadata_only"] is True
+    assert route_resolution["local_only"] is True
     assert policy["metadata_only"] is True
     assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
     compaction = result["output_compaction"]
