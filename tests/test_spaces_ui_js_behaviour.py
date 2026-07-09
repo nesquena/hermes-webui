@@ -5327,6 +5327,8 @@ def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path
 def test_spaces_ui_edit_widget_uses_patch_route_and_preserves_source_bodies(driver_path):
     out = _run_spaces_scenario(driver_path, "editWidgetSave")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/patch")
+    html = out["rootHtml"]
+    receipt_html = html.split("Widgets for lab", 1)[0]
 
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {
@@ -5341,8 +5343,44 @@ def test_spaces_ui_edit_widget_uses_patch_route_and_preserves_source_bodies(driv
     }
     assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
-    assert "<script>" not in out["rootHtml"]
-    assert "renderer" not in out["rootHtml"]
+    assert "Widget update receipt" in receipt_html
+    assert "Confirmed widget update completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence." in receipt_html
+    assert "Prompt preflight" in receipt_html
+    assert "Status: pass" in receipt_html
+    assert "Boundary: creator_commit" in receipt_html
+    assert "Action policy" in receipt_html
+    assert "Action: space.widget.patch" in receipt_html
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in receipt_html
+    assert "Model route hint: hint:reasoning" in receipt_html
+    assert "Widget patch progress" in receipt_html
+    assert "tool.completed · tool · run widget.patch:lab:weather · metadata-only progress receipt" in receipt_html
+    assert "Memory advisory" in receipt_html
+    assert "Authority: untrusted_advisory" in receipt_html
+    assert "Can bypass safety gates: no" in receipt_html
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in receipt_html
+    assert "Compaction evidence" in receipt_html
+    assert receipt_html.index("Memory advisory") < receipt_html.index("Compaction evidence")
+    assert "Original output: 624 chars · Compacted output: 284 chars · Redaction: metadata_only" in receipt_html
+    assert "Command: space.widget.patch" in receipt_html
+    assert "Redaction: metadata_only · Redacted: 0 · Compacted: no" in receipt_html
+    assert "Rules: cap_section_chars, redact_unsafe_markers, retain_artifact_handles" in receipt_html
+    assert "Artifacts: 2" in receipt_html
+    assert "space · space:lab · Space action metadata" in receipt_html
+    assert "widget · widget:lab:weather · Widget patch metadata" in receipt_html
+    for unsafe in (
+        "PATCH_RAW_PROMPT_SECRET_DO_NOT_LEAK",
+        "PATCH_RAW_CONTEXT_SECRET_DO_NOT_LEAK",
+        "PATCH_API_KEY_SECRET_DO_NOT_LEAK",
+        "TRUSTED_SYSTEM_MEMORY_DO_NOT_LEAK",
+        "<script>",
+        "renderer",
+        "api_key",
+        "SECRET",
+        "raw_context",
+        "raw_prompt",
+        "trusted_system_memory",
+    ):
+        assert unsafe not in html
 
 
 def test_spaces_ui_move_widget_posts_layout_patch_and_prepends_update_receipt(driver_path):
