@@ -2059,7 +2059,74 @@ global.fetch = async function(path, opts = {}) {
     return response({ revisions: labRevisions });
   }
   if (path === 'api/spaces/widget/upsert') {
-    return response({ space_id: 'lab', widget: { id: 'notes', kind: 'markdown', title: 'Notes', layout: { x: 2, y: 3, w: 8, h: 5 } }, revision_event_id: 'rev2' });
+    return response({
+      space_id: 'lab',
+      widget: { id: 'notes', kind: 'markdown', title: 'Notes', layout: { x: 2, y: 3, w: 8, h: 5 }, renderer: '<script>bad()</script>', api_key: 'UPSERT_API_KEY_SECRET_DO_NOT_LEAK' },
+      revision_event_id: 'rev2',
+      prompt_preflight: {
+        status: 'pass',
+        boundary: 'creator_commit',
+        severity: 'none',
+        checks: ['widget_upsert_metadata_only', 'prompt_injection_preflight_required'],
+        metadata_only: true,
+        local_only: true,
+        raw_prompt_stored: false,
+        raw_prompt: 'UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        raw_context: 'UPSERT_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'UPSERT_API_KEY_SECRET_DO_NOT_LEAK',
+      },
+      autonomy_policy: {
+        available: true,
+        action: 'space.widget.upsert',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['creator_commit'],
+        prompt_preflight_status: 'pass',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        raw_context: 'UPSERT_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'UPSERT_API_KEY_SECRET_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-widget-upsert',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'widget.upsert:lab',
+        redaction_status: 'metadata-only',
+        metadata_only: true,
+        raw_prompt: 'UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        raw_context: 'UPSERT_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'UPSERT_API_KEY_SECRET_DO_NOT_LEAK',
+      },
+      output_compaction: {
+        tool: 'capy-spaces-tool-action',
+        command: 'space.widget.upsert',
+        exit_status: 0,
+        original_chars: 512,
+        compacted_chars: 260,
+        redaction_status: 'metadata_only',
+        rules_applied: ['cap_section_chars', 'redact_unsafe_markers', 'retain_artifact_handles'],
+        text: 'space_action: space.widget.upsert\nprogress_run_id: widget.upsert:lab',
+        retained_artifact_handles: [
+          { kind: 'space', handle: 'space:lab', label: 'Space action metadata' },
+          { kind: 'widget', handle: 'widget:lab:notes', label: 'Widget upsert metadata' },
+        ],
+        raw_prompt: 'UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        raw_context: 'UPSERT_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'UPSERT_API_KEY_SECRET_DO_NOT_LEAK',
+      },
+      raw_prompt: 'UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+      raw_context: 'UPSERT_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+      renderer: '<script>bad()</script>',
+      api_key: 'UPSERT_API_KEY_SECRET_DO_NOT_LEAK',
+    });
   }
   if (path === 'api/spaces/widget/patch') {
     return response({
@@ -5314,14 +5381,49 @@ def test_spaces_ui_widget_manager_shows_inline_agent_bridge_status(driver_path):
 def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path):
     out = _run_spaces_scenario(driver_path, "save")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/upsert")
+    html = out["rootHtml"]
+    receipt_html = html.split("Widgets for lab", 1)[0]
 
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {
         "space_id": "lab",
         "widget": {"id": "notes", "title": "Notes", "kind": "markdown", "layout": {"x": 2, "y": 3, "w": 8, "h": 5}},
+        "includeSafetyReceipts": True,
     }
     assert not any(call["path"] == "api/spaces/widget/patch" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "Widget create/update receipt" in receipt_html
+    assert "Confirmed widget create/update completed with metadata-only preflight, policy, progress, and compaction evidence." in receipt_html
+    assert "Prompt preflight" in receipt_html
+    assert "Status: pass" in receipt_html
+    assert "Boundary: creator_commit" in receipt_html
+    assert "Action policy" in receipt_html
+    assert "Action: space.widget.upsert" in receipt_html
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in receipt_html
+    assert "Model route hint: hint:reasoning" in receipt_html
+    assert "Widget upsert progress" in receipt_html
+    assert "tool.completed · tool · run widget.upsert:lab · metadata-only progress receipt" in receipt_html
+    assert "Compaction evidence" in receipt_html
+    assert "Original output: 512 chars · Compacted output: 260 chars · Redaction: metadata_only" in receipt_html
+    assert "Command: space.widget.upsert" in receipt_html
+    assert "Redaction: metadata_only · Redacted: 0 · Compacted: no" in receipt_html
+    assert "Rules: cap_section_chars, redact_unsafe_markers, retain_artifact_handles" in receipt_html
+    assert "Artifacts: 2" in receipt_html
+    assert "space · space:lab · Space action metadata" in receipt_html
+    assert "widget · widget:lab:notes · Widget upsert metadata" in receipt_html
+    for unsafe in (
+        "UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK",
+        "UPSERT_RAW_CONTEXT_SECRET_DO_NOT_LEAK",
+        "UPSERT_API_KEY_SECRET_DO_NOT_LEAK",
+        "<script>",
+        "renderer",
+        "api_key",
+        "SECRET",
+        "raw_context",
+        "raw_prompt",
+        "Bearer",
+    ):
+        assert unsafe not in receipt_html
 
 
 def test_spaces_ui_edit_widget_uses_patch_route_and_preserves_source_bodies(driver_path):

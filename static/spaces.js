@@ -1805,6 +1805,26 @@
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
+  function renderWidgetUpsertReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Widget upsert progress');
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Widget create/update receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed widget create/update completed with metadata-only preflight, policy, progress, and compaction evidence. Raw output, prompt bodies, widget bodies, implementation fields, and sensitive values remain omitted from this receipt.</div>' +
+      preflight + policy + progress + compaction + '</div>';
+  }
+
+  function prependWidgetUpsertReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderWidgetUpsertReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
   function renderSystemWidgetUpsertReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
@@ -4212,13 +4232,15 @@
       };
       const editingWidgetId = root && root.dataset ? String(root.dataset.editingWidgetId || '').trim() : '';
       let patchResult = null;
+      let upsertResult = null;
       if (editingWidgetId) {
         patchResult = await patchWidgetWithReceipt(spaceId, editingWidgetId, {title: widget.title, kind: widget.kind, layout: widget.layout});
       } else {
-        await postSpacesJson('api/spaces/widget/upsert', {space_id: spaceId, widget: widget});
+        upsertResult = await postSpacesJson('api/spaces/widget/upsert', {space_id: spaceId, widget: widget, includeSafetyReceipts: true});
       }
       await loadSpaceWidgets(spaceId);
       if (patchResult) prependWidgetUpdateReceipt(patchResult || {});
+      if (upsertResult) prependWidgetUpsertReceipt(upsertResult || {});
       return;
     }
     if (action === 'deleteWidget') {
