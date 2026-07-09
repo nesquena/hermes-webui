@@ -11,6 +11,10 @@
 
 ### Fixed
 
+- **The embedded terminal no longer leaks a file descriptor, reader thread, and shell process on exit.** When the terminal client disconnected or the shell exited, the PTY fd, its reader thread, and the shell process were left dangling — accumulating over a long uptime (part of the #4633 long-uptime-crash family). Teardown now closes the fd once, stops the reader thread, and reaps the shell on both the client-exit and shell-exit paths. Thanks @ai-ag2026. (#5835, #4633)
+
+- **Atomic JSON writers now `fsync` before rename, and the discoverability temp write is thread-safe.** The OAuth, passkeys, and session-discoverability stores wrote via temp-file → `os.replace` but without an `fsync`, so a crash right after the rename could still surface a partially-flushed file; they now flush → `fsync` → replace (matching the settings/config atomic-write hardening). The discoverability temp file also now uses a thread-specific name so concurrent writers can't collide. Thanks @ai-ag2026. (#5843)
+
 - **The dashboard status poll now pauses while the browser tab is hidden.** The Insights/dashboard status poll kept firing on a backgrounded tab; it now skips unforced polls while `document.hidden` and does one catch-up fetch on re-show (sibling of the hidden-tab session-poll pause). Forced init/save/resume fetches are unaffected. Thanks @ai-ag2026. (#5840)
 
 - **A slow or stuck client can no longer pin the session-events invalidation stream.** The session-events SSE stream now arms a write deadline after headers and before subscription, so a client that stops reading is torn down (and unsubscribed in `finally`) instead of holding the stream open indefinitely. A healthy slow-but-alive client is unaffected. Thanks @ai-ag2026. (#5841)
