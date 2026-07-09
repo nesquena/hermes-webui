@@ -2062,7 +2062,86 @@ global.fetch = async function(path, opts = {}) {
     return response({ space_id: 'lab', widget: { id: 'notes', kind: 'markdown', title: 'Notes', layout: { x: 2, y: 3, w: 8, h: 5 } }, revision_event_id: 'rev2' });
   }
   if (path === 'api/spaces/widget/patch') {
-    return response({ space_id: 'lab', widget: { id: 'weather', kind: 'markdown', title: 'Weather patched', layout: { x: 4, y: 5, w: 9, h: 6 } }, revision_event_id: 'rev-patch', renderer: '<script>bad()</script>' });
+    return response({
+      space_id: 'lab',
+      widget: { id: 'weather', kind: 'markdown', title: 'Weather patched', layout: { x: 4, y: 5, w: 9, h: 6 } },
+      revision_event_id: 'rev-patch',
+      prompt_preflight: {
+        status: 'pass',
+        boundary: 'creator_commit',
+        severity: 'none',
+        checks: ['widget_patch_metadata_only', 'prompt_injection_preflight_required'],
+        metadata_only: true,
+        local_only: true,
+        raw_prompt_stored: false,
+        raw_prompt: 'PATCH_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        raw_context: 'PATCH_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'PATCH_API_KEY_SECRET_DO_NOT_LEAK',
+      },
+      autonomy_policy: {
+        available: true,
+        action: 'space.widget.patch',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['creator_commit'],
+        prompt_preflight_status: 'pass',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'PATCH_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        raw_context: 'PATCH_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'PATCH_API_KEY_SECRET_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-widget-patch',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'widget.patch:lab:weather',
+        redaction_status: 'metadata-only',
+        metadata_only: true,
+        raw_prompt: 'PATCH_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        raw_context: 'PATCH_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'PATCH_API_KEY_SECRET_DO_NOT_LEAK',
+      },
+      memory_advisory: {
+        metadata_only: true,
+        advisory_context: true,
+        context_authority: 'untrusted_advisory',
+        can_bypass_safety_gates: false,
+        required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+        trusted_system_memory: 'TRUSTED_SYSTEM_MEMORY_DO_NOT_LEAK',
+        raw_context: 'PATCH_RAW_CONTEXT_SECRET_DO_NOT_LEAK renderer <script>bad()</script>',
+        raw_prompt: 'PATCH_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'PATCH_API_KEY_SECRET_DO_NOT_LEAK',
+      },
+      output_compaction: {
+        tool: 'capy-spaces-tool-action',
+        command: 'space.widget.patch',
+        exit_status: 0,
+        original_chars: 624,
+        compacted_chars: 284,
+        redaction_status: 'metadata_only',
+        rules_applied: ['cap_section_chars', 'redact_unsafe_markers', 'retain_artifact_handles'],
+        text: 'space_action: space.widget.patch\nprogress_run_id: widget.patch:lab:weather',
+        retained_artifact_handles: [
+          { kind: 'space', handle: 'space:lab', label: 'Space action metadata' },
+          { kind: 'widget', handle: 'widget:lab:weather', label: 'Widget patch metadata' },
+        ],
+        raw_prompt: 'PATCH_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        raw_context: 'PATCH_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'PATCH_API_KEY_SECRET_DO_NOT_LEAK',
+      },
+      raw_prompt: 'PATCH_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+      raw_context: 'PATCH_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+      renderer: '<script>bad()</script>',
+      api_key: 'PATCH_API_KEY_SECRET_DO_NOT_LEAK',
+    });
   }
   if (path === 'api/spaces/system-widget/upsert') {
     return response({
@@ -5258,6 +5337,7 @@ def test_spaces_ui_edit_widget_uses_patch_route_and_preserves_source_bodies(driv
             "kind": "markdown",
             "layout": {"x": 4, "y": 5, "w": 9, "h": 6},
         },
+        "includeSafetyReceipts": True,
     }
     assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
@@ -5265,9 +5345,11 @@ def test_spaces_ui_edit_widget_uses_patch_route_and_preserves_source_bodies(driv
     assert "renderer" not in out["rootHtml"]
 
 
-def test_spaces_ui_move_widget_posts_metadata_only_layout_patch(driver_path):
+def test_spaces_ui_move_widget_posts_layout_patch_and_prepends_update_receipt(driver_path):
     out = _run_spaces_scenario(driver_path, "moveWidgetLeft")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/patch")
+    html = out["rootHtml"]
+    receipt_html = html.split("Widgets for lab", 1)[0]
 
     assert "Move left" in out["beforeHtml"]
     assert "Move right" in out["beforeHtml"]
@@ -5276,13 +5358,41 @@ def test_spaces_ui_move_widget_posts_metadata_only_layout_patch(driver_path):
         "space_id": "lab",
         "widget_id": "weather",
         "patch": {"layout": {"x": 11, "y": 3, "w": 5, "h": 4}},
+        "includeSafetyReceipts": True,
     }
     assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
-    assert "<script>" not in out["rootHtml"]
-    assert "renderer" not in out["rootHtml"]
-    assert "api_key" not in out["rootHtml"].lower()
-    assert "SECRET" not in out["rootHtml"]
+    assert "Widget update receipt" in receipt_html
+    assert "Confirmed widget update completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence." in receipt_html
+    assert "Prompt preflight" in receipt_html
+    assert "Status: pass" in receipt_html
+    assert "Boundary: creator_commit" in receipt_html
+    assert "Action policy" in receipt_html
+    assert "Action: space.widget.patch" in receipt_html
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in receipt_html
+    assert "Model route hint: hint:reasoning" in receipt_html
+    assert "Widget patch progress" in receipt_html
+    assert "tool.completed · tool · run widget.patch:lab:weather · metadata-only progress receipt" in receipt_html
+    assert "Memory advisory" in receipt_html
+    assert "Authority: untrusted_advisory" in receipt_html
+    assert "Can bypass safety gates: no" in receipt_html
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in receipt_html
+    assert "Compaction evidence" in receipt_html
+    assert receipt_html.index("Memory advisory") < receipt_html.index("Compaction evidence")
+    assert "Original output: 624 chars · Compacted output: 284 chars · Redaction: metadata_only" in receipt_html
+    assert "Command: space.widget.patch" in receipt_html
+    assert "Redaction: metadata_only · Redacted: 0 · Compacted: no" in receipt_html
+    assert "Rules: cap_section_chars, redact_unsafe_markers, retain_artifact_handles" in receipt_html
+    assert "Artifacts: 2" in receipt_html
+    assert "space · space:lab · Space action metadata" in receipt_html
+    assert "widget · widget:lab:weather · Widget patch metadata" in receipt_html
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+    assert "raw_context" not in html
+    assert "raw_prompt" not in html
+    assert "trusted_system_memory" not in html
 
 
 def test_spaces_ui_resize_widget_posts_metadata_only_layout_patch(driver_path):
@@ -5298,6 +5408,7 @@ def test_spaces_ui_resize_widget_posts_metadata_only_layout_patch(driver_path):
         "space_id": "lab",
         "widget_id": "weather",
         "patch": {"layout": {"x": 12, "y": 3, "w": 6, "h": 4}},
+        "includeSafetyReceipts": True,
     }
     assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
@@ -5317,6 +5428,7 @@ def test_spaces_ui_minimize_widget_posts_metadata_only_layout_patch(driver_path)
         "space_id": "lab",
         "widget_id": "weather",
         "patch": {"layout": {"x": 12, "y": 3, "w": 5, "h": 4, "minimized": True}},
+        "includeSafetyReceipts": True,
     }
     assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
@@ -5337,6 +5449,7 @@ def test_spaces_ui_restore_widget_posts_metadata_only_layout_patch(driver_path):
         "space_id": "lab",
         "widget_id": "weather",
         "patch": {"layout": {"x": 12, "y": 3, "w": 5, "h": 4, "minimized": False}},
+        "includeSafetyReceipts": True,
     }
     assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
@@ -6551,6 +6664,7 @@ def test_spaces_ui_notes_widget_detail_saves_real_editable_notes_via_patch(drive
                 "updated_from": "spaces-ui",
             }
         },
+        "includeSafetyReceipts": True,
     }
     assert out["calls"][-1]["path"] == "api/spaces/widget?space_id=lab&widget_id=notes-main"
     assert "<script>" not in out["rootHtml"]

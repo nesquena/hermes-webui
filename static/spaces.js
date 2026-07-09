@@ -1784,6 +1784,27 @@
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
+  function renderWidgetUpdateReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Widget patch progress');
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Widget update receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed widget update completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence. Raw output, prompt bodies, widget bodies, memory context, and sensitive values remain omitted from this receipt.</div>' +
+      preflight + policy + progress + advisory + compaction + '</div>';
+  }
+
+  function prependWidgetUpdateReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderWidgetUpdateReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
   function renderSystemWidgetUpsertReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
@@ -3297,6 +3318,15 @@
     if (hInput) hInput.value = String(safeLayout.h);
   }
 
+  async function patchWidgetWithReceipt(spaceId, widgetId, patch){
+    return postSpacesJson('api/spaces/widget/patch', {
+      space_id: spaceId,
+      widget_id: widgetId,
+      patch: patch,
+      includeSafetyReceipts: true,
+    });
+  }
+
   async function handleCapySpacesClick(event){
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
@@ -4087,34 +4117,25 @@
     if (action === 'moveWidget') {
       const widgetId = button.dataset.widgetId || '';
       if (!spaceId || !widgetId) return;
-      await postSpacesJson('api/spaces/widget/patch', {
-        space_id: spaceId,
-        widget_id: widgetId,
-        patch: {layout: moveWidgetBy(button)},
-      });
+      const patchResult = await patchWidgetWithReceipt(spaceId, widgetId, {layout: moveWidgetBy(button)});
       await loadSpaceWidgets(spaceId);
+      prependWidgetUpdateReceipt(patchResult || {});
       return;
     }
     if (action === 'resizeWidget') {
       const widgetId = button.dataset.widgetId || '';
       if (!spaceId || !widgetId) return;
-      await postSpacesJson('api/spaces/widget/patch', {
-        space_id: spaceId,
-        widget_id: widgetId,
-        patch: {layout: resizeWidgetBy(button)},
-      });
+      const patchResult = await patchWidgetWithReceipt(spaceId, widgetId, {layout: resizeWidgetBy(button)});
       await loadSpaceWidgets(spaceId);
+      prependWidgetUpdateReceipt(patchResult || {});
       return;
     }
     if (action === 'toggleWidgetMinimized') {
       const widgetId = button.dataset.widgetId || '';
       if (!spaceId || !widgetId) return;
-      await postSpacesJson('api/spaces/widget/patch', {
-        space_id: spaceId,
-        widget_id: widgetId,
-        patch: {layout: toggleWidgetMinimized(button)},
-      });
+      const patchResult = await patchWidgetWithReceipt(spaceId, widgetId, {layout: toggleWidgetMinimized(button)});
       await loadSpaceWidgets(spaceId);
+      prependWidgetUpdateReceipt(patchResult || {});
       return;
     }
     if (action === 'askWidget') {
@@ -4172,13 +4193,10 @@
       const notesInput = getRootInput(root, '#capyWidgetNotesBody');
       const format = /^[a-z0-9._-]{1,40}$/i.test(String(button.dataset.notesFormat || '')) ? String(button.dataset.notesFormat || '') : 'markdown';
       if (!spaceId || !widgetId || !notesInput || !root) return;
-      await postSpacesJson('api/spaces/widget/patch', {
-        space_id: spaceId,
-        widget_id: widgetId,
-        patch: {notes: {body: String(notesInput.value || ''), format: format, updated_from: 'spaces-ui'}},
-      });
+      const patchResult = await patchWidgetWithReceipt(spaceId, widgetId, {notes: {body: String(notesInput.value || ''), format: format, updated_from: 'spaces-ui'}});
       const data = await fetchSpacesJson('api/spaces/widget?space_id='+encodeURIComponent(spaceId)+'&widget_id='+encodeURIComponent(widgetId));
       root.innerHTML = renderWidgetDetailPanel(spaceId, data && data.widget, null) + root.innerHTML;
+      prependWidgetUpdateReceipt(patchResult || {});
       return;
     }
     if (action === 'saveWidget') {
@@ -4193,12 +4211,14 @@
         layout: formLayout(root),
       };
       const editingWidgetId = root && root.dataset ? String(root.dataset.editingWidgetId || '').trim() : '';
+      let patchResult = null;
       if (editingWidgetId) {
-        await postSpacesJson('api/spaces/widget/patch', {space_id: spaceId, widget_id: editingWidgetId, patch: {title: widget.title, kind: widget.kind, layout: widget.layout}});
+        patchResult = await patchWidgetWithReceipt(spaceId, editingWidgetId, {title: widget.title, kind: widget.kind, layout: widget.layout});
       } else {
         await postSpacesJson('api/spaces/widget/upsert', {space_id: spaceId, widget: widget});
       }
       await loadSpaceWidgets(spaceId);
+      if (patchResult) prependWidgetUpdateReceipt(patchResult || {});
       return;
     }
     if (action === 'deleteWidget') {
