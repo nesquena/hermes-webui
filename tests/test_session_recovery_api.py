@@ -156,6 +156,16 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
 
     sid = "abc123"
     live = _write_session(tmp_path, sid, messages=4)
+    hostile_session = json.loads(live.read_text(encoding="utf-8"))
+    hostile_session.update({
+        "title": "RAW_TITLE_SENTINEL_DO_NOT_LEAK",
+        "raw_prompt": "RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+        "renderer": "RENDERER_SENTINEL_DO_NOT_LEAK",
+        "source": "SOURCE_SENTINEL_DO_NOT_LEAK",
+        "api_auth": "API_AUTH_SENTINEL_DO_NOT_LEAK",
+    })
+    hostile_session["messages"][0]["content"] = "TOKEN_SECRET_SENTINEL_DO_NOT_LEAK"
+    live.write_text(json.dumps(hostile_session), encoding="utf-8")
     bak = tmp_path / f"{sid}.json.bak"
     bak.write_text(live.read_text(encoding="utf-8"), encoding="utf-8")
     live.unlink()
@@ -164,6 +174,17 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(_m, "SESSION_INDEX_FILE", index)
     monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress.jsonl"))
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:reasoning": {
+            "provider": "Local recovery provider",
+            "model": "Recovery reasoning model",
+            "api_auth": "ROUTE_API_AUTH_SENTINEL_DO_NOT_LEAK",
+            "raw_prompt": "ROUTE_RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+            "renderer": "ROUTE_RENDERER_SENTINEL_DO_NOT_LEAK",
+            "source": "ROUTE_SOURCE_SENTINEL_DO_NOT_LEAK",
+            "token": "ROUTE_TOKEN_SECRET_SENTINEL_DO_NOT_LEAK",
+        },
+    }))
     _m.SESSIONS.clear()
 
     result = repair_safe_session_recovery(tmp_path, state_db_path=tmp_path / "state.db")
@@ -192,9 +213,9 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     route_resolution = policy["model_route_resolution"]
     assert route_resolution["hint"] == "hint:reasoning"
     assert route_resolution["label"] == "Reasoning"
-    assert route_resolution["resolved_provider"]
-    assert route_resolution["resolved_model"]
-    assert route_resolution["resolution"] in {"configured", "default_fallback"}
+    assert route_resolution["resolved_provider"] == "Local recovery provider"
+    assert route_resolution["resolved_model"] == "Recovery reasoning model"
+    assert route_resolution["resolution"] == "configured"
     assert route_resolution["metadata_only"] is True
     assert route_resolution["local_only"] is True
     assert policy["metadata_only"] is True
@@ -221,6 +242,37 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert "context_authority: untrusted_advisory" in compaction["text"]
     assert "can_bypass_safety_gates: false" in compaction["text"]
     assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in compaction["text"]
+    serialized_receipts = json.dumps(
+        {
+            "prompt_preflight": result["prompt_preflight"],
+            "autonomy_policy": result["autonomy_policy"],
+            "progress_event": result["progress_event"],
+            "progress_events": result["progress_events"],
+            "memory_advisory": result["memory_advisory"],
+            "output_compaction": result["output_compaction"],
+        },
+        sort_keys=True,
+    ).lower()
+    for unsafe in (
+        sid,
+        "RAW_TITLE_SENTINEL_DO_NOT_LEAK",
+        "RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+        "RENDERER_SENTINEL_DO_NOT_LEAK",
+        "SOURCE_SENTINEL_DO_NOT_LEAK",
+        "API_AUTH_SENTINEL_DO_NOT_LEAK",
+        "TOKEN_SECRET_SENTINEL_DO_NOT_LEAK",
+        "ROUTE_API_AUTH_SENTINEL_DO_NOT_LEAK",
+        "ROUTE_RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+        "ROUTE_RENDERER_SENTINEL_DO_NOT_LEAK",
+        "ROUTE_SOURCE_SENTINEL_DO_NOT_LEAK",
+        "ROUTE_TOKEN_SECRET_SENTINEL_DO_NOT_LEAK",
+        '"raw_prompt":',
+        '"renderer":',
+        '"source":',
+        '"api_auth":',
+        '"token":',
+    ):
+        assert unsafe.lower() not in serialized_receipts
     assert live.exists()
     assert audit_session_recovery(tmp_path)["status"] == "ok"
     idx = json.loads(index.read_text(encoding="utf-8"))
