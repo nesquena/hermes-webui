@@ -5565,11 +5565,30 @@ def _embedded_terminal_gate_allows(handler) -> bool:
     return _onboarding_gate_allows(handler)
 
 
+# Above this many distinct client keys, sweep out entries whose timestamps have
+# all aged past the window on the next update. Behind a reverse proxy the map
+# holds a single key (the proxy IP) and never trips this; a directly-exposed
+# deployment would otherwise keep one entry forever for every IP that ever hit
+# the endpoint, since a key is only revisited when that same IP calls again.
+_RATE_LIMIT_MAP_SWEEP_THRESHOLD = 4096
+
+
+def _prune_stale_rate_limit_keys(mapping: dict, cutoff: float) -> None:
+    """Drop keys whose newest timestamp has aged out of the window. Caller holds
+    the map's lock. Size-gated so the common (few-key) path stays O(1)."""
+    if len(mapping) <= _RATE_LIMIT_MAP_SWEEP_THRESHOLD:
+        return
+    stale = [k for k, ts in mapping.items() if not ts or ts[-1] < cutoff]
+    for k in stale:
+        del mapping[k]
+
+
 def _csp_report_rate_limited(handler, *, now: float | None = None) -> bool:
     now = time.time() if now is None else now
     key = _client_ip_for_rate_limit(handler)
     cutoff = now - _CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS
     with _CSP_REPORT_RATE_LIMIT_LOCK:
+        _prune_stale_rate_limit_keys(_CSP_REPORT_RATE_LIMIT, cutoff)
         timestamps = [ts for ts in _CSP_REPORT_RATE_LIMIT.get(key, []) if ts >= cutoff]
         if len(timestamps) >= _CSP_REPORT_RATE_LIMIT_MAX:
             _CSP_REPORT_RATE_LIMIT[key] = timestamps
@@ -5584,6 +5603,7 @@ def _client_event_rate_limited(handler, *, now: float | None = None) -> bool:
     key = _client_ip_for_rate_limit(handler)
     cutoff = now - _CLIENT_EVENT_RATE_LIMIT_WINDOW_SECONDS
     with _CLIENT_EVENT_RATE_LIMIT_LOCK:
+        _prune_stale_rate_limit_keys(_CLIENT_EVENT_RATE_LIMIT, cutoff)
         timestamps = [ts for ts in _CLIENT_EVENT_RATE_LIMIT.get(key, []) if ts >= cutoff]
         if len(timestamps) >= _CLIENT_EVENT_RATE_LIMIT_MAX:
             _CLIENT_EVENT_RATE_LIMIT[key] = timestamps
@@ -16642,6 +16662,7 @@ def _handle_session_events_stream(handler):
     # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
     # EventSource reconnect storms in browsers on long-lived SSE.
     end_sse_headers(handler)
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = subscribe_session_events()
     try:

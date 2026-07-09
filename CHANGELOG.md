@@ -11,6 +11,12 @@
 
 ### Fixed
 
+- **The dashboard status poll now pauses while the browser tab is hidden.** The Insights/dashboard status poll kept firing on a backgrounded tab; it now skips unforced polls while `document.hidden` and does one catch-up fetch on re-show (sibling of the hidden-tab session-poll pause). Forced init/save/resume fetches are unaffected. Thanks @ai-ag2026. (#5840)
+
+- **A slow or stuck client can no longer pin the session-events invalidation stream.** The session-events SSE stream now arms a write deadline after headers and before subscription, so a client that stops reading is torn down (and unsubscribed in `finally`) instead of holding the stream open indefinitely. A healthy slow-but-alive client is unaffected. Thanks @ai-ag2026. (#5841)
+
+- **The per-client rate-limit maps are now bounded.** The client rate-limit tracking maps grew unbounded over long uptimes; a sweep now prunes keys whose newest timestamp is older than the live window (under the existing locks), so a key still inside its window is never evicted (no rate-limit bypass). Part of the long-uptime stability work. Thanks @ai-ag2026. (#5842)
+
 - **Steering a live *gateway-owned* run no longer errors and drops your message.** When you steered a stream backed by a gateway run (which has no process-local agent in `SESSION_AGENT_CACHE`), the old path showed a misleading "No agent cached for this session" toast and lost the text you'd typed. WebUI now detects the live gateway run and queues your steer as the next turn on that session (snapshotting model/provider/profile first), updates the queue badge, clears the composer draft, and shows a "Steer queued for next turn" notice — without cancelling the active stream. This is the gateway sibling of the existing local-agent queued-steer fallback. Thanks @rodboev. (#5823, #5585)
 
 - **CORS preflight (`OPTIONS`) responses are now framed with `Content-Length: 0`.** Under HTTP/1.1 keep-alive the preflight `200` was sent with no `Content-Length`, so a browser/proxy/curl client read the body until connection close (RFC 7230 §3.3.3) — a keep-alive preflight would hang to the 30s timeout and couldn't reuse the connection. The handler now emits `Content-Length: 0` before `end_headers()`; status stays `200` and CORS headers are unchanged. Thanks @ai-ag2026. (#5828)
