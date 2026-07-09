@@ -27,6 +27,7 @@ from api.agent_sessions import (
     _is_continuation_session,
     is_cli_session_row,
     normalize_agent_session_source,
+    open_state_db_readonly,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
@@ -4140,7 +4141,7 @@ def state_db_has_session(sid: str) -> bool:
     if not db_path.exists():
         return False
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),))
             return cur.fetchone() is not None
@@ -4246,7 +4247,7 @@ def agent_session_rows_existing(
     if db_path is None:
         return frozenset(wanted)
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
             cols = {str(row[1]) for row in cur.fetchall()}
@@ -4302,7 +4303,7 @@ def agent_session_zero_message_sids(
     if db_path is None:
         return frozenset()
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
             sessions_cols = {str(row[1]) for row in cur.fetchall()}
@@ -4399,7 +4400,7 @@ def _read_state_db_sidebar_overrides(
     except ImportError:
         return {}
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -6483,7 +6484,7 @@ def get_state_db_session_messages(
         return []
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(messages)")
@@ -6629,7 +6630,7 @@ def get_state_db_session_message_keys_before_timestamp(
         return []
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(messages)")
@@ -6679,7 +6680,7 @@ def get_state_db_session_summary(sid, *, profile=None) -> dict:
         return {"message_count": 0, "last_message_at": 0.0}
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(messages)")
@@ -7710,7 +7711,7 @@ def count_conversation_rounds(sid: str, since: float | None = None) -> int:
         return 0
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute(
