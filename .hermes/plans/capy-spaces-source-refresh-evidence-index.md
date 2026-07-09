@@ -1,7 +1,7 @@
 # Capy Spaces Source-Refresh Evidence Index
 
 Created: 2026-06-30 21:01 CDT
-Last count refresh: 2026-07-06 03:48 CDT
+Last count refresh: 2026-07-09 11:49 CDT
 Branch: `feat/capy-spaces-foundation`
 
 ## Purpose
@@ -27,18 +27,18 @@ The index is intentionally docs-only. It does not change the Memory Tree impleme
 
 ## Evidence snapshot
 
-Snapshot generated from the checked-out `tests/test_capy_memory_tree.py` on 2026-07-06 03:48 CDT:
+Snapshot generated from the checked-out `tests/test_capy_memory_tree.py` on 2026-07-09 11:49 CDT:
 
 | Search/count | Count | Meaning |
 | --- | ---: | --- |
 | `def test_.*github.*(?:final_url|redirect).*drift` | 135 | GitHub source-refresh drift regressions across route families. |
 | `def test_.*before_body_read` | 129 | Regressions that explicitly name no-body-read behavior. |
-| `def test_.*relevant_memory_empty` | 129 | Regressions that also prove Spaces relevant-memory remains empty after hostile drift. |
+| `def test_.*relevant_memory_empty` | 130 | Regressions that also prove Spaces relevant-memory remains empty after hostile drift. |
 | `def test_.*ingests_github.*metadata_only` | 154 | Positive metadata-only GitHub ingestion regressions. |
 
 ### Lag-scan status
 
-The 2026-07-06 04:56 CDT autonomous sprint selector reran the three local-only relevant-memory lag scans from `capy-spaces-development/references/relevant-memory-name-count-lag-scan.md` against the checked-out `tests/test_capy_memory_tree.py` and found no remaining candidates:
+The 2026-07-09 11:49 CDT autonomous sprint selector reran the three local-only relevant-memory lag scans from `capy-spaces-development/references/relevant-memory-name-count-lag-scan.md` after aligning one stale GitHub secret-scanning alert-locations malformed-route regression. The checked-out `tests/test_capy_memory_tree.py` now has no remaining candidates:
 
 | Scan | Result | Meaning |
 | --- | ---: | --- |

@@ -49907,7 +49907,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_
         "https://octo-capy:SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/secret-scanning/alerts/31/locations",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_alert_locations_malformed_routes_before_fetch(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_alert_locations_malformed_routes_before_fetch_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     source_id,
@@ -49937,13 +49937,15 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_
     monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
 
     result = run_source_refresh_jobs(limit=1)
-    serialized = json.dumps(result, sort_keys=True).lower()
+    relevant = relevant_memory_for_space("secret-scanning-alert-locations-malformed-routes", limit=5)
+    serialized = json.dumps({"result": result, "relevant": relevant}, sort_keys=True).lower()
 
     assert result["processed"] == 1
     assert result["jobs"][0]["status"] == "pending"
     assert result["jobs"][0]["error"] == "refresh failed"
     assert calls == []
     assert not (root / "vault" / f"{source_id}.md").exists()
+    assert relevant["results"] == []
     assert "api.github.com" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "access_token" not in serialized
