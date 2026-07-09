@@ -57,11 +57,11 @@ class TestWorkspaceSubpathRawUrls:
         )
 
     def test_route_builder_keeps_app_relative_strings_internally(self):
-        """The literal '/api/...' route strings must survive for api() callers."""
+        """The literal '/api/...' route strings must remain in _workspaceRouteForPathRel."""
         src = _workspace_js()
         assert "/api/file/raw?session_id=" in src, (
-            "the app-relative /api/file/raw route string must remain so api()-based "
-            "callers keep re-resolving it themselves"
+            "the app-relative /api/file/raw route string must remain as the internal "
+            "building block inside _workspaceRouteForPathRel (used when document is absent)"
         )
 
     @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -99,3 +99,31 @@ console.log(JSON.stringify({
         assert result["read"].startswith(prefix), result["read"]
         # The mount prefix must not be duplicated or dropped.
         assert result["raw"].count("/hermes/") == 1, result["raw"]
+
+    @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+    def test_non_http_base_falls_back_to_app_relative(self):
+        """about:blank (jsdom's default baseURI) must not crash the builder."""
+        helper_block = _route_helper_block()
+        js = (
+            "const helperBlock = "
+            + json.dumps(helper_block)
+            + ";\n"
+            + r"""
+global.document = { baseURI: 'about:blank' };
+const S = { session: { session_id: 'sess-1' }, currentDir: '.', _escapeGrants: Object.create(null) };
+const runner = new Function(
+  'S', 'URLSearchParams', 'document',
+  helperBlock + '; return { _workspaceRouteForPath };'
+);
+const fns = runner(S, URLSearchParams, global.document);
+console.log(JSON.stringify({
+  raw: fns._workspaceRouteForPath('sub/dir/plot.png', 'raw', { download: true }),
+}));
+"""
+        )
+        out = subprocess.run(
+            [NODE, "-e", js], cwd=ROOT, capture_output=True, text=True, check=True
+        )
+        result = json.loads(out.stdout)
+        # Non-http(s) base: keep the app-relative form rather than throwing.
+        assert result["raw"].startswith("/api/file/raw?session_id="), result["raw"]

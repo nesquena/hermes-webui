@@ -253,7 +253,7 @@ function _workspaceRouteForPath(path, kind, opts={}){
   if(!route) return route;
   // Non-browser test harnesses have no document/location: keep the app-relative form.
   const base=(typeof document!=='undefined'&&document.baseURI)||(typeof location!=='undefined'&&location.href)||'';
-  if(!base) return route;
+  if(!base||!/^https?:\/\//i.test(base)) return route;
   const rel=route.startsWith('/') ? route.slice(1) : route;
   return new URL(rel, base).href;
 }
