@@ -93,6 +93,14 @@ class TerminalSession:
     # at its prompt has neither, so it sorts oldest and is evicted before an
     # actively used one.
     last_activity: float = field(default_factory=time.time)
+    # Wall-clock of when the terminal last had zero attached viewers, or None
+    # while at least one is attached. The reaper closes a terminal that has been
+    # unwatched for longer than the idle grace: a client that drops its output
+    # stream without POSTing /api/terminal/close (tab close, crash, network drop)
+    # otherwise leaves the shell running forever (no PDEATHSIG). A terminal is
+    # born unwatched, so a spawn nobody ever attaches to is reaped too. The grace
+    # spans transient reconnects (a tab refresh re-attaches and clears it).
+    unwatched_since: float | None = field(default_factory=time.time)
 
     def is_alive(self) -> bool:
         return not self.closed.is_set() and self.proc.poll() is None
@@ -111,6 +119,7 @@ class TerminalSession:
                 if after_seq is None or item[0] > after_seq:
                     q.put_nowait(item)
             self._subscribers.append(q)
+            self.unwatched_since = None  # a viewer is attached
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
@@ -119,6 +128,8 @@ class TerminalSession:
                 self._subscribers.remove(q)
             except ValueError:
                 pass
+            if not self._subscribers:
+                self.unwatched_since = time.time()
 
     def put_output(self, event: str, payload: dict) -> None:
         self.last_activity = time.time()
@@ -163,6 +174,19 @@ _spawn_supervisor_lock = threading.Lock()
 _spawn_supervisor_thread: threading.Thread | None = None
 _terminal_descendant_reaper_lock = threading.Lock()
 _TERMINAL_DESCENDANT_REAPER_LIMIT = 64
+
+# Idle-terminal reaper: proactively close terminals whose viewers have all gone
+# away, instead of leaving an abandoned shell running until the cap evicts it.
+# A terminal unwatched (zero attached output streams) for longer than the grace
+# is closed; the grace spans a tab refresh / brief network drop so a real
+# reconnect keeps the session. Dead-process terminals are swept too as a
+# belt-and-suspenders for the reader-loop retire.
+_TERMINAL_IDLE_GRACE_SECONDS = 900  # 15 min unwatched -> reap
+_TERMINAL_REAPER_INTERVAL_SECONDS = 60
+_terminal_reaper_started = False
+_terminal_reaper_lock = threading.Lock()
+_terminal_reaper_thread: threading.Thread | None = None
+_terminal_reaper_stop = threading.Event()
 
 
 @dataclass
@@ -415,6 +439,59 @@ def _enforce_terminal_cap(*, exclude_sid: str | None = None) -> None:
         close_terminal(victim_sid, expected=victim_term)
 
 
+def _terminals_to_reap(now: float) -> list[tuple[str, TerminalSession]]:
+    """Return (sid, term) pairs the reaper should close: a dead process, or a
+    terminal unwatched for longer than the idle grace. Pure/snapshotted under
+    the lock so it can be unit-tested without threads."""
+    victims = []
+    with _LOCK:
+        for sid, term in _TERMINALS.items():
+            if not term.is_alive():
+                victims.append((sid, term))
+                continue
+            unwatched = term.unwatched_since
+            if unwatched is not None and (now - unwatched) >= _TERMINAL_IDLE_GRACE_SECONDS:
+                victims.append((sid, term))
+    return victims
+
+
+def _reap_idle_terminals(now: float) -> int:
+    """Close every terminal selected by ``_terminals_to_reap``. Returns the count
+    closed. ``expected=term`` guards against closing a restart replacement."""
+    reaped = 0
+    for sid, term in _terminals_to_reap(now):
+        if close_terminal(sid, expected=term):
+            reaped += 1
+    return reaped
+
+
+def _terminal_reaper_loop() -> None:
+    while not _terminal_reaper_stop.wait(_TERMINAL_REAPER_INTERVAL_SECONDS):
+        try:
+            # Wall-clock, consistent with unwatched_since / last_activity.
+            _reap_idle_terminals(time.time())
+        except Exception:
+            # Never let a transient error kill the reaper thread.
+            pass
+
+
+def _ensure_terminal_reaper() -> None:
+    global _terminal_reaper_started, _terminal_reaper_thread
+    if not _TERMINAL_SUPPORTED:
+        return
+    with _terminal_reaper_lock:
+        if (
+            _terminal_reaper_started
+            and _terminal_reaper_thread is not None
+            and getattr(_terminal_reaper_thread, "is_alive", lambda: False)()
+        ):
+            return
+        thread = threading.Thread(target=_terminal_reaper_loop, daemon=True)
+        thread.start()
+        _terminal_reaper_thread = thread
+        _terminal_reaper_started = True
+
+
 def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int = 80, restart: bool = False) -> TerminalSession:
     """Start or return the embedded terminal for a WebUI session."""
     if not _TERMINAL_SUPPORTED:
@@ -476,6 +553,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             }
         )
         _ensure_spawn_supervisor()
+        _ensure_terminal_reaper()
         _spawn_queue.put(request)
         try:
             if not request.done.wait(timeout=5.0):
