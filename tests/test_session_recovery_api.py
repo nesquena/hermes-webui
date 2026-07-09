@@ -229,6 +229,7 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert progress["event_type"] == "tool.completed"
     assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
     compaction = result["output_compaction"]
+    assert compaction["metadata_only"] is True
     assert compaction["tool"] == "capy-session-recovery"
     assert compaction["command"] == "session.recovery.repair_safe"
     assert compaction["exit_status"] == 0
@@ -318,6 +319,7 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
     assert result["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
     assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
     compaction = result["output_compaction"]
+    assert compaction["metadata_only"] is True
     assert compaction["exit_status"] == 1
     assert "repair_status: manual_review_required" in compaction["text"]
     assert "unsafe_remaining: 1" in compaction["text"]

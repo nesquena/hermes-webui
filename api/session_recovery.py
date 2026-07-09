@@ -786,13 +786,15 @@ def _session_recovery_output_compaction_receipt(
         lines.append(f"can_bypass_safety_gates: {'true' if memory_advisory.get('can_bypass_safety_gates') is True else 'false'}")
         if safe_required_gates:
             lines.append(f"required_gates: {', '.join(safe_required_gates)}")
-    return compact_output(
+    receipt = compact_output(
         "\n".join(lines),
         tool="capy-session-recovery",
         command="session.recovery.repair_safe",
         exit_status=0 if clean else 1,
         max_chars=1200,
     )
+    receipt["metadata_only"] = True
+    return receipt
 
 
 def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None = None) -> dict:
