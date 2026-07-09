@@ -4274,6 +4274,7 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
 
 _POST_COMPRESSION_TOOL_RESULT_TOTAL_TOKENS = 4096
 _POST_COMPRESSION_TOOL_RESULT_MIN_SNIPPET_TOKENS = 256
+_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG = "_webui_pruned_tool_result_summary"
 _POST_COMPRESSION_TOOL_RESULT_MARKER = "[WebUI compressed-context budget:"
 _POST_COMPRESSION_TOOL_RESULT_NOTE_RE = re.compile(
     r"^\[WebUI compressed-context budget: omitted \d+(?: of \d+)? chars "
@@ -4342,8 +4343,7 @@ def _is_compressed_context_tool_result_summary(text: str) -> bool:
 def _is_compressed_context_tool_result_summary_message(msg) -> bool:
     if not isinstance(msg, dict) or msg.get('role') != 'tool':
         return False
-    content = msg.get('content')
-    return isinstance(content, str) and _is_compressed_context_tool_result_summary(content)
+    return msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is True
 
 
 def _hard_prune_post_compression_tool_results(messages, *, compressor=None):
@@ -4361,7 +4361,7 @@ def _hard_prune_post_compression_tool_results(messages, *, compressor=None):
         if not text.strip():
             continue
         token_count = _rough_text_token_count(text)
-        if isinstance(content, str) and _is_compressed_context_tool_result_summary(content):
+        if _is_compressed_context_tool_result_summary_message(msg):
             raw_tool_tokens += token_count
             continue
         remaining = max(0, budget - raw_tool_tokens)
@@ -4384,6 +4384,7 @@ def _hard_prune_post_compression_tool_results(messages, *, compressor=None):
             original_tokens=token_count,
             keep_tokens=keep_tokens,
         )
+        msg[_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] = True
     return pruned, len(replacements)
 
 
@@ -4472,6 +4473,11 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
             # with their display counterpart.
             if prev_msg.get('id') is not None and cur_msg.get('id') is None:
                 cur_msg['id'] = prev_msg['id']
+            if (
+                prev_msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is True
+                and cur_msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is not True
+            ):
+                cur_msg[_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] = True
             if prev_msg.get('timestamp') and not cur_msg.get('timestamp'):
                 cur_msg['timestamp'] = prev_msg['timestamp']
             elif prev_msg.get('_ts') and not cur_msg.get('_ts') and not cur_msg.get('timestamp'):

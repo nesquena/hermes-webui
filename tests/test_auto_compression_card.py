@@ -3,11 +3,14 @@ from pathlib import Path
 from api.compression_anchor import visible_messages_for_anchor
 from api.models import Session
 from api.streaming import (
+    _POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG,
     _compressed_context_tool_result_summary,
     _is_fallback_lifecycle_message,
     _merge_display_messages_after_agent_result,
     _message_text,
     _prune_context_tool_results_after_compression,
+    _restore_reasoning_metadata,
+    _sanitize_messages_for_api,
 )
 
 
@@ -119,6 +122,7 @@ def test_post_compression_context_hard_prunes_protected_tail_tool_payload():
     assert context_tool != recent_payload
     assert "RECENT_TOOL_PAYLOAD_END" not in context_tool
     assert "WebUI compressed-context budget" in context_tool
+    assert session.context_messages[1][_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] is True
     assert context_tool_tokens <= compressor.tail_token_budget
 
 
@@ -147,8 +151,11 @@ def test_post_compression_context_note_only_replacement_consumes_residual_budget
     assert pruned[2]["content"] == recent_payload
     assert pruned[1]["content"] != old_oversize_payload
     assert "WebUI compressed-context budget" in pruned[1]["content"]
+    assert pruned[1][_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] is True
     assert pruned[0]["content"] != old_small_payload
     assert "WebUI compressed-context budget" in pruned[0]["content"]
+    assert pruned[0][_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] is True
+    assert _POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG not in pruned[2]
     assert context_messages[0]["content"] == old_small_payload
 
 
@@ -173,6 +180,13 @@ def test_post_compression_context_hard_prune_is_idempotent():
 
     assert [msg["content"] for msg in twice] == [msg["content"] for msg in once]
     assert any("WebUI compressed-context budget" in str(msg.get("content") or "") for msg in once)
+    assert [
+        msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG)
+        for msg in twice
+    ] == [
+        msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG)
+        for msg in once
+    ]
     assert context_messages[0]["content"] != once[0]["content"]
 
 
@@ -195,6 +209,7 @@ def test_post_compression_context_hard_prune_preserves_old_summary_after_new_too
     once = _prune_context_tool_results_after_compression(agent, context_messages)
     old_summary = once[-1]["content"]
     assert "\n\n[WebUI compressed-context budget:" in old_summary
+    assert once[-1][_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] is True
     assert f"of {len(context_messages[-1]['content'])} chars" in old_summary
 
     with_new_tool = once + [
@@ -207,6 +222,7 @@ def test_post_compression_context_hard_prune_preserves_old_summary_after_new_too
     twice = _prune_context_tool_results_after_compression(agent, with_new_tool)
 
     assert twice[-2]["content"] == old_summary
+    assert twice[-2][_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] is True
     assert f"of {len(context_messages[-1]['content'])} chars" in twice[-2]["content"]
 
 
@@ -230,6 +246,7 @@ def test_post_compression_context_hard_prune_counts_raw_tool_whitespace():
 
     assert once[0]["content"] != whitespace_padded_payload
     assert "WebUI compressed-context budget" in once[0]["content"]
+    assert once[0][_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] is True
     assert context_messages[0]["content"] == whitespace_padded_payload
 
 
@@ -251,6 +268,7 @@ def test_post_compression_context_hard_prune_keeps_idless_twin_summaries():
 
     assert len(once) == 3
     assert sum("WebUI compressed-context budget" in msg["content"] for msg in once) == 3
+    assert sum(msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is True for msg in once) == 3
 
 
 def test_post_compression_context_pruned_tool_summary_does_not_backfill_into_display():
@@ -267,7 +285,12 @@ def test_post_compression_context_pruned_tool_summary_does_not_backfill_into_dis
     ]
     previous_context = [
         {"role": "assistant", "content": "", "tool_calls": [{"id": "call_big"}]},
-        {"role": "tool", "tool_call_id": "call_big", "content": summary},
+        {
+            "role": "tool",
+            "tool_call_id": "call_big",
+            "content": summary,
+            _POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG: True,
+        },
         {"role": "assistant", "content": "Final answer"},
     ]
     result_messages = previous_context + [
@@ -313,8 +336,94 @@ def test_post_compression_context_raw_marker_collision_still_prunes():
     assert once[0]["content"] != raw_payload
     assert "RAW_COLLISION_END" not in once[0]["content"]
     assert "WebUI compressed-context budget" in once[0]["content"]
+    assert once[0][_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] is True
     assert twice[0]["content"] == once[0]["content"]
     assert context_messages[0]["content"] == raw_payload
+
+
+def test_post_compression_context_exact_note_shape_without_flag_still_prunes():
+    class NoopCompressor:
+        protect_last_n = 20
+        tail_token_budget = 1024
+        threshold_tokens = 4096
+
+        def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens=None):
+            return messages, 0
+
+    compressor = NoopCompressor()
+    agent = type("Agent", (), {"context_compressor": compressor})()
+    generated_note = _compressed_context_tool_result_summary(
+        "prior generated payload",
+        original_tokens=512,
+        keep_tokens=0,
+    )
+    raw_payload = (
+        ("raw shape-collision payload\n" * 600)
+        + "RAW_SHAPE_COLLISION_END\n\n"
+        + generated_note
+    )
+    context_messages = [
+        {"role": "tool", "tool_call_id": "call_shape_collision", "content": raw_payload},
+    ]
+
+    once = _prune_context_tool_results_after_compression(agent, context_messages)
+
+    assert once[0]["content"] != raw_payload
+    assert "RAW_SHAPE_COLLISION_END" not in once[0]["content"]
+    assert once[0][_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] is True
+    assert context_messages[0]["content"] == raw_payload
+
+
+def test_post_compression_context_unflagged_note_shape_can_stay_visible():
+    visible_shape = _compressed_context_tool_result_summary(
+        "visible tool payload",
+        original_tokens=256,
+        keep_tokens=0,
+    )
+    previous_display = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_visible"}]},
+        {"role": "tool", "tool_call_id": "call_visible", "content": visible_shape},
+    ]
+    previous_context = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_visible"}]},
+        {"role": "tool", "tool_call_id": "call_visible", "content": visible_shape},
+    ]
+    result_messages = previous_context + [
+        {"role": "user", "content": "next question"},
+        {"role": "assistant", "content": "next answer"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        "next question",
+    )
+
+    assert visible_shape in [msg.get("content") for msg in merged if msg.get("role") == "tool"]
+
+
+def test_post_compression_context_private_flag_restored_but_not_sent_to_provider():
+    previous_context = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_pruned"}]},
+        {
+            "role": "tool",
+            "tool_call_id": "call_pruned",
+            "content": _compressed_context_tool_result_summary(
+                "large generated payload",
+                original_tokens=512,
+                keep_tokens=0,
+            ),
+            _POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG: True,
+        },
+    ]
+    api_safe = _sanitize_messages_for_api(previous_context)
+
+    assert _POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG not in api_safe[1]
+
+    restored = _restore_reasoning_metadata(previous_context, api_safe)
+
+    assert restored[1][_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] is True
 
 
 def test_auto_compression_running_sse_uses_active_session_running_card():
