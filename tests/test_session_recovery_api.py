@@ -60,11 +60,14 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert policy["prompt_preflight_status"] == "required"
     assert policy["model_route_hint"] == "hint:reasoning"
     assert policy["metadata_only"] is True
+    assert result["progress_event"] == result["progress_events"][-1]
+    assert [event["event_type"] for event in result["progress_events"]] == ["tool.started", "tool.completed"]
+    for progress in result["progress_events"]:
+        assert progress["family"] == "tool"
+        assert progress["run_id"] == "session.recovery.repair_safe"
+        assert progress["redaction_status"] == "metadata_only"
     progress = result["progress_event"]
     assert progress["event_type"] == "tool.completed"
-    assert progress["family"] == "tool"
-    assert progress["run_id"] == "session.recovery.repair_safe"
-    assert progress["redaction_status"] == "metadata_only"
     assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
     compaction = result["output_compaction"]
     assert compaction["tool"] == "capy-session-recovery"
@@ -74,6 +77,8 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert "repair_status: clean" in compaction["text"]
     assert "repaired_sessions: 1" in compaction["text"]
     assert "approval_required: yes" in compaction["text"]
+    assert "progress_status: tool.completed" in compaction["text"]
+    assert "progress_event_types: tool.started, tool.completed" in compaction["text"]
     assert "advisory_context: true" in compaction["text"]
     assert "context_authority: untrusted_advisory" in compaction["text"]
     assert "can_bypass_safety_gates: false" in compaction["text"]
@@ -104,6 +109,7 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
             "prompt_preflight": result["prompt_preflight"],
             "autonomy_policy": result["autonomy_policy"],
             "progress_event": result["progress_event"],
+            "progress_events": result["progress_events"],
             "memory_advisory": result["memory_advisory"],
             "output_compaction": result["output_compaction"],
         },
@@ -111,6 +117,12 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
     ).lower()
 
     assert result["clean"] is False
+    assert result["progress_event"] == result["progress_events"][-1]
+    assert [event["event_type"] for event in result["progress_events"]] == ["tool.started", "tool.failed"]
+    for progress in result["progress_events"]:
+        assert progress["family"] == "tool"
+        assert progress["run_id"] == "session.recovery.repair_safe"
+        assert progress["redaction_status"] == "metadata_only"
     assert result["progress_event"]["event_type"] == "tool.failed"
     assert result["progress_event"]["run_id"] == "session.recovery.repair_safe"
     assert result["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
@@ -119,6 +131,8 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
     assert compaction["exit_status"] == 1
     assert "repair_status: manual_review_required" in compaction["text"]
     assert "unsafe_remaining: 1" in compaction["text"]
+    assert "progress_status: tool.failed" in compaction["text"]
+    assert "progress_event_types: tool.started, tool.failed" in compaction["text"]
     assert "advisory_context: true" in compaction["text"]
     assert "context_authority: untrusted_advisory" in compaction["text"]
     assert "can_bypass_safety_gates: false" in compaction["text"]
