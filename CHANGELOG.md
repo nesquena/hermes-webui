@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- **Long tool outputs can no longer blow up the model context after a compression event.** After the conversation is compressed, the protected-tail tool-result payloads sent to the model are now hard-capped to a token budget (applied once, only after a confirmed compression). The cap operates on the model context only (a deep copy of `context_messages`) — it never removes or reorders messages (so no tool_call/tool_result pairing is broken) and never touches the visible/persisted transcript, which keeps the full tool output. Thanks @franksong2702. (#5667, #4685)
+
 - **"Copy conversation link" now copies an openable URL instead of a `session://` reference.** The copy action produced the internal `session://` reference (not openable in a browser); it now copies an absolute `origin + /session/<id>` URL — the same shape used elsewhere in the app, with tracking query params stripped. Thanks @djsavvy. (#5478)
 
 - **The model picker now marks the active model with a "Selected" badge.** The currently-selected conversation model shows a distinct **Selected** pill (separate from the "Configured" state), and the picker opens with that model's provider group expanded and scrolled into view — so it's obvious at a glance which model is in use. Thanks @rodboev. (#5757, #5748)
