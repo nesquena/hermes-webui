@@ -32,6 +32,7 @@ def test_nix_package_version_comes_from_flake_source_revision():
     assert "0.51.0" not in FLAKE_NIX
     assert "0.51.0" not in PACKAGES_NIX
     assert 'api/_version.py' in PACKAGES_NIX
+    assert 'chmod u+w "$out/${runtimeDir}/api"' in PACKAGES_NIX
 
 
 def test_nixos_module_decouples_agent_dir_from_python_inference():

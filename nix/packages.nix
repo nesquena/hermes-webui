@@ -28,6 +28,7 @@ pkgs.stdenv.mkDerivation {
     cp "${./../mcp_server.py}" "$out/${runtimeDir}/mcp_server.py"
     cp "${./../requirements.txt}" "$out/${runtimeDir}/requirements.txt"
     cp -r "${./../api}" "$out/${runtimeDir}/api"
+    chmod u+w "$out/${runtimeDir}/api"
     cp -r "${./../static}" "$out/${runtimeDir}/static"
     printf "__version__ = '%s'\n" "$version" > "$out/${runtimeDir}/api/_version.py"
 
