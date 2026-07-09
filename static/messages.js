@@ -5024,8 +5024,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
       if(text&&S.session&&S.session.session_id===activeSid){
-        _upsertAnchorReasoning(_liveThinkingText());
-        _updateLiveThinkingCard(_liveThinkingText());
+        const liveThinkingText=_liveThinkingText();
+        if(!_upsertAnchorReasoning(liveThinkingText)){
+          _updateLiveThinkingCard(liveThinkingText);
+        }
       }
     });
 

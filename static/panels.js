@@ -9020,6 +9020,11 @@ async function loadSettingsPanel(){
           for(const m of [...(g.models||[]),...(g.extra_models||[])]){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;
+            if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+              opt.dataset.fast='1';
+            }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+              opt.dataset.fast='0';
+            }
             og.appendChild(opt);
           }
           modelSel.appendChild(og);
@@ -12045,17 +12050,9 @@ function _mainModelSupportsServiceTier(cfg){
  const optgroup=selectedOpt&&selectedOpt.parentElement&&selectedOpt.parentElement.tagName==='OPTGROUP'?selectedOpt.parentElement:null;
  const provider=((selectedOpt&&selectedOpt.dataset&&selectedOpt.dataset.provider)||(optgroup&&optgroup.dataset&&optgroup.dataset.provider)||(cfg&&cfg.provider)||'').trim().toLowerCase();
  if(provider!=='openai'&&provider!=='openai-api'&&provider!=='openai-codex') return false;
- if(provider==='openai-codex') return false;
- const rawModel=String((selectedOpt&&selectedOpt.value)||(selected&&selected.value)||(cfg&&cfg.model)||'').trim().toLowerCase();
- if(!rawModel) return true;
- let bareModel=rawModel;
- if(rawModel.includes('/')){
-  const slash=rawModel.indexOf('/');
-  if(rawModel.slice(0,slash)!=='openai') return false;
-  bareModel=rawModel.slice(slash+1);
- }
- if(bareModel.includes('codex')) return false;
- return bareModel.startsWith('gpt-')||bareModel.startsWith('o1')||bareModel.startsWith('o3')||bareModel.startsWith('o4');
+ const fastSupport = selectedOpt&&selectedOpt.dataset?selectedOpt.dataset.fast:'';
+ if(fastSupport) return fastSupport==='1'||fastSupport==='true';
+ return cfg&&cfg.supports_fast_tier===true;
 }
 
 function _openAuxAdvancedOptions(taskKey,cfg){

@@ -670,6 +670,40 @@ class TestToolCallGroupingStatic:
             "Tool starts must not split consecutive tools into one-tool Activity rows."
         )
 
+    def test_reasoning_stream_uses_one_live_renderer_path(self):
+        reasoning_match = re.search(
+            r"source\.addEventListener\('reasoning',e=>\{(.*?)\n\s*\}\);",
+            MESSAGES_JS,
+            re.S,
+        )
+        assert reasoning_match, "reasoning listener not found"
+        reasoning_fn = reasoning_match.group(1)
+        render_live_thinking_fn = _function_body(MESSAGES_JS, "_renderLiveThinking")
+
+        assert reasoning_fn.count("_liveThinkingText()") == 1, (
+            "_liveThinkingText() should be computed once inside the active-session branch."
+        )
+        assert "const liveThinkingText=_liveThinkingText();" in reasoning_fn, (
+            "Reasoning SSE updates should cache the live thinking text before routing."
+        )
+        assert "_upsertAnchorReasoning(liveThinkingText)" in reasoning_fn, (
+            "Anchor reasoning must remain the primary renderer path."
+        )
+        assert reasoning_fn.index("_upsertAnchorReasoning(liveThinkingText)") < reasoning_fn.index(
+            "_updateLiveThinkingCard(liveThinkingText)"
+        ), (
+            "The legacy thinking card should only run after anchor upsert fails."
+        )
+        assert "if(!_upsertAnchorReasoning(liveThinkingText)){" in reasoning_fn, (
+            "The legacy thinking card should be a falsy-anchor fallback."
+        )
+        assert reasoning_fn.count("_updateLiveThinkingCard(liveThinkingText)") == 1, (
+            "Reasoning SSE updates should call the live thinking card only in fallback."
+        )
+        assert "_updateLiveThinkingCard(" in render_live_thinking_fn, (
+            "Inline parsed thinking still needs the live thinking card renderer."
+        )
+
     def test_live_thinking_card_is_segment_scoped_not_global_singleton(self):
         live_thinking_fn = _function_body(UI_JS, "appendThinking")
         placement_fn = _function_body(MESSAGES_JS, "_liveThinkingPlacement")

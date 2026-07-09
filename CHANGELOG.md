@@ -5,6 +5,12 @@
 
 ### Fixed
 
+- **Service-tier (fast-mode) support is now derived from the agent's model metadata instead of a hardcoded list.** The service-tier control appears for a model only when the agent reports it supports the fast tier, so newly-supported models light up automatically and unsupported ones don't show a dead control. Falls back safely (no control) when the metadata is absent. Thanks @starship-s. (#5762, #4536)
+
+- **Live reasoning no longer briefly renders twice while a reply streams.** The streaming path updated the reasoning display through two renderers at once (the anchored reasoning block and the live thinking card), which could momentarily show the reasoning twice. It now routes through a single renderer — the live thinking card only updates when the anchored path didn't handle it. Thanks @rodboev. (#5773, #5720)
+
+- **A wide or tall code block in the chat no longer thrashes the surrounding layout while a reply streams.** Code blocks now use CSS `contain: content`, so a growing/overflowing `<pre>` is isolated to its own rounded container (with its own horizontal scroll) instead of reflowing the message column during streaming. Thanks @rodboev. (#5770, #5760)
+
 - **Workspace switcher is now navigable with a screen reader.** The workspace switcher exposes proper roles/labels and announces the "New Chat" workspace state transiently, and the closed workspace dropdown is kept out of screen-reader navigation so it isn't read while collapsed. Visual layout and click/keyboard behavior are unchanged. Thanks @rodboev. (#5721, #5671)
 
 - **A background child stream no longer bumps its parent session to the top of the sidebar.** When a child (branched/background) stream was active, its activity re-sorted the parent session's sidebar time-bucket, yanking the parent around while you were working elsewhere. The sidebar sort no longer keys the parent's bucket off child-stream activity, so parents stay put. Thanks @rodboev. (#5729, #5699)

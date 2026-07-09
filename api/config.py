@@ -2226,10 +2226,12 @@ def _apply_provider_prefix(
     result = []
     for m in raw_models:
         mid = m["id"]
+        entry = dict(m)
         if mid.startswith("@") or "/" in mid:
-            result.append({"id": mid, "label": m["label"]})
+            result.append(entry)
         else:
-            result.append({"id": f"@{provider_id}:{mid}", "label": m["label"]})
+            entry["id"] = f"@{provider_id}:{mid}"
+            result.append(entry)
     return result
 
 
@@ -3853,6 +3855,74 @@ def _is_openai_family_provider(provider: str | None) -> bool:
     return resolved in ("openai", "openai-api", "openai-codex")
 
 
+def _normalize_openai_family_model_id(model_id: str | None) -> str:
+    """Return a model id in the form expected by hermes_cli fast-mode resolution."""
+    model = str(model_id or "").strip()
+    if not model:
+        return ""
+
+    if model.startswith("@") and ":" in model:
+        model = model.split(":", 1)[1].strip()
+
+    if "://" in model:
+        return model
+
+    if "/" in model:
+        provider_hint, candidate = model.split("/", 1)
+        if provider_hint.strip().lower() in {"openai", "openai-api", "openai-codex"}:
+            model = candidate.strip()
+        else:
+            return ""
+
+    return model
+
+
+def _legacy_openai_service_tier_overrides(model_id: str | None, provider: str | None) -> dict:
+    """Compatibility fallback for standalone WebUI installs without hermes_cli.
+
+    Normal operation delegates to Hermes Agent model metadata.  This fallback
+    preserves the old WebUI behavior when the agent package is unavailable,
+    while still failing closed for codex model slugs and foreign provider IDs.
+    """
+    if not _is_openai_family_provider(provider):
+        return {}
+    resolved_provider = str(_resolve_provider_alias(str(provider or "").strip().lower()))
+    raw_model = str(model_id or "").strip()
+    if "://" not in raw_model and "/" in raw_model:
+        provider_hint = raw_model.split("/", 1)[0].strip().lower()
+        if provider_hint not in {"openai", "openai-api", "openai-codex"}:
+            return {}
+    normalized_model = _normalize_openai_family_model_id(model_id)
+    if not normalized_model:
+        if resolved_provider == "openai-codex":
+            return {}
+        return {"service_tier": "priority"}
+    lowered = normalized_model.lower()
+    if "codex" in lowered:
+        return {}
+    if lowered.startswith(("gpt-", "o1", "o3", "o4")):
+        return {"service_tier": "priority"}
+    return {}
+
+
+def _resolve_main_model_fast_mode_overrides(model_id: str | None, provider: str | None = None) -> dict:
+    """Return provider request overrides for the main model fast-mode setting."""
+    normalized_model = _normalize_openai_family_model_id(model_id)
+    if not normalized_model:
+        return _legacy_openai_service_tier_overrides(model_id, provider)
+    try:
+        from hermes_cli.models import resolve_fast_mode_overrides
+    except Exception:
+        logger.debug("Failed to import hermes_cli.models.resolve_fast_mode_overrides; using WebUI compatibility fallback.")
+        return _legacy_openai_service_tier_overrides(model_id, provider)
+    try:
+        resolved = resolve_fast_mode_overrides(normalized_model)
+    except Exception:
+        logger.debug("Failed to resolve fast-mode overrides for %r; using WebUI compatibility fallback.", normalized_model)
+        return _legacy_openai_service_tier_overrides(model_id, provider)
+    return resolved if isinstance(resolved, dict) else {}
+
+
 def _main_model_supports_service_tier(
     model_id: str | None,
     provider: str | None,
@@ -3860,24 +3930,41 @@ def _main_model_supports_service_tier(
     """Return True when the current main-model selection can use OpenAI service tier."""
     if not _is_openai_family_provider(provider):
         return False
-    resolved = str(provider or "").strip().lower()
-    if resolved == "openai-codex":
-        return False
-    raw_model = str(model_id or "").strip().lower()
-    if not raw_model:
-        return True
-    if "/" in raw_model:
-        prefix, bare_model = raw_model.split("/", 1)
-        if prefix != "openai":
-            return False
-    else:
-        bare_model = raw_model
-    if "codex" in bare_model:
-        return False
     return (
-        _is_first_party_model("openai", bare_model)
-        or bare_model.startswith(("gpt-", "o1", "o3", "o4"))
+        str(_resolve_main_model_fast_mode_overrides(model_id, provider).get("service_tier", "")).strip().lower()
+        == "priority"
     )
+
+
+def _model_supports_fast_tier_for_provider(model_id: str | None, provider: str | None) -> bool:
+    """Return whether a provider/model entry supports WebUI's service-tier toggle."""
+    return _main_model_supports_service_tier(model_id, provider)
+
+
+def _annotate_fast_tier_model_groups(payload: dict | None) -> dict | None:
+    """Add service-tier capability metadata to OpenAI-family model groups."""
+    if not isinstance(payload, dict):
+        return payload
+    groups = payload.get("groups")
+    if not isinstance(groups, list):
+        return payload
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        provider_id = str(group.get("provider_id") or "").strip()
+        if not _is_openai_family_provider(provider_id):
+            continue
+        for bucket in ("models", "extra_models"):
+            models = group.get(bucket)
+            if not isinstance(models, list):
+                continue
+            for model in models:
+                if not isinstance(model, dict):
+                    continue
+                model_id = str(model.get("id") or "").strip()
+                if model_id:
+                    model["supports_fast_tier"] = _model_supports_fast_tier_for_provider(model_id, provider_id)
+    return payload
 
 
 def _public_main_service_tier(model_cfg: dict) -> str:
@@ -4120,6 +4207,7 @@ def get_auxiliary_models() -> dict:
         "main": {
             "provider": main_provider,
             "model": main_model,
+            "supports_fast_tier": _main_model_supports_service_tier(main_model, main_provider),
             "service_tier": _public_main_service_tier(model_cfg),
             **_public_advanced_model_options(model_cfg),
         },
@@ -4447,13 +4535,13 @@ def _minimal_static_models_catalog() -> dict:
                     "models": [{"id": default_model, "label": label}],
                 }
             )
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": {},
             "groups": groups,
             "aliases": {},
-        }
+        })
     except Exception:
         logger.debug("minimal static models catalog build failed", exc_info=True)
         return {
@@ -4812,7 +4900,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         if not groups and default_model:
             return copy.deepcopy(_minimal_static_models_catalog())
 
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": _configured_model_badges_from_static_catalog(
@@ -4822,7 +4910,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             ),
             "groups": groups,
             "aliases": model_aliases,
-        }
+        })
     except Exception:
         logger.debug("static models catalog build failed", exc_info=True)
         return copy.deepcopy(_minimal_static_models_catalog())
@@ -5339,7 +5427,7 @@ def _load_models_cache_from_disk() -> dict | None:
         # disk save path does not persist `aliases`, so reconstruct them from
         # current config to keep the /api/models.aliases contract intact (a
         # disk-cache hit must not silently drop `/model <alias>` resolution).
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -5349,7 +5437,7 @@ def _load_models_cache_from_disk() -> dict | None:
                 if isinstance(cache.get("aliases"), dict)
                 else _model_aliases_from_config()
             ),
-        }
+        })
     except Exception:
         return None
 
@@ -5407,13 +5495,13 @@ def _load_stale_models_cache_from_disk() -> dict | None:
             # duration of the over-budget stale fallback. Reconstruct from
             # current config, mirroring the live/static catalog alias build.
             aliases = _model_aliases_from_config()
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
             "aliases": aliases,
-        }
+        })
     except Exception:
         return None
 
@@ -5478,7 +5566,7 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
         _available_models_cache_source_fingerprint = None
         return None
     if _is_valid_models_cache(_available_models_cache):
-        return copy.deepcopy(_available_models_cache)
+        return _annotate_fast_tier_model_groups(copy.deepcopy(_available_models_cache))
     _available_models_cache = None
     _available_models_cache_ts = 0.0
     _available_models_live_rebuild_ts = 0.0
@@ -6661,6 +6749,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 allow_empty: bool = False,
             ) -> None:
                 picker_models = copy.deepcopy(raw_models or [])
+                if _is_openai_family_provider(provider_id):
+                    for _model in picker_models:
+                        if not isinstance(_model, dict):
+                            continue
+                        _model_id = str(_model.get("id") or "").strip()
+                        if not _model_id:
+                            continue
+                        _model["supports_fast_tier"] = (
+                            str(
+                                _resolve_main_model_fast_mode_overrides(_model_id, provider_id).get("service_tier", "")
+                            ).strip().lower()
+                            == "priority"
+                        )
                 if apply_prefix:
                     picker_models = _apply_provider_prefix(picker_models, provider_id, active_provider)
                 visible_models, extra_models = _split_picker_overflow_models(

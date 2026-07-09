@@ -3123,6 +3123,11 @@ async function populateModelDropdown(opts={}){
         const opt=document.createElement('option');
         opt.value=m.id;
         opt.textContent=m.label;
+        if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+          opt.dataset.fast='1';
+        }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+          opt.dataset.fast='0';
+        }
         og.appendChild(opt);
         _dynamicModelLabels[m.id]=m.label||m.id;
       }
@@ -3221,6 +3226,11 @@ function _addLiveModelsToSelect(provider, models, sel){
     opt.textContent=m.label||m.id;
     opt.title='Live model — fetched from provider';
     opt.dataset.provider=provider;
+    if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+      opt.dataset.fast='1';
+    }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+      opt.dataset.fast='0';
+    }
     providerGroup.appendChild(opt);
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;

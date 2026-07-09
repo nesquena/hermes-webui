@@ -18552,7 +18552,11 @@ def _handle_live_models(handler, parsed):
         # Normalise to {id, label} — provider_model_ids() returns plain string IDs.
         # For ollama-cloud use the shared Ollama formatter (handles `:variant` suffix).
         # For all other providers use a simpler hyphen-split capitaliser.
-        from api.config import _format_ollama_label as _fmt_ollama
+        from api.config import (
+            _format_ollama_label as _fmt_ollama,
+            _is_openai_family_provider as _is_fast_tier_provider,
+            _model_supports_fast_tier_for_provider,
+        )
 
         def _make_label(mid):
             """Best-effort human label from a model ID string."""
@@ -18579,7 +18583,15 @@ def _handle_live_models(handler, parsed):
                 label = label.replace(orig.title(), orig)
             return label
 
-        models_out = [{"id": mid, "label": _make_label(mid)} for mid in ids if mid]
+        annotate_fast_tier = _is_fast_tier_provider(provider)
+        models_out = []
+        for mid in ids:
+            if not mid:
+                continue
+            entry = {"id": mid, "label": _make_label(mid)}
+            if annotate_fast_tier:
+                entry["supports_fast_tier"] = _model_supports_fast_tier_for_provider(mid, provider)
+            models_out.append(entry)
         return _finish({"provider": provider, "models": models_out,
                         "count": len(models_out)})
 

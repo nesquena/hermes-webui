@@ -21,7 +21,7 @@ def _catalog(label: str) -> dict:
             {
                 "provider": "OpenAI",
                 "provider_id": "openai",
-                "models": [{"id": label, "label": label}],
+                "models": [{"id": label, "label": label, "supports_fast_tier": False}],
             }
         ],
         "aliases": {},
