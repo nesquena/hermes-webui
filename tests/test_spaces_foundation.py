@@ -274,14 +274,39 @@ def test_load_spaces_isolates_progress_event_log(monkeypatch, tmp_path):
     assert progress_events_log_path() == (tmp_path / "capy-progress-events.jsonl").resolve()
 
 
-def test_spaces_feature_flag_disabled_is_safe(monkeypatch, tmp_path):
+def test_spaces_feature_flag_disabled_recovery_snapshot_keeps_metadata_only_receipts(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=False)
+    from api.capy_progress import progress_events_log_path
 
     assert spaces.spaces_enabled() is False
     assert spaces.list_spaces() == []
     recovery = spaces.recovery_snapshot()
+    serialized = json.dumps(recovery, sort_keys=True).lower()
+
     assert recovery["enabled"] is False
     assert recovery["generated_widgets_rendered"] is False
+    assert recovery["prompt_preflight"]["boundary"] == "recovery_action"
+    assert recovery["prompt_preflight"]["status"] == "required"
+    assert recovery["prompt_preflight"]["metadata_only"] is True
+    assert recovery["prompt_preflight"]["raw_prompt_stored"] is False
+    assert recovery["autonomy_policy"]["action"] == "space.recovery.snapshot"
+    assert recovery["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert recovery["autonomy_policy"]["metadata_only"] is True
+    assert recovery["progress_event"]["event_type"] == "tool.completed"
+    assert recovery["progress_event"]["stored"] is False
+    assert recovery["progress_event"]["queued"] is False
+    assert recovery["progress_event"]["run_id"] == "recovery.snapshot:recovery"
+    assert recovery["progress_event"]["redaction_status"] == "metadata_only"
+    assert recovery["output_compaction"]["tool"] == "capy-spaces-tool-action"
+    assert recovery["output_compaction"]["command"] == "space.recovery.snapshot"
+    assert recovery["output_compaction"]["metadata_only"] is True
+    _assert_server_memory_advisory_receipt(recovery)
+
+    assert "<script" not in serialized
+    assert '\"renderer\"' not in serialized
+    assert "api_key" not in serialized
+    assert '\"raw_prompt\"' not in serialized
+    assert not progress_events_log_path().exists()
 
 
 def test_recovery_snapshot_exposes_metadata_only_policy_progress_and_compaction_receipts(monkeypatch, tmp_path):

@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- Disabled recovery snapshots now keep the recovery trust boundary visible even before Spaces are enabled: the safe fallback returns metadata-only prompt-preflight, supervised autonomy/model-route, local-only progress, Memory Tree advisory/no-authority, and output-compaction receipts without writing progress logs or leaking renderer/API-auth/raw-prompt fields. This is backend-only recovery-panel readiness evidence; no demo UI surface changed in this slice.
+
 - Recovery snapshot whole-Space repair `latest_space_repair_event` summaries now have explicit backend evidence that stored metadata-only prompt-preflight and supervised autonomy-policy/model-route receipts replay beside the Memory Tree advisory/no-authority envelope. This keeps recovery-panel whole-Space repair status aligned with `list_space_repair_events(...)` while hostile forged memory authority, raw memory context, raw prompts, renderer/source/html/API-auth fields, bearer/token markers, and secret-looking repair fixture values remain absent from the snapshot surface.
 
 - Recovery snapshot widget latest-event summaries now replay stored metadata-only prompt-preflight and supervised autonomy-policy/model-route receipts from queued widget refresh/prompt events, alongside the Memory Tree advisory/no-authority envelope. This keeps recovery-panel widget status aligned with `list_widget_events(...)` while hostile forged memory authority, raw context, renderer/script/API-auth/token, and secret-looking widget-event fixture values remain absent from the snapshot surface.
