@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **The background-wakeup status-row label is now localized.** The "Background wakeup" label introduced with the wakeup status row (#5766) was hardcoded English; it now resolves through `t('process_wakeup_label')`, with translations in all 15 locales. Thanks @Isla-Liu. (#5768)
+
 - **Concurrent remote-gateway health checks no longer stampede the gateway.** When many requests needed a remote-gateway health probe at once, each fired its own probe (a thundering herd). Probes are now single-flighted: one "leader" thread probes while latecomers wait (bounded) and share the result, guarded by a single condition/lock with a `finally` that always releases waiters even if the probe errors. Thanks @ai-ag2026. (#5798, #5455)
 
 - **Appending run-journal events no longer gets slower as a session's journal grows.** The next sequence number was recomputed by scanning existing entries on every append (O(n²) over a session's lifetime); it's now cached per journal path (guarded by a dedicated lock, evicted on journal delete), making each append O(1). Thanks @ai-ag2026. (#5799)
