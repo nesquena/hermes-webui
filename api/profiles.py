@@ -21,6 +21,7 @@ from typing import Optional
 
 import yaml
 
+from api.paths import _atomic_write_text
 from api.session_events import publish_session_list_changed
 
 logger = logging.getLogger(__name__)
@@ -2262,7 +2263,7 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
     if base_url:
         model_section['base_url'] = base_url
     cfg['model'] = model_section
-    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
+    _atomic_write_text(config_path, _yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
 
 
 def _clean_profile_config_value(value: Optional[str], field: str) -> Optional[str]:
@@ -2401,7 +2402,7 @@ def _write_model_defaults_to_config(
     if model_provider:
         model_section['provider'] = model_provider
     cfg['model'] = model_section
-    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
+    _atomic_write_text(config_path, _yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
 
 
 def create_profile_api(name: str, clone_from: str = None,
