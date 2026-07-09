@@ -122,6 +122,7 @@ class TerminalSession:
 
     def put_output(self, event: str, payload: dict) -> None:
         self.last_activity = time.time()
+        self.last_activity = time.time()
         with self._sub_lock:
             item = (self._next_output_seq, event, payload)
             self._next_output_seq += 1
