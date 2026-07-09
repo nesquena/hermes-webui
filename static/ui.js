@@ -526,6 +526,7 @@ const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
 const MESSAGE_VIRTUAL_BUFFER_PX=900;
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
   user:120,
+  process_wakeup:96,
   assistant:160,
   tool_call:400,
   default:140,
@@ -616,7 +617,7 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
-  if(m._source === 'process_wakeup') return false;
+  if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -811,6 +812,7 @@ function _syncMessageVirtualHeightCache(visWithIdx){
 function _messageVirtualRoleForEntry(entry){
   const m=entry&&entry.m;
   if(!m) return 'default';
+  if(m._source === 'process_wakeup') return 'process_wakeup';
   if(m.role==='user') return 'user';
   if(m.role==='assistant'){
     if((Array.isArray(m.tool_calls)&&m.tool_calls.length>0)||
@@ -14419,11 +14421,13 @@ function renderMessages(options){
         }
       }
     }
+    const isProcessWakeup=m&&m._source==='process_wakeup';
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
     const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
+    const rowDisplayContent=displayContent;
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
     }
@@ -14493,6 +14497,42 @@ function renderMessages(options){
       continue;
     }
 
+    if(isProcessWakeup){
+      currentAssistantTurn=null;
+      let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
+      if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
+      const processText=String(rowDisplayContent||'').trim();
+      const processFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
+      const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
+      const nextRowHtml=`<div class="process-wakeup-notice"><div class="process-wakeup-label">${li('terminal',13)}<span>Background wakeup</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}</div>`;
+      if(row){
+        row.className='msg-row process-wakeup-row';
+        row.id=_userMessageDomId(rawIdx);
+        row.dataset.msgIdx=rawIdx;
+        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+        row.dataset.role='process_wakeup';
+        delete row.dataset.editing;
+        if(row.dataset.rawText!==processText||row.innerHTML!==nextRowHtml){
+          row.dataset.rawText=processText;
+          row.innerHTML=nextRowHtml;
+        }
+      }else{
+        row=document.createElement('div');
+        row.className='msg-row process-wakeup-row';
+        row.id=_userMessageDomId(rawIdx);
+        row.dataset.msgIdx=rawIdx;
+        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+        row.dataset.role='process_wakeup';
+        row.dataset.rawText=processText;
+        row.innerHTML=nextRowHtml;
+      }
+      inner.appendChild(row);
+      userRows.set(rawIdx, row);
+      continue;
+    }
+
     if(isUser){
       currentAssistantTurn=null;
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
@@ -14500,6 +14540,7 @@ function renderMessages(options){
       const newRawText=String(displayContent).trim();
       const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       if(row){
+        row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
         row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);

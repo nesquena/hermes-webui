@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **A background wakeup no longer eats the assistant reply that preceded it.** When a background-process wakeup prompt arrived after an assistant response, the response could disappear from the interactive transcript (it remained in the DB and export). Background wakeups now render as their own distinct "Background wakeup" status row aligned to the message rail — with attachment support — leaving the prior reply intact. Thanks @Isla-Liu. (#5766)
+
 - **Service-tier (fast-mode) support is now derived from the agent's model metadata instead of a hardcoded list.** The service-tier control appears for a model only when the agent reports it supports the fast tier, so newly-supported models light up automatically and unsupported ones don't show a dead control. Falls back safely (no control) when the metadata is absent. Thanks @starship-s. (#5762, #4536)
 
 - **Live reasoning no longer briefly renders twice while a reply streams.** The streaming path updated the reasoning display through two renderers at once (the anchored reasoning block and the live thinking card), which could momentarily show the reasoning twice. It now routes through a single renderer — the live thinking card only updates when the anchored path didn't handle it. Thanks @rodboev. (#5773, #5720)

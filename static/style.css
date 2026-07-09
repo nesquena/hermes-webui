@@ -2318,6 +2318,14 @@
   .provider-error-details{margin:12px 0 0;border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden;}
   .provider-error-details>summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:600;padding:8px 12px;}
   .provider-error-details>pre{margin:0;border:0;border-top:1px solid var(--border);border-radius:0;max-height:220px;}
+  .process-wakeup-row{padding:6px 0;}
+  .process-wakeup-notice{margin:8px 0 8px var(--msg-rail);max-width:min(var(--msg-max),760px);padding:8px 10px;border:1px solid var(--border);border-left:2px solid var(--accent-bg-strong);border-radius:9px;background:var(--surface-subtle,var(--hover-bg));color:var(--muted);}
+  .process-wakeup-label{display:flex;align-items:center;gap:6px;margin-bottom:5px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);}
+  .process-wakeup-label svg{width:13px;height:13px;flex:0 0 auto;}
+  .process-wakeup-row .msg-body.process-wakeup-body{padding-left:0;max-width:none;color:var(--muted);}
+  .process-wakeup-row .msg-body pre.process-wakeup-text{margin:0;padding:0;border:0;border-radius:0;background:transparent;color:var(--muted);font-family:var(--font-mono);font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;}
+  .process-wakeup-row .msg-foot{padding-left:0;margin-top:5px;}
+  @media(max-width:700px){.process-wakeup-notice{margin-left:0;}}
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .msg-body pre[class*="language-"],.msg-body pre code[class*="language-"]{background:var(--code-bg) !important;}
   /* Fix #1463: Prism YAML grammar collapses newlines inside token spans — force pre */
