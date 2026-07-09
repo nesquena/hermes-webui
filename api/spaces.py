@@ -16153,6 +16153,16 @@ def recovery_snapshot() -> dict[str, Any]:
                     "event_name": _context_value(latest.get("event_name"), 120),
                     "status": _context_value(latest.get("status") or "queued", 80),
                 }
+                latest_prompt_preflight = latest.get("prompt_preflight")
+                if isinstance(latest_prompt_preflight, dict):
+                    latest_queued_event["prompt_preflight"] = _prompt_preflight_receipt_metadata_summary(
+                        latest_prompt_preflight
+                    )
+                latest_autonomy_policy = latest.get("autonomy_policy")
+                if isinstance(latest_autonomy_policy, dict):
+                    latest_queued_event["autonomy_policy"] = _action_policy_receipt_metadata_summary(
+                        latest_autonomy_policy
+                    )
                 latest_memory_advisory = latest.get("memory_advisory")
                 if isinstance(latest_memory_advisory, dict):
                     latest_queued_event["memory_advisory"] = _memory_advisory_public_summary(latest_memory_advisory)

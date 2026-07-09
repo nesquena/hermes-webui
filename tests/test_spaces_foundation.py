@@ -777,6 +777,25 @@ def test_widget_reload_events_emit_server_memory_advisory_no_authority_receipts(
     _assert_server_memory_advisory_receipt(queued)
     assert "memory_advisory" in listed[0]
     _assert_server_memory_advisory_receipt(listed[0])
+
+    snapshot = spaces.recovery_snapshot()
+    space_summary = next(space for space in snapshot["spaces"] if space["space_id"] == created["space_id"])
+    widget_summary = next(widget for widget in space_summary["widgets"] if widget["id"] == "reload-card")
+    latest_queued_event = widget_summary["latest_queued_event"]
+    assert latest_queued_event["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(latest_queued_event)
+    assert latest_queued_event["prompt_preflight"] == listed[0]["prompt_preflight"]
+    assert latest_queued_event["prompt_preflight"]["action"] == "capy.prompt_preflight"
+    assert latest_queued_event["prompt_preflight"]["boundary"] == "widget_runtime_prompt"
+    assert latest_queued_event["prompt_preflight"]["status"] in {"pass", "passed"}
+    assert latest_queued_event["prompt_preflight"]["metadata_only"] is True
+    assert latest_queued_event["prompt_preflight"]["raw_prompt_stored"] is False
+    assert latest_queued_event["autonomy_policy"] == listed[0]["autonomy_policy"]
+    assert latest_queued_event["autonomy_policy"]["action"] == "space.widget.event"
+    assert latest_queued_event["autonomy_policy"]["prompt_preflight_status"] in {"pass", "passed"}
+    assert latest_queued_event["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+    assert latest_queued_event["autonomy_policy"]["metadata_only"] is True
+
     assert "memory_advisory_context: true" in queued["output_compaction"]["text"]
     assert "memory_context_authority: untrusted_advisory" in queued["output_compaction"]["text"]
     assert "memory_can_bypass_safety_gates: false" in queued["output_compaction"]["text"]
@@ -19573,13 +19592,17 @@ def test_recovery_snapshot_includes_safe_widget_event_status_without_prompt_or_p
     serialized = json.dumps(recovery).lower()
 
     assert widget["queued_event_count"] == 1
-    assert widget["latest_queued_event"] == {
-        "event_id": queued["event_id"],
-        "event_name": "agent.repair",
-        "status": "queued",
-        "memory_advisory": queued["memory_advisory"],
-    }
-    _assert_server_memory_advisory_envelope(widget["latest_queued_event"])
+    latest = widget["latest_queued_event"]
+    assert latest["event_id"] == queued["event_id"]
+    assert latest["event_name"] == "agent.repair"
+    assert latest["status"] == "queued"
+    assert latest["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(latest)
+    assert latest["prompt_preflight"]["status"] in {"required", "blocked", "pass"}
+    assert latest["prompt_preflight"]["metadata_only"] is True
+    assert latest["prompt_preflight"]["raw_prompt_stored"] is False
+    assert latest["autonomy_policy"]["prompt_preflight_status"] in {"required", "blocked", "pass"}
+    assert latest["autonomy_policy"]["metadata_only"] is True
     assert "prompt_preview" not in serialized
     assert "payload_summary" not in serialized
     assert "authorization" not in serialized
