@@ -1296,8 +1296,22 @@ def test_space_repair_event_list_persists_server_memory_advisory_receipt(monkeyp
 
     snapshot = spaces.recovery_snapshot()
     space_summary = next(space for space in snapshot["spaces"] if space["space_id"] == created["space_id"])
-    assert space_summary["latest_space_repair_event"]["memory_advisory"] == queued["memory_advisory"]
-    _assert_server_memory_advisory_envelope(space_summary["latest_space_repair_event"])
+    latest_space_repair = space_summary["latest_space_repair_event"]
+    assert latest_space_repair["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(latest_space_repair)
+    latest_prompt_preflight = latest_space_repair["prompt_preflight"]
+    assert latest_prompt_preflight == listed[0]["prompt_preflight"]
+    assert latest_prompt_preflight["action"] == "capy.prompt_preflight"
+    assert latest_prompt_preflight["boundary"] == "space_repair_prompt"
+    assert latest_prompt_preflight["status"] == "pass"
+    assert latest_prompt_preflight["metadata_only"] is True
+    assert latest_prompt_preflight["raw_prompt_stored"] is False
+    latest_autonomy_policy = latest_space_repair["autonomy_policy"]
+    assert latest_autonomy_policy == listed[0]["autonomy_policy"]
+    assert latest_autonomy_policy["action"] == "space.repair.queue"
+    assert latest_autonomy_policy["prompt_preflight_status"] == "pass"
+    assert latest_autonomy_policy["approval_gates"] == ["generated_widget_execution"]
+    assert latest_autonomy_policy["metadata_only"] is True
 
     serialized = json.dumps({"queued": queued, "listed": listed[0], "snapshot": snapshot}, sort_keys=True).lower()
     assert "trusted_system_memory" not in serialized
