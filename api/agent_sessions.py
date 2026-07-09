@@ -219,6 +219,17 @@ def is_cli_session_row(row: dict) -> bool:
         return False
     if source == "cli":
         return True
+    # External-agent imports (Claude Code, Codex, etc.) are read-only sessions
+    # that Hermes discovers on disk and lists alongside CLI/TUI sessions. The
+    # client renderer (static/sessions.js: _isCliSession) files them in the CLI
+    # bucket via the is_cli_session fallthrough, so the server session-count
+    # classifier MUST agree — otherwise the server counts them under
+    # webui_session_count while the client renders them under CLI, and the WebUI
+    # filter shows a non-zero count with an empty list (#5831). These carry a
+    # real title, so they'd otherwise fall through to the conservative
+    # default-title gate below and be misclassified as non-CLI.
+    if source in {"external_agent", "external-agent"}:
+        return True
     if (
         source_tag in {"cli", "tui"}
         or raw_source in {"cli", "tui"}
