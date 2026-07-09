@@ -3976,7 +3976,7 @@ async function _copyTextToClipboard(text){
 async function _copySessionLink(session){
   const sid=session&&session.session_id;
   if(!sid) return;
-  const ref=_sessionInternalReferenceForSession(session);
+  const ref=(window.location.origin||'')+_sessionUrlForSid(sid);
   try{
     await _copyTextToClipboard(ref);
     showToast(t('session_link_copied'));

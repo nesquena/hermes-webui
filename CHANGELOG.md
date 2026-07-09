@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- **"Copy conversation link" now copies an openable URL instead of a `session://` reference.** The copy action produced the internal `session://` reference (not openable in a browser); it now copies an absolute `origin + /session/<id>` URL — the same shape used elsewhere in the app, with tracking query params stripped. Thanks @djsavvy. (#5478)
+
 - **The model picker now marks the active model with a "Selected" badge.** The currently-selected conversation model shows a distinct **Selected** pill (separate from the "Configured" state), and the picker opens with that model's provider group expanded and scrolled into view — so it's obvious at a glance which model is in use. Thanks @rodboev. (#5757, #5748)
 
 - **Transparent Stream no longer briefly renders a duplicate of the answer.** A live-token prose snapshot that was a strict prefix of the final answer escaped the existing dedupe guards (which only fired on near-complete matches) and rendered as a visible duplicate. A new provenance-gated guard suppresses only the ephemeral live-token accumulator row (role `prose` / kind `process_prose` / `token` source / `live-prose:*` id) when it's a strict shorter prefix of the settled answer and sits after the last tool row — so genuine intermediate narration is never suppressed. Thanks @rodboev. (#5758, #5749)
