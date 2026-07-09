@@ -4276,11 +4276,6 @@ _POST_COMPRESSION_TOOL_RESULT_TOTAL_TOKENS = 4096
 _POST_COMPRESSION_TOOL_RESULT_MIN_SNIPPET_TOKENS = 256
 _POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG = "_webui_pruned_tool_result_summary"
 _POST_COMPRESSION_TOOL_RESULT_MARKER = "[WebUI compressed-context budget:"
-_POST_COMPRESSION_TOOL_RESULT_NOTE_RE = re.compile(
-    r"^\[WebUI compressed-context budget: omitted \d+(?: of \d+)? chars "
-    r"\(~\d+ rough tokens\) from this tool result; "
-    r"the full output remains in the visible transcript/tool log\.\]$"
-)
 _ROUGH_TOKEN_CHARS = 4
 
 
@@ -4328,16 +4323,6 @@ def _compressed_context_tool_result_summary(text: str, *, original_tokens: int, 
     omitted_chars = max(0, len(text) - len(snippet))
     note = f"{note_prefix}{omitted_chars} of {len(text)} chars{note_suffix}"
     return f"{snippet}\n\n{note}"
-
-
-def _is_compressed_context_tool_result_summary(text: str) -> bool:
-    text = str(text or "").strip()
-    if not text:
-        return False
-    if _POST_COMPRESSION_TOOL_RESULT_NOTE_RE.fullmatch(text):
-        return True
-    _snippet, separator, note = text.rpartition("\n\n")
-    return bool(separator and _POST_COMPRESSION_TOOL_RESULT_NOTE_RE.fullmatch(note.strip()))
 
 
 def _is_compressed_context_tool_result_summary_message(msg) -> bool:
