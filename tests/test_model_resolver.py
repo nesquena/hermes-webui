@@ -590,7 +590,6 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
     """Custom endpoint model discovery must use model.api_key from config.yaml,
     not only environment variables, otherwise the dropdown collapses to the
     default model when /v1/models requires auth."""
-    import json as _json
     import api.config as _cfg
 
     old_cfg = dict(_cfg.cfg)
@@ -610,22 +609,13 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
 
     captured = {}
 
-    class _Resp:
-        def read(self):
-            return _json.dumps({'data': [{'id': 'gpt-5.2', 'name': 'GPT-5.2'}]}).encode('utf-8')
-        def __enter__(self):
-            return self
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    def _fake_urlopen(req, timeout=10):
-        url = getattr(req, 'full_url', '')
+    def _fake_get(url, headers, *, timeout):
         if 'example.test' in url:
-            captured['auth'] = req.get_header('Authorization')
-            captured['ua'] = req.get_header('User-agent')
-        return _Resp()
+            captured['auth'] = headers.get('Authorization')
+            captured['ua'] = headers.get('User-Agent')
+        return {'data': [{'id': 'gpt-5.2', 'name': 'GPT-5.2'}]}
 
-    monkeypatch.setattr('urllib.request.urlopen', _fake_urlopen)
+    monkeypatch.setattr(_cfg, '_credentialed_json_get_no_redirect', _fake_get)
     monkeypatch.setattr('socket.getaddrinfo', lambda *a, **k: [])
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     monkeypatch.delenv('HERMES_API_KEY', raising=False)

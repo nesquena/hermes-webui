@@ -1,50 +1,29 @@
-import json
-import urllib.request
-
 from api import config
 
 
 def test_custom_provider_model_field_does_not_block_remote_catalog(monkeypatch, tmp_path):
     """custom_providers[].model is sticky metadata, not the whole picker catalog."""
 
-    class FakeResponse:
-        def __init__(self, payload):
-            self.payload = payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            return json.dumps(self.payload).encode("utf-8")
-
     calls = []
 
-    def fake_urlopen(req, timeout=10):
-        url = getattr(req, "full_url", str(req))
+    def fake_get(url, headers, *, timeout):
         calls.append(url)
         if "alpha.example" in url:
-            return FakeResponse(
-                {
-                    "data": [
-                        {"id": "alpha/sticky", "name": "Alpha Sticky"},
-                        {"id": "alpha/remote", "name": "Alpha Remote"},
-                    ]
-                }
-            )
+            return {
+                "data": [
+                    {"id": "alpha/sticky", "name": "Alpha Sticky"},
+                    {"id": "alpha/remote", "name": "Alpha Remote"},
+                ]
+            }
         if "beta.example" in url:
-            return FakeResponse(
-                {
-                    "models": [
-                        {"id": "beta/remote", "name": "Beta Remote"},
-                    ]
-                }
-            )
+            return {
+                "models": [
+                    {"id": "beta/remote", "name": "Beta Remote"},
+                ]
+            }
         raise AssertionError(f"unexpected urlopen: {url}")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(config, "_credentialed_json_get_no_redirect", fake_get)
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
 
