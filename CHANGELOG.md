@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **Concurrent remote-gateway health checks no longer stampede the gateway.** When many requests needed a remote-gateway health probe at once, each fired its own probe (a thundering herd). Probes are now single-flighted: one "leader" thread probes while latecomers wait (bounded) and share the result, guarded by a single condition/lock with a `finally` that always releases waiters even if the probe errors. Thanks @ai-ag2026. (#5798, #5455)
+
 - **Appending run-journal events no longer gets slower as a session's journal grows.** The next sequence number was recomputed by scanning existing entries on every append (O(n²) over a session's lifetime); it's now cached per journal path (guarded by a dedicated lock, evicted on journal delete), making each append O(1). Thanks @ai-ag2026. (#5799)
 
 - **The login page's connectivity retry timer is now cleared correctly.** The retry poller is started with `setInterval` but was cleared with `clearTimeout`, so once the server came back the interval kept firing (a zombie timer) instead of stopping and reloading once. It now uses `clearInterval`. Thanks @ai-ag2026. (#5801)
