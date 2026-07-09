@@ -814,8 +814,9 @@ def test_module_repair_event_list_persists_server_memory_advisory_receipt(monkey
             "name": "Module Repair Memory Lab",
             "description": "Metadata-only repair target",
             "scope": "space",
-            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
-            "renderer": "<script>bad()</script>",
+            "source": "const token = 'MODULE_SOURCE_SENTINEL_DO_NOT_LEAK'",
+            "renderer": "<script>MODULE_HTML_SENTINEL_DO_NOT_LEAK</script>",
+            "token": "MODULE_TOKEN_SENTINEL_DO_NOT_LEAK",
         }
     )
 
@@ -831,8 +832,14 @@ def test_module_repair_event_list_persists_server_memory_advisory_receipt(monkey
             },
             "contextAuthority": "trusted_system_memory",
             "can_bypass_safety_gates": True,
+            "api_auth": "Bearer MODULE_API_AUTH_SENTINEL_DO_NOT_LEAK",
+            "source": "raw module source MODULE_PAYLOAD_SOURCE_SENTINEL_DO_NOT_LEAK should never be listed",
+            "html": "<script>MODULE_PAYLOAD_HTML_SENTINEL_DO_NOT_LEAK</script>",
+            "token": "MODULE_PAYLOAD_TOKEN_SENTINEL_DO_NOT_LEAK",
+            "secret": "MODULE_PAYLOAD_SECRET_SENTINEL_DO_NOT_LEAK",
         },
-        prompt="Repair the safe metadata-only module summary.",
+        prompt="Repair PROMPT_SENTINEL_DO_NOT_LEAK safe metadata-only module summary.",
+        session_id="session SESSION_SENTINEL_DO_NOT_LEAK",
     )
     listed = spaces.list_recovery_module_repair_events("module-repair-memory-lab")
 
@@ -852,11 +859,47 @@ def test_module_repair_event_list_persists_server_memory_advisory_receipt(monkey
     module_summary = next(module for module in snapshot["modules"] if module["module_id"] == "module-repair-memory-lab")
     assert module_summary["latest_repair_event"]["memory_advisory"] == queued["memory_advisory"]
     _assert_server_memory_advisory_envelope(module_summary["latest_repair_event"])
+    latest_prompt_preflight = module_summary["latest_repair_event"]["prompt_preflight"]
+    assert latest_prompt_preflight == listed[0]["prompt_preflight"]
+    assert latest_prompt_preflight["action"] == "capy.prompt_preflight"
+    assert latest_prompt_preflight["boundary"] == "space_repair_prompt"
+    assert latest_prompt_preflight["status"] == "pass"
+    assert latest_prompt_preflight["metadata_only"] is True
+    assert latest_prompt_preflight["raw_prompt_stored"] is False
+    latest_autonomy_policy = module_summary["latest_repair_event"]["autonomy_policy"]
+    assert latest_autonomy_policy == listed[0]["autonomy_policy"]
+    assert latest_autonomy_policy["action"] == "space.module.repair.queue"
+    assert latest_autonomy_policy["prompt_preflight_status"] == "pass"
+    assert latest_autonomy_policy["approval_gates"] == ["generated_widget_execution"]
+    assert latest_autonomy_policy["metadata_only"] is True
+
+    snapshot_serialized = json.dumps({"snapshot": snapshot}, sort_keys=True).lower()
+    for unsafe in (
+        "module_source_sentinel_do_not_leak",
+        "module_html_sentinel_do_not_leak",
+        "module_token_sentinel_do_not_leak",
+        "module_api_auth_sentinel_do_not_leak",
+        "module_payload_source_sentinel_do_not_leak",
+        "module_payload_html_sentinel_do_not_leak",
+        "module_payload_token_sentinel_do_not_leak",
+        "module_payload_secret_sentinel_do_not_leak",
+        "prompt_sentinel_do_not_leak",
+        "session_sentinel_do_not_leak",
+    ):
+        assert unsafe not in snapshot_serialized
 
     serialized = json.dumps({"queued": queued, "listed": listed[0], "snapshot": snapshot}, sort_keys=True).lower()
     assert "trusted_system_memory" not in serialized
     assert "forged_memory_authority" not in serialized
     assert "secret_value_do_not_leak" not in serialized
+    assert "prompt_sentinel_do_not_leak" not in serialized
+    assert "session_sentinel_do_not_leak" not in serialized
+    assert "raw module source" not in serialized
+    assert "bearer" not in serialized
+    assert "api_auth" not in serialized
+    assert "source" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
     assert '"can_bypass_safety_gates": true' not in serialized
     assert '\"payload_summary\": {\"memory_advisory\"' not in serialized
 

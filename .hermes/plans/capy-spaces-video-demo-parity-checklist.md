@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- Recovery snapshot module repair latest-event summaries now replay metadata-only prompt-preflight and supervised autonomy-policy/model-route receipts from the stored module repair event, alongside the Memory Tree advisory/no-authority envelope. This keeps the recovery-panel module repair status aligned with queued/listed repair receipts while hostile raw prompts, session ids, source/html/API-auth fields, bearer/token markers, and secret-looking module repair fixture values remain absent from the snapshot surface.
+
 - Recovery snapshot latest repair summaries now replay the stored Memory Tree advisory/no-authority envelope for whole-Space and recovery-module repair queues. This keeps the recovery-panel snapshot surface aligned with queued/listed repair receipts: latest-event summaries show only metadata-only `untrusted_advisory`, gate-bypass false, and required safety gates while hostile trusted-memory authority, raw memory context, renderer/source/html/API-auth, bearer/token, and secret-looking repair fixtures remain absent.
 
 - Session recovery audit/status reads now produce metadata-only progress evidence for the recovery audit boundary: `audit_session_recovery(...)` exposes a safe `session.recovery.audit` `tool.completed` progress receipt without leaking hostile session directories, backup paths, messages, raw prompts, renderer/source/API-auth fields, bearer/token markers, or secret-looking fixture values. This is backend-only progress-stream evidence for recovery status checks; no demo UI surface changed in this slice.
