@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 BOOT_JS = (Path(__file__).parent.parent / "static" / "boot.js").read_text(encoding="utf-8")
-CHORD = "(e.metaKey||e.ctrlKey)&&e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')"
+CHORD = "(e.metaKey||e.ctrlKey)&&!e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')"
 CTRL_K = "(e.metaKey||e.ctrlKey)&&e.key==='k'"
 
 
@@ -32,9 +32,9 @@ def _ctrl_k_branch() -> str:
     return _block_from(start)
 
 
-def test_composer_focus_chord_uses_alt_slash_and_stays_before_ctrl_k():
+def test_composer_focus_chord_uses_cmd_ctrl_slash_and_stays_before_ctrl_k():
     assert CHORD in BOOT_JS
-    assert "(e.metaKey||e.ctrlKey)&&e.key==='/'" not in BOOT_JS
+    assert "&&e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')" not in BOOT_JS
     assert "e.code==='Slash'" in BOOT_JS
     assert BOOT_JS.index("(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')") < BOOT_JS.index(CHORD)
     assert BOOT_JS.index(CHORD) < BOOT_JS.index(CTRL_K)
@@ -62,13 +62,14 @@ def test_composer_focus_branch_only_focuses_msg_and_does_not_mutate_session_stat
     assert "draft" not in branch.lower()
 
 
-def test_mode_matrix_covers_focus_return_no_alt_and_unchanged_ctrl_k():
+def test_mode_matrix_covers_focus_return_shortcut_and_unchanged_ctrl_k():
     branch = _composer_focus_branch()
     ctrl_k = _ctrl_k_branch()
 
+    assert "!e.altKey" in branch
     assert "if(composer){e.preventDefault();composer.focus();}" in branch
     assert "if(isText) return;" in branch
-    assert "(e.metaKey||e.ctrlKey)&&e.key==='/'" not in BOOT_JS
+    assert "&&e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')" not in BOOT_JS
 
     assert "if(_currentSessionIsReusableEmptyChat()){" in ctrl_k
     assert "await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();" in ctrl_k

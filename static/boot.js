@@ -2062,8 +2062,8 @@ document.addEventListener('keydown',async e=>{
       return;
     }
   }
-  // Cmd/Ctrl+Alt+/ focuses the message composer without creating a chat.
-  if((e.metaKey||e.ctrlKey)&&e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')){
+  // Cmd/Ctrl+/ focuses the message composer without creating a chat.
+  if((e.metaKey||e.ctrlKey)&&!e.altKey&&!e.shiftKey&&(e.key==='/'||e.code==='Slash')){
     const t=e.target;
     const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
     if(isText) return;
