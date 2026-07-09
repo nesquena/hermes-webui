@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- **A dropped SSE connection can no longer grow the offline replay buffer without bound.** When a stream disconnected without being cancelled, the per-`StreamChannel` offline replay buffer grew for the whole turn (a per-abandoned-turn memory risk). It's now a bounded `deque` (drop-oldest); the reconnect tail is intact and any dropped frames are recovered through the run-journal `last_event_id` replay path (the client requests journal replay on reconnect; the server enforces journal gap coverage before draining the tail). Thanks @ai-ag2026. (#5788, #4633)
+
 - **The embedded terminal no longer leaks a file descriptor, reader thread, and shell process on exit.** When the terminal client disconnected or the shell exited, the PTY fd, its reader thread, and the shell process were left dangling — accumulating over a long uptime (part of the #4633 long-uptime-crash family). Teardown now closes the fd once, stops the reader thread, and reaps the shell on both the client-exit and shell-exit paths. Thanks @ai-ag2026. (#5835, #4633)
 
 - **Atomic JSON writers now `fsync` before rename, and the discoverability temp write is thread-safe.** The OAuth, passkeys, and session-discoverability stores wrote via temp-file → `os.replace` but without an `fsync`, so a crash right after the rename could still surface a partially-flushed file; they now flush → `fsync` → replace (matching the settings/config atomic-write hardening). The discoverability temp file also now uses a thread-specific name so concurrent writers can't collide. Thanks @ai-ag2026. (#5843)

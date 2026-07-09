@@ -7863,10 +7863,39 @@ class StreamChannel:
     of them instead of being consumed destructively by a single queue reader.
     """
 
+    # Cap on the offline replay buffer (drop-oldest). While no tab is subscribed,
+    # put_nowait() buffers the stream tail so a first/reconnecting subscriber can
+    # catch up. But a client that disconnects without cancelling leaves the turn
+    # running with zero subscribers, so an unbounded buffer here grows for the
+    # WHOLE turn (a busy turn emits thousands of coalesced token frames) — an OOM
+    # risk per abandoned turn (#4633). Bounding to the most recent N frames keeps
+    # a reconnecting tab's needed *tail* intact; older dropped frames stay
+    # recoverable via the run journal by last_event_id. 8192 is generous enough
+    # to hold a long multi-tool turn's backlog while capping worst-case memory to
+    # a fixed number of small (event, data, id) tuples — deliberately far above
+    # SessionChannel's per-subscriber maxsize of 16 (that queue drops on a *slow*
+    # reader; this buffer must survive a legitimate reconnect gap).
+    _OFFLINE_BUFFER_MAXLEN = 8192
+
     def __init__(self):
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
-        self._offline_buffer: list[tuple[str, object]] = []
+        self._offline_buffer: collections.deque = collections.deque(
+            maxlen=self._OFFLINE_BUFFER_MAXLEN
+        )
+        # Frames evicted at the cap from the CURRENT buffer content. Scoped to
+        # the buffer, NOT to an attach cycle: it resets exactly when the buffer
+        # itself is cleared (first live broadcast), never on subscribe/
+        # unsubscribe alone — a drain is a non-destructive copy, so after a
+        # transient attach the buffer is STILL truncated and reporting 0 would
+        # hand the next subscriber a silently-holed tail. Whether a given
+        # reconnect actually NEEDS the evicted frames is decided server-side
+        # against offline_first_event_id (its cursor may sit inside the
+        # retained tail). Also gates the one-shot eviction log.
+        self._offline_dropped = 0
+        # Cumulative evictions over the channel's lifetime, never reset — for ops
+        # visibility via diagnostic_snapshot().
+        self._offline_dropped_total = 0
         self._last_event_id: str | None = None
 
     def subscribe(self) -> queue.Queue:
@@ -7883,8 +7912,19 @@ class StreamChannel:
             # is safe. Per Opus advisor on stage-292.
             for item in self._offline_buffer:
                 q.put_nowait(item)
+            first = self._offline_buffer[0] if self._offline_buffer else None
             snapshot = {
                 "offline_buffered_events": len(self._offline_buffer),
+                # Surface eviction so the SSE handler can tell the tail it is
+                # about to drain may be truncated (older frames were dropped at
+                # the cap) and must be proven contiguous before streaming.
+                "offline_dropped_events": self._offline_dropped,
+                # Event id of the oldest retained frame: the handler needs run-
+                # journal coverage only for (client cursor → this frame); a
+                # cursor already inside the retained tail needs no journal.
+                "offline_first_event_id": (
+                    first[2] if first is not None and len(first) >= 3 else None
+                ),
                 "last_event_id": self._last_event_id,
             }
             self._subscribers.append(q)
@@ -7911,9 +7951,27 @@ class StreamChannel:
                 self._last_event_id = event_id
             subscribers = list(self._subscribers)
             if not subscribers:
+                # deque(maxlen) evicts the oldest frame automatically when full.
+                # Log once on the first eviction (debug: an abandoned/disconnected
+                # turn is expected to hit this) and keep a running dropped count
+                # for diagnostics.
+                if len(self._offline_buffer) >= self._OFFLINE_BUFFER_MAXLEN:
+                    if self._offline_dropped == 0:  # first eviction this cycle
+                        logger.debug(
+                            "StreamChannel offline buffer full (cap=%d); dropping "
+                            "oldest frames while no subscriber is connected",
+                            self._OFFLINE_BUFFER_MAXLEN,
+                        )
+                    self._offline_dropped += 1
+                    self._offline_dropped_total += 1
                 self._offline_buffer.append(item)
                 return
+            # A subscriber is live: events now broadcast directly, so the offline
+            # tail is drained. Reset the per-cycle eviction count (which also
+            # re-arms the one-shot log) so the NEXT disconnect/overflow cycle
+            # reports and logs its own truncation, not a stale carry-over.
             self._offline_buffer.clear()
+            self._offline_dropped = 0
         for q in subscribers:
             q.put_nowait(item)
 
@@ -7923,6 +7981,9 @@ class StreamChannel:
             return {
                 "subscriber_count": len(self._subscribers),
                 "offline_buffered_events": len(self._offline_buffer),
+                # Cumulative over the channel lifetime (ops visibility), vs. the
+                # per-cycle count subscribe_with_snapshot() reports for truncation.
+                "offline_dropped_events": self._offline_dropped_total,
             }
 
 

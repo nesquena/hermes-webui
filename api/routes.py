@@ -16221,6 +16221,185 @@ def _run_journal_same_run_seq(event_id: str | None, stream_id: str) -> int | Non
     return event_seq
 
 
+def _run_journal_covers_offline_gap(
+    stream_id: str, after_seq: int | None, cutoff_seq: int | None
+) -> bool:
+    """Return True when the run journal PROVABLY backfills a dropped-frame gap.
+
+    When StreamChannel evicted frames from its offline buffer
+    (``offline_dropped_events > 0``), draining the retained tail to a
+    reconnecting client is only safe if the journal replay actually covers
+    everything from the client's cursor (*after_seq*, ``None`` = start of run)
+    through the snapshot cutoff — journal seqs are assigned contiguously from 1,
+    so coverage means every seq in ``(after_seq, cutoff_seq]`` is present. A
+    missing journal, a journal that stops short of the cutoff, or a window with
+    malformed/dropped lines all mean the evicted frames are unrecoverable here
+    and the caller must signal recovery instead of streaming tail-only.
+
+    ``cutoff_seq is None`` (the channel never saw a same-run journaled event id)
+    counts as not covered: nothing can be proven against an unknown cutoff.
+    """
+    if cutoff_seq is None:
+        return False
+    floor = max(0, int(after_seq)) if after_seq is not None else 0
+    if floor >= cutoff_seq:
+        # Client cursor is already at/past everything the buffer ever held.
+        return True
+    try:
+        summary = find_run_summary(stream_id)
+        if not summary:
+            return False
+        journal = read_run_events(
+            str(summary.get("session_id") or ""),
+            stream_id,
+            after_seq=floor,
+            max_seq=cutoff_seq,
+        )
+    except Exception:
+        logger.debug(
+            "Run journal coverage check failed for stream %s", stream_id, exc_info=True
+        )
+        return False
+    cutoff = int(cutoff_seq)
+    seqs = set()
+    for entry in journal.get("events") or []:
+        try:
+            seq = int(entry.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        if floor < seq <= cutoff:
+            seqs.add(seq)
+    # Seqs are unique and bounded to the window, so full coverage means one
+    # distinct seq per slot — no need to materialize the whole range.
+    return len(seqs) == cutoff - floor
+
+
+def _sse_replay_run_journal_gap_checked(
+    handler, qs: dict, stream_id: str, stream_snapshot: dict
+) -> tuple[bool, int | None]:
+    """Journal-replay for a reconnecting client, enforcing offline-gap coverage.
+
+    Returns ``(gap_recovered, replay_cutoff_seq)``. When the channel evicted
+    frames from its offline buffer (``offline_dropped_events > 0`` in the
+    subscribe snapshot) and the run journal cannot PROVE it backfills the gap
+    (see ``_run_journal_covers_offline_gap``), a recovery_control apperror has
+    been emitted and the caller must return instead of draining the retained
+    tail (``gap_recovered=True``).
+    """
+    if not (
+        qs.get("replay", [""])[0]
+        or qs.get("after_seq", [None])[0] not in (None, "")
+        or qs.get("after_event_id", [None])[0]
+    ):
+        return False, None
+    try:
+        offline_dropped = int(stream_snapshot.get("offline_dropped_events") or 0)
+    except (TypeError, ValueError):
+        offline_dropped = 0
+    snapshot_cutoff_seq = _run_journal_same_run_seq(
+        str(stream_snapshot.get("last_event_id") or ""),
+        stream_id,
+    )
+    after_seq = _parse_run_journal_after_seq(qs, stream_id)
+    # The subscribe snapshot already queued the retained offline tail, which
+    # covers [first buffered frame → snapshot cutoff] by itself. The journal
+    # only has to bridge (client cursor → first buffered frame) — and the
+    # replay/dedup cutoff must stop there too, or the drain loop's
+    # `seq <= replay_cutoff_seq` filter would eat queued frames the journal
+    # never emitted. Without a parseable first-frame id (empty buffer, foreign
+    # run, unjournaled head frame) fall back to the full (cursor → cutoff]
+    # window as before.
+    replay_max_seq = snapshot_cutoff_seq
+    first_buffered_seq = _run_journal_same_run_seq(
+        str(stream_snapshot.get("offline_first_event_id") or ""),
+        stream_id,
+    )
+    if first_buffered_seq is not None:
+        replay_max_seq = first_buffered_seq - 1
+        if snapshot_cutoff_seq is not None:
+            replay_max_seq = min(replay_max_seq, snapshot_cutoff_seq)
+    covered = offline_dropped <= 0 or _run_journal_covers_offline_gap(
+        stream_id, after_seq, replay_max_seq
+    )
+    replay_cutoff_seq = None
+    replay_failed = False
+    if covered:
+        try:
+            if _replay_run_journal(
+                handler,
+                stream_id,
+                after_seq,
+                max_seq=replay_max_seq,
+                include_stale=False,
+            ):
+                replay_cutoff_seq = replay_max_seq
+        except _CLIENT_DISCONNECT_ERRORS:
+            raise
+        except Exception:
+            replay_failed = True
+            logger.debug("Failed to replay active run journal for stream %s", stream_id, exc_info=True)
+    if offline_dropped > 0 and (not covered or replay_failed):
+        _sse_offline_gap_recovery(handler, stream_id, offline_dropped)
+        return True, None
+    # Two distinct dedup bounds feed the drain loop's `seq <=` filter: frames
+    # the journal replay just emitted (replay_cutoff_seq, capped at the buffer
+    # head so queued frames the journal never sent survive) AND frames the
+    # client already holds per its own cursor. A cursor at/inside the retained
+    # tail (after_seq >= first buffered frame) would otherwise get the queued
+    # copy of frames it already rendered — a double-render, since this filter
+    # is the only dedup for replayed streams.
+    if after_seq is not None:
+        cursor_bound = after_seq
+        if snapshot_cutoff_seq is not None:
+            # A legitimate cursor can never exceed the channel's last known
+            # frame; clamping keeps a bogus/corrupt cursor from filtering the
+            # queued terminal frame and pinning the loop on heartbeats.
+            cursor_bound = min(cursor_bound, snapshot_cutoff_seq)
+        replay_cutoff_seq = (
+            cursor_bound
+            if replay_cutoff_seq is None
+            else max(replay_cutoff_seq, cursor_bound)
+        )
+    return False, replay_cutoff_seq
+
+
+def _sse_offline_gap_recovery(handler, stream_id: str, offline_dropped: int) -> None:
+    """Signal an unrecoverable replay gap instead of streaming tail-only.
+
+    Frames were evicted from the channel's capped offline buffer and the run
+    journal cannot prove it backfills (client cursor → snapshot cutoff]:
+    draining the retained tail would render a silent transcript hole that ends
+    in a normal ``stream_end``. Emit the established ``recovery_control``
+    apperror (same client contract as ``run_journal.stale_interrupted_event``)
+    so the tab restores the transcript from persisted session state instead.
+    """
+    # The client only acts on the recovery signal when the payload names its
+    # session (eventMatchesCurrent), so fall back to the journal summary when
+    # the pre-worker owner registration is already gone.
+    try:
+        session_id = stream_owner_session_id(stream_id) or ""
+        if not session_id:
+            session_id = str((find_run_summary(stream_id) or {}).get("session_id") or "")
+    except Exception:
+        session_id = ""
+    _sse(
+        handler,
+        "apperror",
+        {
+            "type": "interrupted",
+            "recovery_control": True,
+            "message": (
+                "The live stream's replay buffer overflowed while no tab was "
+                "attached and the run journal cannot backfill the dropped frames."
+            ),
+            "hint": "The transcript was restored to the last saved state.",
+            "session_id": session_id,
+            "stream_id": stream_id,
+            "offline_dropped_events": offline_dropped,
+        },
+    )
+
+
 def _runner_stream_cursor_from_query(qs: dict) -> str | None:
     cursor = str(qs.get("cursor", [""])[0] or "").strip()
     if cursor:
@@ -16352,27 +16531,13 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Connection", "close")
     end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
-    replay_cutoff_seq = None
-    if qs.get("replay", [""])[0] or qs.get("after_seq", [None])[0] not in (None, "") or qs.get("after_event_id", [None])[0]:
-        snapshot_cutoff_seq = _run_journal_same_run_seq(
-            str(stream_snapshot.get("last_event_id") or ""),
-            stream_id,
-        )
-        try:
-            replayed = _replay_run_journal(
-                handler,
-                stream_id,
-                _parse_run_journal_after_seq(qs, stream_id),
-                max_seq=snapshot_cutoff_seq,
-                include_stale=False,
-            )
-            if replayed:
-                replay_cutoff_seq = snapshot_cutoff_seq
-        except _CLIENT_DISCONNECT_ERRORS:
-            raise
-        except Exception:
-            logger.debug("Failed to replay active run journal for stream %s", stream_id, exc_info=True)
+    # Replay shares the drain loop's try/finally so every exit path unsubscribes.
     try:
+        gap_recovered, replay_cutoff_seq = _sse_replay_run_journal_gap_checked(
+            handler, qs, stream_id, stream_snapshot
+        )
+        if gap_recovered:
+            return True
         while True:
             try:
                 item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
