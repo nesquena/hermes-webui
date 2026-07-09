@@ -49907,7 +49907,7 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_
         "https://octo-capy:SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/secret-scanning/alerts/31/locations",
     ),
 ])
-def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_alert_locations_malformed_routes_before_fetch_relevant_memory_empty(
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_secret_scanning_alert_locations_malformed_routes_before_fetch_before_body_read_relevant_memory_empty(
     tmp_path,
     monkeypatch,
     source_id,
