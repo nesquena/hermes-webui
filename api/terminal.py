@@ -64,11 +64,23 @@ class TerminalSession:
     output: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=2000))
     closed: threading.Event = field(default_factory=threading.Event)
     reader: threading.Thread | None = None
+    # Serializes fd-touching ops (os.write, resize ioctl) against os.close, so a
+    # write can never land on a master_fd that was closed and whose number was
+    # already recycled by a concurrent openpty — that would inject the user's
+    # keystrokes into a foreign fd. Holders re-check ``closed`` under this lock
+    # and bail if the terminal has been torn down.
+    io_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Wall-clock of the last input written or output produced. Drives which
+    # terminal the cap evicts first (least-recently-active): a shell abandoned
+    # at its prompt has neither, so it sorts oldest and is evicted before an
+    # actively used one.
+    last_activity: float = field(default_factory=time.time)
 
     def is_alive(self) -> bool:
         return not self.closed.is_set() and self.proc.poll() is None
 
     def put_output(self, event: str, payload: dict) -> None:
+        self.last_activity = time.time()
         try:
             self.output.put_nowait((event, payload))
         except queue.Full:
@@ -85,6 +97,14 @@ class TerminalSession:
 
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
+# Hard cap on concurrently live embedded terminals. Each holds a shell process,
+# a pty master fd, and a reader thread; a client that drops its output stream
+# without POSTing /api/terminal/close (tab close, crash, network drop) leaves
+# the shell running (no PDEATHSIG — see the note below), so without a ceiling
+# these accumulate over a long uptime toward fd/thread exhaustion (#4633). The
+# cap evicts the least-recently-active terminal to make room. Generous enough
+# that real interactive use never trips it.
+_MAX_TERMINALS = 32
 _spawn_queue: queue.Queue = queue.Queue()
 _spawn_supervisor_started = False
 _spawn_supervisor_lock = threading.Lock()
@@ -278,20 +298,69 @@ def _reader_loop(term: TerminalSession) -> None:
         code = term.proc.poll()
         _reap_terminal_descendants(term.proc.pid)
         term.put_output("terminal_closed", {"exit_code": code})
+        # The shell has exited (or its pty broke): retire the session so its
+        # master fd and _TERMINALS entry are released. Previously only an
+        # explicit close_terminal() / restart / atexit did this, so a shell that
+        # exited on its own (user typed `exit`, process died) leaked its master
+        # fd and dict entry for the rest of the WebUI's uptime. ``expected=term``
+        # makes this a no-op if a restart already replaced the entry with a new
+        # terminal for the same session id.
+        close_terminal(term.session_id, expected=term)
 
 
 def _set_size(term: TerminalSession, rows: int, cols: int) -> None:
     term.rows = max(8, min(int(rows or term.rows or 24), 80))
     term.cols = max(20, min(int(cols or term.cols or 80), 240))
-    try:
-        fcntl.ioctl(term.master_fd, termios.TIOCSWINSZ, _winsize(term.rows, term.cols))
-    except OSError:
-        pass
+    # The ioctl touches master_fd, so guard it against a concurrent close (and
+    # the fd-number recycling that can follow) with the same io_lock as writes.
+    with term.io_lock:
+        if not term.closed.is_set():
+            try:
+                fcntl.ioctl(term.master_fd, termios.TIOCSWINSZ, _winsize(term.rows, term.cols))
+            except OSError:
+                pass
     try:
         if term.proc.poll() is None:
             os.killpg(term.proc.pid, signal.SIGWINCH)
     except (OSError, ProcessLookupError):
         pass
+
+
+def _enforce_terminal_cap(*, exclude_sid: str | None = None) -> None:
+    """Evict terminals until there is room under ``_MAX_TERMINALS``.
+
+    Picks a victim under the lock but closes it *outside* the lock (close_terminal
+    may spend up to a couple of seconds killing/​waiting on the shell). Prefers a
+    dead-process terminal, else the least-recently-active one — an abandoned
+    shell idle at its prompt sorts oldest and goes first. ``exclude_sid`` is the
+    session about to reuse/replace its own entry, so it never evicts itself.
+    """
+    if not _TERMINAL_SUPPORTED:
+        return
+    # Bounded loop: at most the current population; guards against a pathological
+    # spin if close_terminal somehow can't remove an entry.
+    for _ in range(_MAX_TERMINALS + 1):
+        victim_sid = None
+        victim_term = None
+        with _LOCK:
+            # Reuse/restart of an existing sid replaces in place — no growth.
+            if exclude_sid in _TERMINALS:
+                return
+            if len(_TERMINALS) < _MAX_TERMINALS:
+                return
+            candidates = [
+                (sid, term) for sid, term in _TERMINALS.items() if sid != exclude_sid
+            ]
+            if not candidates:
+                return
+            dead = [(sid, term) for sid, term in candidates if not term.is_alive()]
+            victim_sid, victim_term = (
+                dead[0] if dead else min(candidates, key=lambda kv: kv[1].last_activity)
+            )
+        # ``expected=victim_term`` so that if this sid was restarted/replaced in
+        # the gap between picking it and closing it, we don't tear down the new
+        # (possibly active) terminal — symmetric with the reader-loop retire.
+        close_terminal(victim_sid, expected=victim_term)
 
 
 def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int = 80, restart: bool = False) -> TerminalSession:
@@ -304,6 +373,12 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
     cwd = str(Path(workspace).expanduser().resolve())
     if not Path(cwd).is_dir():
         raise ValueError("workspace is not a directory")
+
+    # Enforce the cap before spawning. Done outside the main lock below (the
+    # eviction's process teardown must not run while _LOCK is held for the whole
+    # spawn), and skipped for a same-sid reuse/restart, which replaces rather
+    # than adds an entry.
+    _enforce_terminal_cap(exclude_sid=sid)
 
     with _LOCK:
         current = _TERMINALS.get(sid)
@@ -402,7 +477,14 @@ def write_terminal(session_id: str, data: str) -> None:
     term = get_terminal(session_id)
     if not term or not term.is_alive():
         raise KeyError("terminal not running")
-    os.write(term.master_fd, str(data or "").encode("utf-8", errors="replace"))
+    # Re-check ``closed`` under io_lock and write while holding it, so the fd
+    # can't be closed (and its number recycled by another openpty) between the
+    # check and the write — which would inject this input into a foreign fd.
+    with term.io_lock:
+        if term.closed.is_set():
+            raise KeyError("terminal not running")
+        os.write(term.master_fd, str(data or "").encode("utf-8", errors="replace"))
+    term.last_activity = time.time()
 
 
 def resize_terminal(session_id: str, rows: int, cols: int) -> None:
@@ -414,11 +496,21 @@ def resize_terminal(session_id: str, rows: int, cols: int) -> None:
     _set_size(term, rows, cols)
 
 
-def close_terminal(session_id: str) -> bool:
+def close_terminal(session_id: str, *, expected: TerminalSession | None = None) -> bool:
+    """Tear down the terminal for *session_id*: kill the shell, close the pty
+    master fd, reap descendants, and drop the ``_TERMINALS`` entry.
+
+    ``expected`` guards the retire-from-reader-loop path: only act if the live
+    entry is still that exact terminal, so an old reader thread finishing after
+    a restart cannot tear down the *new* terminal that replaced it (the old
+    one's fd was already closed by the restart's own close_terminal call).
+    """
     if not _TERMINAL_SUPPORTED:
         return False
     sid = str(session_id or "")
     with _LOCK:
+        if expected is not None and _TERMINALS.get(sid) is not expected:
+            return False
         term = _TERMINALS.pop(sid, None)
     if not term:
         return False
@@ -441,10 +533,13 @@ def close_terminal(session_id: str) -> bool:
                 except (subprocess.TimeoutExpired, ProcessLookupError):
                     pass
     finally:
-        try:
-            os.close(term.master_fd)
-        except OSError:
-            pass
+        # ``closed`` is already set above, so a writer/​resizer blocked on io_lock
+        # will see it and bail rather than touch the fd we are about to close.
+        with term.io_lock:
+            try:
+                os.close(term.master_fd)
+            except OSError:
+                pass
         _reap_terminal_descendants(term.proc.pid)
     return True
 
