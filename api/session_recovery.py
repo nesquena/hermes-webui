@@ -408,7 +408,12 @@ def _read_index_session_ids(index_path: Path) -> set[str]:
     return ids
 
 
-def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None) -> dict:
+def audit_session_recovery(
+    session_dir: Path,
+    state_db_path: Path | None = None,
+    *,
+    include_progress: bool = True,
+) -> dict:
     """Read-only audit of session recovery state.
 
     The audit intentionally does not mutate files. It classifies only the safe
@@ -416,12 +421,21 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
     derived index rebuilds. Call ``recover_all_sessions_on_startup`` separately
     for safe repairs.
     """
+    def _with_progress(payload: dict) -> dict:
+        if not include_progress:
+            return payload
+        progress_event = _session_recovery_progress_event(
+            "tool.completed",
+            run_id="session.recovery.audit",
+        )
+        return {**payload, "progress_event": progress_event, "progress_events": [progress_event]}
+
     if not session_dir.exists():
-        return {
+        return _with_progress({
             "status": "ok",
             "summary": {"ok": 0, "repairable": 0, "unsafe_to_repair": 0},
             "items": [],
-        }
+        })
 
     items: list[dict] = []
     live_paths = sorted(p for p in session_dir.glob('*.json') if not p.name.startswith('_'))
@@ -539,7 +553,7 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         overall = "warn"
     else:
         overall = "ok"
-    return {"status": overall, "summary": summary, "items": items}
+    return _with_progress({"status": overall, "summary": summary, "items": items})
 
 
 def _session_recovery_required_prompt_preflight_receipt() -> dict:
@@ -585,15 +599,20 @@ def _session_recovery_memory_advisory_receipt() -> dict:
     }
 
 
-def _session_recovery_progress_event(event_type: str) -> dict:
+def _session_recovery_progress_event(
+    event_type: str,
+    *,
+    run_id: str = "session.recovery.repair_safe",
+) -> dict:
     safe_event_type = event_type if event_type in {"tool.started", "tool.completed", "tool.failed"} else "tool.completed"
+    safe_run_id = run_id if run_id in {"session.recovery.audit", "session.recovery.repair_safe"} else "session.recovery.repair_safe"
     try:
         from api.capy_progress import record_progress_event
 
         return record_progress_event(
             {
                 "event_type": safe_event_type,
-                "run_id": "session.recovery.repair_safe",
+                "run_id": safe_run_id,
             }
         )
     except Exception:  # noqa: BLE001 - recovery should still return if telemetry is unavailable.
@@ -602,7 +621,7 @@ def _session_recovery_progress_event(event_type: str) -> dict:
             "queued": False,
             "event_type": safe_event_type,
             "family": "tool",
-            "run_id": "session.recovery.repair_safe",
+            "run_id": safe_run_id,
             "redaction_status": "metadata_only",
         }
 
@@ -688,7 +707,7 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     readable state.db. Unsafe audit findings remain for manual review.
     """
     progress_events = [_session_recovery_progress_event("tool.started")]
-    before = audit_session_recovery(session_dir, state_db_path=state_db_path)
+    before = audit_session_recovery(session_dir, state_db_path=state_db_path, include_progress=False)
     backup_repair = recover_all_sessions_on_startup(
         session_dir,
         rebuild_index=True,
@@ -701,7 +720,7 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
             _write_session_index(updates=None)
         except Exception as exc:
             logger.warning("repair_safe_session_recovery: index rebuild after state.db reconciliation failed: %s", exc)
-    after = audit_session_recovery(session_dir, state_db_path=state_db_path)
+    after = audit_session_recovery(session_dir, state_db_path=state_db_path, include_progress=False)
     unsafe_remaining = int((after.get("summary") or {}).get("unsafe_to_repair") or 0)
     repairable_remaining = int((after.get("summary") or {}).get("repairable") or 0)
     clean = unsafe_remaining == 0 and repairable_remaining == 0

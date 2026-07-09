@@ -21,6 +21,80 @@ def _write_session(session_dir, sid, messages=1):
     return path
 
 
+def test_audit_session_recovery_returns_metadata_only_progress_event_without_hostile_strings(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress.jsonl"))
+    session_dir = tmp_path / "sessions_BEARER_TOKEN_SECRET_path"
+    session_dir.mkdir()
+    sid = "sid_API_AUTH_BEARER_TOKEN_SECRET_prompt_renderer_source"
+    live = session_dir / f"{sid}.json"
+    backup = session_dir / f"{sid}.json.bak"
+    live.write_text(
+        json.dumps(
+            {
+                "id": sid,
+                "session_id": sid,
+                "title": "raw prompt bearer token secret title",
+                "messages": [
+                    {"role": "user", "content": "RAW_PROMPT:<script>alert('token')</script> API_AUTH=secret"}
+                ],
+                "renderer": "unsafe-source-renderer",
+                "source": "unsafe-source-body",
+            }
+        ),
+        encoding="utf-8",
+    )
+    backup.write_text(
+        json.dumps(
+            {
+                "id": sid,
+                "session_id": sid,
+                "title": "backup raw prompt bearer token secret title",
+                "messages": [
+                    {"role": "user", "content": "RAW_PROMPT backup bearer secret"},
+                    {"role": "assistant", "content": "backup message with token"},
+                ],
+                "api_auth": "Bearer unsafe-secret-token",
+                "backup_path": str(backup),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = audit_session_recovery(session_dir)
+
+    assert result["status"] == "warn"
+    progress = result["progress_event"]
+    assert progress["event_type"] == "tool.completed"
+    assert progress["family"] == "tool"
+    assert progress["run_id"] == "session.recovery.audit"
+    assert progress["redaction_status"] == "metadata_only"
+    assert result["progress_events"] == [progress]
+    serialized_progress = json.dumps(
+        {"progress_event": progress, "progress_events": result["progress_events"]},
+        sort_keys=True,
+    ).lower()
+    for unsafe in (
+        str(session_dir).lower(),
+        str(live).lower(),
+        str(backup).lower(),
+        sid.lower(),
+        "raw_prompt",
+        "<script",
+        "api_auth",
+        "bearer",
+        "unsafe-secret-token",
+        "renderer",
+        "unsafe-source",
+        "secret_path",
+    ):
+        assert unsafe not in serialized_progress
+
+    missing_result = audit_session_recovery(tmp_path / "missing_SECRET_session_dir")
+    assert missing_result["status"] == "ok"
+    assert missing_result["progress_event"]["run_id"] == "session.recovery.audit"
+    assert "missing_secret_session_dir" not in json.dumps(missing_result["progress_event"], sort_keys=True).lower()
+
+
 def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_path, monkeypatch):
     import api.models as _m
 
