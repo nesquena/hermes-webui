@@ -7239,7 +7239,7 @@ def _session_index_marks_was_webui(sid: str) -> bool:
     if not SESSION_INDEX_FILE.exists():
         return False
     try:
-        entries = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+        entries = json.loads(SESSION_INDEX_FILE.read_bytes())
     except Exception:
         return False
     for entry in entries if isinstance(entries, list) else []:
@@ -8812,7 +8812,7 @@ def _pre_compression_continuation_session_id(session) -> str | None:
         if not SESSION_INDEX_FILE.exists():
             return None
         try:
-            entries = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
         except Exception:
             return None
         if not isinstance(entries, list):
@@ -15237,7 +15237,7 @@ def handle_post(handler, parsed) -> bool:
         # update so one slow/failing session can't abort the whole request.
         if SESSION_INDEX_FILE.exists():
             try:
-                index = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+                index = json.loads(SESSION_INDEX_FILE.read_bytes())
                 active_ids = _active_stream_ids()
                 deferred_to_stream = []
                 for entry in index:
@@ -19305,7 +19305,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
 
             with _INDEX_WRITE_LOCK:
                 index_file_data = json.loads(
-                    SESSION_INDEX_FILE.read_text(encoding="utf-8")
+                    SESSION_INDEX_FILE.read_bytes()
                 )
                 if isinstance(index_file_data, list):
                     live_ids = {

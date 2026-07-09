@@ -17,9 +17,11 @@ def test_compression_continuation_fallback_reads_only_file_head(monkeypatch, tmp
 
     opened_for_read = []
     read_text_calls = []
+    read_bytes_calls = []
 
     original_path_open = models.Path.open
     original_path_read_text = models.Path.read_text
+    original_path_read_bytes = models.Path.read_bytes
 
     class _TrackingHandle:
         def __init__(self, path, inner):
@@ -47,15 +49,24 @@ def test_compression_continuation_fallback_reads_only_file_head(monkeypatch, tmp
         read_text_calls.append(str(self))
         return original_path_read_text(self, *args, **kwargs)
 
+    def tracking_read_bytes(self, *args, **kwargs):
+        read_bytes_calls.append(str(self))
+        return original_path_read_bytes(self, *args, **kwargs)
+
     monkeypatch.setattr(models.Path, "open", tracking_open)
     monkeypatch.setattr(models.Path, "read_text", tracking_read_text)
+    monkeypatch.setattr(models.Path, "read_bytes", tracking_read_bytes)
 
     session = models.Session(session_id=parent_sid)
 
     assert models._has_compression_continuation(session) is False
 
-    assert str(index_file) in read_text_calls
+    # The index is read whole (now via read_bytes — json.loads decodes UTF-8 in
+    # one pass); the candidate sidecar is NOT slurped, only its head is read
+    # through the bounded open below.
+    assert str(index_file) in read_bytes_calls
     assert all(path != str(candidate) for path in read_text_calls)
+    assert all(path != str(candidate) for path in read_bytes_calls)
 
     candidate_reads = [size for path, size in opened_for_read if path == str(candidate)]
     assert candidate_reads, "fallback should read the candidate sidecar"

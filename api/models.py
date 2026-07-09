@@ -392,7 +392,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
             # Avoid N filesystem exists() checks under LOCK by collecting
             # on-disk IDs once before entering the critical section.
             on_disk_ids = _persisted_session_ids_snapshot()
-            existing = json.loads(session_index_file.read_text(encoding='utf-8'))
+            existing = json.loads(session_index_file.read_bytes())
             if not isinstance(existing, list):
                 raise ValueError("session index must be a list")
             with LOCK:
@@ -456,7 +456,7 @@ def prune_session_from_index(session_id: str) -> None:
     with _INDEX_WRITE_LOCK:
         try:
             with LOCK:
-                existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+                existing = json.loads(SESSION_INDEX_FILE.read_bytes())
                 if not isinstance(existing, list):
                     raise ValueError("session index must be a list")
                 pruned = [e for e in existing if e.get('session_id') != sid]
@@ -1022,7 +1022,7 @@ def _index_message_count_map(entries=None) -> dict[str, int]:
     """
     if entries is None:
         try:
-            entries = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
         except Exception:
             return {}
     if not isinstance(entries, list):
@@ -2636,7 +2636,7 @@ def _has_compression_continuation(session) -> bool:
 
     try:
         if SESSION_INDEX_FILE.exists():
-            entries = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
             if isinstance(entries, list) and any(_row_is_continuation(e) for e in entries):
                 return True
     except Exception:
@@ -4665,7 +4665,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     if SESSION_INDEX_FILE.exists():
         try:
             _diag_stage(diag, "all_sessions.read_index")
-            index = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            index = json.loads(SESSION_INDEX_FILE.read_bytes())
             _diag_stage(diag, "all_sessions.prune_index")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
@@ -4907,7 +4907,7 @@ def _backfill_project_profiles_if_needed(projects: list) -> bool:
     session_profile_by_project: dict[str, str] = {}
     if SESSION_INDEX_FILE.exists():
         try:
-            entries = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
             untagged_ids = {p['project_id'] for p in untagged if p.get('project_id')}
             for e in entries:
                 pid = e.get('project_id')
