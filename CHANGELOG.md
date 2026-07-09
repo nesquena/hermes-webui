@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- **Imported external-agent sessions (Claude Code, Codex) no longer show a non-zero "WebUI sessions" count with an empty list.** The server session-count classifier treated a read-only external-agent import (which carries a real title) as non-CLI — counting it under `webui_session_count` — while the client renderer filed the same row in the CLI bucket. The result was a confusing "WebUI sessions (N)" chip over an empty list, with those sessions only reachable under the CLI tab. The server now classifies `external_agent`/`external-agent` sources as CLI, matching the client, so the tab counts agree with where rows render. WebUI, messaging, and delegated-subagent sessions are unaffected. Thanks @nesquena-hermes. (#5846, #5831)
+
 - **Long tool outputs can no longer blow up the model context after a compression event.** After the conversation is compressed, the protected-tail tool-result payloads sent to the model are now hard-capped to a token budget (applied once, only after a confirmed compression). The cap operates on the model context only (a deep copy of `context_messages`) — it never removes or reorders messages (so no tool_call/tool_result pairing is broken) and never touches the visible/persisted transcript, which keeps the full tool output. Thanks @franksong2702. (#5667, #4685)
 
 - **"Copy conversation link" now copies an openable URL instead of a `session://` reference.** The copy action produced the internal `session://` reference (not openable in a browser); it now copies an absolute `origin + /session/<id>` URL — the same shape used elsewhere in the app, with tracking query params stripped. Thanks @djsavvy. (#5478)
