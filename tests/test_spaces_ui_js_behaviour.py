@@ -2084,7 +2084,7 @@ global.fetch = async function(path, opts = {}) {
         approval_required: true,
         approval_gates: ['creator_commit'],
         prompt_preflight_status: 'pass',
-        model_route_hint: 'hint:reasoning',
+        model_route_hint: 'hint:fast',
         metadata_only: true,
         local_only: true,
         raw_prompt: 'UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
@@ -2115,7 +2115,7 @@ global.fetch = async function(path, opts = {}) {
         text: 'space_action: space.widget.upsert\nprogress_run_id: widget.upsert:lab',
         retained_artifact_handles: [
           { kind: 'space', handle: 'space:lab', label: 'Space action metadata' },
-          { kind: 'widget', handle: 'widget:lab:notes', label: 'Widget upsert metadata' },
+          { kind: 'revision', handle: 'revision:rev2', label: 'Space action revision' },
         ],
         raw_prompt: 'UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
         raw_context: 'UPSERT_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
@@ -5400,7 +5400,7 @@ def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path
     assert "Action policy" in receipt_html
     assert "Action: space.widget.upsert" in receipt_html
     assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in receipt_html
-    assert "Model route hint: hint:reasoning" in receipt_html
+    assert "Model route hint: hint:fast" in receipt_html
     assert "Widget upsert progress" in receipt_html
     assert "tool.completed · tool · run widget.upsert:lab · metadata-only progress receipt" in receipt_html
     assert "Compaction evidence" in receipt_html
@@ -5410,7 +5410,8 @@ def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path
     assert "Rules: cap_section_chars, redact_unsafe_markers, retain_artifact_handles" in receipt_html
     assert "Artifacts: 2" in receipt_html
     assert "space · space:lab · Space action metadata" in receipt_html
-    assert "widget · widget:lab:notes · Widget upsert metadata" in receipt_html
+    assert "revision · revision:rev2 · Space action revision" in receipt_html
+    assert "widget · widget:lab:notes" not in receipt_html
     for unsafe in (
         "UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK",
         "UPSERT_RAW_CONTEXT_SECRET_DO_NOT_LEAK",
