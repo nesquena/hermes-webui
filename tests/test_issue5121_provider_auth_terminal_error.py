@@ -1468,3 +1468,47 @@ def test_non_auth_seeded_replayed_assistant_does_not_satisfy_current_turn(tmp_pa
     assert apperrors, "expected apperror for seeded replay silent failure"
     assert apperrors[-1]["type"] == "no_response"
     assert not any(event == "done" for event, _ in events)
+
+
+def test_display_merge_preserves_identical_partial_text_across_separate_turns():
+    previous_display = [
+        {"role": "user", "content": "first cancelled turn"},
+        {
+            "role": "assistant",
+            "content": "Same partial progress",
+            "_partial": True,
+            "_partial_tool_calls": [
+                {"name": "terminal", "args": {"command": "first"}, "done": True}
+            ],
+        },
+        {"role": "assistant", "content": "First turn cancelled", "_error": True},
+        {"role": "user", "content": "second cancelled turn"},
+        {
+            "role": "assistant",
+            "content": "Same partial progress",
+            "_partial": True,
+            "_partial_tool_calls": [
+                {"name": "read_file", "args": {"path": "second"}, "done": True}
+            ],
+        },
+        {"role": "assistant", "content": "Second turn cancelled", "_error": True},
+        {"role": "user", "content": "successful turn"},
+    ]
+    previous_context = list(previous_display)
+    result_messages = previous_context + [
+        {"role": "assistant", "content": "Successful final answer"}
+    ]
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        "successful turn",
+    )
+
+    partials = [msg for msg in merged if msg.get("_partial")]
+    assert len(partials) == 2
+    assert [msg["_partial_tool_calls"][0]["name"] for msg in partials] == [
+        "terminal",
+        "read_file",
+    ]

@@ -5299,16 +5299,20 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     # merge's _message_identity previously returned None for empty _partial
     # messages, so the seen-set couldn't catch them — they doubled each turn.
     # Scan backwards and keep only the LAST occurrence of each unique _partial
-    # identity, then reverse back to original order.
+    # signature within one user turn, then reverse back to original order.
+    # The signature includes partial tool calls, and resetting at user boundaries
+    # prevents identical progress text in separate cancelled turns from deleting
+    # legitimate historical rows.
     _partial_seen = set()
     _deduped_rev = []
     for m in reversed(previous_display):
-        if isinstance(m, dict) and m.get('_partial'):
-            key = _message_identity(m)
-            if key is not None:
-                if key in _partial_seen:
-                    continue
-                _partial_seen.add(key)
+        if isinstance(m, dict) and m.get('role') == 'user':
+            _partial_seen.clear()
+        elif isinstance(m, dict) and m.get('_partial'):
+            key = _partial_message_signature(m)
+            if key in _partial_seen:
+                continue
+            _partial_seen.add(key)
         _deduped_rev.append(m)
     _deduped = list(reversed(_deduped_rev))
     if len(_deduped) < len(previous_display):
