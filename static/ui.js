@@ -3771,6 +3771,15 @@ function renderModelDropdown(){
     }
     return 500;
   };
+  const _selectedModelState=(typeof _modelStateForSelect==='function')?_modelStateForSelect(sel,sel.value):{model:sel&&sel.value||'',model_provider:null};
+  const _modelProviderForSelectedBadge=(m)=>{
+    const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
+    return (_provider&&_provider!=='default')?_provider:null;
+  };
+  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
+    ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
+    :'';
   const _renderProviderEndpointHint=(entry,parent)=>{
     if(!entry||!entry.label||!entry.modelsEndpointError) return;
     const hint=document.createElement('div');
@@ -3780,13 +3789,13 @@ function renderModelDropdown(){
   };
   // Build a single model-option row (mirrors the main render loop's row markup),
   // used both by the main render and by the in-place overflow reveal below.
-  const _buildModelRow=(m,sel,withProviderChip)=>{
+  const _buildModelRow=(m,withProviderChip)=>{
     const row=document.createElement('div');
-    row.className='model-opt'+(m.value===sel.value?' active':'');
+    row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
     const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
-    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
     row.onclick=()=>selectFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
     return row;
   };
@@ -3840,7 +3849,7 @@ function renderModelDropdown(){
       for(const m of extraModels){
         if(!m||!m.id) continue;
         if(_alreadyShown.has(esc(m.id))) continue;
-        const row=_buildModelRow({value:m.id,name:m.label||m.id,id:m.id,group:_plainLabel,groupKey,providerId:(og.dataset&&og.dataset.provider)||''},sel,false);
+        const row=_buildModelRow({value:m.id,name:m.label||m.id,id:m.id,group:_plainLabel,groupKey,providerId:(og.dataset&&og.dataset.provider)||''},false);
         wrap.insertBefore(row,moreEl);
         if(!firstNewRow) firstNewRow=row;
       }
@@ -3895,17 +3904,17 @@ function renderModelDropdown(){
   const _selectedGroupKey=(()=>{
     const _selVal=String((sel&&sel.value)||'');
     if(!_selVal) return null;
-    const _hit=_modelData.find(m=>m&&!m.endpointErrorOnly&&String(m.value||'')===_selVal);
+    const _hit=_modelData.find(m=>m&&!m.endpointErrorOnly&&_isSelectedModelRow(m)) || _modelData.find(m=>m&&!m.endpointErrorOnly&&String(m.value||'')===_selVal);
     return _hit?_hit.groupKey:null;
   })();
-  const _makeModelRow=(m,sel,shouldRenderHeading)=>{
+  const _makeModelRow=(m,shouldRenderHeading)=>{
     const row=document.createElement('div');
-    row.className='model-opt'+(m.value===sel.value?' active':'');
+    row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
     const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
     const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
-    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
     row.onclick=()=>selectFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
     return row;
   };
@@ -3990,7 +3999,7 @@ function renderModelDropdown(){
       }
       for(const m of configuredModels){
         const row=document.createElement('div');
-        row.className='model-opt'+(m.value===sel.value?' active':'');
+        row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
         let badgeLabel = '';
         let modelName = m.name;
         if (m.badge) {
@@ -4004,7 +4013,7 @@ function renderModelDropdown(){
           }
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
@@ -4105,16 +4114,16 @@ function renderModelDropdown(){
               });
               wrapper.appendChild(subHeading);
               wrapper.appendChild(subWrapper);
-              for(const m of pfxRows) subWrapper.appendChild(_makeModelRow(m,sel,shouldRenderHeading));
+              for(const m of pfxRows) subWrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
             } else {
-              for(const m of pfxRows) wrapper.appendChild(_makeModelRow(m,sel,shouldRenderHeading));
+              for(const m of pfxRows) wrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
             }
           }
         } else {
-          for(const m of groupRows) wrapper.appendChild(_makeModelRow(m,sel,shouldRenderHeading));
+          for(const m of groupRows) wrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
         }
       } else {
-        for(const m of groupRows) dd.appendChild(_makeModelRow(m,sel,shouldRenderHeading));
+        for(const m of groupRows) dd.appendChild(_makeModelRow(m,shouldRenderHeading));
       }
       if(!term&&hiddenCount){
         const showAll=document.createElement('div');
@@ -4243,6 +4252,8 @@ async function toggleModelDropdown(){
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
+  const activeRow=dd.querySelector('.model-opt.active');
+  if(activeRow&&typeof activeRow.scrollIntoView==='function') activeRow.scrollIntoView({block:'nearest'});
   chip.classList.add('active');
   const mobileAction=$('composerMobileModelAction');
   if(mobileAction) mobileAction.classList.add('active');
@@ -11513,6 +11524,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     const text=String(row.text||'').trim();
     if(!text) return null;
     const finalAnswer=String((opts&&opts.finalAnswer)||'').trim();
+    if(opts&&opts.liveTokenFinalPrefixEligible&&_anchorSceneLiveTokenFinalPrefix(row,text,finalAnswer)) return null;
     if(finalAnswer&&_anchorSceneProseMatchesFinalAnswer(text,finalAnswer)) return null;
     node=_anchorSceneNodeForRow(row,{settled});
     if(!node) return null;
@@ -11554,6 +11566,18 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   if(opts&&opts.sessionId) node.setAttribute('data-session-id',String(opts.sessionId));
   if(live) node.setAttribute('data-live-stream-owned','1');
   return node;
+}
+function _anchorSceneLiveTokenFinalPrefix(row, proseText, finalAnswer){
+  if(!row||row.role!=='prose'||row.kind!=='process_prose') return false;
+  if(String(row.source_event_type||'')!=='token') return false;
+  if(!String(row.local_id||'').startsWith('live-prose:')) return false;
+  const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const rowKey=norm(proseText), finalKey=norm(finalAnswer);
+  return !!(rowKey&&finalKey&&rowKey.length<finalKey.length&&finalKey.startsWith(rowKey));
+}
+function _anchorSceneLastNonTerminalWorkRowIndex(rows){
+  if(!Array.isArray(rows)) return -1;
+  return rows.reduce((last,row,idx)=>(row&&row.role==='tool')?idx:last,-1);
 }
 // Whitespace-insensitive compare so a scene prose row that IS the final answer
 // (possibly re-wrapped) is recognized and not duplicated against the segment.
@@ -12152,6 +12176,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   const scene=message._anchor_activity_scene;
   const rows=_anchorSceneRowsForRendering(scene,{settled:true});
   if(!rows.length) return false;
+  const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);
   // The assistant segment owns the final answer; pass it so intermediate prose
   // rows render but the final-answer-duplicate prose row is suppressed.
   const finalAnswer=String(
@@ -12170,8 +12195,9 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
     }
   });
   let wrote=false;
-  for(const row of rows){
-    const node=_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer});
+  for(let idx=0;idx<rows.length;idx+=1){
+    const row=rows[idx];
+    const node=_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer,liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex});
     if(!node) continue;
     if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
     else blocks.appendChild(node);

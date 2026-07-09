@@ -1,0 +1,36 @@
+{
+  "source": "Issue #5749 captured session JSON shape, redacted in the public issue body.",
+  "messages": [
+    {
+      "id": "assistant-5749",
+      "role": "assistant",
+      "content": "While reviewing the Transparent Stream replay, I found that the settled anchor scene kept a live token prose row from the final answer stream. That row was saved as progress even though it was only the beginning of the final response. On reload the renderer treated it as ordinary activity, so the reader saw the opening paragraph once above the answer and again inside the assistant message."
+    }
+  ],
+  "anchor_activity_scenes": {
+    "assistant-5749": {
+      "scene": {
+        "mode": "transparent_stream",
+        "final_answer": "While reviewing the Transparent Stream replay, I found that the settled anchor scene kept a live token prose row from the final answer stream. That row was saved as progress even though it was only the beginning of the final response. On reload the renderer treated it as ordinary activity, so the reader saw the opening paragraph once above the answer and again inside the assistant message.",
+        "lifecycle": {
+          "terminal_state": "done"
+        },
+        "identity": {
+          "source_message_refs": [
+            "assistant-5749"
+          ]
+        },
+        "activity_rows": [
+          {
+            "role": "prose",
+            "kind": "process_prose",
+            "source_event_type": "token",
+            "local_id": "live-prose:issue5749:1",
+            "text": "While reviewing the Transparent Stream replay, I found that the settled anchor scene kept a live token prose row from the final answer stream. That row was saved as progress",
+            "status": "running"
+          }
+        ]
+      }
+    }
+  }
+}

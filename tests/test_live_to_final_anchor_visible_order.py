@@ -924,10 +924,12 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
     overlap = _function_body(MESSAGES_JS, "_anchorSceneRowTextOverlapsExisting")
 
     projected_idx = complete.index("const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];")
-    projected_push_idx = complete.index("for(const row of projectedRows){")
-    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)")
-    terminal_idx = complete.index("if(row&&row.role==='terminal') pushRow(row);", backfill_idx)
-    assert projected_idx < projected_push_idx < backfill_idx < terminal_idx
+    ordered_idx = complete.index("const orderedRows=[];", projected_idx)
+    projected_push_idx = complete.index("orderedRows.push(row);", ordered_idx)
+    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)", projected_push_idx)
+    terminal_idx = complete.index("if(row&&row.role==='terminal') orderedRows.push(row);", backfill_idx)
+    replay_idx = complete.index("orderedRows.forEach((row,idx)=>pushRow(row,idx));", terminal_idx)
+    assert projected_idx < ordered_idx < projected_push_idx < backfill_idx < terminal_idx < replay_idx
 
     assert "const seenTextKeys=[];" in complete
     assert "_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)" in complete
@@ -990,7 +992,8 @@ def test_transparent_stream_renders_persisted_anchor_scene_after_reload():
     assert 'blocks.querySelectorAll(\'[data-anchor-settled-scene-row="1"],.transparent-event-row[data-anchor-scene-row="1"]\')' in transparent
     # combined fix: the final answer text is computed and threaded into the row
     # renderer so intermediate prose survives while the final-answer duplicate is dropped.
-    assert "_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer})" in transparent
+    assert "const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);" in transparent
+    assert "liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex" in transparent
     assert "finalAnswer" in transparent
     assert "blocks.insertBefore(node,segment)" in transparent
     assert "_syncTransparentEventControls(turn)" in transparent
@@ -1233,6 +1236,7 @@ global._renderAnchorSceneRowsIntoWorklog=(group, rows)=>{{
 }};
 global._syncToolCallGroupSummary=()=>{{}};
 
+    eval(extractFunc('_anchorSceneLiveTokenFinalPrefix'));
     eval(extractFunc('_anchorSceneTransparentNodeForRow'));
     eval(extractFunc('renderLiveAnchorActivityScene'));
     eval(extractFunc('_transparentLiveRowKey'));

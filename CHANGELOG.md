@@ -11,6 +11,10 @@
 
 ### Fixed
 
+- **The model picker now marks the active model with a "Selected" badge.** The currently-selected conversation model shows a distinct **Selected** pill (separate from the "Configured" state), and the picker opens with that model's provider group expanded and scrolled into view — so it's obvious at a glance which model is in use. Thanks @rodboev. (#5757, #5748)
+
+- **Transparent Stream no longer briefly renders a duplicate of the answer.** A live-token prose snapshot that was a strict prefix of the final answer escaped the existing dedupe guards (which only fired on near-complete matches) and rendered as a visible duplicate. A new provenance-gated guard suppresses only the ephemeral live-token accumulator row (role `prose` / kind `process_prose` / `token` source / `live-prose:*` id) when it's a strict shorter prefix of the settled answer and sits after the last tool row — so genuine intermediate narration is never suppressed. Thanks @rodboev. (#5758, #5749)
+
 - **A dropped SSE connection can no longer grow the offline replay buffer without bound.** When a stream disconnected without being cancelled, the per-`StreamChannel` offline replay buffer grew for the whole turn (a per-abandoned-turn memory risk). It's now a bounded `deque` (drop-oldest); the reconnect tail is intact and any dropped frames are recovered through the run-journal `last_event_id` replay path (the client requests journal replay on reconnect; the server enforces journal gap coverage before draining the tail). Thanks @ai-ag2026. (#5788, #4633)
 
 - **The embedded terminal no longer leaks a file descriptor, reader thread, and shell process on exit.** When the terminal client disconnected or the shell exited, the PTY fd, its reader thread, and the shell process were left dangling — accumulating over a long uptime (part of the #4633 long-uptime-crash family). Teardown now closes the fd once, stops the reader thread, and reaps the shell on both the client-exit and shell-exit paths. Thanks @ai-ag2026. (#5835, #4633)
