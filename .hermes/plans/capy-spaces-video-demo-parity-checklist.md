@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- Session recovery repair-safe trust-envelope evidence now explicitly covers the nested `model_route_resolution` returned by `repair_safe_session_recovery(...)`: `hint:reasoning`, safe resolved provider/model labels, and `metadata_only` / `local_only` routing evidence beside required prompt-preflight, an approval-gated supervised policy, the repair progress lifecycle, Memory Tree advisory/no-authority, and output-compaction receipts, while hostile/raw session, auth, prompt, renderer, source, token, and secret data remains omitted. This is backend-only evidence; no demo UI surface changed.
+
 - Session recovery audit/status trust-envelope evidence now explicitly covers the nested read-only `model_route_resolution` inside `audit_session_recovery(...)`: the focused regression asserts `hint:reasoning`, safe resolved provider/model labels, `metadata_only`, and `local_only` route evidence beside prompt-preflight, non-persisted progress, Memory Tree advisory/no-authority, and output-compaction receipts, while raw session paths, API-auth fields, bearer/token markers, renderer/source fields, raw prompts, and secret-looking values remain absent.
 
 - Disabled recovery snapshots now keep the recovery trust boundary visible even before Spaces are enabled: the safe fallback returns metadata-only prompt-preflight, supervised autonomy/model-route, local-only progress, Memory Tree advisory/no-authority, and output-compaction receipts without writing progress logs or leaking renderer/API-auth/raw-prompt fields. This is backend-only recovery-panel readiness evidence; no demo UI surface changed in this slice.

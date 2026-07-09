@@ -189,6 +189,14 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert policy["approval_gates"] == ["destructive_external_action"]
     assert policy["prompt_preflight_status"] == "required"
     assert policy["model_route_hint"] == "hint:reasoning"
+    route_resolution = policy["model_route_resolution"]
+    assert route_resolution["hint"] == "hint:reasoning"
+    assert route_resolution["label"] == "Reasoning"
+    assert route_resolution["resolved_provider"]
+    assert route_resolution["resolved_model"]
+    assert route_resolution["resolution"] in {"configured", "default_fallback"}
+    assert route_resolution["metadata_only"] is True
+    assert route_resolution["local_only"] is True
     assert policy["metadata_only"] is True
     assert result["progress_event"] == result["progress_events"][-1]
     assert [event["event_type"] for event in result["progress_events"]] == ["tool.started", "tool.completed"]
