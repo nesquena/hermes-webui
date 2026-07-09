@@ -2104,6 +2104,21 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'UPSERT_API_KEY_SECRET_DO_NOT_LEAK',
       },
+      memory_advisory: {
+        metadata_only: true,
+        advisory_context: true,
+        context_authority: 'untrusted_advisory',
+        can_bypass_safety_gates: false,
+        required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
+        trusted_system_memory: 'trusted_system_memory',
+        raw_context: 'UPSERT_RAW_CONTEXT_SECRET_DO_NOT_LEAK',
+        raw_prompt: 'UPSERT_RAW_PROMPT_SECRET_DO_NOT_LEAK',
+        contextAuthority: 'trusted_system_memory',
+        canBypassSafetyGates: true,
+        requiredGates: ['none'],
+        renderer: '<script>bad()</script>',
+        api_key: 'UPSERT_API_KEY_SECRET_DO_NOT_LEAK',
+      },
       output_compaction: {
         tool: 'capy-spaces-tool-action',
         command: 'space.widget.upsert',
@@ -5393,7 +5408,7 @@ def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path
     assert not any(call["path"] == "api/spaces/widget/patch" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
     assert "Widget create/update receipt" in receipt_html
-    assert "Confirmed widget create/update completed with metadata-only preflight, policy, progress, and compaction evidence." in receipt_html
+    assert "Confirmed widget create/update completed with metadata-only preflight, policy, progress, memory advisory/no-authority, and compaction evidence." in receipt_html
     assert "Prompt preflight" in receipt_html
     assert "Status: pass" in receipt_html
     assert "Boundary: creator_commit" in receipt_html
@@ -5403,7 +5418,12 @@ def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path
     assert "Model route hint: hint:fast" in receipt_html
     assert "Widget upsert progress" in receipt_html
     assert "tool.completed · tool · run widget.upsert:lab · metadata-only progress receipt" in receipt_html
+    assert "Memory advisory" in receipt_html
+    assert "Authority: untrusted_advisory" in receipt_html
+    assert "Can bypass safety gates: no" in receipt_html
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in receipt_html
     assert "Compaction evidence" in receipt_html
+    assert receipt_html.index("Memory advisory") < receipt_html.index("Compaction evidence")
     assert "Original output: 512 chars · Compacted output: 260 chars · Redaction: metadata_only" in receipt_html
     assert "Command: space.widget.upsert" in receipt_html
     assert "Redaction: metadata_only · Redacted: 0 · Compacted: no" in receipt_html
@@ -5422,6 +5442,10 @@ def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path
         "SECRET",
         "raw_context",
         "raw_prompt",
+        "trusted_system_memory",
+        "contextAuthority",
+        "canBypassSafetyGates",
+        "requiredGates",
         "Bearer",
     ):
         assert unsafe not in receipt_html

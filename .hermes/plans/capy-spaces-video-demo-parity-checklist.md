@@ -15,6 +15,8 @@ Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-ind
 
 Recent safe adapter progress:
 
+- Direct widget create/upsert receipts now preserve the Memory Tree advisory/no-authority boundary: native `upsert_widget(..., include_safety_receipts=True)` and `/api/spaces/widget/upsert` return metadata-only `untrusted_advisory`, gate-bypass false, required prompt-preflight/approval/sandbox/visual-QA/rollback gates, and matching output-compaction evidence; the checked-out save-widget regression renders the Memory advisory card while hostile trusted-memory/raw-context/raw-prompt/renderer/script/API-auth/token/secret fixture fields stay out of the scoped receipt DOM.
+
 - Direct widget create/upsert browser receipt evidence now matches the live direct `/api/spaces/widget/upsert` helper shape: the checked-out save-widget regression expects `hint:fast` action-policy/model-route evidence and retained `space:<space_id>` plus `revision:<event_id>` compaction artifacts, explicitly rejects an invented widget artifact handle for this route, and keeps hostile raw-context/raw-prompt/renderer/script/API-key/secret fixture fields out of the scoped receipt DOM.
 
 - Direct widget create/upsert saves now have explicit browser receipt evidence: the checked-out save-widget regression covers the typed `/api/spaces/widget/upsert` request with `includeSafetyReceipts`, widget-list refresh, and prepended “Widget create/update receipt” with prompt preflight, supervised `space.widget.upsert` action-policy/model-route evidence, metadata-only `widget.upsert:lab` progress, output-compaction stats/artifacts, and hostile raw-context/raw-prompt/renderer/script/API-key/secret fixture omission from the DOM.

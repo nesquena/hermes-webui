@@ -3718,6 +3718,10 @@ def _public_root_metadata_key_is_safe(key: str) -> bool:
     unsafe_compact_markers = (
         "apikey",
         "apiauth",
+        "advisorycontext",
+        "bypasssafetygates",
+        "canbypasssafetygates",
+        "contextauthority",
         "datasource",
         "generatedbody",
         "generatedcode",
@@ -3725,12 +3729,18 @@ def _public_root_metadata_key_is_safe(key: str) -> bool:
         "generatedrenderer",
         "generatedscript",
         "generatedsource",
+        "memoryadvisory",
+        "memorycontext",
+        "rawcontext",
         "rawdata",
         "rawhtml",
         "rawprompt",
         "rawrenderer",
         "rawsource",
         "rawscript",
+        "requiredgates",
+        "systemmemory",
+        "trustedmemory",
         "widgetbody",
     )
     if any(token in unsafe_tokens for token in tokens):
@@ -12233,8 +12243,10 @@ def upsert_widget(
             "space.widget.upsert",
             prompt_preflight_receipt,
         )
+        memory_advisory = _memory_advisory_public_envelope()
         result["progress_event"] = progress_event
         result["autonomy_policy"] = autonomy_policy
+        result["memory_advisory"] = memory_advisory
         result["output_compaction"] = _space_tool_action_output_compaction_receipt(
             action="space.widget.upsert",
             space_id=sid,
@@ -12242,6 +12254,8 @@ def upsert_widget(
             revision_event_id=result.get("revision_event_id"),
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
         )
     return result
 
