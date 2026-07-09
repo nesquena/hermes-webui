@@ -5972,6 +5972,13 @@ def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
     _snap_reasoning = None
     _snap_tool_calls = None
 
+    # The streaming thread mirrors these three buffers lock-free (GIL-atomic; see
+    # the STREAMS_LOCK contract note at on_token in the streaming loop). We take
+    # STREAMS_LOCK here to read atomically w.r.t. the worker's cleanup `finally`
+    # (which pops all three under STREAMS_LOCK) — NOT w.r.t. the writer, which
+    # holds no lock, so the three reads may still reflect slightly different
+    # points in time. That is acceptable: each individual read is complete (never
+    # torn) and a slightly-stale partial is reconciled by later journal/SSE events.
     with streams_lock:
         _snap_partial_text = partial_texts.get(stream_id, '')
         if not _snap_partial_text:
@@ -7211,7 +7218,28 @@ def _run_agent_streaming(
                 # first so the live Thinking stream is complete before/at the transition.
                 _flush_reasoning_buffer()
                 _token_sent = True
-                # Accumulate partial text so cancel_stream() can persist it (#893)
+                # Accumulate partial text so cancel_stream() can persist it (#893).
+                #
+                # STREAMS_LOCK contract for the three STREAM_* buffers (partial text,
+                # reasoning, live tool calls): the per-token hot path below mirrors
+                # into them WITHOUT holding STREAMS_LOCK, while snapshot readers hold
+                # STREAMS_LOCK (_snapshot_and_append_partial_on_error / cancel_stream).
+                # This is deliberate and safe for two reasons, NOT because `+=` is one
+                # bytecode (it is not — `d[k] += s` compiles to load/add/STORE_SUBSCR):
+                #  1. Single writer: only this streaming thread ever writes a given
+                #     stream_id's buffers, so there is no writer/writer race to tear.
+                #  2. Reader/writer atomicity under the GIL: `+=` builds a complete new
+                #     immutable str, then the final STORE_SUBSCR that binds it into the
+                #     dict is a single atomic bytecode; a concurrent reader's dict.get
+                #     therefore returns either the old or the new *complete* string
+                #     object (strings are immutable — never a half-built one). Same for
+                #     the atomic list.append / single-key dict writes on the other two.
+                # So a reader sees a complete-but-possibly-stale value, never a torn one.
+                # The snapshot is a best-effort partial that later journal/SSE events
+                # reconcile, so exact-latest is not required. Taking STREAMS_LOCK per
+                # token would add real contention against readers copying large buffers
+                # and would entangle the documented LOCK -> STREAMS_LOCK ordering — not
+                # worth it for a recoverable staleness window.
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
                 put('token', {'text': text})
@@ -7244,6 +7272,7 @@ def _run_agent_streaming(
                 # Mirror full concatenation to shared dict so cancel_stream() can persist
                 # it (#1361 §A). Cancel only creates one partial message, so the flat
                 # concatenation is correct there.
+                # Lock-free GIL-atomic mirror — see the STREAMS_LOCK contract in on_token.
                 if stream_id in STREAM_REASONING_TEXT:
                     STREAM_REASONING_TEXT[stream_id] += reasoning_delta
                 # Accumulate into a coalescing buffer so every delta reaches the
@@ -7368,6 +7397,7 @@ def _run_agent_streaming(
                             _reasoning_segments.get(_current_reasoning_idx, '') + reason_delta
                         )
                         # Mirror full concatenation to shared dict (#1361 §A)
+                        # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                         if stream_id in STREAM_REASONING_TEXT:
                             STREAM_REASONING_TEXT[stream_id] += reason_delta
                         put('reasoning', {'text': reason_delta})
@@ -7400,6 +7430,7 @@ def _run_agent_streaming(
                         'args': args if isinstance(args, dict) else {},
                     })
                     # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
+                    # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
                         STREAM_LIVE_TOOL_CALLS[stream_id].append({
                             'name': name,
@@ -7528,6 +7559,7 @@ def _run_agent_streaming(
                             'tid': tool_call_id,
                         })
                         # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
+                        # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             STREAM_LIVE_TOOL_CALLS[stream_id].append({
                                 'name': name,

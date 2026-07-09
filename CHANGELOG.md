@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Internal
+
+- **Documented the lock-free GIL-atomic contract for the streaming `STREAM_*` buffers.** Added an in-code explanation of why the per-token hot path mirrors partial-text/reasoning/tool-call buffers without holding `STREAMS_LOCK` (single writer + GIL-atomic `STORE_SUBSCR` on immutable strings → readers see complete-but-possibly-stale values, never torn), and why snapshot readers do take the lock. No behavior change. Thanks @ai-ag2026. (#5800)
+
 ### Fixed
 
 - **The background-wakeup status-row label is now localized.** The "Background wakeup" label introduced with the wakeup status row (#5766) was hardcoded English; it now resolves through `t('process_wakeup_label')`, with translations in all 15 locales. Thanks @Isla-Liu. (#5768)
