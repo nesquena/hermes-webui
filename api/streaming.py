@@ -10057,7 +10057,29 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         except Exception:
             logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
     if not cached:
-        # No active agent for this session — caller surfaces a steer failure
+        try:
+            s = get_session(sid)
+            active_stream_id = getattr(s, "active_stream_id", None) or None
+        except KeyError:
+            active_stream_id = None
+        if active_stream_id:
+            with _cfg.STREAMS_LOCK:
+                stream_alive = active_stream_id in _cfg.STREAMS
+            if stream_alive:
+                try:
+                    with _cfg.ACTIVE_RUNS_LOCK:
+                        active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
+                    if active_run.get("backend") == "gateway":
+                        return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
+                                           "stream_id": active_stream_id})
+                except Exception:
+                    logger.warning(
+                        "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
+                        sid,
+                        active_stream_id,
+                        exc_info=True,
+                    )
+        # No active local agent for this session — caller surfaces a steer failure
         # without cancelling the active run.
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
                            "stream_id": None})
