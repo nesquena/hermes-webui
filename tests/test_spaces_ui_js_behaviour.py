@@ -6649,6 +6649,8 @@ def test_spaces_ui_widget_detail_can_request_pdf_export_as_metadata_event(driver
 def test_spaces_ui_notes_widget_detail_saves_real_editable_notes_via_patch(driver_path):
     out = _run_spaces_scenario(driver_path, "saveNotesWidget")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/patch")
+    html = out["rootHtml"]
+    receipt_html = html.split("Widget details", 1)[0]
 
     assert "Editable notes" in out["beforeHtml"]
     assert "Initial notes body" in out["beforeHtml"]
@@ -6667,10 +6669,41 @@ def test_spaces_ui_notes_widget_detail_saves_real_editable_notes_via_patch(drive
         "includeSafetyReceipts": True,
     }
     assert out["calls"][-1]["path"] == "api/spaces/widget?space_id=lab&widget_id=notes-main"
-    assert "<script>" not in out["rootHtml"]
-    assert "renderer" not in out["rootHtml"]
-    assert "api_key" not in out["rootHtml"].lower()
-    assert "SECRET" not in out["rootHtml"]
+    assert "Widget update receipt" in receipt_html
+    assert "Confirmed widget update completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence." in receipt_html
+    assert "Prompt preflight" in receipt_html
+    assert "Status: pass" in receipt_html
+    assert "Boundary: creator_commit" in receipt_html
+    assert "Action policy" in receipt_html
+    assert "Action: space.widget.patch" in receipt_html
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in receipt_html
+    assert "Model route hint: hint:reasoning" in receipt_html
+    assert "Widget patch progress" in receipt_html
+    assert "tool.completed · tool · run widget.patch:lab:weather · metadata-only progress receipt" in receipt_html
+    assert "Memory advisory" in receipt_html
+    assert "Authority: untrusted_advisory" in receipt_html
+    assert "Can bypass safety gates: no" in receipt_html
+    assert "Required gates: prompt preflight, approval, sandbox preview, visual QA, rollback recovery" in receipt_html
+    assert "Compaction evidence" in receipt_html
+    assert receipt_html.index("Memory advisory") < receipt_html.index("Compaction evidence")
+    assert "Original output: 624 chars · Compacted output: 284 chars · Redaction: metadata_only" in receipt_html
+    assert "Command: space.widget.patch" in receipt_html
+    assert "Redaction: metadata_only · Redacted: 0 · Compacted: no" in receipt_html
+    assert "Rules: cap_section_chars, redact_unsafe_markers, retain_artifact_handles" in receipt_html
+    assert "Artifacts: 2" in receipt_html
+    assert "space · space:lab · Space action metadata" in receipt_html
+    assert "widget · widget:lab:weather · Widget patch metadata" in receipt_html
+    for unsafe in (
+        "PATCH_RAW_PROMPT_SECRET_DO_NOT_LEAK",
+        "PATCH_RAW_CONTEXT_SECRET_DO_NOT_LEAK",
+        "PATCH_API_KEY_SECRET_DO_NOT_LEAK",
+        "TRUSTED_SYSTEM_MEMORY_DO_NOT_LEAK",
+        "<script>",
+        "renderer",
+        "api_key",
+        "SECRET",
+    ):
+        assert unsafe not in html
 
 
 def test_spaces_ui_ask_widget_uses_shared_prompt_and_queues_agent_event(driver_path):
