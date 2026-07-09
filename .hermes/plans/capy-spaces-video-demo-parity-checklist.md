@@ -3,7 +3,7 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
-Last implementation-status update: 2026-07-01
+Last implementation-status update: 2026-07-09
 
 ## Current parity implementation notes
 
