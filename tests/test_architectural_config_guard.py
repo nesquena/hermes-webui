@@ -348,3 +348,55 @@ class TestArchitecturalConfigGuard:
 
         # Plain-value keys survive
         assert saved["mcp_servers"]["my-server"]["url"] == "https://example.com"
+
+
+class TestDiffConfigPaths:
+    """``_diff_config_paths`` identifies leaf-level paths that changed."""
+
+    def test_no_changes_returns_empty(self):
+        from api.commands import _diff_config_paths
+
+        cfg = {"model": {"provider": "openai", "default": "gpt-4o"}}
+        assert _diff_config_paths(cfg, cfg) == set()
+
+    def test_scalar_changed(self):
+        from api.commands import _diff_config_paths
+
+        old = {"model": {"default": "gpt-4o"}}
+        new = {"model": {"default": "claude-opus-4"}}
+        assert _diff_config_paths(old, new) == {("model", "default")}
+
+    def test_nested_leaf_changed(self):
+        from api.commands import _diff_config_paths
+
+        old = {"model": {"openai_runtime": "auto", "api_key": "${KEY}"}}
+        new = {"model": {"openai_runtime": "codex_app_server", "api_key": "${KEY}"}}
+        # Only the changed leaf is dirty, not the whole model branch
+        assert _diff_config_paths(old, new) == {("model", "openai_runtime")}
+
+    def test_key_added(self):
+        from api.commands import _diff_config_paths
+
+        old = {"model": {"default": "gpt-4o"}}
+        new = {"model": {"default": "gpt-4o", "provider": "openai"}}
+        assert _diff_config_paths(old, new) == {("model", "provider")}
+
+    def test_key_deleted(self):
+        from api.commands import _diff_config_paths
+
+        old = {"model": {"default": "gpt-4o", "provider": "openai"}}
+        new = {"model": {"default": "gpt-4o"}}
+        assert _diff_config_paths(old, new) == {("model", "provider")}
+
+    def test_multiple_changes(self):
+        from api.commands import _diff_config_paths
+
+        old = {"a": 1, "b": {"c": 2, "d": 3}, "e": 4}
+        new = {"a": 1, "b": {"c": 99, "d": 3}, "e": 5}
+        result = _diff_config_paths(old, new)
+        assert result == {("b", "c"), ("e",)}
+
+    def test_both_empty_returns_empty(self):
+        from api.commands import _diff_config_paths
+
+        assert _diff_config_paths({}, {}) == set()
