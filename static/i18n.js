@@ -496,6 +496,8 @@ const LOCALES = {
     path_copy_failed: 'Failed to copy path: ',
     session_rename: 'Rename conversation',
     session_rename_desc: 'Edit the title of this conversation',
+    session_mark_read: 'Mark as read',
+    session_mark_read_desc: 'Clear the unread notification for this conversation',
     session_title_regenerate: 'Regenerate title',
     session_title_regenerate_desc: 'Ask Hermes to generate a fresh title from the conversation',
     session_title_regenerating: 'Regenerating title…',
