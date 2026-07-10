@@ -1856,6 +1856,7 @@ function _applySessionContextMetadataUpdate(data){
   S.session.context_length=data.session.context_length||0;
   S.session.threshold_tokens=data.session.threshold_tokens||0;
   S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
+  S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
   if(typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
@@ -1865,6 +1866,7 @@ function _applySessionContextMetadataUpdate(data){
       estimated_cost:_pick(u.estimated_cost,S.session.estimated_cost),
       context_length:S.session.context_length||0,
       last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
+      post_compression_context_tokens_estimate:S.session.post_compression_context_tokens_estimate,
       threshold_tokens:S.session.threshold_tokens||0,
     });
   }

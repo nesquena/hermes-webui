@@ -1108,6 +1108,7 @@ class Session:
                  context_engine_state=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
+                 post_compression_context_tokens_estimate=None,
                  compression_recovery=None,
                  recommended_recovery_action=None,
                  compression_recovery_source_session_id=None,
@@ -1164,6 +1165,10 @@ class Session:
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
+        _post_compression_tokens = _parse_nonnegative_int(post_compression_context_tokens_estimate)
+        self.post_compression_context_tokens_estimate = (
+            _post_compression_tokens if _post_compression_tokens and _post_compression_tokens > 0 else None
+        )
         self.compression_recovery = compression_recovery if isinstance(compression_recovery, dict) else {}
         self.recommended_recovery_action = recommended_recovery_action
         self.compression_recovery_source_session_id = (
@@ -1255,6 +1260,7 @@ class Session:
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
             'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
+            'post_compression_context_tokens_estimate',
             'compression_recovery', 'recommended_recovery_action',
             'compression_recovery_source_session_id', 'compression_recovery_action',
             'truncation_watermark',
@@ -1614,6 +1620,7 @@ class Session:
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
+            'post_compression_context_tokens_estimate': self.post_compression_context_tokens_estimate,
             'compression_recovery': self.compression_recovery,
             'recommended_recovery_action': self.recommended_recovery_action,
             'gateway_routing': self.gateway_routing,

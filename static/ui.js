@@ -5885,6 +5885,9 @@ function _mergeUsageForCtxIndicator(latest, fallback){
       merged[field]=fallbackObj[field];
     }
   }
+  if(!Object.hasOwn(latestObj,'post_compression_context_tokens_estimate')&&fallbackObj.post_compression_context_tokens_estimate!=null){
+    merged.post_compression_context_tokens_estimate=fallbackObj.post_compression_context_tokens_estimate;
+  }
   return merged;
 }
 
@@ -5905,7 +5908,10 @@ function _syncCtxIndicator(usage){
   // nonsense percentage (often >100%) on long sessions.  When we have no
   // last-prompt data we render "·" + "tokens used" via the !hasPromptTok
   // branch below — honest "no data" instead of misleading "890% used".
+  const postCompressionEstimate=Number(usage.post_compression_context_tokens_estimate)||0;
+  const hasPostCompressionEstimate=postCompressionEstimate>0;
   const promptTok=usage.last_prompt_tokens||0;
+  const contextPromptTok=hasPostCompressionEstimate?postCompressionEstimate:promptTok;
   const totalTok=(usage.input_tokens||0)+(usage.output_tokens||0);
   const cacheReadTok=usage.cache_read_tokens||0;
   const cacheWriteTok=usage.cache_write_tokens||0;
@@ -5925,8 +5931,9 @@ function _syncCtxIndicator(usage){
     wrap.removeAttribute('aria-hidden');
     wrap.style.display='';
   }
-  const hasPromptTok=!!promptTok;
-  const rawPct=hasPromptTok?Math.round((promptTok/ctxWindow)*100):0;
+  let hasPromptTok=!!promptTok;
+  if(hasPostCompressionEstimate) hasPromptTok=true;
+  const rawPct=hasPromptTok?Math.round((contextPromptTok/ctxWindow)*100):0;
   const pct=Math.min(100,rawPct);
   const overflowed=rawPct>100;
   const ring=$('ctxRingValue');
@@ -5954,13 +5961,14 @@ function _syncCtxIndicator(usage){
   _setCtxCompressButton(compressBtn,compressText);
   const cacheHitPct=usage.cache_hit_percent;
   const cacheText=cacheHitPct!=null?t('usage_cache_hit_detail',cacheHitPct,_fmtTokens(cacheReadTok),_fmtTokens(cacheWriteTok)):'';
-  let label=hasPromptTok?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
+  const contextLabel=hasPostCompressionEstimate?'Estimated next model context':'Context window';
+  let label=hasPromptTok?`${contextLabel} ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
   if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   if(cacheText) label+=` \u00b7 ${cacheText}`;
   el.setAttribute('aria-label',label);
-  const usageText=hasPromptTok?(overflowed?`${rawPct}% used (context exceeded)`:`${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
-  const tokensText=hasPromptTok?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  const usageText=hasPromptTok?(overflowed?`${contextLabel}: ${rawPct}% used (context exceeded)`:`${contextLabel}: ${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
+  const tokensText=hasPromptTok?`${contextLabel}: ${_fmtTokens(contextPromptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
   if(usageLine) usageLine.textContent=usageText;
   if(tokensLine) tokensLine.textContent=tokensText;
   const threshold=usage.threshold_tokens||0;

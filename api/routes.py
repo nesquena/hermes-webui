@@ -19929,6 +19929,7 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
+    s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()

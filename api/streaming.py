@@ -4411,6 +4411,45 @@ def _prune_context_tool_results_after_compression(agent, context_messages):
     return pruned_messages
 
 
+def _estimate_post_compression_context_tokens(agent, context_messages, system_message):
+    """Return a display-only estimate for the prepared post-compression request."""
+    try:
+        from agent import model_metadata
+
+        messages = context_messages or []
+        tools = getattr(agent, 'tools', None) or None
+        request_estimator = getattr(model_metadata, 'estimate_request_tokens_rough', None)
+        if callable(request_estimator):
+            estimate = request_estimator(messages, system_prompt=system_message or '', tools=tools)
+        else:
+            message_estimator = getattr(model_metadata, 'estimate_messages_tokens_rough', None)
+            if callable(message_estimator):
+                estimate = message_estimator(messages)
+                if system_message:
+                    estimate += message_estimator([{'role': 'system', 'content': system_message}])
+                if tools:
+                    estimate += message_estimator([{'role': 'system', 'content': str(tools)}])
+            else:
+                try:
+                    from agent.context_compressor import _estimate_msg_budget_tokens
+                except ImportError:
+                    return None
+
+                estimate = sum(
+                    _estimate_msg_budget_tokens(message)
+                    for message in messages
+                    if isinstance(message, dict)
+                )
+                if system_message:
+                    estimate += _estimate_msg_budget_tokens({'role': 'system', 'content': system_message})
+                if tools:
+                    estimate += _estimate_msg_budget_tokens({'role': 'system', 'content': str(tools)})
+        return estimate if isinstance(estimate, int) and estimate > 0 else None
+    except Exception:
+        logger.debug("post-compression context estimate failed", exc_info=True)
+        return None
+
+
 def _restore_reasoning_metadata(previous_messages, updated_messages):
     """Carry forward display-only metadata lost during API-safe history sanitization.
 
@@ -6670,6 +6709,7 @@ def _run_agent_streaming(
             'context_length': 0,
             'threshold_tokens': 0,
             'last_prompt_tokens': 0,
+            'post_compression_context_tokens_estimate': None,
         }
         _session_obj = _current_live_usage_session()
 
@@ -6842,6 +6882,11 @@ def _run_agent_streaming(
                         _usage[_field] = getattr(_session_obj, _field, 0) or 0
                     except Exception:
                         pass
+            _post_compression_estimate = getattr(
+                _session_obj, 'post_compression_context_tokens_estimate', None,
+            )
+            if isinstance(_post_compression_estimate, int) and _post_compression_estimate > 0:
+                _usage['post_compression_context_tokens_estimate'] = _post_compression_estimate
 
         _real_prompt_tokens = int(_usage.get('last_prompt_tokens') or 0)
         _usage['cache_hit_percent'] = prompt_cache_hit_percent(
@@ -8981,6 +9026,11 @@ def _run_agent_streaming(
                         agent,
                         s.context_messages,
                     )
+                    s.post_compression_context_tokens_estimate = _estimate_post_compression_context_tokens(
+                        agent,
+                        s.context_messages,
+                        workspace_system_msg,
+                    )
                     visible_after = visible_messages_for_anchor(s.messages, auto_compression=True)
                     # Find the LAST [CONTEXT COMPACTION] marker in s.messages
                     # and count visible messages before it. This is the correct
@@ -9615,6 +9665,12 @@ def _run_agent_streaming(
                 _sess_lpt = getattr(s, 'last_prompt_tokens', 0) or 0
                 if _sess_lpt:
                     usage['last_prompt_tokens'] = _sess_lpt
+            _post_compression_estimate = getattr(s, 'post_compression_context_tokens_estimate', None)
+            usage['post_compression_context_tokens_estimate'] = (
+                _post_compression_estimate
+                if isinstance(_post_compression_estimate, int) and _post_compression_estimate > 0
+                else None
+            )
             # (reasoning trace already attached + saved above, before s.save())
             # Leftover-steer delivery: if a /steer was queued (via
             # api/chat/steer) but the agent finished its turn before

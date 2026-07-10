@@ -1282,6 +1282,7 @@ async function newSession(flash, options={}){
         cache_hit_percent:data.session.cache_hit_percent,
         context_length:data.session.context_length||0,
         last_prompt_tokens:data.session.last_prompt_tokens||0,
+        post_compression_context_tokens_estimate:data.session.post_compression_context_tokens_estimate||null,
         threshold_tokens:data.session.threshold_tokens||0,
       });
     }
@@ -2018,6 +2019,7 @@ async function loadSession(sid){
       cache_hit_percent: _pick(u.cache_hit_percent, _s.cache_hit_percent, null),
       context_length:    _pickPositive(u.context_length, _s.context_length),
       last_prompt_tokens:_pick(u.last_prompt_tokens,_s.last_prompt_tokens),
+      post_compression_context_tokens_estimate:_s.post_compression_context_tokens_estimate||null,
       threshold_tokens:  _pick(_s.threshold_tokens,  u.threshold_tokens),
     });
   }
@@ -2606,6 +2608,7 @@ function _resolveSessionModelForDisplaySoon(sid){
       S.session.context_length=resolvedContextLength;
       S.session.threshold_tokens=data.session.threshold_tokens||0;
       S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
+      S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
       S.session._modelResolutionDeferred=false;
       syncTopbar();
       if(typeof _syncCtxIndicator==='function'){
@@ -2620,6 +2623,7 @@ function _resolveSessionModelForDisplaySoon(sid){
           cache_hit_percent:_pick(u.cache_hit_percent,S.session.cache_hit_percent,null),
           context_length:resolvedContextLength||u.context_length||0,
           last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
+          post_compression_context_tokens_estimate:S.session.post_compression_context_tokens_estimate,
           threshold_tokens:data.session.threshold_tokens||0,
         });
       }
