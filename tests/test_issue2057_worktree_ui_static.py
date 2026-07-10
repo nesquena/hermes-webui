@@ -67,7 +67,13 @@ def test_worktree_archive_delete_api_responses_are_explicit():
     assert "def _worktree_retained_payload_for_session_id(sid: str)" in src
     assert '"worktree_retained": True' in src
     assert '{"ok": True, **worktree_retained}' in src
-    assert '{"ok": True, "session": s.compact(), **_worktree_retained_payload(s)}' in src
+    archive_start = src.index('if parsed.path == "/api/session/archive":')
+    archive_end = src.index('if parsed.path == "/api/session/move":', archive_start)
+    archive_handler = src[archive_start:archive_end]
+    assert '"session": s.compact()' in archive_handler
+    assert '"subagent_archive_synced": subagent_archive_synced' in archive_handler
+    assert '"subagent_child_count": len(subagent_child_ids)' in archive_handler
+    assert "**_worktree_retained_payload(s)" in archive_handler
 
 
 def test_remove_worktree_ui_does_not_force_unsafe_status_by_default():

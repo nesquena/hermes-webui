@@ -195,3 +195,65 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
             db.close()
         except Exception:
             logger.debug("Failed to close state.db")
+
+
+def sync_session_archive_group(
+    parent_session_id: str,
+    archived: bool,
+    profile: Optional[str] = None,
+) -> tuple[bool, list[str]]:
+    """Synchronize a parent's archive state with direct delegated children.
+
+    A delegated child remains view-only in WebUI: callers may not mutate a child
+    session by its own ID. The parent archive operation is the one exception,
+    scoped narrowly to state.db rows whose exact ``parent_session_id`` matches
+    and whose Agent-owned source is exactly ``subagent``. The parent row and its
+    eligible children are written through one ``SessionDB._execute_write`` call,
+    so competing archive/restore requests cannot leave the group split inside
+    state.db.
+
+    Returns ``(synced, child_ids)``. ``synced=False`` distinguishes an unavailable
+    or failed parent state-db write from a successful group write with no children.
+    The caller still owns the WebUI JSON sidecar mutation and must surface that
+    distinction to the client.
+    """
+    if not parent_session_id:
+        return False, []
+    db = _get_state_db(profile=profile)
+    if not db:
+        return False, []
+    try:
+        def _set_group_archive_state(conn):
+            parent = conn.execute(
+                "UPDATE sessions SET archived = ? WHERE id = ?",
+                (int(bool(archived)), parent_session_id),
+            )
+            if parent.rowcount != 1:
+                raise LookupError(f"state.db parent session not found: {parent_session_id}")
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM sessions
+                WHERE parent_session_id = ?
+                  AND source = 'subagent'
+                ORDER BY id
+                """,
+                (parent_session_id,),
+            ).fetchall()
+            child_ids = [str(row[0]) for row in rows if row and row[0]]
+            if child_ids:
+                conn.executemany(
+                    "UPDATE sessions SET archived = ? WHERE id = ?",
+                    [(int(bool(archived)), child_id) for child_id in child_ids],
+                )
+            return child_ids
+
+        return True, list(db._execute_write(_set_group_archive_state) or [])
+    except Exception:
+        logger.debug("Failed to sync parent/subagent archive group to state.db", exc_info=True)
+        return False, []
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.debug("Failed to close state.db")
