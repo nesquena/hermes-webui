@@ -80,6 +80,33 @@ def test_static_model_fallback_includes_all_gpt56_models():
         assert f'value="openai/{model_id}"' not in html
 
 
+def test_live_openai_api_catalog_is_augmented_with_gpt56(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {"provider": "openai-api", "default": "gpt-5.4"},
+            "providers": {"openai-api": {}},
+        },
+    )
+    monkeypatch.setattr(
+        config,
+        "_read_live_provider_model_ids",
+        lambda provider_id: ["gpt-5.4"] if provider_id == "openai-api" else [],
+    )
+    config.invalidate_models_cache()
+
+    try:
+        result = config.get_available_models()
+    finally:
+        config.invalidate_models_cache()
+    openai_api_group = next(
+        group for group in result["groups"] if group["provider_id"] == "openai-api"
+    )
+
+    assert GPT56_MODEL_IDS <= {entry["id"] for entry in openai_api_group["models"]}
+
+
 @pytest.mark.parametrize(
     ("model_id", "provider"),
     [

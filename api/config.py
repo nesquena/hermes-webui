@@ -7201,11 +7201,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # config-models allowlist branch and asks Hermes CLI for the
                     # live catalog first (static _PROVIDER_MODELS is fallback only).
                     _uses_models_as_settings_map = pid == "copilot"
-                    if (
+                    _has_explicit_model_allowlist = (
                         not _uses_models_as_settings_map
                         and isinstance(provider_cfg, dict)
                         and "models" in provider_cfg
-                    ):
+                    )
+                    if _has_explicit_model_allowlist:
                         cfg_models = provider_cfg["models"]
                         if isinstance(cfg_models, dict):
                             raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
@@ -7231,6 +7232,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                     if not raw_models:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
+
+                    if pid == "openai-api" and not _has_explicit_model_allowlist:
+                        existing_ids = {str(model.get("id") or "") for model in raw_models}
+                        gpt56_models = [
+                            copy.deepcopy(model)
+                            for model in _PROVIDER_MODELS.get(pid, [])
+                            if model.get("id") in _GPT56_MODEL_IDS
+                            and model.get("id") not in existing_ids
+                        ]
+                        raw_models = gpt56_models + raw_models
 
                     detected_models = auto_detected_models_by_provider.get(pid, [])
                     if detected_models and not raw_models:
