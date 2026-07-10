@@ -8474,10 +8474,12 @@ def test_space_tool_adapter_supports_source_toggle_widgets_metadata_only(monkeyp
     assert toggled["widget_count"] == 2
     assert toggled["widgets"][0]["layout"] == {"x": 0, "y": 0, "w": 4, "h": 3, "minimized": True}
     assert toggled["widgets"][1]["layout"] == {"x": 4, "y": 0, "w": 4, "h": 3, "minimized": False}
-    assert toggled["progress_event"]["event_type"] == "tool.completed"
-    assert toggled["progress_event"]["family"] == "tool"
-    assert toggled["progress_event"]["run_id"] == "layout.toggle:source-toggle-widgets-lab"
-    assert toggled["progress_event"]["space_id"] == created["space_id"]
+    _assert_space_tool_progress_lifecycle(
+        toggled,
+        run_id="layout.toggle:source-toggle-widgets-lab",
+        space_id=created["space_id"],
+    )
+    assert "progress_event_types: tool.started, tool.completed" in toggled["output_compaction"]["text"]
     assert toggled["prompt_preflight"]["action"] == "space.spaces.togglewidgets"
     assert toggled["prompt_preflight"]["boundary"] == "creator_commit"
     assert toggled["prompt_preflight"]["status"] == "required"

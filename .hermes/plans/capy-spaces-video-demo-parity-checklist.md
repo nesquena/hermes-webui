@@ -3,7 +3,7 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
-Last implementation-status update: 2026-07-09
+Last implementation-status update: 2026-07-10
 
 ## Current parity implementation notes
 
@@ -14,6 +14,8 @@ Integration/readiness checkpoint: `.hermes/plans/capy-spaces-integration-readine
 Review/navigation update: `.hermes/plans/capy-spaces-source-refresh-evidence-index.md` is the compact reviewer entry point for source-refresh route-family evidence, invariants, and test-count snapshots before reading the long chronological status list below.
 
 Recent safe adapter progress:
+
+- The real multi-widget `space.spaces.togglewidgets` mutation now exposes paired metadata-only progress lifecycle evidence (verified 2026-07-10 01:33 CDT): `tool.started` is recorded before widget mutation, `tool.completed` follows all successful patches, `progress_events` preserves both under `layout.toggle:<space_id>`, and legacy `progress_event` remains the terminal receipt. Output compaction records both event types while hostile renderer/html/source/data/API-key/token fixtures remain omitted. This is backend-only progress-stream evidence; no demo UI surface changed.
 
 - The real multi-widget `space.spaces.rearrangewidgets` mutation now exposes paired metadata-only progress lifecycle evidence (verified 2026-07-09 23:02 CDT): `tool.started` is recorded before widget mutation, `tool.completed` follows successful patches, `progress_events` preserves both under `layout.rearrange:<space_id>`, and legacy `progress_event` remains the terminal receipt. Output compaction records both event types while hostile renderer/source/html/data/API-auth/memory-authority/secret fixtures remain omitted. This is backend-only progress-stream evidence; no demo UI surface changed.
 
