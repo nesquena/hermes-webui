@@ -10018,6 +10018,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_ids = _space_tool_widget_ids(data)
+        progress_events = [
+            _record_space_tool_progress_event(
+                space_id,
+                run_prefix="layout.toggle",
+                event_type="tool.started",
+            )
+        ]
         toggled_widgets: list[dict[str, Any]] = []
         revision_event_ids: list[str] = []
         for widget_id in widget_ids:
@@ -10027,7 +10034,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             result = patch_widget(space_id, widget_id, {"layout": layout})
             revision_event_ids.append(result["revision_event_id"])
             toggled_widgets.append(read_widget_detail(space_id, widget_id))
-        progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.toggle")
+        progress_event = _record_space_tool_progress_event(
+            space_id,
+            run_prefix="layout.toggle",
+            event_type="tool.completed",
+        )
+        progress_events.append(progress_event)
         prompt_preflight = _space_widget_toggle_required_prompt_preflight_receipt(name, len(toggled_widgets))
         autonomy_policy = _space_layout_action_policy_receipt(name, prompt_preflight)
         memory_advisory = _memory_advisory_public_envelope()
@@ -10043,6 +10055,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "progress_events": progress_events,
             "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
@@ -10051,6 +10064,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_ids=revision_event_ids,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                progress_events=progress_events,
                 memory_advisory=memory_advisory,
                 include_memory_required_gates=True,
             ),
