@@ -223,8 +223,6 @@ class TestSmdMediaInStream(unittest.TestCase):
         # extensionless CDN URLs such as fal.media generated assets. The stream
         # boundary check must therefore treat a complete http(s) ref as complete
         # even when it has no filename extension.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
         self.assertIn("/^MEDIA:([^", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
