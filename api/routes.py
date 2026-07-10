@@ -6001,6 +6001,80 @@ def _catalog_model_id_matches(candidate: str, model: str) -> bool:
     return candidate.replace("-", ".").lower() == model.replace("-", ".").lower()
 
 
+def _catalog_group_owns_exact_model(group: dict, model: str) -> bool:
+    provider_id = str(group.get("provider_id") or "").strip()
+    wrapper = f"@{provider_id}:"
+    for entry in group.get("models") or []:
+        if not isinstance(entry, dict):
+            continue
+        candidate = str(entry.get("id") or "").strip()
+        if candidate.lower().startswith(wrapper.lower()):
+            candidate = candidate[len(wrapper):]
+        if candidate == model or _catalog_model_id_matches(candidate, model):
+            return True
+    return False
+
+
+def _repair_foreign_session_model_provider(
+    session,
+    *,
+    requested_model: str,
+    requested_provider: str | None,
+    resolved_model: str,
+    resolved_provider: str | None,
+    explicit_model_pick: bool,
+    profile_provider: str | None,
+) -> str | None:
+    """Repair a stale provider only when the cached catalog names one owner."""
+    stored_model = str(getattr(session, "model", "") or "").strip()
+    stored_provider = _clean_session_model_provider(getattr(session, "model_provider", None))
+    requested_provider = _clean_session_model_provider(requested_provider)
+    resolved_provider = _clean_session_model_provider(resolved_provider)
+    profile_provider = _clean_session_model_provider(profile_provider)
+    _, qualified_provider = _split_provider_qualified_model(requested_model)
+    if (
+        explicit_model_pick
+        or qualified_provider
+        or not stored_model
+        or not stored_provider
+        or (
+            str(requested_model or "").strip() != stored_model
+            and not _catalog_model_id_matches(str(requested_model or "").strip(), stored_model)
+        )
+        or requested_provider != stored_provider
+        or (
+            resolved_model != stored_model
+            and not _catalog_model_id_matches(resolved_model, stored_model)
+        )
+        or resolved_provider != stored_provider
+        or not profile_provider
+        or profile_provider == stored_provider
+    ):
+        return resolved_provider
+
+    try:
+        catalog = get_available_models(prefer_cache=True)
+    except Exception:
+        return resolved_provider
+    groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
+    stored_groups = [
+        group
+        for group in groups
+        if str(group.get("provider_id") or "").strip().lower() == stored_provider
+    ]
+    if not stored_groups or any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups):
+        return resolved_provider
+    owners = [
+        group
+        for group in groups
+        if str(group.get("provider_id") or "").strip().lower() != stored_provider
+        and _catalog_group_owns_exact_model(group, stored_model)
+    ]
+    if len(owners) != 1:
+        return resolved_provider
+    return str(owners[0].get("provider_id") or "").strip() or resolved_provider
+
+
 def _clean_session_model_provider(value: str | None) -> str | None:
     provider = str(value or "").strip().lower()
     if not provider or provider == "default":
@@ -20933,6 +21007,20 @@ def _handle_chat_start(handler, body, diag=None):
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
             explicit_model_pick=explicit_model_pick,
+        )
+        catalog_profile_provider = _pp_provider
+        if catalog_profile_provider is None and isinstance(_pp_cfg, dict):
+            profile_model_config = _pp_cfg.get("model") or {}
+            if isinstance(profile_model_config, dict):
+                catalog_profile_provider = profile_model_config.get("provider")
+        model_provider = _repair_foreign_session_model_provider(
+            s,
+            requested_model=requested_model,
+            requested_provider=requested_provider,
+            resolved_model=model,
+            resolved_provider=model_provider,
+            explicit_model_pick=explicit_model_pick,
+            profile_provider=catalog_profile_provider,
         )
         if model_provider == "moa" and moa_config is None:
             if webui_gateway_chat_enabled(get_config()):
