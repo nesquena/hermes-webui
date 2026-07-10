@@ -4163,6 +4163,10 @@ AUXILIARY_TASK_CATALOG: tuple[dict[str, str], ...] = (
 
 AUX_TASK_SLOTS: tuple[str, ...] = tuple(item["key"] for item in AUXILIARY_TASK_CATALOG)
 
+# Slots removed from the WebUI catalog whose persisted assignments should be
+# discarded when the user explicitly resets all auxiliary-model routing.
+RETIRED_AUX_TASK_SLOTS: tuple[str, ...] = ("session_search",)
+
 
 def _aux_task_payload(task_key: str, entry: dict, fallback_label: str = "", fallback_description: str = "") -> dict:
     """Build the API payload row for a single auxiliary task."""
@@ -4269,6 +4273,8 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             aux_cfg = config_data.get("auxiliary", {})
             if not isinstance(aux_cfg, dict):
                 aux_cfg = {}
+            for retired_slot in RETIRED_AUX_TASK_SLOTS:
+                aux_cfg.pop(retired_slot, None)
             for slot in AUX_TASK_SLOTS:
                 slot_cfg = aux_cfg.get(slot, {})
                 if not isinstance(slot_cfg, dict):

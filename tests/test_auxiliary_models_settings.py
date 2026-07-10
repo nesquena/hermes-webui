@@ -612,6 +612,37 @@ class TestAuxiliaryModelsBackend:
             config.set_auxiliary_model("future_task", "openai", "gpt-5.6")
         assert "future_task" in str(excinfo.value)
 
+    def test_reset_removes_retired_slot_but_preserves_other_unknown_mappings(
+        self, monkeypatch, tmp_path
+    ):
+        """Reset cleans known retired slots without treating config as task schema."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "auxiliary:\n"
+            "  vision:\n"
+            "    provider: openai\n"
+            "    model: gpt-5.5\n"
+            "  session_search:\n"
+            "    provider: openai\n"
+            "    model: gpt-5.5\n"
+            "  monitor:\n"
+            "    provider: openai\n"
+            "    model: gpt-5.5\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        config.set_auxiliary_model("__reset__", "auto", "")
+
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]
+        assert "session_search" not in saved
+        assert saved["monitor"] == {"provider": "openai", "model": "gpt-5.5"}
+        assert saved["vision"]["provider"] == "auto"
+        assert saved["vision"]["model"] == ""
+
     def test_backend_surfaces_main_advanced_fields_without_api_key_value(self, monkeypatch):
         """Main model advanced fields should be visible, but API keys remain write-only."""
         from api import config
