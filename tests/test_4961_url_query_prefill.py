@@ -185,8 +185,8 @@ def test_apply_prefill_updates_composer_without_autosending():
     source = _node_prelude() + """
 (async () => {
   evalBoot('_applyComposerPrefillOnBoot');
-  const counts = { autoResize: 0, updateSendBtn: 0, send: 0 };
-  const msg = { value: '' };
+  const counts = { autoResize: 0, updateSendBtn: 0, focus: 0, send: 0 };
+  const msg = { value: '', focus() { counts.focus++; } };
   global.document = {
     getElementById(id) {
       return id === 'msg' ? msg : null;
@@ -207,7 +207,7 @@ def test_apply_prefill_updates_composer_without_autosending():
 });
 """
     payload = json.loads(_run_node(source))
-    assert payload["counts"] == {"autoResize": 1, "updateSendBtn": 1, "send": 0}
+    assert payload["counts"] == {"autoResize": 1, "updateSendBtn": 1, "focus": 2, "send": 0}
     assert payload["value"] == "second pass"
 
 

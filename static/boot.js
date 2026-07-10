@@ -130,6 +130,7 @@ async function _applyComposerPrefillOnBoot(prefillIntent){
   msg.value=text;
   if(typeof autoResize==='function') autoResize();
   else if(typeof updateSendBtn==='function') updateSendBtn();
+  if(typeof msg.focus==='function') msg.focus();
 }
 async function _finalizeComposerPrefillOnBoot(prefillIntent){
   if(prefillIntent&&prefillIntent.hasParams&&typeof _consumeComposerPrefillParamsFromLocation==='function'){
