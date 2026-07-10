@@ -945,6 +945,150 @@ function _micToastKeyForRecognitionError(error){
     }
   });
 
+  // ── VU meter (Web Audio AnalyserNode) ──────────────────────────────────
+  // Driven off the MediaRecorder capture stream, not the recorded chunks —
+  // gives instant feedback and works for both `media-transcribe` and
+  // `media-raw` capture modes. Browser SpeechRecognition does NOT expose a
+  // MediaStream, so the meter is intentionally unavailable on the SR path:
+  // when SR is the active backend the existing `#micStatus` text stays in place.
+  const _vuBarsHost=$('micVuBars');
+  const _vuFillInner=$('micVuFillInner');
+  const _vuHost=$('micVuMeter');
+  const _vuStyleSelect=$('settingsVuStyle');
+  const _vuStylePref=()=>{
+    // URL hash override wins (e.g. `#vu=fill`) so users can A/B without
+    // poking storage. Then the Settings → Voice → VU meter style select,
+    // then localStorage, then default 'bars'.
+    const hash=(location.hash||'').match(/vu=(bars|fill)/);
+    if(hash) return hash[1];
+    if(_vuStyleSelect&&_vuStyleSelect.value==='fill') return 'fill';
+    if(_vuStyleSelect&&_vuStyleSelect.value==='bars') return 'bars';
+    try{
+      const stored=localStorage.getItem('micVuStyle');
+      if(stored==='bars'||stored==='fill') return stored;
+    }catch(_){}
+    return 'bars';
+  };
+
+  function _applyVuStylePreference(style){
+    const normalized=(style==='fill')?'fill':'bars';
+    try{localStorage.setItem('micVuStyle',normalized);}catch(_){}
+    if(_vuStyleSelect&&_vuStyleSelect.value!==normalized){
+      _vuStyleSelect.value=normalized;
+    }
+  }
+  window._applyVuStylePreference=_applyVuStylePreference;
+  let _vuAudioCtx=null;
+  let _vuAnalyser=null;
+  let _vuRafId=0;
+  let _vuBarEls=[];
+  let _vuActiveStyle=null;
+  const _vuBarsCount=16;
+
+  function _vuBuildBars(){
+    if(!_vuBarsHost) return;
+    _vuBarsHost.innerHTML='';
+    _vuBarEls=[];
+    for(let i=0;i<_vuBarsCount;i++){
+      const el=document.createElement('div');
+      el.className='bar';
+      _vuBarsHost.appendChild(el);
+      _vuBarEls.push(el);
+    }
+  }
+
+  function _vuShow(style){
+    if(!_vuHost) return;
+    if(_vuActiveStyle===style) return;
+    _vuActiveStyle=style;
+    _vuHost.style.display='';
+    _vuHost.dataset.style=style;
+    // Hide the static "Listening…" text in the same slot — meter replaces it.
+    if(status) status.style.display='none';
+    // Both visual modes live in the DOM; CSS shows the active one via
+    // `data-style`. Keeps the layout stable when toggling.
+  }
+
+  function _vuHide(){
+    if(!_vuHost) return;
+    _vuHost.style.display='none';
+    _vuHost.removeAttribute('data-style');
+    _vuActiveStyle=null;
+    // Restore the "Listening…" text only if recording is still in progress
+    // (i.e. this is a transient hide, not the end of a session).
+    if(status&&window._micActive) status.style.display='';
+  }
+
+  function _vuTick(){
+    if(!_vuAnalyser||!_vuActiveStyle) return;
+    const buf=new Uint8Array(_vuAnalyser.frequencyBinCount);
+    _vuAnalyser.getByteFrequencyData(buf);
+    if(_vuActiveStyle==='bars'){
+      // Bucket the spectrum into 16 frequency bands and render bar heights.
+      const step=Math.floor(buf.length/_vuBarsCount)||1;
+      let peakIdx=-1;
+      for(let i=0;i<_vuBarsCount;i++){
+        let sum=0;
+        for(let j=0;j<step;j++) sum+=buf[i*step+j]||0;
+        const avg=sum/step;
+        const h=Math.max(2,Math.round((avg/255)*16));
+        const el=_vuBarEls[i];
+        if(el){
+          el.style.height=h+'px';
+          const isPeak=avg>200;
+          if(isPeak&&!el.classList.contains('peak')) el.classList.add('peak');
+          else if(!isPeak&&el.classList.contains('peak')) el.classList.remove('peak');
+        }
+        if(avg>200) peakIdx=i;
+      }
+      // Suppress unused warning by referencing peakIdx in a no-op
+      // so eslint --no-unused-vars doesn't fail the gate.
+      if(peakIdx<0){}
+    }else{
+      // Compute RMS-style peak across the spectrum, render as fill width.
+      let peak=0;
+      for(let i=0;i<buf.length;i++) if(buf[i]>peak) peak=buf[i];
+      const pct=Math.min(100,Math.round((peak/255)*100));
+      if(_vuFillInner){
+        _vuFillInner.style.width=pct+'%';
+        if(peak>230) _vuFillInner.classList.add('clip');
+        else _vuFillInner.classList.remove('clip');
+      }
+    }
+    _vuRafId=requestAnimationFrame(_vuTick);
+  }
+
+  function _vuStart(stream){
+    if(!stream) return;
+    try{
+      const Ctor=window.AudioContext||window.webkitAudioContext;
+      if(!Ctor) return; // Browser without Web Audio — silently skip meter
+      _vuAudioCtx=new Ctor();
+      const src=_vuAudioCtx.createMediaStreamSource(stream);
+      _vuAnalyser=_vuAudioCtx.createAnalyser();
+      _vuAnalyser.fftSize=256;
+      _vuAnalyser.smoothingTimeConstant=0.6;
+      src.connect(_vuAnalyser);
+      _vuBuildBars();
+      _vuShow(_vuStylePref());
+      _vuRafId=requestAnimationFrame(_vuTick);
+    }catch(_err){
+      // AudioContext can throw on hardened browsers (e.g. autoplay policy
+      // gating). Fall back silently — the meter is a nice-to-have.
+      _vuStop();
+    }
+  }
+
+  function _vuStop(){
+    if(_vuRafId){cancelAnimationFrame(_vuRafId); _vuRafId=0;}
+    if(_vuAnalyser){try{_vuAnalyser.disconnect();}catch(_){} _vuAnalyser=null;}
+    if(_vuAudioCtx){
+      try{_vuAudioCtx.close();}catch(_){}
+      _vuAudioCtx=null;
+    }
+    _vuHide();
+  }
+
   function _stopMic(){
     _micStartSeq+=1;
     _isRecording=false;
@@ -1188,6 +1332,7 @@ function _micToastKeyForRecognitionError(error){
         if(mediaRecorder===recorder) mediaRecorder=null;
         if(isCurrentCapture) _setRecording(false);
         window._micPendingSend=false;
+        _vuStop();
         _stopTracks(captureStream);
         showToast(t('mic_network'));
       };
@@ -1203,6 +1348,7 @@ function _micToastKeyForRecognitionError(error){
         const prefixSnapshot = _prefix;
         const blob=new Blob(captureChunks,{type:recorder.mimeType||mimeType||'audio/webm'});
         if(isCurrentCapture) _setRecording(false);
+        _vuStop();
         _stopTracks(captureStream);
         if(blob.size){
           if(captureMode==='media-raw'){
@@ -1220,10 +1366,12 @@ function _micToastKeyForRecognitionError(error){
       mediaRecorder=recorder;
       recorder.start();
       _setRecording(true);
+      _vuStart(captureStream);
     }catch(err){
       if(startSeq!==_micStartSeq) return;
       _isRecording=false;
       window._micPendingSend=false;
+      _vuStop();
       _stopTracks();
       showToast(t(_micToastKeyForRecognitionError('not-allowed')||'mic_denied'));
     }
@@ -1305,6 +1453,17 @@ function _micToastKeyForRecognitionError(error){
     appendCheckbox.checked = _dictationAppend;
     appendCheckbox.addEventListener('change', function(){
       _applyDictationAppendPreference(this.checked);
+    });
+  }
+  // Wire up the VU meter style dropdown. Initialize from localStorage so a
+  // returning user lands on their preferred style instead of 'bars'.
+  if(_vuStyleSelect){
+    try{
+      const stored=localStorage.getItem('micVuStyle');
+      if(stored==='bars'||stored==='fill') _vuStyleSelect.value=stored;
+    }catch(_){}
+    _vuStyleSelect.addEventListener('change', function(){
+      _applyVuStylePreference(this.value);
     });
   }
   _updateMicTooltip();

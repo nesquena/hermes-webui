@@ -2700,9 +2700,31 @@
   .icon-btn:hover{background:rgba(255,255,255,.08);color:var(--text);opacity:1;}
   .mic-btn{transition:color .15s,background .15s;}
   .mic-btn.recording{color:var(--error);background:rgba(239,83,80,.12);animation:mic-pulse 1.2s ease-in-out infinite;}
+  /* Mic icon swap: show the stop (square) icon only while recording. */
+  .mic-btn .mic-icon-stop{display:none;}
+  .mic-btn.recording .mic-icon-idle{display:none;}
+  .mic-btn.recording .mic-icon-stop{display:block;}
   @keyframes mic-pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,83,80,.3);}50%{box-shadow:0 0 0 6px rgba(239,83,80,0);}}
-  .mic-status{font-size:11px;color:var(--error);padding:4px 12px;display:flex;align-items:center;gap:6px;}
+  .mic-status{font-size:11px;color:var(--error);padding:6px 12px 4px;display:flex;align-items:center;gap:6px;width:fit-content;margin:0 auto;}
   .mic-dot{width:6px;height:6px;border-radius:50%;background:var(--error);animation:mic-pulse 1.2s ease-in-out infinite;flex-shrink:0;}
+  /* VU meter — quiet per UIUX-GUIDE §121/§131. Single accent, no glow, no shadow.
+     Lives in the same horizontal slot as #micStatus, replacing the static
+     "Listening…" text on the MediaRecorder capture path. */
+  .mic-vu{display:flex;align-items:center;gap:6px;padding:6px 4px 4px;height:24px;min-width:0;width:fit-content;margin:0 auto;}
+  .mic-vu-bars{display:flex;align-items:center;gap:2px;height:16px;}
+  .mic-vu-bars .bar{width:2px;background:var(--muted);border-radius:1px;height:2px;transition:background .1s,height .05s;}
+  .mic-vu-bars .bar.peak{background:var(--error);}
+  .mic-vu-fill{position:relative;width:80px;height:2px;background:var(--border);border-radius:1px;overflow:hidden;}
+  .mic-vu-fill-inner{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--accent);transition:width .05s linear;}
+  .mic-vu-fill-inner.clip{background:var(--error);}
+  /* Only one visual mode is active at a time; suppress the inactive track/host
+     so we don't render a stray gray line next to the bars (or vice versa). */
+  .mic-vu[data-style="bars"] .mic-vu-fill{display:none;}
+  .mic-vu[data-style="fill"] .mic-vu-bars{display:none;}
+  /* Mobile: collapse to 8 bars so the footer stays clean. */
+  @media (max-width:640px){
+    .mic-vu-bars .bar:nth-child(n+9){display:none;}
+  }
 
   /* ── Turn-based voice mode (#1333) ── */
   .voice-mode-btn{transition:color .15s,background .15s;}
