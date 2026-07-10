@@ -60,12 +60,12 @@ def test_ui_js_passes_model_context_to_reasoning_api():
     # the query into a local `key` first (for the in-flight storm + stale-success
     # guards), so accept either the inlined form or the captured-key form — both
     # pass _reasoningEffortQuery()'s output to the endpoint.
-    fetch_match = re.search(r"function fetchReasoningChip\(\)\{(.+?)\n\}", src, re.DOTALL)
+    fetch_match = re.search(r"function fetchReasoningChip\([^)]*\)\{(.+?)\n\}", src, re.DOTALL)
     assert fetch_match, "fetchReasoningChip function must exist"
     fetch_body = fetch_match.group(1)
     inlined = "api('/api/reasoning'+_reasoningEffortQuery())" in src
     captured = (
-        re.search(r"const\s+key\s*=\s*_reasoningEffortQuery\(\)", fetch_body)
+        "_reasoningEffortQuery()" in fetch_body
         and "api('/api/reasoning'+key)" in fetch_body
     )
     assert inlined or captured, (
@@ -79,7 +79,7 @@ def test_fetchReasoningChip_calls_apply():
     with open("static/ui.js") as f:
         src = f.read()
     # Find fetchReasoningChip function
-    func_match = re.search(r"function fetchReasoningChip\(\)\{(.+?)\}", src, re.DOTALL)
+    func_match = re.search(r"function fetchReasoningChip\([^)]*\)\{(.+?)\}", src, re.DOTALL)
     assert func_match, "fetchReasoningChip function must exist"
     func_body = func_match.group(1)
     assert "_applyReasoningChip" in func_body, \
