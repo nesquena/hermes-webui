@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -2793,15 +2794,15 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         return
 
     try:
-        import yaml as _yaml
-
         changed = False
 
         with _cfg_lock:
-            raw = config_path.read_text(encoding="utf-8")
-            cfg = _yaml.safe_load(raw)
+            # Read the expanded view with a snapshot so the central sink can
+            # derive exact deleted leaves and preserve raw ${VAR} siblings.
+            cfg = _config._load_yaml_config_file(config_path)
             if not isinstance(cfg, dict):
                 return
+            snapshot = copy.deepcopy(cfg)
 
             # 1. Clean providers.<id>.api_key
             providers_cfg = cfg.get("providers") or {}
@@ -2831,7 +2832,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
 
             if changed:
                 _save_yaml_config_file(config_path, cfg,
-                    dirty_set={("providers", provider_id, "api_key"), ("model", "api_key"), ("custom_providers",)})
+                    snapshot=snapshot)
         # Sync in-memory cache and bust model TTL cache
         # MUST be called outside _cfg_lock to avoid deadlock:
         # _cfg_lock is a threading.Lock (non-reentrant) and

@@ -413,6 +413,37 @@ class TestRemoveProviderKey:
         assert custom_provider["name"] == "Local (127.0.0.1:15721)"
         assert "api_key" not in custom_provider
 
+    def test_clean_custom_provider_key_preserves_sibling_env_reference(
+        self, monkeypatch, tmp_path,
+    ):
+        """Removing one custom key must not expand an untouched sibling key."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        monkeypatch.setenv("LOCAL_PORT_API_KEY", "local-secret")
+        monkeypatch.setenv("OTHER_PROVIDER_API_KEY", "other-secret")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "custom_providers:\n"
+            "  - name: Local (127.0.0.1:15721)\n"
+            "    api_key: ${LOCAL_PORT_API_KEY}\n"
+            "  - name: Other Provider\n"
+            "    api_key: ${OTHER_PROVIDER_API_KEY}\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("custom:local-127.0.0.1-15721")
+
+        reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        custom_providers = reloaded["custom_providers"]
+        assert "api_key" not in custom_providers[0]
+        assert custom_providers[1]["api_key"] == "${OTHER_PROVIDER_API_KEY}"
+
     def test_remove_provider_key_calls_set_with_none(self, monkeypatch, tmp_path):
         """remove_provider_key should delegate to set_provider_key(id, None)."""
         _install_fake_hermes_cli(monkeypatch)
