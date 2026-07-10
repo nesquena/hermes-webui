@@ -8627,7 +8627,11 @@ def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages
     if not parent_id or not is_safe_session_id(parent_id):
         return None
     parent = Session.load_metadata_only(parent_id)
-    if not parent or not getattr(parent, "pre_compression_snapshot", False):
+    if (
+        not parent
+        or not getattr(parent, "pre_compression_snapshot", False)
+        or not getattr(parent, "_todo_state_metadata_available", False)
+    ):
         return None
     parent_count = _metadata_message_count_for_display(parent)
     if parent_count is None:
@@ -9590,7 +9594,7 @@ from api.run_journal import (
     session_journal_fingerprint,
     stale_interrupted_event,
 )
-from api.todo_state import attach_todo_state
+from api.todo_state import attach_todo_snapshot, attach_todo_state
 from api.providers import (
     get_providers,
     get_provider_quota,
@@ -12795,7 +12799,16 @@ def handle_get(handler, parsed) -> bool:
             # todo list as the current state instead of falling through to an
             # older non-empty write.
             if load_messages and _all_msgs:
-                attach_todo_state(raw, _all_msgs)
+                todo_attached = attach_todo_state(raw, _all_msgs)
+                _attach_todo_state_from_omitted_compression_parent(
+                    raw,
+                    s,
+                    child_state_attached=todo_attached,
+                    parent_omitted=(
+                        limited_effective_base_offset > 0
+                        and limited_sidecar_messages is not None
+                    ),
+                )
             if _merged_last_message_at:
                 raw["last_message_at"] = max(
                     float(raw.get("last_message_at") or 0),
@@ -13767,6 +13780,36 @@ def _validate_session_toolsets_shape(toolsets):
     if not all(isinstance(t, str) and t for t in toolsets):
         raise ValueError("each toolset must be a non-empty string")
     return toolsets
+
+
+def _attach_todo_state_from_omitted_compression_parent(
+    payload,
+    session,
+    *,
+    child_state_attached: bool,
+    parent_omitted: bool,
+) -> None:
+    """Recover todo state from one skipped fast-path compression parent."""
+    if child_state_attached or not parent_omitted:
+        return
+
+    # The bounded initial-load fast path omits only a proven single-hop
+    # compression parent. Consult that one snapshot when the child/state rows
+    # have no todo write. The direct child attach runs first, so its latest write
+    # (including an explicit empty list) always wins by transcript position.
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id or not is_safe_session_id(parent_id):
+        return
+    parent = Session.load_metadata_only(parent_id)
+    if (
+        not parent
+        or not getattr(parent, "pre_compression_snapshot", False)
+        or not getattr(parent, "_todo_state_metadata_available", False)
+        or getattr(parent, "parent_session_id", None)
+    ):
+        return
+    attach_todo_snapshot(payload, getattr(parent, "todo_state", None))
+
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""

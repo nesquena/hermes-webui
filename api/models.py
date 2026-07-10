@@ -1216,6 +1216,9 @@ class Session:
         # fall back to reading keys/updated_at off anchor_activity_scenes.
         _raw_scene_index = kwargs.get('anchor_scene_index')
         self._anchor_scene_index = _raw_scene_index if isinstance(_raw_scene_index, dict) else None
+        raw_todo_state = kwargs.get('todo_state')
+        self.todo_state = raw_todo_state if isinstance(raw_todo_state, dict) else None
+        self._todo_state_metadata_available = 'todo_state' in kwargs
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -1251,6 +1254,11 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        self.todo_state = None
+        if self.pre_compression_snapshot:
+            from api.todo_state import derive_todo_state
+            self.todo_state = derive_todo_state(self.messages)
+        self._todo_state_metadata_available = True
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1262,7 +1270,7 @@ class Session:
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
-            'compression_anchor_summary', 'pre_compression_snapshot',
+            'compression_anchor_summary', 'pre_compression_snapshot', 'todo_state',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
             'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',

@@ -658,6 +658,170 @@ def test_msg_limit_compression_child_fast_path_preserves_pagination_cursor(
     ]
 
 
+@pytest.mark.parametrize(
+    ("child_todo_state", "expected_todo_ids"),
+    [
+        (None, ["parent-todo"]),
+        ("task", ["child-todo"]),
+        ("empty", []),
+    ],
+)
+def test_msg_limit_compression_child_fast_path_preserves_parent_todo_state_without_lineage(
+    monkeypatch,
+    tmp_path,
+    child_todo_state,
+    expected_todo_ids,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_todo"
+    child_sid = "continuation_child_todo"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    parent_messages[100] = {
+        "role": "tool",
+        "content": json.dumps({
+            "todos": [
+                {"id": "parent-todo", "content": "survive compression", "status": "pending"}
+            ]
+        }),
+        "timestamp": 100.0,
+    }
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    if child_todo_state is not None:
+        child_todos = []
+        if child_todo_state == "task":
+            child_todos = [
+                {"id": "child-todo", "content": "new continuation state", "status": "in_progress"}
+            ]
+        child_messages[100] = {
+            "role": "tool",
+            "content": json.dumps({"todos": child_todos}),
+            "timestamp": 400.0,
+        }
+
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    real_session_load = models.Session.load.__func__
+    captured = {"lineage_loads": 0, "parent_full_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    def wrapped_session_load(cls, sid):
+        if sid == parent_sid:
+            captured["parent_full_loads"] += 1
+        return real_session_load(cls, sid)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+    monkeypatch.setattr(models.Session, "load", classmethod(wrapped_session_load))
+
+    handler = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert captured["lineage_loads"] == 0
+    assert captured["parent_full_loads"] == 0
+    payload = handler.response_json["session"]
+    assert payload["message_count"] == len(parent_messages) + len(child_messages)
+    assert payload["_messages_offset"] == len(parent_messages) + 470
+    assert [todo["id"] for todo in payload["todo_state"]["todos"]] == expected_todo_ids
+
+
+def test_msg_limit_compression_child_legacy_parent_todo_falls_back_to_lineage(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "legacy_parent_compression_snapshot_todo"
+    child_sid = "legacy_continuation_child_todo"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    parent_messages[100] = {
+        "role": "tool",
+        "content": json.dumps({
+            "todos": [
+                {"id": "legacy-parent-todo", "content": "preserve legacy state", "status": "pending"}
+            ]
+        }),
+        "timestamp": 100.0,
+    }
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    legacy_payload = json.loads(parent.path.read_text(encoding="utf-8"))
+    legacy_payload.pop("todo_state", None)
+    parent.path.write_text(json.dumps(legacy_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    captured = {"lineage_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+
+    handler = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert captured["lineage_loads"] >= 1
+    payload = handler.response_json["session"]
+    assert payload["message_count"] == len(parent_messages) + len(child_messages)
+    assert payload["todo_state"]["todos"][0]["id"] == "legacy-parent-todo"
+
+
 def test_msg_limit_single_hop_fast_path_falls_back_for_state_db_only_prefix_row(
     monkeypatch,
     tmp_path,
