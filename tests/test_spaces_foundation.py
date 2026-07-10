@@ -274,14 +274,39 @@ def test_load_spaces_isolates_progress_event_log(monkeypatch, tmp_path):
     assert progress_events_log_path() == (tmp_path / "capy-progress-events.jsonl").resolve()
 
 
-def test_spaces_feature_flag_disabled_is_safe(monkeypatch, tmp_path):
+def test_spaces_feature_flag_disabled_recovery_snapshot_keeps_metadata_only_receipts(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=False)
+    from api.capy_progress import progress_events_log_path
 
     assert spaces.spaces_enabled() is False
     assert spaces.list_spaces() == []
     recovery = spaces.recovery_snapshot()
+    serialized = json.dumps(recovery, sort_keys=True).lower()
+
     assert recovery["enabled"] is False
     assert recovery["generated_widgets_rendered"] is False
+    assert recovery["prompt_preflight"]["boundary"] == "recovery_action"
+    assert recovery["prompt_preflight"]["status"] == "required"
+    assert recovery["prompt_preflight"]["metadata_only"] is True
+    assert recovery["prompt_preflight"]["raw_prompt_stored"] is False
+    assert recovery["autonomy_policy"]["action"] == "space.recovery.snapshot"
+    assert recovery["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert recovery["autonomy_policy"]["metadata_only"] is True
+    assert recovery["progress_event"]["event_type"] == "tool.completed"
+    assert recovery["progress_event"]["stored"] is False
+    assert recovery["progress_event"]["queued"] is False
+    assert recovery["progress_event"]["run_id"] == "recovery.snapshot:recovery"
+    assert recovery["progress_event"]["redaction_status"] == "metadata_only"
+    assert recovery["output_compaction"]["tool"] == "capy-spaces-tool-action"
+    assert recovery["output_compaction"]["command"] == "space.recovery.snapshot"
+    assert recovery["output_compaction"]["metadata_only"] is True
+    _assert_server_memory_advisory_receipt(recovery)
+
+    assert "<script" not in serialized
+    assert '\"renderer\"' not in serialized
+    assert "api_key" not in serialized
+    assert '\"raw_prompt\"' not in serialized
+    assert not progress_events_log_path().exists()
 
 
 def test_recovery_snapshot_exposes_metadata_only_policy_progress_and_compaction_receipts(monkeypatch, tmp_path):
@@ -777,6 +802,25 @@ def test_widget_reload_events_emit_server_memory_advisory_no_authority_receipts(
     _assert_server_memory_advisory_receipt(queued)
     assert "memory_advisory" in listed[0]
     _assert_server_memory_advisory_receipt(listed[0])
+
+    snapshot = spaces.recovery_snapshot()
+    space_summary = next(space for space in snapshot["spaces"] if space["space_id"] == created["space_id"])
+    widget_summary = next(widget for widget in space_summary["widgets"] if widget["id"] == "reload-card")
+    latest_queued_event = widget_summary["latest_queued_event"]
+    assert latest_queued_event["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(latest_queued_event)
+    assert latest_queued_event["prompt_preflight"] == listed[0]["prompt_preflight"]
+    assert latest_queued_event["prompt_preflight"]["action"] == "capy.prompt_preflight"
+    assert latest_queued_event["prompt_preflight"]["boundary"] == "widget_runtime_prompt"
+    assert latest_queued_event["prompt_preflight"]["status"] in {"pass", "passed"}
+    assert latest_queued_event["prompt_preflight"]["metadata_only"] is True
+    assert latest_queued_event["prompt_preflight"]["raw_prompt_stored"] is False
+    assert latest_queued_event["autonomy_policy"] == listed[0]["autonomy_policy"]
+    assert latest_queued_event["autonomy_policy"]["action"] == "space.widget.event"
+    assert latest_queued_event["autonomy_policy"]["prompt_preflight_status"] in {"pass", "passed"}
+    assert latest_queued_event["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+    assert latest_queued_event["autonomy_policy"]["metadata_only"] is True
+
     assert "memory_advisory_context: true" in queued["output_compaction"]["text"]
     assert "memory_context_authority: untrusted_advisory" in queued["output_compaction"]["text"]
     assert "memory_can_bypass_safety_gates: false" in queued["output_compaction"]["text"]
@@ -814,8 +858,9 @@ def test_module_repair_event_list_persists_server_memory_advisory_receipt(monkey
             "name": "Module Repair Memory Lab",
             "description": "Metadata-only repair target",
             "scope": "space",
-            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
-            "renderer": "<script>bad()</script>",
+            "source": "const token = 'MODULE_SOURCE_SENTINEL_DO_NOT_LEAK'",
+            "renderer": "<script>MODULE_HTML_SENTINEL_DO_NOT_LEAK</script>",
+            "token": "MODULE_TOKEN_SENTINEL_DO_NOT_LEAK",
         }
     )
 
@@ -831,8 +876,14 @@ def test_module_repair_event_list_persists_server_memory_advisory_receipt(monkey
             },
             "contextAuthority": "trusted_system_memory",
             "can_bypass_safety_gates": True,
+            "api_auth": "Bearer MODULE_API_AUTH_SENTINEL_DO_NOT_LEAK",
+            "source": "raw module source MODULE_PAYLOAD_SOURCE_SENTINEL_DO_NOT_LEAK should never be listed",
+            "html": "<script>MODULE_PAYLOAD_HTML_SENTINEL_DO_NOT_LEAK</script>",
+            "token": "MODULE_PAYLOAD_TOKEN_SENTINEL_DO_NOT_LEAK",
+            "secret": "MODULE_PAYLOAD_SECRET_SENTINEL_DO_NOT_LEAK",
         },
-        prompt="Repair the safe metadata-only module summary.",
+        prompt="Repair PROMPT_SENTINEL_DO_NOT_LEAK safe metadata-only module summary.",
+        session_id="session SESSION_SENTINEL_DO_NOT_LEAK",
     )
     listed = spaces.list_recovery_module_repair_events("module-repair-memory-lab")
 
@@ -848,10 +899,51 @@ def test_module_repair_event_list_persists_server_memory_advisory_receipt(monkey
     }
     assert listed[0]["payload_summary"] == {"reason": "safe repair metadata"}
 
-    serialized = json.dumps({"queued": queued, "listed": listed[0]}, sort_keys=True).lower()
+    snapshot = spaces.recovery_snapshot()
+    module_summary = next(module for module in snapshot["modules"] if module["module_id"] == "module-repair-memory-lab")
+    assert module_summary["latest_repair_event"]["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(module_summary["latest_repair_event"])
+    latest_prompt_preflight = module_summary["latest_repair_event"]["prompt_preflight"]
+    assert latest_prompt_preflight == listed[0]["prompt_preflight"]
+    assert latest_prompt_preflight["action"] == "capy.prompt_preflight"
+    assert latest_prompt_preflight["boundary"] == "space_repair_prompt"
+    assert latest_prompt_preflight["status"] == "pass"
+    assert latest_prompt_preflight["metadata_only"] is True
+    assert latest_prompt_preflight["raw_prompt_stored"] is False
+    latest_autonomy_policy = module_summary["latest_repair_event"]["autonomy_policy"]
+    assert latest_autonomy_policy == listed[0]["autonomy_policy"]
+    assert latest_autonomy_policy["action"] == "space.module.repair.queue"
+    assert latest_autonomy_policy["prompt_preflight_status"] == "pass"
+    assert latest_autonomy_policy["approval_gates"] == ["generated_widget_execution"]
+    assert latest_autonomy_policy["metadata_only"] is True
+
+    snapshot_serialized = json.dumps({"snapshot": snapshot}, sort_keys=True).lower()
+    for unsafe in (
+        "module_source_sentinel_do_not_leak",
+        "module_html_sentinel_do_not_leak",
+        "module_token_sentinel_do_not_leak",
+        "module_api_auth_sentinel_do_not_leak",
+        "module_payload_source_sentinel_do_not_leak",
+        "module_payload_html_sentinel_do_not_leak",
+        "module_payload_token_sentinel_do_not_leak",
+        "module_payload_secret_sentinel_do_not_leak",
+        "prompt_sentinel_do_not_leak",
+        "session_sentinel_do_not_leak",
+    ):
+        assert unsafe not in snapshot_serialized
+
+    serialized = json.dumps({"queued": queued, "listed": listed[0], "snapshot": snapshot}, sort_keys=True).lower()
     assert "trusted_system_memory" not in serialized
     assert "forged_memory_authority" not in serialized
     assert "secret_value_do_not_leak" not in serialized
+    assert "prompt_sentinel_do_not_leak" not in serialized
+    assert "session_sentinel_do_not_leak" not in serialized
+    assert "raw module source" not in serialized
+    assert "bearer" not in serialized
+    assert "api_auth" not in serialized
+    assert "source" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
     assert '"can_bypass_safety_gates": true' not in serialized
     assert '\"payload_summary\": {\"memory_advisory\"' not in serialized
 
@@ -1227,7 +1319,26 @@ def test_space_repair_event_list_persists_server_memory_advisory_receipt(monkeyp
     assert legacy_summary is not None
     assert "memory_advisory" not in legacy_summary
 
-    serialized = json.dumps({"queued": queued, "listed": listed[0]}, sort_keys=True).lower()
+    snapshot = spaces.recovery_snapshot()
+    space_summary = next(space for space in snapshot["spaces"] if space["space_id"] == created["space_id"])
+    latest_space_repair = space_summary["latest_space_repair_event"]
+    assert latest_space_repair["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(latest_space_repair)
+    latest_prompt_preflight = latest_space_repair["prompt_preflight"]
+    assert latest_prompt_preflight == listed[0]["prompt_preflight"]
+    assert latest_prompt_preflight["action"] == "capy.prompt_preflight"
+    assert latest_prompt_preflight["boundary"] == "space_repair_prompt"
+    assert latest_prompt_preflight["status"] == "pass"
+    assert latest_prompt_preflight["metadata_only"] is True
+    assert latest_prompt_preflight["raw_prompt_stored"] is False
+    latest_autonomy_policy = latest_space_repair["autonomy_policy"]
+    assert latest_autonomy_policy == listed[0]["autonomy_policy"]
+    assert latest_autonomy_policy["action"] == "space.repair.queue"
+    assert latest_autonomy_policy["prompt_preflight_status"] == "pass"
+    assert latest_autonomy_policy["approval_gates"] == ["generated_widget_execution"]
+    assert latest_autonomy_policy["metadata_only"] is True
+
+    serialized = json.dumps({"queued": queued, "listed": listed[0], "snapshot": snapshot}, sort_keys=True).lower()
     assert "trusted_system_memory" not in serialized
     assert "forged_memory_authority" not in serialized
     assert "secret_value_do_not_leak" not in serialized
@@ -2743,6 +2854,11 @@ def test_native_widget_mutations_can_return_metadata_only_safety_receipts(monkey
     assert upserted["output_compaction"]["metadata_only"] is True
     assert upserted["output_compaction"]["redaction_status"] == "metadata_only"
     assert f"space_id: {created['space_id']}" in upserted["output_compaction"]["text"]
+    _assert_server_memory_advisory_receipt(upserted)
+    assert "advisory_context: true" in upserted["output_compaction"]["text"]
+    assert "context_authority: untrusted_advisory" in upserted["output_compaction"]["text"]
+    assert "can_bypass_safety_gates: false" in upserted["output_compaction"]["text"]
+    assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in upserted["output_compaction"]["text"]
     assert f"progress_run_id: widget.upsert:{created['space_id']}" in upserted["output_compaction"]["text"]
 
     assert patched["prompt_preflight"]["boundary"] == "creator_commit"
@@ -2962,6 +3078,107 @@ def test_native_widget_safety_receipts_redact_unsafe_values_under_safe_keys(monk
     assert "title()" not in serialized
     assert upserted["prompt_preflight"]["boundary"] == "creator_commit"
     assert upserted["autonomy_policy"]["action"] == "space.widget.upsert"
+
+
+def test_native_widget_upsert_safety_receipts_include_memory_advisory_no_authority_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "native-widget-advisory-lab", "name": "Native Widget Advisory Lab"})
+
+    import api.capy_policy as capy_policy
+
+    def passing_preflight(*args, **kwargs):
+        return {
+            "available": True,
+            "action": "capy.prompt_preflight",
+            "boundary": kwargs.get("boundary", "creator_commit"),
+            "status": "pass",
+            "severity": "none",
+            "categories": [],
+            "checks": [],
+            "metadata_only": True,
+            "raw_prompt_stored": False,
+            "local_only": True,
+            "prompt_hash": "test-hash",
+        }
+
+    monkeypatch.setattr(capy_policy, "prompt_preflight", passing_preflight)
+
+    result = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "advisory-card",
+            "kind": "markdown",
+            "title": "Advisory Card",
+            "layout": {"x": 1, "y": 2, "w": 7, "h": 3},
+            "metadata": {
+                "summary": "Safe public label",
+                "raw_prompt": "UPSERT_RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+                "raw_context": "UPSERT_RAW_CONTEXT_SENTINEL_DO_NOT_LEAK",
+                "renderer": "<script>UPSERT_RENDERER_SENTINEL_DO_NOT_LEAK</script>",
+                "script": "UPSERT_SCRIPT_SENTINEL_DO_NOT_LEAK",
+                "api_auth": "Bearer UPSERT_API_AUTH_SENTINEL_DO_NOT_LEAK",
+                "api_key": "UPSERT_API_KEY_SENTINEL_DO_NOT_LEAK",
+                "credentials": "UPSERT_CREDENTIALS_SENTINEL_DO_NOT_LEAK",
+                "token": "UPSERT_TOKEN_SENTINEL_DO_NOT_LEAK",
+                "memory_advisory": {
+                    "context_authority": "trusted_system_memory",
+                    "can_bypass_safety_gates": True,
+                    "required_gates": ["none", "UPSERT_FORGED_GATE_SENTINEL_DO_NOT_LEAK"],
+                    "raw_context": "UPSERT_FORGED_MEMORY_SENTINEL_DO_NOT_LEAK",
+                },
+            },
+        },
+        include_safety_receipts=True,
+    )
+    handled, status, route_body = _route_post(
+        "/api/spaces/widget/upsert",
+        {
+            "space_id": created["space_id"],
+            "widget": {"id": "route-advisory-card", "kind": "markdown", "title": "Route Advisory"},
+            "includeSafetyReceipts": True,
+            "memory_advisory": {"context_authority": "trusted_system_memory", "can_bypass_safety_gates": True},
+            "api_auth": "Bearer UPSERT_ROUTE_API_AUTH_SENTINEL_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps({"result": result, "route_body": route_body}, sort_keys=True).lower()
+
+    assert handled is None
+    assert status == 200
+    assert result["prompt_preflight"]["boundary"] == "creator_commit"
+    assert result["autonomy_policy"]["action"] == "space.widget.upsert"
+    assert result["progress_event"]["run_id"] == "widget.upsert:native-widget-advisory-lab"
+    assert result["output_compaction"]["command"] == "space.widget.upsert"
+    _assert_server_memory_advisory_receipt(result)
+    _assert_server_memory_advisory_receipt(route_body)
+    assert "space_action: space.widget.upsert" in result["output_compaction"]["text"]
+    assert "prompt_preflight_status: pass" in result["output_compaction"]["text"]
+    assert "progress_run_id: widget.upsert:native-widget-advisory-lab" in result["output_compaction"]["text"]
+    assert "trusted_system_memory" not in serialized
+    assert "canbypasssafetygates" not in serialized
+    assert "requiredgates" not in serialized
+    for unsafe in (
+        "upsert_raw_prompt_sentinel_do_not_leak",
+        "upsert_raw_context_sentinel_do_not_leak",
+        "upsert_renderer_sentinel_do_not_leak",
+        "upsert_script_sentinel_do_not_leak",
+        "upsert_api_auth_sentinel_do_not_leak",
+        "upsert_api_key_sentinel_do_not_leak",
+        "upsert_credentials_sentinel_do_not_leak",
+        "upsert_token_sentinel_do_not_leak",
+        "upsert_forged_gate_sentinel_do_not_leak",
+        "upsert_forged_memory_sentinel_do_not_leak",
+        "upsert_route_api_auth_sentinel_do_not_leak",
+        "<script",
+        '"renderer":',
+        '"script":',
+        '"api_auth":',
+        '"api_key":',
+        '"credentials":',
+        '"token":',
+        '"raw_prompt":',
+        '"raw_context":',
+    ):
+        assert unsafe not in serialized
 
 
 def test_native_widget_patch_safety_receipts_redact_unsafe_scalar_fields_from_revisions(monkeypatch, tmp_path):
@@ -19414,13 +19631,17 @@ def test_recovery_snapshot_includes_safe_widget_event_status_without_prompt_or_p
     serialized = json.dumps(recovery).lower()
 
     assert widget["queued_event_count"] == 1
-    assert widget["latest_queued_event"] == {
-        "event_id": queued["event_id"],
-        "event_name": "agent.repair",
-        "status": "queued",
-        "memory_advisory": queued["memory_advisory"],
-    }
-    _assert_server_memory_advisory_envelope(widget["latest_queued_event"])
+    latest = widget["latest_queued_event"]
+    assert latest["event_id"] == queued["event_id"]
+    assert latest["event_name"] == "agent.repair"
+    assert latest["status"] == "queued"
+    assert latest["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(latest)
+    assert latest["prompt_preflight"]["status"] in {"required", "blocked", "pass"}
+    assert latest["prompt_preflight"]["metadata_only"] is True
+    assert latest["prompt_preflight"]["raw_prompt_stored"] is False
+    assert latest["autonomy_policy"]["prompt_preflight_status"] in {"required", "blocked", "pass"}
+    assert latest["autonomy_policy"]["metadata_only"] is True
     assert "prompt_preview" not in serialized
     assert "payload_summary" not in serialized
     assert "authorization" not in serialized
@@ -21884,11 +22105,12 @@ def test_queue_recovery_module_repair_event_metadata_only(monkeypatch, tmp_path)
     assert event["details"]["autonomy_policy"]["metadata_only"] is True
     assert snapshot["summary"]["queued_event_count"] == 1
     assert snapshot["modules"][0]["queued_repair_count"] == 1
-    assert snapshot["modules"][0]["latest_repair_event"] == {
-        "event_id": queued["event_id"],
-        "event_name": "agent.repair",
-        "status": "queued",
-    }
+    latest_repair_event = snapshot["modules"][0]["latest_repair_event"]
+    assert latest_repair_event["event_id"] == queued["event_id"]
+    assert latest_repair_event["event_name"] == "agent.repair"
+    assert latest_repair_event["status"] == "queued"
+    assert latest_repair_event["memory_advisory"] == queued["memory_advisory"]
+    _assert_server_memory_advisory_envelope(latest_repair_event)
     assert "source" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
@@ -25301,6 +25523,137 @@ def _route_post(path, body):
     handler = _RouteHandler(body)
     handled = routes.handle_post(handler, urlparse(path))
     return handled, handler.status, handler.json_body()
+
+
+def test_direct_duplicate_space_route_returns_native_metadata_only_safety_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "route-duplicate-receipts-lab",
+            "name": "Route Duplicate Receipts Lab",
+            "description": "Safe duplicate source",
+            "agent_instructions": "Duplicate through the supervised safety boundary only.",
+            "widgets": [
+                {
+                    "id": "duplicate-widget",
+                    "kind": "markdown",
+                    "title": "Duplicate widget",
+                    "renderer": "<script>DUPLICATE_ROUTE_SECRET_DO_NOT_LEAK</script>",
+                    "api_key": "DUPLICATE_ROUTE_SECRET_DO_NOT_LEAK",
+                    "source": "DUPLICATE_ROUTE_SOURCE_DO_NOT_LEAK",
+                }
+            ],
+        }
+    )
+
+    handled, status, missing = _route_post("/api/spaces/duplicate", {})
+    assert handled is None
+    assert status == 400
+    assert "Missing space_id" in missing["error"]
+
+    handled, status, conflict = _route_post(
+        "/api/spaces/duplicate",
+        {"space_id": created["space_id"], "spaceId": "other-route-duplicate-lab"},
+    )
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in conflict["error"]
+
+    handled, status, target_conflict = _route_post(
+        "/api/spaces/duplicate",
+        {
+            "space_id": created["space_id"],
+            "target_space_id": "route-duplicate-target-a",
+            "targetSpaceId": "route-duplicate-target-b",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in target_conflict["error"]
+    assert _progress_log_rows_for_run("space.duplicate:route-duplicate-target-a") == []
+    assert _progress_log_rows_for_run("space.duplicate:route-duplicate-target-b") == []
+
+    handled, status, duplicated = _route_post(
+        "/api/spaces/duplicate",
+        {"space_id": created["space_id"], "target_space_id": "route-duplicate-receipts-copy"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert duplicated["ok"] is True
+    assert duplicated["action"] == "space.spaces.duplicatespace"
+    assert duplicated["source_space_id"] == created["space_id"]
+    assert duplicated["space_id"] == "route-duplicate-receipts-copy"
+    assert duplicated["space"]["space_id"] == "route-duplicate-receipts-copy"
+    assert duplicated["space"]["widget_count"] == 1
+    assert duplicated["prompt_preflight"]["boundary"] == "active_space_instructions"
+    assert duplicated["prompt_preflight"]["metadata_only"] is True
+    assert duplicated["autonomy_policy"]["action"] == "space.spaces.duplicatespace"
+    assert duplicated["autonomy_policy"]["approval_required"] is True
+    assert duplicated["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert duplicated["progress_event"]["run_id"] == "space.duplicate:route-duplicate-receipts-copy"
+    assert duplicated["progress_event"]["redaction_status"] == "metadata_only"
+    assert [event["event_type"] for event in duplicated["progress_events"]] == ["tool.started", "tool.completed"]
+    for event in duplicated["progress_events"]:
+        assert event["family"] == "tool"
+        assert event["run_id"] == "space.duplicate:route-duplicate-receipts-copy"
+        assert event["space_id"] == "route-duplicate-receipts-copy"
+        assert event["redaction_status"] == "metadata_only"
+    assert duplicated["progress_event"] == duplicated["progress_events"][-1]
+    _assert_space_tool_progress_lifecycle_log(
+        "space.duplicate:route-duplicate-receipts-copy",
+        space_id="route-duplicate-receipts-copy",
+    )
+    assert duplicated["memory_advisory"]["context_authority"] == "untrusted_advisory"
+    assert duplicated["memory_advisory"]["can_bypass_safety_gates"] is False
+    compaction = duplicated["output_compaction"]
+    assert compaction["command"] == "space.spaces.duplicatespace"
+    assert compaction["redaction_status"] == "metadata_only"
+    assert any(
+        artifact.get("handle") == "space:route-duplicate-receipts-copy"
+        for artifact in compaction.get("retained_artifact_handles") or []
+    )
+
+    serialized = json.dumps(duplicated).lower()
+    for unsafe in (
+        "duplicate_route_secret_do_not_leak",
+        "duplicate_route_source_do_not_leak",
+        "<script",
+        "api_key",
+        "trusted_system_memory",
+        "raw_memory_context",
+        "can_bypass_safety_gates: true",
+    ):
+        assert unsafe not in serialized
+
+    handled, status, camel_duplicated = _route_post(
+        "/api/spaces/duplicate",
+        {"spaceId": created["space_id"], "targetSpaceId": "route-duplicate-receipts-camel-copy"},
+    )
+    assert handled is None
+    assert status == 200
+    assert camel_duplicated["space_id"] == "route-duplicate-receipts-camel-copy"
+    assert camel_duplicated["progress_event"]["run_id"] == "space.duplicate:route-duplicate-receipts-camel-copy"
+
+    before_existing_target_rows = _progress_log_rows_for_run("space.duplicate:route-duplicate-receipts-copy")
+    handled, status, existing_target = _route_post(
+        "/api/spaces/duplicate",
+        {"space_id": created["space_id"], "target_space_id": "route-duplicate-receipts-copy"},
+    )
+    assert handled is None
+    assert status == 409
+    assert "already exists" in existing_target["error"].lower()
+    assert "progress_event" not in existing_target
+    assert _progress_log_rows_for_run("space.duplicate:route-duplicate-receipts-copy") == before_existing_target_rows
+
+    handled, status, missing_source = _route_post(
+        "/api/spaces/duplicate",
+        {"space_id": "missing-duplicate-source", "target_space_id": "missing-duplicate-target"},
+    )
+    assert handled is None
+    assert status == 404
+    assert "not found" in missing_source["error"].lower()
+    assert _progress_log_rows_for_run("space.duplicate:missing-duplicate-target") == []
 
 
 def test_widget_mutation_routes_return_native_metadata_only_safety_receipts(monkeypatch, tmp_path):

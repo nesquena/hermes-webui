@@ -3718,6 +3718,10 @@ def _public_root_metadata_key_is_safe(key: str) -> bool:
     unsafe_compact_markers = (
         "apikey",
         "apiauth",
+        "advisorycontext",
+        "bypasssafetygates",
+        "canbypasssafetygates",
+        "contextauthority",
         "datasource",
         "generatedbody",
         "generatedcode",
@@ -3725,12 +3729,18 @@ def _public_root_metadata_key_is_safe(key: str) -> bool:
         "generatedrenderer",
         "generatedscript",
         "generatedsource",
+        "memoryadvisory",
+        "memorycontext",
+        "rawcontext",
         "rawdata",
         "rawhtml",
         "rawprompt",
         "rawrenderer",
         "rawsource",
         "rawscript",
+        "requiredgates",
+        "systemmemory",
+        "trustedmemory",
         "widgetbody",
     )
     if any(token in unsafe_tokens for token in tokens):
@@ -12233,8 +12243,10 @@ def upsert_widget(
             "space.widget.upsert",
             prompt_preflight_receipt,
         )
+        memory_advisory = _memory_advisory_public_envelope()
         result["progress_event"] = progress_event
         result["autonomy_policy"] = autonomy_policy
+        result["memory_advisory"] = memory_advisory
         result["output_compaction"] = _space_tool_action_output_compaction_receipt(
             action="space.widget.upsert",
             space_id=sid,
@@ -12242,6 +12254,8 @@ def upsert_widget(
             revision_event_id=result.get("revision_event_id"),
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
+            memory_advisory=memory_advisory,
+            include_memory_required_gates=True,
         )
     return result
 
@@ -16048,6 +16062,27 @@ def recovery_snapshot() -> dict[str, Any]:
         "module_count": 0,
         "disabled_module_count": 0,
     }
+    prompt_preflight = _recovery_required_prompt_preflight_receipt("space.recovery.snapshot")
+    autonomy_policy = _recovery_toggle_action_policy_receipt("space.recovery.snapshot")
+    memory_advisory = _memory_advisory_public_envelope()
+    progress_event = {
+        "stored": False,
+        "queued": False,
+        "event_type": "tool.completed",
+        "family": "tool",
+        "run_id": "recovery.snapshot:recovery",
+        "space_id": "recovery",
+        "redaction_status": "metadata_only",
+    }
+    output_compaction = _space_tool_action_output_compaction_receipt(
+        action="space.recovery.snapshot",
+        space_id="recovery",
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+        memory_advisory=memory_advisory,
+        include_memory_required_gates=True,
+        include_widget_count=False,
+    )
     if not spaces_enabled():
         return {
             "enabled": False,
@@ -16056,6 +16091,11 @@ def recovery_snapshot() -> dict[str, Any]:
             "summary": empty_summary,
             "spaces": [],
             "modules": [],
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
+            "memory_advisory": memory_advisory,
+            "output_compaction": output_compaction,
         }
     _ensure_dirs()
     spaces: list[dict[str, Any]] = []
@@ -16073,11 +16113,25 @@ def recovery_snapshot() -> dict[str, Any]:
         latest_module_repair = module_events[0]
         counts["queued_event_count"] += len(module_events)
         module_summary["queued_repair_count"] = len(module_events)
-        module_summary["latest_repair_event"] = {
+        latest_module_repair_event: dict[str, Any] = {
             "event_id": _context_value(latest_module_repair.get("event_id"), 120),
             "event_name": _context_value(latest_module_repair.get("event_name"), 120),
             "status": _context_value(latest_module_repair.get("status") or "queued", 80),
         }
+        latest_module_prompt_preflight = latest_module_repair.get("prompt_preflight")
+        if isinstance(latest_module_prompt_preflight, dict):
+            latest_module_repair_event["prompt_preflight"] = _prompt_preflight_receipt_metadata_summary(
+                latest_module_prompt_preflight
+            )
+        latest_module_autonomy_policy = latest_module_repair.get("autonomy_policy")
+        if isinstance(latest_module_autonomy_policy, dict):
+            latest_module_repair_event["autonomy_policy"] = _action_policy_receipt_metadata_summary(
+                latest_module_autonomy_policy
+            )
+        latest_module_memory_advisory = latest_module_repair.get("memory_advisory")
+        if isinstance(latest_module_memory_advisory, dict):
+            latest_module_repair_event["memory_advisory"] = _memory_advisory_public_summary(latest_module_memory_advisory)
+        module_summary["latest_repair_event"] = latest_module_repair_event
     for manifest in manifests_dir().glob("*/space.json"):
         try:
             space = json.loads(manifest.read_text(encoding="utf-8"))
@@ -16100,6 +16154,9 @@ def recovery_snapshot() -> dict[str, Any]:
                 latest_autonomy_policy = latest_space_repair.get("autonomy_policy")
                 if isinstance(latest_autonomy_policy, dict):
                     latest_space_repair_event["autonomy_policy"] = _action_policy_receipt_metadata_summary(latest_autonomy_policy)
+                latest_memory_advisory = latest_space_repair.get("memory_advisory")
+                if isinstance(latest_memory_advisory, dict):
+                    latest_space_repair_event["memory_advisory"] = _memory_advisory_public_summary(latest_memory_advisory)
                 summary["latest_space_repair_event"] = latest_space_repair_event
             queued_events_by_widget: dict[str, list[dict[str, Any]]] = {}
             for event in list_widget_events(summary["space_id"], limit=100):
@@ -16122,6 +16179,16 @@ def recovery_snapshot() -> dict[str, Any]:
                     "event_name": _context_value(latest.get("event_name"), 120),
                     "status": _context_value(latest.get("status") or "queued", 80),
                 }
+                latest_prompt_preflight = latest.get("prompt_preflight")
+                if isinstance(latest_prompt_preflight, dict):
+                    latest_queued_event["prompt_preflight"] = _prompt_preflight_receipt_metadata_summary(
+                        latest_prompt_preflight
+                    )
+                latest_autonomy_policy = latest.get("autonomy_policy")
+                if isinstance(latest_autonomy_policy, dict):
+                    latest_queued_event["autonomy_policy"] = _action_policy_receipt_metadata_summary(
+                        latest_autonomy_policy
+                    )
                 latest_memory_advisory = latest.get("memory_advisory")
                 if isinstance(latest_memory_advisory, dict):
                     latest_queued_event["memory_advisory"] = _memory_advisory_public_summary(latest_memory_advisory)
@@ -16138,27 +16205,6 @@ def recovery_snapshot() -> dict[str, Any]:
         except Exception:
             continue
     spaces.sort(key=lambda s: s.get("updated_at") or 0, reverse=True)
-    prompt_preflight = _recovery_required_prompt_preflight_receipt("space.recovery.snapshot")
-    autonomy_policy = _recovery_toggle_action_policy_receipt("space.recovery.snapshot")
-    memory_advisory = _memory_advisory_public_envelope()
-    progress_event = {
-        "stored": False,
-        "queued": False,
-        "event_type": "tool.completed",
-        "family": "tool",
-        "run_id": "recovery.snapshot:recovery",
-        "space_id": "recovery",
-        "redaction_status": "metadata_only",
-    }
-    output_compaction = _space_tool_action_output_compaction_receipt(
-        action="space.recovery.snapshot",
-        space_id="recovery",
-        autonomy_policy=autonomy_policy,
-        progress_event=progress_event,
-        memory_advisory=memory_advisory,
-        include_memory_required_gates=True,
-        include_widget_count=False,
-    )
     return {
         "enabled": True,
         "schema_version": SCHEMA_VERSION,

@@ -21,11 +21,166 @@ def _write_session(session_dir, sid, messages=1):
     return path
 
 
+def test_audit_session_recovery_returns_metadata_only_progress_event_without_hostile_strings(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress.jsonl"))
+    session_dir = tmp_path / "sessions_BEARER_TOKEN_SECRET_path"
+    session_dir.mkdir()
+    sid = "sid_API_AUTH_BEARER_TOKEN_SECRET_prompt_renderer_source"
+    live = session_dir / f"{sid}.json"
+    backup = session_dir / f"{sid}.json.bak"
+    live.write_text(
+        json.dumps(
+            {
+                "id": sid,
+                "session_id": sid,
+                "title": "raw prompt bearer token secret title",
+                "messages": [
+                    {"role": "user", "content": "RAW_PROMPT:<script>alert('token')</script> API_AUTH=secret"}
+                ],
+                "renderer": "unsafe-source-renderer",
+                "source": "unsafe-source-body",
+            }
+        ),
+        encoding="utf-8",
+    )
+    backup.write_text(
+        json.dumps(
+            {
+                "id": sid,
+                "session_id": sid,
+                "title": "backup raw prompt bearer token secret title",
+                "messages": [
+                    {"role": "user", "content": "RAW_PROMPT backup bearer secret"},
+                    {"role": "assistant", "content": "backup message with token"},
+                ],
+                "api_auth": "Bearer unsafe-secret-token",
+                "backup_path": str(backup),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = audit_session_recovery(session_dir)
+
+    assert result["status"] == "warn"
+    progress = result["progress_event"]
+    assert progress["event_type"] == "tool.completed"
+    assert progress["family"] == "tool"
+    assert progress["run_id"] == "session.recovery.audit"
+    assert progress["stored"] is False
+    assert progress["queued"] is False
+    assert progress["redaction_status"] == "metadata_only"
+    assert result["progress_events"] == [progress]
+    assert result["prompt_preflight"] == {
+        "available": True,
+        "action": "session.recovery.audit",
+        "boundary": "recovery_action",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["shared_confirmation_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+    policy = result["autonomy_policy"]
+    assert policy["action"] == "session.recovery.audit"
+    assert policy["approval_required"] is False
+    assert policy["approval_gates"] == []
+    assert policy["prompt_preflight_status"] == "required"
+    assert policy["model_route_hint"] == "hint:reasoning"
+    route_resolution = policy["model_route_resolution"]
+    assert route_resolution["hint"] == "hint:reasoning"
+    assert route_resolution["label"] == "Reasoning"
+    assert route_resolution["resolved_provider"]
+    assert route_resolution["resolved_model"]
+    assert route_resolution["resolution"] in {"configured", "default_fallback"}
+    assert route_resolution["metadata_only"] is True
+    assert route_resolution["local_only"] is True
+    assert policy["metadata_only"] is True
+    assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
+    compaction = result["output_compaction"]
+    assert compaction["tool"] == "capy-session-recovery"
+    assert compaction["command"] == "session.recovery.audit"
+    assert compaction["metadata_only"] is True
+    assert "audit_status: warn" in compaction["text"]
+    assert "repairable_sessions: 1" in compaction["text"]
+    assert "unsafe_sessions: 0" in compaction["text"]
+    assert "approval_required: no" in compaction["text"]
+    assert "progress_run_id: session.recovery.audit" in compaction["text"]
+    assert "advisory_context: true" in compaction["text"]
+    serialized_receipts = json.dumps(
+        {
+            "prompt_preflight": result["prompt_preflight"],
+            "autonomy_policy": result["autonomy_policy"],
+            "memory_advisory": result["memory_advisory"],
+            "progress_event": progress,
+            "progress_events": result["progress_events"],
+            "output_compaction": result["output_compaction"],
+        },
+        sort_keys=True,
+    ).lower()
+    for unsafe in (
+        str(session_dir).lower(),
+        str(live).lower(),
+        str(backup).lower(),
+        sid.lower(),
+        '"raw_prompt":',
+        "<script",
+        "api_auth",
+        "bearer",
+        "unsafe-secret-token",
+        "renderer",
+        "unsafe-source",
+        "secret_path",
+    ):
+        assert unsafe not in serialized_receipts
+    assert not (tmp_path / "progress.jsonl").exists()
+
+    missing_result = audit_session_recovery(tmp_path / "missing_SECRET_session_dir")
+    assert missing_result["status"] == "ok"
+    assert missing_result["progress_event"]["run_id"] == "session.recovery.audit"
+    assert missing_result["progress_event"]["stored"] is False
+    assert missing_result["autonomy_policy"]["approval_required"] is False
+    assert "missing_secret_session_dir" not in json.dumps(
+        {
+            "progress_event": missing_result["progress_event"],
+            "output_compaction": missing_result["output_compaction"],
+        },
+        sort_keys=True,
+    ).lower()
+
+
 def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_path, monkeypatch):
     import api.models as _m
 
     sid = "abc123"
     live = _write_session(tmp_path, sid, messages=4)
+    hostile_fields = {
+        "session_path": "/synthetic/sessions/SUCCESS_SESSION_PATH_SENTINEL_DO_NOT_LEAK.json",
+        "local_path": "/synthetic/local/SUCCESS_LOCAL_PATH_SENTINEL_DO_NOT_LEAK.json",
+        "backup_path": "/synthetic/backups/SUCCESS_BACKUP_PATH_SENTINEL_DO_NOT_LEAK.json.bak",
+        "raw_prompt": "SUCCESS_RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+        "renderer": "SUCCESS_RENDERER_SENTINEL_DO_NOT_LEAK",
+        "source": "SUCCESS_SOURCE_SENTINEL_DO_NOT_LEAK",
+        "html": "<main>SUCCESS_HTML_SENTINEL_DO_NOT_LEAK</main>",
+        "script": "<script>SUCCESS_SCRIPT_SENTINEL_DO_NOT_LEAK</script>",
+        "data": "SUCCESS_DATA_SENTINEL_DO_NOT_LEAK",
+        "body": "SUCCESS_BODY_SENTINEL_DO_NOT_LEAK",
+        "api_auth": "SUCCESS_API_AUTH_SENTINEL_DO_NOT_LEAK",
+        "credentials": "SUCCESS_CREDENTIALS_SENTINEL_DO_NOT_LEAK",
+        "bearer": "Bearer SUCCESS_BEARER_TOKEN_SENTINEL_DO_NOT_LEAK",
+        "access_token": "SUCCESS_ACCESS_TOKEN_SENTINEL_DO_NOT_LEAK",
+        "secret": "synthetic-secret://SUCCESS_SECRET_LOOKING_VALUE_SENTINEL_DO_NOT_LEAK",
+    }
+    hostile_message_content = "SUCCESS_MESSAGE_CONTENT_SENTINEL_DO_NOT_LEAK"
+    hostile_session = json.loads(live.read_text(encoding="utf-8"))
+    hostile_session.update({
+        "title": "RAW_TITLE_SENTINEL_DO_NOT_LEAK",
+        **hostile_fields,
+    })
+    hostile_session["messages"][0]["content"] = hostile_message_content
+    live.write_text(json.dumps(hostile_session), encoding="utf-8")
     bak = tmp_path / f"{sid}.json.bak"
     bak.write_text(live.read_text(encoding="utf-8"), encoding="utf-8")
     live.unlink()
@@ -34,6 +189,13 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(_m, "SESSION_INDEX_FILE", index)
     monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress.jsonl"))
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:reasoning": {
+            "provider": "Local recovery provider",
+            "model": "Recovery reasoning model",
+            **hostile_fields,
+        },
+    }))
     _m.SESSIONS.clear()
 
     result = repair_safe_session_recovery(tmp_path, state_db_path=tmp_path / "state.db")
@@ -59,14 +221,26 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert policy["approval_gates"] == ["destructive_external_action"]
     assert policy["prompt_preflight_status"] == "required"
     assert policy["model_route_hint"] == "hint:reasoning"
+    route_resolution = policy["model_route_resolution"]
+    assert route_resolution["hint"] == "hint:reasoning"
+    assert route_resolution["label"] == "Reasoning"
+    assert route_resolution["resolved_provider"] == "Local recovery provider"
+    assert route_resolution["resolved_model"] == "Recovery reasoning model"
+    assert route_resolution["resolution"] == "configured"
+    assert route_resolution["metadata_only"] is True
+    assert route_resolution["local_only"] is True
     assert policy["metadata_only"] is True
+    assert result["progress_event"] == result["progress_events"][-1]
+    assert [event["event_type"] for event in result["progress_events"]] == ["tool.started", "tool.completed"]
+    for progress in result["progress_events"]:
+        assert progress["family"] == "tool"
+        assert progress["run_id"] == "session.recovery.repair_safe"
+        assert progress["redaction_status"] == "metadata_only"
     progress = result["progress_event"]
     assert progress["event_type"] == "tool.completed"
-    assert progress["family"] == "tool"
-    assert progress["run_id"] == "session.recovery.repair_safe"
-    assert progress["redaction_status"] == "metadata_only"
     assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
     compaction = result["output_compaction"]
+    assert compaction["metadata_only"] is True
     assert compaction["tool"] == "capy-session-recovery"
     assert compaction["command"] == "session.recovery.repair_safe"
     assert compaction["exit_status"] == 0
@@ -74,10 +248,52 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert "repair_status: clean" in compaction["text"]
     assert "repaired_sessions: 1" in compaction["text"]
     assert "approval_required: yes" in compaction["text"]
+    assert "progress_status: tool.completed" in compaction["text"]
+    assert "progress_event_types: tool.started, tool.completed" in compaction["text"]
     assert "advisory_context: true" in compaction["text"]
     assert "context_authority: untrusted_advisory" in compaction["text"]
     assert "can_bypass_safety_gates: false" in compaction["text"]
     assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in compaction["text"]
+    serialized_receipts = json.dumps(
+        {
+            "prompt_preflight": result["prompt_preflight"],
+            "autonomy_policy": result["autonomy_policy"],
+            "progress_event": result["progress_event"],
+            "progress_events": result["progress_events"],
+            "memory_advisory": result["memory_advisory"],
+            "output_compaction": result["output_compaction"],
+        },
+        sort_keys=True,
+    ).lower()
+    for unsafe_value in (
+        sid,
+        "RAW_TITLE_SENTINEL_DO_NOT_LEAK",
+        *hostile_fields.values(),
+        hostile_message_content,
+    ):
+        assert unsafe_value.lower() not in serialized_receipts
+    unsafe_keys = (
+        "session_path",
+        "local_path",
+        "backup_path",
+        "title",
+        "messages",
+        "content",
+        "raw_prompt",
+        "renderer",
+        "source",
+        "html",
+        "script",
+        "data",
+        "body",
+        "api_auth",
+        "credentials",
+        "bearer",
+        "access_token",
+        "secret",
+    )
+    for unsafe_key in unsafe_keys:
+        assert f'"{unsafe_key}":' not in serialized_receipts
     assert live.exists()
     assert audit_session_recovery(tmp_path)["status"] == "ok"
     idx = json.loads(index.read_text(encoding="utf-8"))
@@ -90,6 +306,28 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
     monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress.jsonl"))
     sid = "abc123"
     live = _write_session(tmp_path, sid, messages=1)
+    hostile_fields = {
+        "session_path": "/synthetic/sessions/MANUAL_REVIEW_SESSION_PATH_SENTINEL_DO_NOT_LEAK.json",
+        "local_path": "/synthetic/local/MANUAL_REVIEW_LOCAL_PATH_SENTINEL_DO_NOT_LEAK.json",
+        "backup_path": "/synthetic/backups/MANUAL_REVIEW_BACKUP_PATH_SENTINEL_DO_NOT_LEAK.json.bak",
+        "raw_prompt": "MANUAL_REVIEW_RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+        "renderer": "MANUAL_REVIEW_RENDERER_SENTINEL_DO_NOT_LEAK",
+        "source": "MANUAL_REVIEW_SOURCE_SENTINEL_DO_NOT_LEAK",
+        "html": "<main>MANUAL_REVIEW_HTML_SENTINEL_DO_NOT_LEAK</main>",
+        "script": "<script>MANUAL_REVIEW_SCRIPT_SENTINEL_DO_NOT_LEAK</script>",
+        "data": "MANUAL_REVIEW_DATA_SENTINEL_DO_NOT_LEAK",
+        "body": "MANUAL_REVIEW_BODY_SENTINEL_DO_NOT_LEAK",
+        "api_auth": "MANUAL_REVIEW_API_AUTH_SENTINEL_DO_NOT_LEAK",
+        "credentials": "MANUAL_REVIEW_CREDENTIALS_SENTINEL_DO_NOT_LEAK",
+        "bearer": "Bearer MANUAL_REVIEW_BEARER_TOKEN_SENTINEL_DO_NOT_LEAK",
+        "access_token": "MANUAL_REVIEW_ACCESS_TOKEN_SENTINEL_DO_NOT_LEAK",
+        "secret": "synthetic-secret://MANUAL_REVIEW_SECRET_LOOKING_VALUE_SENTINEL_DO_NOT_LEAK",
+    }
+    hostile_message_content = "MANUAL_REVIEW_MESSAGE_CONTENT_SENTINEL_DO_NOT_LEAK"
+    hostile_session = json.loads(live.read_text(encoding="utf-8"))
+    hostile_session.update(hostile_fields)
+    hostile_session["messages"][0]["content"] = hostile_message_content
+    live.write_text(json.dumps(hostile_session), encoding="utf-8")
     bak = tmp_path / f"{sid}.json.bak"
     bak.write_text(live.read_text(encoding="utf-8"), encoding="utf-8")
     live.unlink()
@@ -104,6 +342,7 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
             "prompt_preflight": result["prompt_preflight"],
             "autonomy_policy": result["autonomy_policy"],
             "progress_event": result["progress_event"],
+            "progress_events": result["progress_events"],
             "memory_advisory": result["memory_advisory"],
             "output_compaction": result["output_compaction"],
         },
@@ -111,22 +350,50 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
     ).lower()
 
     assert result["clean"] is False
+    assert result["progress_event"] == result["progress_events"][-1]
+    assert [event["event_type"] for event in result["progress_events"]] == ["tool.started", "tool.failed"]
+    for progress in result["progress_events"]:
+        assert progress["family"] == "tool"
+        assert progress["run_id"] == "session.recovery.repair_safe"
+        assert progress["redaction_status"] == "metadata_only"
     assert result["progress_event"]["event_type"] == "tool.failed"
     assert result["progress_event"]["run_id"] == "session.recovery.repair_safe"
     assert result["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
     assert result["memory_advisory"] == EXPECTED_MEMORY_ADVISORY
     compaction = result["output_compaction"]
+    assert compaction["metadata_only"] is True
     assert compaction["exit_status"] == 1
     assert "repair_status: manual_review_required" in compaction["text"]
     assert "unsafe_remaining: 1" in compaction["text"]
+    assert "progress_status: tool.failed" in compaction["text"]
+    assert "progress_event_types: tool.started, tool.failed" in compaction["text"]
     assert "advisory_context: true" in compaction["text"]
     assert "context_authority: untrusted_advisory" in compaction["text"]
     assert "can_bypass_safety_gates: false" in compaction["text"]
     assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in compaction["text"]
-    assert str(tmp_path).lower() not in serialized_receipts
-    assert "secret" not in serialized_receipts
-    assert "api_key" not in serialized_receipts
-    assert "<script" not in serialized_receipts
+    for unsafe_value in (*hostile_fields.values(), hostile_message_content):
+        assert unsafe_value.lower() not in serialized_receipts
+    unsafe_keys = (
+        "session_path",
+        "local_path",
+        "backup_path",
+        "messages",
+        "content",
+        "raw_prompt",
+        "renderer",
+        "source",
+        "html",
+        "script",
+        "data",
+        "body",
+        "api_auth",
+        "credentials",
+        "bearer",
+        "access_token",
+        "secret",
+    )
+    for unsafe_key in unsafe_keys:
+        assert f'"{unsafe_key}":' not in serialized_receipts
 
 
 def test_repair_safe_session_recovery_leaves_unsafe_orphan_for_manual_review(tmp_path):

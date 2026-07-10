@@ -408,7 +408,12 @@ def _read_index_session_ids(index_path: Path) -> set[str]:
     return ids
 
 
-def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None) -> dict:
+def audit_session_recovery(
+    session_dir: Path,
+    state_db_path: Path | None = None,
+    *,
+    include_progress: bool = True,
+) -> dict:
     """Read-only audit of session recovery state.
 
     The audit intentionally does not mutate files. It classifies only the safe
@@ -416,12 +421,38 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
     derived index rebuilds. Call ``recover_all_sessions_on_startup`` separately
     for safe repairs.
     """
-    if not session_dir.exists():
+    def _with_progress(payload: dict) -> dict:
+        if not include_progress:
+            return payload
+        progress_event = _session_recovery_progress_event(
+            "tool.completed",
+            run_id="session.recovery.audit",
+            persist=False,
+        )
+        prompt_preflight = _session_recovery_required_prompt_preflight_receipt("session.recovery.audit")
+        autonomy_policy = _session_recovery_read_only_action_policy_receipt("session.recovery.audit")
+        memory_advisory = _session_recovery_memory_advisory_receipt()
         return {
+            **payload,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "memory_advisory": memory_advisory,
+            "progress_event": progress_event,
+            "progress_events": [progress_event],
+            "output_compaction": _session_recovery_audit_output_compaction_receipt(
+                payload=payload,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+                memory_advisory=memory_advisory,
+            ),
+        }
+
+    if not session_dir.exists():
+        return _with_progress({
             "status": "ok",
             "summary": {"ok": 0, "repairable": 0, "unsafe_to_repair": 0},
             "items": [],
-        }
+        })
 
     items: list[dict] = []
     live_paths = sorted(p for p in session_dir.glob('*.json') if not p.name.startswith('_'))
@@ -539,13 +570,14 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         overall = "warn"
     else:
         overall = "ok"
-    return {"status": overall, "summary": summary, "items": items}
+    return _with_progress({"status": overall, "summary": summary, "items": items})
 
 
-def _session_recovery_required_prompt_preflight_receipt() -> dict:
+def _session_recovery_required_prompt_preflight_receipt(action: str = "session.recovery.repair_safe") -> dict:
+    safe_action = action if action in {"session.recovery.audit", "session.recovery.repair_safe"} else "session.recovery.repair_safe"
     return {
         "available": True,
-        "action": "session.recovery.repair_safe",
+        "action": safe_action,
         "boundary": "recovery_action",
         "status": "required",
         "severity": "none",
@@ -553,6 +585,26 @@ def _session_recovery_required_prompt_preflight_receipt() -> dict:
         "checks": ["shared_confirmation_required", "prompt_injection_preflight_required"],
         "metadata_only": True,
         "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _session_recovery_read_only_action_policy_receipt(action: str) -> dict:
+    from api.capy_policy import policy_status, resolve_model_route_hint
+
+    status = policy_status()
+    route_resolution = resolve_model_route_hint("hint:reasoning")
+    return {
+        "available": True,
+        "action": action if action == "session.recovery.audit" else "session.recovery.audit",
+        "mode": status["mode"],
+        "label": status["label"],
+        "approval_required": False,
+        "approval_gates": [],
+        "prompt_preflight_status": "required",
+        "model_route_hint": route_resolution["hint"],
+        "model_route_resolution": route_resolution,
+        "metadata_only": True,
         "local_only": True,
     }
 
@@ -585,25 +637,89 @@ def _session_recovery_memory_advisory_receipt() -> dict:
     }
 
 
-def _session_recovery_progress_event(clean: bool) -> dict:
+def _session_recovery_progress_event(
+    event_type: str,
+    *,
+    run_id: str = "session.recovery.repair_safe",
+    persist: bool = True,
+) -> dict:
+    safe_event_type = event_type if event_type in {"tool.started", "tool.completed", "tool.failed"} else "tool.completed"
+    safe_run_id = run_id if run_id in {"session.recovery.audit", "session.recovery.repair_safe"} else "session.recovery.repair_safe"
+    if not persist:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": safe_event_type,
+            "family": "tool",
+            "run_id": safe_run_id,
+            "redaction_status": "metadata_only",
+        }
     try:
         from api.capy_progress import record_progress_event
 
         return record_progress_event(
             {
-                "event_type": "tool.completed" if clean else "tool.failed",
-                "run_id": "session.recovery.repair_safe",
+                "event_type": safe_event_type,
+                "run_id": safe_run_id,
             }
         )
     except Exception:  # noqa: BLE001 - recovery should still return if telemetry is unavailable.
         return {
             "stored": False,
             "queued": False,
-            "event_type": "tool.completed" if clean else "tool.failed",
+            "event_type": safe_event_type,
             "family": "tool",
-            "run_id": "session.recovery.repair_safe",
+            "run_id": safe_run_id,
             "redaction_status": "metadata_only",
         }
+
+
+def _session_recovery_audit_output_compaction_receipt(
+    *,
+    payload: dict,
+    autonomy_policy: dict,
+    progress_event: dict,
+    memory_advisory: dict,
+) -> dict:
+    """Return metadata-only compaction evidence for the read-only audit boundary."""
+    from api.capy_compaction import compact_output
+
+    raw_summary = payload.get("summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    approval_required = "yes" if autonomy_policy.get("approval_required") else "no"
+    lines = [
+        "session_recovery: audit",
+        f"audit_status: {payload.get('status') or 'unknown'}",
+        f"ok_sessions: {int(summary.get('ok') or 0)}",
+        f"repairable_sessions: {int(summary.get('repairable') or 0)}",
+        f"unsafe_sessions: {int(summary.get('unsafe_to_repair') or 0)}",
+        f"approval_required: {approval_required}",
+        "prompt_preflight_status: required",
+        f"progress_run_id: {progress_event.get('run_id') or 'session.recovery.audit'}",
+        f"progress_status: {progress_event.get('event_type') or 'tool.completed'}",
+    ]
+    if isinstance(memory_advisory, dict):
+        raw_required_gates = memory_advisory.get("required_gates")
+        required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
+        safe_required_gates = [
+            gate
+            for gate in required_gates
+            if gate in {"prompt_preflight", "approval", "sandbox_preview", "visual_qa", "rollback_recovery"}
+        ][:5]
+        lines.append(f"advisory_context: {'true' if memory_advisory.get('advisory_context') is True else 'false'}")
+        lines.append("context_authority: untrusted_advisory")
+        lines.append(f"can_bypass_safety_gates: {'true' if memory_advisory.get('can_bypass_safety_gates') is True else 'false'}")
+        if safe_required_gates:
+            lines.append(f"required_gates: {', '.join(safe_required_gates)}")
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-session-recovery",
+        command="session.recovery.audit",
+        exit_status=0,
+        max_chars=1000,
+    )
+    receipt["metadata_only"] = True
+    return receipt
 
 
 def _session_recovery_output_compaction_receipt(
@@ -615,7 +731,7 @@ def _session_recovery_output_compaction_receipt(
     backup_repair: dict,
     sidecar_repair: dict,
     autonomy_policy: dict,
-    progress_event: dict,
+    progress_events: list[dict],
     memory_advisory: dict,
 ) -> dict:
     """Return metadata-only compaction evidence for the repair-safe boundary.
@@ -633,6 +749,12 @@ def _session_recovery_output_compaction_receipt(
     after_summary = raw_after_summary if isinstance(raw_after_summary, dict) else {}
     status = "clean" if clean else "manual_review_required"
     approval_required = "yes" if autonomy_policy.get("approval_required") else "no"
+    terminal_progress_event = progress_events[-1] if progress_events else {}
+    progress_event_types = [
+        str(event.get("event_type") or "").strip()
+        for event in progress_events
+        if isinstance(event, dict) and str(event.get("event_type") or "").strip()
+    ]
     lines = [
         "session_recovery: repair_safe",
         f"repair_status: {status}",
@@ -646,9 +768,11 @@ def _session_recovery_output_compaction_receipt(
         f"unsafe_remaining: {int(after_summary.get('unsafe_to_repair') or 0)}",
         f"approval_required: {approval_required}",
         "prompt_preflight_status: required",
-        f"progress_run_id: {progress_event.get('run_id') or 'session.recovery.repair_safe'}",
-        f"progress_status: {progress_event.get('event_type') or ('tool.completed' if clean else 'tool.failed')}",
+        f"progress_run_id: {terminal_progress_event.get('run_id') or 'session.recovery.repair_safe'}",
+        f"progress_status: {terminal_progress_event.get('event_type') or ('tool.completed' if clean else 'tool.failed')}",
     ]
+    if progress_event_types:
+        lines.append(f"progress_event_types: {', '.join(progress_event_types[:4])}")
     if isinstance(memory_advisory, dict):
         raw_required_gates = memory_advisory.get("required_gates")
         required_gates = raw_required_gates if isinstance(raw_required_gates, list) else []
@@ -662,13 +786,15 @@ def _session_recovery_output_compaction_receipt(
         lines.append(f"can_bypass_safety_gates: {'true' if memory_advisory.get('can_bypass_safety_gates') is True else 'false'}")
         if safe_required_gates:
             lines.append(f"required_gates: {', '.join(safe_required_gates)}")
-    return compact_output(
+    receipt = compact_output(
         "\n".join(lines),
         tool="capy-session-recovery",
         command="session.recovery.repair_safe",
         exit_status=0 if clean else 1,
         max_chars=1200,
     )
+    receipt["metadata_only"] = True
+    return receipt
 
 
 def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None = None) -> dict:
@@ -678,7 +804,8 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     shrunken live sidecars and orphan backups that are not tombstoned by a
     readable state.db. Unsafe audit findings remain for manual review.
     """
-    before = audit_session_recovery(session_dir, state_db_path=state_db_path)
+    progress_events = [_session_recovery_progress_event("tool.started")]
+    before = audit_session_recovery(session_dir, state_db_path=state_db_path, include_progress=False)
     backup_repair = recover_all_sessions_on_startup(
         session_dir,
         rebuild_index=True,
@@ -691,7 +818,7 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
             _write_session_index(updates=None)
         except Exception as exc:
             logger.warning("repair_safe_session_recovery: index rebuild after state.db reconciliation failed: %s", exc)
-    after = audit_session_recovery(session_dir, state_db_path=state_db_path)
+    after = audit_session_recovery(session_dir, state_db_path=state_db_path, include_progress=False)
     unsafe_remaining = int((after.get("summary") or {}).get("unsafe_to_repair") or 0)
     repairable_remaining = int((after.get("summary") or {}).get("repairable") or 0)
     clean = unsafe_remaining == 0 and repairable_remaining == 0
@@ -699,7 +826,8 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     prompt_preflight = _session_recovery_required_prompt_preflight_receipt()
     autonomy_policy = _session_recovery_action_policy_receipt()
     memory_advisory = _session_recovery_memory_advisory_receipt()
-    progress_event = _session_recovery_progress_event(clean)
+    progress_events.append(_session_recovery_progress_event("tool.completed" if clean else "tool.failed"))
+    progress_event = progress_events[-1]
     return {
         "clean": clean,
         "ok": clean,
@@ -712,6 +840,7 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
         "autonomy_policy": autonomy_policy,
         "memory_advisory": memory_advisory,
         "progress_event": progress_event,
+        "progress_events": progress_events,
         "output_compaction": _session_recovery_output_compaction_receipt(
             clean=clean,
             repaired=repaired,
@@ -720,7 +849,7 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
             backup_repair=backup_repair,
             sidecar_repair=sidecar_repair,
             autonomy_policy=autonomy_policy,
-            progress_event=progress_event,
+            progress_events=progress_events,
             memory_advisory=memory_advisory,
         ),
     }

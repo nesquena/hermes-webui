@@ -164,11 +164,12 @@
     const eventName = String(result && result.event_name || 'widget.event').trim();
     const widgetId = String(result && result.widget_id || '').trim();
     const eventId = String(result && result.event_id || '').trim();
-    const title = eventName === 'widget.refresh' ? 'Weather refresh queued' : (eventName === 'agent.prompt' ? 'Weather prompt queued' : 'Widget event queued');
+    const eventLabel = eventName === 'widget.refresh' ? 'Weather refresh queued' : (eventName === 'agent.prompt' ? 'Weather prompt queued' : 'Widget event queued');
     const meta = [widgetId, eventName, eventId].filter(Boolean).join(' · ');
-    return '<div class="capy-spaces-card" role="status"><h3>'+escapeHtml(title)+'</h3>' +
-      '<div class="capy-spaces-muted">'+escapeHtml(meta || 'Metadata-only event queued')+'</div>' +
-      '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div>' +
+    const summary = eventLabel + (meta ? ' · '+meta : '');
+    return '<div class="capy-spaces-card" role="status"><h3>Widget event receipt</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(summary || 'Metadata-only event queued')+'</div>' +
+      '<div class="capy-spaces-muted">Metadata-only preflight, policy, progress, memory advisory/no-authority, and compaction evidence. Prompt bodies and generated widget code stay redacted.</div>' +
       renderPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
       renderPackageProgressEvidence(result && result.progress_event, 'Widget event progress') +
@@ -747,6 +748,7 @@
         '<div class="capy-spaces-product-space-actions">' +
         '<button type="button" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Open">→</button>' +
         '<button type="button" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'" aria-label="Edit">✎</button>' +
+        '<button type="button" data-capy-action="duplicateSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" aria-label="Duplicate">⧉</button>' +
         '<button type="button" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Delete">×</button>' +
         '</div>' +
         '</article>';
@@ -794,6 +796,7 @@
         '<button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open</button>' +
         activeAction +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'">Edit</button>' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="duplicateSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'">Duplicate</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button>' +
         resetAction +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'">Delete</button>' +
@@ -1675,6 +1678,27 @@
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
+  function renderSpaceDuplicateReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Space duplicate progress');
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Space duplicate receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed Space duplicate completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence. Raw prompts, widget bodies, memory context, implementation fields, and secrets stay omitted.</div>' +
+      preflight + policy + progress + advisory + compaction + '</div>';
+  }
+
+  function prependSpaceDuplicateReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderSpaceDuplicateReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
   function renderSpaceDeleteReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
@@ -1685,7 +1709,7 @@
     const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
     if (!preflight && !policy && !progress && !advisory && !compaction) return '';
     return '<div class="capy-spaces-card" role="status"><h3>Space delete receipt</h3>' +
-      '<div class="capy-spaces-muted">Confirmed Space deletion completed with metadata-only policy and progress evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
+      '<div class="capy-spaces-muted">Confirmed Space deletion completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence. Raw widget bodies, prompts, memory context, implementation fields, and secrets stay omitted.</div>' +
       preflight + policy + progress + advisory + compaction + '</div>';
   }
 
@@ -1758,6 +1782,48 @@
     const root = document.getElementById('capySpacesRoot');
     if (!root) return;
     const receipt = renderWidgetDeleteReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
+  function renderWidgetUpdateReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Widget patch progress');
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Widget update receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed widget update completed with metadata-only policy, progress, memory advisory/no-authority, and compaction evidence. Raw output, prompt bodies, widget bodies, memory context, and sensitive values remain omitted from this receipt.</div>' +
+      preflight + policy + progress + advisory + compaction + '</div>';
+  }
+
+  function prependWidgetUpdateReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderWidgetUpdateReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
+  function renderWidgetUpsertReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Widget upsert progress');
+    const advisory = renderMemoryAdvisoryEvidence(result.memory_advisory);
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !advisory && !compaction) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Widget create/update receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed widget create/update completed with metadata-only preflight, policy, progress, memory advisory/no-authority, and compaction evidence. Raw output, prompt bodies, widget bodies, memory context, implementation fields, and sensitive values remain omitted from this receipt.</div>' +
+      preflight + policy + progress + advisory + compaction + '</div>';
+  }
+
+  function prependWidgetUpsertReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderWidgetUpsertReceipt(data);
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
@@ -3274,6 +3340,15 @@
     if (hInput) hInput.value = String(safeLayout.h);
   }
 
+  async function patchWidgetWithReceipt(spaceId, widgetId, patch){
+    return postSpacesJson('api/spaces/widget/patch', {
+      space_id: spaceId,
+      widget_id: widgetId,
+      patch: patch,
+      includeSafetyReceipts: true,
+    });
+  }
+
   async function handleCapySpacesClick(event){
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
@@ -3968,6 +4043,16 @@
       prependSpaceDeleteReceipt(deleteResult || {});
       return;
     }
+    if (action === 'duplicateSpace') {
+      if (typeof showConfirmDialog !== 'function') return;
+      const spaceName = safeDisplayMetadataText(button.dataset.spaceName || spaceId, spaceId) || spaceId;
+      const ok = await showConfirmDialog({title: 'Duplicate Capy Space?', message: 'Duplicate space "'+spaceName+'" through the metadata-only safety boundary?', confirmLabel: 'Duplicate', danger: false, focusCancel: true});
+      if (!ok) return;
+      const duplicateResult = await postSpacesJson('api/spaces/duplicate', {space_id: spaceId});
+      await loadCapySpaces();
+      prependSpaceDuplicateReceipt(duplicateResult || {});
+      return;
+    }
     if (action === 'restoreRevision') {
       const eventId = safePathIdText(button.dataset.eventId || '');
       if (!spaceId || !eventId || typeof showConfirmDialog !== 'function') return;
@@ -4054,34 +4139,25 @@
     if (action === 'moveWidget') {
       const widgetId = button.dataset.widgetId || '';
       if (!spaceId || !widgetId) return;
-      await postSpacesJson('api/spaces/widget/patch', {
-        space_id: spaceId,
-        widget_id: widgetId,
-        patch: {layout: moveWidgetBy(button)},
-      });
+      const patchResult = await patchWidgetWithReceipt(spaceId, widgetId, {layout: moveWidgetBy(button)});
       await loadSpaceWidgets(spaceId);
+      prependWidgetUpdateReceipt(patchResult || {});
       return;
     }
     if (action === 'resizeWidget') {
       const widgetId = button.dataset.widgetId || '';
       if (!spaceId || !widgetId) return;
-      await postSpacesJson('api/spaces/widget/patch', {
-        space_id: spaceId,
-        widget_id: widgetId,
-        patch: {layout: resizeWidgetBy(button)},
-      });
+      const patchResult = await patchWidgetWithReceipt(spaceId, widgetId, {layout: resizeWidgetBy(button)});
       await loadSpaceWidgets(spaceId);
+      prependWidgetUpdateReceipt(patchResult || {});
       return;
     }
     if (action === 'toggleWidgetMinimized') {
       const widgetId = button.dataset.widgetId || '';
       if (!spaceId || !widgetId) return;
-      await postSpacesJson('api/spaces/widget/patch', {
-        space_id: spaceId,
-        widget_id: widgetId,
-        patch: {layout: toggleWidgetMinimized(button)},
-      });
+      const patchResult = await patchWidgetWithReceipt(spaceId, widgetId, {layout: toggleWidgetMinimized(button)});
       await loadSpaceWidgets(spaceId);
+      prependWidgetUpdateReceipt(patchResult || {});
       return;
     }
     if (action === 'askWidget') {
@@ -4139,13 +4215,10 @@
       const notesInput = getRootInput(root, '#capyWidgetNotesBody');
       const format = /^[a-z0-9._-]{1,40}$/i.test(String(button.dataset.notesFormat || '')) ? String(button.dataset.notesFormat || '') : 'markdown';
       if (!spaceId || !widgetId || !notesInput || !root) return;
-      await postSpacesJson('api/spaces/widget/patch', {
-        space_id: spaceId,
-        widget_id: widgetId,
-        patch: {notes: {body: String(notesInput.value || ''), format: format, updated_from: 'spaces-ui'}},
-      });
+      const patchResult = await patchWidgetWithReceipt(spaceId, widgetId, {notes: {body: String(notesInput.value || ''), format: format, updated_from: 'spaces-ui'}});
       const data = await fetchSpacesJson('api/spaces/widget?space_id='+encodeURIComponent(spaceId)+'&widget_id='+encodeURIComponent(widgetId));
       root.innerHTML = renderWidgetDetailPanel(spaceId, data && data.widget, null) + root.innerHTML;
+      prependWidgetUpdateReceipt(patchResult || {});
       return;
     }
     if (action === 'saveWidget') {
@@ -4160,12 +4233,16 @@
         layout: formLayout(root),
       };
       const editingWidgetId = root && root.dataset ? String(root.dataset.editingWidgetId || '').trim() : '';
+      let patchResult = null;
+      let upsertResult = null;
       if (editingWidgetId) {
-        await postSpacesJson('api/spaces/widget/patch', {space_id: spaceId, widget_id: editingWidgetId, patch: {title: widget.title, kind: widget.kind, layout: widget.layout}});
+        patchResult = await patchWidgetWithReceipt(spaceId, editingWidgetId, {title: widget.title, kind: widget.kind, layout: widget.layout});
       } else {
-        await postSpacesJson('api/spaces/widget/upsert', {space_id: spaceId, widget: widget});
+        upsertResult = await postSpacesJson('api/spaces/widget/upsert', {space_id: spaceId, widget: widget, includeSafetyReceipts: true});
       }
       await loadSpaceWidgets(spaceId);
+      if (patchResult) prependWidgetUpdateReceipt(patchResult || {});
+      if (upsertResult) prependWidgetUpsertReceipt(upsertResult || {});
       return;
     }
     if (action === 'deleteWidget') {
