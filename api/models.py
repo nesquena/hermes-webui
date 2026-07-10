@@ -7351,6 +7351,75 @@ def get_state_db_session_messages(
     return msgs
 
 
+def get_state_db_session_message_prefix_summary(
+    sid,
+    before_timestamp,
+    *,
+    profile=None,
+) -> dict | None:
+    """Return prefix timestamp counts, or ``None`` when they cannot be proven.
+
+    The projection intentionally avoids message content and tool-call columns so
+    callers can reject impossible prefix matches before materializing visible
+    identities. Missing databases are an authoritative empty prefix and are not
+    created by this read path.
+    """
+    try:
+        import sqlite3
+    except ImportError:
+        return None
+
+    if not sid:
+        return None
+    try:
+        before_ts = float(before_timestamp)
+    except (TypeError, ValueError):
+        return None
+
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        return {"count": 0, "null_timestamp_count": 0}
+
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'timestamp'}.issubset(available):
+                return None
+            active_clause = ""
+            if 'active' in available:
+                active_clause = " AND (active IS NULL OR active != 0)"
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(CASE
+                        WHEN timestamp IS NOT NULL AND timestamp < ? THEN 1
+                    END) AS count,
+                    COUNT(CASE WHEN timestamp IS NULL THEN 1 END) AS null_timestamp_count
+                FROM messages
+                WHERE session_id = ?
+                {active_clause}
+                """,
+                (before_ts, str(sid)),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "count": int(row["count"]),
+                "null_timestamp_count": int(row["null_timestamp_count"]),
+            }
+    except Exception:
+        return None
+
+
 def get_state_db_session_message_keys_before_timestamp(
     sid,
     before_timestamp,

@@ -8524,6 +8524,24 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, sidecar_messages
 
     floor = min(sidecar_timestamps[-raw_budget:])
+    sidecar_before_count = sum(1 for ts in sidecar_timestamps if ts < floor)
+    prefix_summary = get_state_db_session_message_prefix_summary(
+        getattr(session, "session_id", None),
+        floor,
+        profile=getattr(session, "profile", None) or None,
+    )
+    if prefix_summary is None:
+        return None, sidecar_messages
+    try:
+        state_before_count = int(prefix_summary["count"])
+        null_timestamp_count = int(prefix_summary["null_timestamp_count"])
+    except (KeyError, TypeError, ValueError):
+        return None, sidecar_messages
+    if null_timestamp_count or state_before_count != sidecar_before_count:
+        return None, sidecar_messages
+    if sidecar_before_count == 0:
+        return floor, sidecar_messages
+
     sidecar_before_keys = [
         _session_message_visible_key(msg)
         for msg, ts in zip(sidecar_messages, sidecar_timestamps, strict=True)
@@ -9137,6 +9155,7 @@ from api.models import (
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
+    get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
