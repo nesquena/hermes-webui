@@ -674,6 +674,10 @@ function _micToastKeyForRecognitionError(error){
 
   // Raw audio mode preference: send audio file instead of transcribing
   let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
+  // Append-on-commit preference: when ON (default), dictated text is appended
+  // to any text already in the composer. When OFF, dictated text replaces the
+  // composer content (the pre-existing behavior).
+  let _dictationAppend = localStorage.getItem('hermes-dictation-append') !== 'false';
   // Capture backend pinned at recording start ('speech' | 'media' | null) so
   // _stopMic / onstop act on the backend that actually started, even if the
   // raw-audio toggle changes mid-recording (#3169 Codex review).
@@ -746,6 +750,14 @@ function _micToastKeyForRecognitionError(error){
   }
   window._applyRawAudioModePreference=_applyRawAudioModePreference;
 
+  function _applyDictationAppendPreference(enabled){
+    _dictationAppend=!!enabled;
+    try{localStorage.setItem('hermes-dictation-append',_dictationAppend?'true':'false');}catch(_){}
+    const cb=document.getElementById('settingsDictationAppend');
+    if(cb) cb.checked=_dictationAppend;
+  }
+  window._applyDictationAppendPreference=_applyDictationAppendPreference;
+
   async function _sendRawAudio(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
@@ -766,13 +778,25 @@ function _micToastKeyForRecognitionError(error){
     }
   }
 
-  function _commitTranscript(text){
+  function _commitTranscript(text, prefixOverride){
+    // `prefixOverride` lets async paths snapshot the textarea content before
+    // _setRecording(false) clears _prefix — without it, server-STT commits
+    // would see _prefix='' and replace instead of append.
+    const _p = prefixOverride !== undefined ? prefixOverride : _prefix;
     const clean=(text||'').trim();
-    const committed=clean
-      ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
-          ? _prefix+' '+clean.trimStart()
-          : _prefix+clean)
-      : ta.value;
+    let committed;
+    if(!clean){
+      committed = ta.value;
+    }else if(_dictationAppend && _p){
+      // Append mode (default): preserve existing composer text, glue with a
+      // space when the prefix doesn't already end with whitespace.
+      committed = (!_p.endsWith(' ') && !_p.endsWith('\n'))
+        ? _p+' '+clean.trimStart()
+        : _p+clean;
+    }else{
+      // Replace mode (explicit): dictated text overwrites the composer.
+      committed = clean;
+    }
     ta.value=committed;
     autoResize();
     if(window._micPendingSend){
@@ -797,6 +821,11 @@ function _micToastKeyForRecognitionError(error){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
+    // Snapshot the existing composer text BEFORE _setRecording(false) in the
+    // recorder.onstop handler clears _prefix. Server STT is async; without
+    // this snapshot, _commitTranscript sees _prefix='' and replaces instead
+    // of appending.
+    const prefixSnapshot = _prefix;
     setComposerStatus('Transcribing…');
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
@@ -806,7 +835,7 @@ function _micToastKeyForRecognitionError(error){
         err.status=res.status;
         throw err;
       }
-      _commitTranscript(data.transcript||'');
+      _commitTranscript(data.transcript||'', prefixSnapshot);
     }catch(err){
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
@@ -1249,6 +1278,13 @@ function _micToastKeyForRecognitionError(error){
     rawAudioCheckbox.checked = _rawAudioMode;
     rawAudioCheckbox.addEventListener('change', function(){
       _applyRawAudioModePreference(this.checked);
+    });
+  }
+  const appendCheckbox = document.getElementById('settingsDictationAppend');
+  if(appendCheckbox){
+    appendCheckbox.checked = _dictationAppend;
+    appendCheckbox.addEventListener('change', function(){
+      _applyDictationAppendPreference(this.checked);
     });
   }
   _updateMicTooltip();
