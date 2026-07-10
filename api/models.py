@@ -7104,6 +7104,45 @@ def _json_loads_if_string(value):
         return value
 
 
+# Hermes Agent stores structured (multimodal) message content in state.db as a
+# sentinel-prefixed JSON string because sqlite3 cannot bind list/dict params
+# (see SessionDB._CONTENT_JSON_PREFIX / _encode_content in hermes_state.py).
+# The NUL byte is not legal in normal text, so the prefix cannot collide with
+# real content — decoding is a provable no-op for every plain-string row. The
+# constant is mirrored here (not imported) because the storage format cannot
+# change without breaking every existing DB row, while a cross-package import
+# would couple WebUI startup to hermes-agent internals.
+_STATE_DB_CONTENT_JSON_PREFIX = "\x00json:"
+
+
+def _decode_state_db_content(value):
+    """Decode Hermes Agent's structured-content sentinel from a state.db row.
+
+    Structured content (a list of parts such as ``{"type": "text", ...}`` and
+    ``{"type": "image_url", ...}``) is flattened to its text parts only. Raw
+    ``image_url`` parts carry multi-hundred-KB base64 data URLs; rendering or
+    identity-comparing them leaks the base64 into the visible transcript and
+    defeats sidecar/state.db dedup (the flattened text matches the clean
+    sidecar row's identity, so the existing dedup collapses the duplicate).
+    """
+    if not (
+        isinstance(value, str)
+        and value.startswith(_STATE_DB_CONTENT_JSON_PREFIX)
+    ):
+        return value
+    try:
+        parts = json.loads(value[len(_STATE_DB_CONTENT_JSON_PREFIX):])
+    except Exception:
+        return value
+    if isinstance(parts, list):
+        return "\n".join(
+            str(part.get("text") or "")
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return parts
+
+
 def get_state_db_session_messages(
     sid,
     *,
@@ -7239,7 +7278,7 @@ def get_state_db_session_messages(
             for row in cur.fetchall():
                 msg = {
                     'role': row['role'],
-                    'content': row['content'],
+                    'content': _decode_state_db_content(row['content']),
                     'timestamp': row['timestamp'],
                 }
                 for col in optional:
@@ -7318,7 +7357,7 @@ def get_state_db_session_message_keys_before_timestamp(
                 _session_message_visible_key(
                     {
                         "role": row["role"],
-                        "content": row["content"],
+                        "content": _decode_state_db_content(row["content"]),
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                     }
                 )
