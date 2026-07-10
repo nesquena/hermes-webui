@@ -57,7 +57,6 @@ class TestArchitecturalConfigGuard:
         """Simulate a buggy caller that loads expanded config via
         ``get_config()`` — mutates ONE key — and passes the full expanded
         dict to ``_save_yaml_config_file()``."""
-        import os
 
         import api.config as config
 
@@ -109,7 +108,6 @@ class TestArchitecturalConfigGuard:
     def test_nested_env_var_survives(self, _prepare_config_path):
         """A ``${VAR}`` nested inside a dict section that wasn't touched
         is preserved."""
-        import os
 
         import api.config as config
 
