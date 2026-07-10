@@ -1405,7 +1405,9 @@ async function loadSession(sid){
   const opts = arguments[1] || {};
   // Extension pre-open hook — allows extensions (e.g. chat-tiling) to intercept
   // before the core navigates. Handler returns {cancel:true} to prevent load.
-  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
+  // _hermesSessionOpenAlreadyFired is set by _openSidebarSession before it calls
+  // loadSession so the hook doesn't fire twice for the same sidebar click.
+  if(!opts.skipExtHooks && !_hermesSessionOpenAlreadyFired && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
       return;
@@ -2149,7 +2151,9 @@ async function _openSidebarSession(session, loadOpts={}){
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
   await _ensureSidebarSessionProfile(session);
-  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
+  // Set flag so the pre-hook in loadSession skips its own fire — we already ran it above.
+  _hermesSessionOpenAlreadyFired = true;
+  await loadSession(session.session_id, loadOpts);
   renderSessionListFromCache();
 }
 
