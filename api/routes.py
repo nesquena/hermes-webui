@@ -28,7 +28,7 @@ import time
 import uuid
 import http.client
 import socket as _socket
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
@@ -1034,6 +1034,7 @@ def _skill_view_from_active_dir(name: str) -> dict:
 # Trivial; many production SSE deployments run 5-15s heartbeats specifically
 # to handle proxies and mobile NAT.
 _SSE_HEARTBEAT_INTERVAL_SECONDS = 5
+_SESSION_SSE_SENT_EVENT_ID_LIMIT = 4096
 
 
 def _normalize_messaging_source(raw_source) -> str:
@@ -16160,68 +16161,76 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
     # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
     # EventSource reconnect storms in browsers on long-lived SSE.
     end_sse_headers(handler)
+    _sse_set_write_deadline(handler)
 
     resume_event_id = _session_events_resume_event_id(handler, parsed)
     active_stream_id = _active_run_stream_for_session(session_id)
-    stream = STREAMS.get(active_stream_id) if active_stream_id else None
     subscriber = None
-    stream_snapshot = {}
+    subscriber_stream = None
     replay_cutoff_seq = None
-    if stream is not None:
+    sent_event_ids: set[str] = set()
+    sent_event_order = deque()
+
+    def note_sent_event_id(event_id):
+        if not event_id:
+            return
+        sent_event_ids.add(event_id)
+        sent_event_order.append(event_id)
+        while len(sent_event_order) > _SESSION_SSE_SENT_EVENT_ID_LIMIT:
+            sent_event_ids.discard(sent_event_order.popleft())
+
+    def attach_active_stream():
+        stream_id = _active_run_stream_for_session(session_id)
+        stream = STREAMS.get(stream_id) if stream_id else None
+        if stream is None:
+            return None, None, None, stream_id
         if hasattr(stream, "subscribe_with_snapshot"):
-            subscriber, stream_snapshot = stream.subscribe_with_snapshot()
+            queue_, snapshot = stream.subscribe_with_snapshot()
         else:
-            subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
-            stream_snapshot = {}
+            queue_ = stream.subscribe() if hasattr(stream, "subscribe") else stream
+            snapshot = {}
+        return queue_, stream, snapshot, stream_id
+
+    def emit_replay(events, stream_id, cutoff_seq):
+        for entry in events:
+            event_id = str(entry.get("event_id") or "")
+            event_seq = _run_journal_same_run_seq(event_id, stream_id)
+            if cutoff_seq is not None and event_seq is not None and event_seq > cutoff_seq:
+                continue
+            if event_id and event_id in sent_event_ids:
+                continue
+            _sse_with_id(handler, entry.get("event") or entry.get("type") or "message", entry.get("payload"), event_id)
+            if event_id:
+                note_sent_event_id(event_id)
+
     try:
+        replay_events = []
+        replay_ok = False
         if resume_event_id:
             replay = read_session_run_events(session_id, after_event_id=resume_event_id)
             if replay.get("status") != "ok":
                 _sse(handler, "session_snapshot", _session_snapshot_payload(session, active_stream_id=active_stream_id))
             else:
-                replay_cutoff_seq = _run_journal_same_run_seq(
-                    str(stream_snapshot.get("last_event_id") or ""),
-                    active_stream_id,
-                )
-                for entry in replay.get("events") or []:
-                    event_run_id = str(entry.get("run_id") or "")
-                    event_seq = entry.get("seq")
-                    if (
-                        subscriber is not None
-                        and replay_cutoff_seq is not None
-                        and event_run_id == active_stream_id
-                        and event_seq is not None
-                        and int(event_seq) > int(replay_cutoff_seq)
-                    ):
-                        continue
-                    _sse_with_id(
-                        handler,
-                        entry.get("event") or entry.get("type") or "message",
-                        entry.get("payload"),
-                        entry.get("event_id"),
-                    )
+                replay_ok = True
+                replay_events = replay.get("events") or []
+        subscriber, subscriber_stream, stream_snapshot, active_stream_id = attach_active_stream()
         if subscriber is None:
+            if replay_ok:
+                emit_replay(replay_events, active_stream_id, None)
             while True:
-                active_stream_id = _active_run_stream_for_session(session_id)
-                if not active_stream_id:
-                    handler.wfile.write(b": keepalive\n\n")
-                    handler.wfile.flush()
-                    time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
-                    continue
-                stream = STREAMS.get(active_stream_id)
-                if stream is None:
-                    handler.wfile.write(b": keepalive\n\n")
-                    handler.wfile.flush()
-                    time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
-                    continue
-                if hasattr(stream, "subscribe_with_snapshot"):
-                    subscriber, stream_snapshot = stream.subscribe_with_snapshot()
-                else:
-                    subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
-                    stream_snapshot = {}
-                break
+                subscriber, subscriber_stream, stream_snapshot, active_stream_id = attach_active_stream()
+                if subscriber is not None:
+                    break
+                handler.wfile.write(b": keepalive\n\n")
+                handler.wfile.flush()
+                time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
         if subscriber is None:
             return True
+        if replay_ok:
+            replay_cutoff_seq = _run_journal_same_run_seq(str(stream_snapshot.get("last_event_id") or ""), active_stream_id)
+            reconciled = read_session_run_events(session_id, after_event_id=resume_event_id)
+            if reconciled.get("status") == "ok":
+                emit_replay(reconciled.get("events") or [], active_stream_id, replay_cutoff_seq)
         try:
             while True:
                 try:
@@ -16239,8 +16248,11 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
                 if replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq:
                     continue
+                if event_id and event_id in sent_event_ids:
+                    continue
                 if event_id:
                     _sse_with_id(handler, event, data, event_id)
+                    note_sent_event_id(event_id)
                 else:
                     _sse(handler, event, data)
                 if event in ("stream_end", "error", "cancel"):
@@ -16250,9 +16262,9 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
     except _CLIENT_DISCONNECT_ERRORS:
         pass
     finally:
-        if subscriber is not None and subscriber is not stream and hasattr(stream, "unsubscribe"):
+        if subscriber is not None and subscriber is not subscriber_stream and hasattr(subscriber_stream, "unsubscribe"):
             try:
-                stream.unsubscribe(subscriber)
+                subscriber_stream.unsubscribe(subscriber)
             except Exception:
                 pass
     return True

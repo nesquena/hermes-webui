@@ -21,6 +21,8 @@ _TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
+_SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
+_SESSION_REPLAY_MAX_ROWS = 4096
 
 
 def _default_session_dir() -> Path:
@@ -148,49 +150,6 @@ def _event_created_at(event: dict, *, fallback: float = 0.0) -> float:
         return float(event.get("created_at") or fallback)
     except (TypeError, ValueError):
         return fallback
-
-
-def _session_run_journal_entries(session_id: str, *, session_dir: Path | None = None) -> list[dict]:
-    sid = _validate_id(session_id, "session_id")
-    root = Path(session_dir) if session_dir is not None else _default_session_dir()
-    session_root = root / RUN_JOURNAL_DIR_NAME / sid
-    if not session_root.exists():
-        return []
-    entries: list[dict] = []
-    for path in sorted(session_root.glob("*.jsonl")):
-        run_id = path.stem
-        try:
-            run_id = _validate_id(run_id, "run_id")
-        except ValueError:
-            continue
-        events, malformed = _read_jsonl(path)
-        ordered_events = sorted(
-            [event for event in events if isinstance(event, dict)],
-            key=lambda event: (
-                int(event.get("seq") or 0),
-                _event_created_at(event),
-                str(event.get("event_id") or ""),
-            ),
-        )
-        summary = _summary_from_events(sid, run_id, ordered_events)
-        created_at = min((
-            _event_created_at(event)
-            for event in ordered_events
-        ), default=path.stat().st_mtime if path.exists() else 0.0)
-        entries.append(
-            {
-                "session_id": sid,
-                "run_id": run_id,
-                "path": str(path),
-                "created_at": created_at,
-                "event_count": len(ordered_events),
-                "events": ordered_events,
-                "summary": summary,
-                "malformed": malformed,
-            }
-        )
-    entries.sort(key=lambda entry: (entry["created_at"], entry["run_id"]))
-    return entries
 
 
 def append_run_event(
@@ -332,6 +291,8 @@ def read_session_run_events(
     *,
     after_event_id: str | None = None,
     session_dir: Path | None = None,
+    max_bytes: int = _SESSION_REPLAY_MAX_BYTES,
+    max_rows: int = _SESSION_REPLAY_MAX_ROWS,
 ) -> dict:
     """Replay durable run-journal rows for one session after an opaque cursor."""
     sid = _validate_id(session_id, "session_id")
@@ -348,7 +309,7 @@ def read_session_run_events(
                 cursor_seq = None
         except (TypeError, ValueError):
             pass
-    if raw_cursor and (cursor_run_id is None or cursor_seq is None):
+    if raw_cursor and (cursor_run_id is None or cursor_seq is None or cursor_seq <= 0):
         return {
             "session_id": sid,
             "cursor_run_id": cursor_run_id,
@@ -356,7 +317,6 @@ def read_session_run_events(
             "status": "cursor_invalid",
             "events": [],
         }
-    runs = _session_run_journal_entries(sid, session_dir=session_dir)
     if not raw_cursor:
         return {
             "session_id": sid,
@@ -364,15 +324,56 @@ def read_session_run_events(
             "cursor_seq": None,
             "status": "ok",
             "events": [],
-            "runs": runs,
         }
-    run_lookup = {entry["run_id"]: entry for entry in runs}
-    cursor_entry = run_lookup.get(cursor_run_id or "")
-    if cursor_entry is None:
-        summary = find_run_summary(cursor_run_id or "", session_dir=session_dir) if cursor_run_id else None
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_root = root / RUN_JOURNAL_DIR_NAME / sid
+    runs: list[tuple[float, str, list[dict]]] = []
+    retained_rows = 0
+    retained_bytes = 0
+    for path in sorted(session_root.glob("*.jsonl")) if session_root.exists() else []:
+        run_id = path.stem
+        try:
+            run_id = _validate_id(run_id, "run_id")
+        except ValueError:
+            continue
+        events: list[dict] = []
+        expected_seq = 1
+        try:
+            with path.open(encoding="utf-8") as fh:
+                for line_no, raw in enumerate(fh, start=1):
+                    retained_bytes += len(raw.encode("utf-8"))
+                    if retained_bytes > max_bytes:
+                        return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_bytes", "events": []}
+                    if not raw.strip():
+                        continue
+                    try:
+                        event = json.loads(raw)
+                        seq = int(event.get("seq")) if isinstance(event, dict) else 0
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_malformed", "events": []}
+                    if (
+                        seq != expected_seq
+                        or event.get("event_id") != f"{run_id}:{seq}"
+                        or event.get("run_id") != run_id
+                        or event.get("session_id") != sid
+                    ):
+                        return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_noncontiguous", "events": []}
+                    expected_seq += 1
+                    retained_rows += 1
+                    if retained_rows > max_rows:
+                        return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_rows", "events": []}
+                    events.append(event)
+        except FileNotFoundError:
+            continue
+        created_at = min((_event_created_at(event) for event in events), default=path.stat().st_mtime)
+        runs.append((created_at, run_id, events))
+    runs.sort(key=lambda run: (run[0], run[1]))
+    cursor_index = next((index for index, (_created_at, run_id, _events) in enumerate(runs) if run_id == cursor_run_id), None)
+    if cursor_index is None:
+        foreign_paths = root.joinpath(RUN_JOURNAL_DIR_NAME).glob(f"*/{cursor_run_id}.jsonl") if cursor_run_id else []
+        foreign_session_id = next((path.parent.name for path in foreign_paths if path.parent.name != sid), "")
         status = "cursor_run_missing"
-        summary_sid = str(summary.get("session_id") or "").strip() if summary else ""
-        if summary_sid and summary_sid != sid:
+        if foreign_session_id:
             status = "cursor_session_mismatch"
         return {
             "session_id": sid,
@@ -381,16 +382,11 @@ def read_session_run_events(
             "status": status,
             "events": [],
         }
-    replay_events: list[dict] = []
-    started = False
-    for entry in runs:
-        if not started:
-            if entry["run_id"] != cursor_entry["run_id"]:
-                continue
-            started = True
-        events = entry["events"]
-        if entry["run_id"] == cursor_entry["run_id"] and cursor_seq is not None:
-            events = [event for event in events if int(event.get("seq") or 0) > int(cursor_seq)]
+    cursor_events = runs[cursor_index][2]
+    if cursor_seq is None or cursor_seq >= len(cursor_events):
+        return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "cursor_event_missing", "events": []}
+    replay_events = [event for event in cursor_events if event["seq"] > cursor_seq]
+    for _created_at, _run_id, events in runs[cursor_index + 1:]:
         replay_events.extend(events)
     return {
         "session_id": sid,
@@ -398,7 +394,6 @@ def read_session_run_events(
         "cursor_seq": cursor_seq,
         "status": "ok",
         "events": replay_events,
-        "runs": runs,
     }
 
 
