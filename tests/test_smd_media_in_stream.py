@@ -144,8 +144,6 @@ class TestSmdMediaInStream(unittest.TestCase):
         # text-node insertion. The new implementation routes plain prose
         # back to baseAddText (which uses createTextNode) and only sends
         # each MEDIA token's HTML through DOMParser.
-        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
-        block = MESSAGES_JS[idx:idx + 5000]
         # The single-token DOMParser helper must exist and accept ONE ref;
         # the loop body must call baseAddText for any prose slice *before*
         # it would attempt to splice HTML.
