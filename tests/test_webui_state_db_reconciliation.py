@@ -662,6 +662,11 @@ def test_msg_limit_compression_child_fast_path_preserves_pagination_cursor(
     ("child_todo_state", "expected_todo_ids"),
     [
         (None, ["parent-todo"]),
+        pytest.param(
+            "large-parent",
+            [f"parent-todo-{idx}" for idx in range(20)],
+            id="large-parent-todo-over-64KiB",
+        ),
         ("task", ["child-todo"]),
         ("empty", []),
     ],
@@ -681,20 +686,24 @@ def test_msg_limit_compression_child_fast_path_preserves_parent_todo_state_witho
         {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
         for idx in range(120)
     ]
+    parent_todos = [
+        {"id": "parent-todo", "content": "survive compression", "status": "pending"}
+    ]
+    if child_todo_state == "large-parent":
+        parent_todos = [
+            {"id": f"parent-todo-{idx}", "content": "x" * 4000, "status": "pending"}
+            for idx in range(20)
+        ]
     parent_messages[100] = {
         "role": "tool",
-        "content": json.dumps({
-            "todos": [
-                {"id": "parent-todo", "content": "survive compression", "status": "pending"}
-            ]
-        }),
+        "content": json.dumps({"todos": parent_todos}),
         "timestamp": 100.0,
     }
     child_messages = [
         {"role": "assistant", "content": f"child {idx}", "timestamp": 300.0 + idx}
         for idx in range(500)
     ]
-    if child_todo_state is not None:
+    if child_todo_state not in (None, "large-parent"):
         child_todos = []
         if child_todo_state == "task":
             child_todos = [

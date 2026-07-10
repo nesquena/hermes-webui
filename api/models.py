@@ -989,6 +989,9 @@ def _read_file_head(path: Path, max_prefix_bytes: int = 4096) -> str:
         return fp.read(max_prefix_bytes).decode('utf-8', errors='ignore')
 
 
+_TODO_STATE_METADATA_PREFIX_MAX_BYTES = 6 * 1024 * 1024
+
+
 def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     """Read only the metadata portion before the large arrays.
 
@@ -1001,24 +1004,81 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     — still captures ``message_count`` (which is written before both). Without
     the scenes-stop a legacy large-scene sidecar overflows ``max_prefix_bytes``
     and forces a full multi-MB parse on every poll (the #4633 churn).
+
+    Compression snapshots may carry a bounded ``todo_state`` before ``messages``.
+    After that top-level key is detected, the reader uses a larger todo-specific
+    ceiling so a valid list does not fall back to parsing the parent transcript.
+    Other oversized metadata remains subject to ``max_prefix_bytes``.
     """
     buf = ''
+    bytes_read = 0
+    active_limit = max_prefix_bytes
+    chunk_chars = 4096
+    todo_state_prefix = False
+    modern_messages_marker = '\n  "messages":'
+    modern_scenes_marker = '\n  "anchor_activity_scenes":'
+    marker_overlap = max(len(modern_messages_marker), len(modern_scenes_marker))
+
+    def _closed_prefix(stop_pos):
+        prefix = buf[:stop_pos].rstrip()
+        if prefix.endswith(','):
+            prefix = prefix[:-1].rstrip()
+        return f'{prefix}\n}}'
+
     with open(path, 'r', encoding='utf-8') as f:
-        while len(buf.encode('utf-8')) < max_prefix_bytes:
-            chunk = f.read(4096)
+        while bytes_read < active_limit:
+            previous_len = len(buf)
+            chunk = f.read(chunk_chars)
             if not chunk:
-                return None
+                break
             buf += chunk
-            stop_pos = _find_top_level_json_key(buf, 'messages')
-            scenes_pos = _find_top_level_json_key(buf, 'anchor_activity_scenes')
-            if scenes_pos is not None and (stop_pos is None or scenes_pos < stop_pos):
-                stop_pos = scenes_pos
-            if stop_pos is None:
-                continue
-            prefix = buf[:stop_pos].rstrip()
-            if prefix.endswith(','):
-                prefix = prefix[:-1].rstrip()
-            return f'{prefix}\n}}'
+            bytes_read += len(chunk.encode('utf-8'))
+
+            if todo_state_prefix:
+                # Session.save() writes indent=2 JSON. Search only the newly
+                # appended range (plus marker overlap) instead of rescanning the
+                # complete, potentially multi-megabyte todo value each time.
+                search_from = max(0, previous_len - marker_overlap)
+                messages_marker_pos = buf.find(modern_messages_marker, search_from)
+                scenes_marker_pos = buf.find(modern_scenes_marker, search_from)
+                stop_pos = None
+                if messages_marker_pos >= 0:
+                    stop_pos = messages_marker_pos + 3  # skip newline + two spaces
+                if scenes_marker_pos >= 0:
+                    scenes_pos = scenes_marker_pos + 3
+                    if stop_pos is None or scenes_pos < stop_pos:
+                        stop_pos = scenes_pos
+            else:
+                stop_pos = _find_top_level_json_key(buf, 'messages')
+                scenes_pos = _find_top_level_json_key(buf, 'anchor_activity_scenes')
+                if scenes_pos is not None and (stop_pos is None or scenes_pos < stop_pos):
+                    stop_pos = scenes_pos
+
+            if stop_pos is not None:
+                return _closed_prefix(stop_pos)
+
+            if not todo_state_prefix and _find_top_level_json_key(buf, 'todo_state') is not None:
+                # Compression snapshots persist the settled todo list in the
+                # metadata prefix. The todo tool permits 256 items with 4,000
+                # characters each, so a valid snapshot can exceed the normal
+                # 64 KiB metadata budget. Extend the budget only after seeing
+                # this top-level key; unrelated oversized metadata still fails
+                # closed at the normal limit. Larger chunks avoid repeatedly
+                # rescanning a multi-megabyte todo payload in 4 KiB steps.
+                todo_state_prefix = True
+                active_limit = max(active_limit, _TODO_STATE_METADATA_PREFIX_MAX_BYTES)
+                chunk_chars = 256 * 1024
+
+    if todo_state_prefix:
+        # Compatibility fallback for compact or externally-authored JSON that
+        # does not use Session.save()'s two-space top-level indentation. This is
+        # intentionally a single scan after EOF/cap, not one scan per chunk.
+        stop_pos = _find_top_level_json_key(buf, 'messages')
+        scenes_pos = _find_top_level_json_key(buf, 'anchor_activity_scenes')
+        if scenes_pos is not None and (stop_pos is None or scenes_pos < stop_pos):
+            stop_pos = scenes_pos
+        if stop_pos is not None:
+            return _closed_prefix(stop_pos)
     return None
 
 
