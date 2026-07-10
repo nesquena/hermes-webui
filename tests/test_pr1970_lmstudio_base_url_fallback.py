@@ -187,6 +187,19 @@ def test_get_provider_base_url_treats_list_providers_as_unconfigured():
             assert config._get_provider_base_url("openai") is None
 
 
+def test_get_provider_base_url_preserves_mixed_case_provider_id_keys():
+    with _RestoreCfg():
+        config.cfg.clear()
+        config.cfg.update(
+            {
+                "providers": {
+                    "custom:MyLab": {"base_url": "http://127.0.0.1:1234/v1", "api_key": "x"},
+                },
+            }
+        )
+        assert config._get_provider_base_url("custom:MyLab") == "http://127.0.0.1:1234/v1"
+
+
 def test_get_provider_base_url_treats_malformed_provider_entry_as_unconfigured():
     """Truth-y non-dict provider entries must not reach ``.get("base_url")``."""
     with _RestoreCfg():

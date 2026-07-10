@@ -2497,25 +2497,33 @@ def _get_provider_base_url(provider_id):
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    provider_id = str(provider_id or "").strip().lower()
-    if provider_id.startswith("custom:"):
+    provider_id = str(provider_id or "").strip()
+    if not provider_id:
+        return None
+
+    provider_id_lower = provider_id.lower()
+    if provider_id_lower.startswith("custom:"):
         for entry in cfg.get("custom_providers", []) or []:
             if not isinstance(entry, dict):
                 continue
             slug = _custom_provider_slug_from_name(entry.get("name"))
-            if slug != provider_id:
+            if slug != provider_id_lower:
                 continue
             custom_base = str(entry.get("base_url") or "").strip().rstrip("/")
-            return custom_base or None
+            if custom_base:
+                return custom_base
+            break
 
     prov_cfg = _get_provider_cfg(provider_id)
+    if not prov_cfg and provider_id_lower != provider_id:
+        prov_cfg = _get_provider_cfg(provider_id_lower)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
-        model_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if model_provider == str(provider_id).strip().lower():
+        model_provider = str(model_cfg.get("provider") or "").strip()
+        if model_provider and model_provider.lower() == provider_id_lower:
             model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
             if model_base:
                 return model_base
@@ -3682,10 +3690,14 @@ def coerce_reasoning_effort_for_model(
     # releases). Coercion exists to avoid sending a level a KNOWN-incompatible
     # model rejects (e.g. openai-codex gpt-5 'max', o1/o3/o4 above 'high') -
     # those paths return a NON-empty clamped set, so the degrade ladder below
-    # still applies. When the set is empty we can't tell "unsupported" from
-    # "unknown", so preserve the user's configured effort verbatim where it is
-    # still valid.
+    # still applies.
     if not supported:
+        # Historical behavior was to preserve arbitrary configured effort values when
+        # capabilities are unknown. For ``max`` specifically, keep endpoints that do
+        # not understand it safe by falling back to ``xhigh`` which remains the
+        # highest widely supported request path for unknown providers in this system.
+        if raw == "max":
+            return "xhigh"
         return raw
     if raw in supported:
         return raw
