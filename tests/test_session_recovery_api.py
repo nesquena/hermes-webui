@@ -156,15 +156,30 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
 
     sid = "abc123"
     live = _write_session(tmp_path, sid, messages=4)
+    hostile_fields = {
+        "session_path": "/synthetic/sessions/SUCCESS_SESSION_PATH_SENTINEL_DO_NOT_LEAK.json",
+        "local_path": "/synthetic/local/SUCCESS_LOCAL_PATH_SENTINEL_DO_NOT_LEAK.json",
+        "backup_path": "/synthetic/backups/SUCCESS_BACKUP_PATH_SENTINEL_DO_NOT_LEAK.json.bak",
+        "raw_prompt": "SUCCESS_RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+        "renderer": "SUCCESS_RENDERER_SENTINEL_DO_NOT_LEAK",
+        "source": "SUCCESS_SOURCE_SENTINEL_DO_NOT_LEAK",
+        "html": "<main>SUCCESS_HTML_SENTINEL_DO_NOT_LEAK</main>",
+        "script": "<script>SUCCESS_SCRIPT_SENTINEL_DO_NOT_LEAK</script>",
+        "data": "SUCCESS_DATA_SENTINEL_DO_NOT_LEAK",
+        "body": "SUCCESS_BODY_SENTINEL_DO_NOT_LEAK",
+        "api_auth": "SUCCESS_API_AUTH_SENTINEL_DO_NOT_LEAK",
+        "credentials": "SUCCESS_CREDENTIALS_SENTINEL_DO_NOT_LEAK",
+        "bearer": "Bearer SUCCESS_BEARER_TOKEN_SENTINEL_DO_NOT_LEAK",
+        "access_token": "SUCCESS_ACCESS_TOKEN_SENTINEL_DO_NOT_LEAK",
+        "secret": "synthetic-secret://SUCCESS_SECRET_LOOKING_VALUE_SENTINEL_DO_NOT_LEAK",
+    }
+    hostile_message_content = "SUCCESS_MESSAGE_CONTENT_SENTINEL_DO_NOT_LEAK"
     hostile_session = json.loads(live.read_text(encoding="utf-8"))
     hostile_session.update({
         "title": "RAW_TITLE_SENTINEL_DO_NOT_LEAK",
-        "raw_prompt": "RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
-        "renderer": "RENDERER_SENTINEL_DO_NOT_LEAK",
-        "source": "SOURCE_SENTINEL_DO_NOT_LEAK",
-        "api_auth": "API_AUTH_SENTINEL_DO_NOT_LEAK",
+        **hostile_fields,
     })
-    hostile_session["messages"][0]["content"] = "TOKEN_SECRET_SENTINEL_DO_NOT_LEAK"
+    hostile_session["messages"][0]["content"] = hostile_message_content
     live.write_text(json.dumps(hostile_session), encoding="utf-8")
     bak = tmp_path / f"{sid}.json.bak"
     bak.write_text(live.read_text(encoding="utf-8"), encoding="utf-8")
@@ -178,11 +193,7 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
         "hint:reasoning": {
             "provider": "Local recovery provider",
             "model": "Recovery reasoning model",
-            "api_auth": "ROUTE_API_AUTH_SENTINEL_DO_NOT_LEAK",
-            "raw_prompt": "ROUTE_RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
-            "renderer": "ROUTE_RENDERER_SENTINEL_DO_NOT_LEAK",
-            "source": "ROUTE_SOURCE_SENTINEL_DO_NOT_LEAK",
-            "token": "ROUTE_TOKEN_SECRET_SENTINEL_DO_NOT_LEAK",
+            **hostile_fields,
         },
     }))
     _m.SESSIONS.clear()
@@ -254,26 +265,35 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
         },
         sort_keys=True,
     ).lower()
-    for unsafe in (
+    for unsafe_value in (
         sid,
         "RAW_TITLE_SENTINEL_DO_NOT_LEAK",
-        "RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
-        "RENDERER_SENTINEL_DO_NOT_LEAK",
-        "SOURCE_SENTINEL_DO_NOT_LEAK",
-        "API_AUTH_SENTINEL_DO_NOT_LEAK",
-        "TOKEN_SECRET_SENTINEL_DO_NOT_LEAK",
-        "ROUTE_API_AUTH_SENTINEL_DO_NOT_LEAK",
-        "ROUTE_RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
-        "ROUTE_RENDERER_SENTINEL_DO_NOT_LEAK",
-        "ROUTE_SOURCE_SENTINEL_DO_NOT_LEAK",
-        "ROUTE_TOKEN_SECRET_SENTINEL_DO_NOT_LEAK",
-        '"raw_prompt":',
-        '"renderer":',
-        '"source":',
-        '"api_auth":',
-        '"token":',
+        *hostile_fields.values(),
+        hostile_message_content,
     ):
-        assert unsafe.lower() not in serialized_receipts
+        assert unsafe_value.lower() not in serialized_receipts
+    unsafe_keys = (
+        "session_path",
+        "local_path",
+        "backup_path",
+        "title",
+        "messages",
+        "content",
+        "raw_prompt",
+        "renderer",
+        "source",
+        "html",
+        "script",
+        "data",
+        "body",
+        "api_auth",
+        "credentials",
+        "bearer",
+        "access_token",
+        "secret",
+    )
+    for unsafe_key in unsafe_keys:
+        assert f'"{unsafe_key}":' not in serialized_receipts
     assert live.exists()
     assert audit_session_recovery(tmp_path)["status"] == "ok"
     idx = json.loads(index.read_text(encoding="utf-8"))
@@ -286,6 +306,28 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
     monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress.jsonl"))
     sid = "abc123"
     live = _write_session(tmp_path, sid, messages=1)
+    hostile_fields = {
+        "session_path": "/synthetic/sessions/MANUAL_REVIEW_SESSION_PATH_SENTINEL_DO_NOT_LEAK.json",
+        "local_path": "/synthetic/local/MANUAL_REVIEW_LOCAL_PATH_SENTINEL_DO_NOT_LEAK.json",
+        "backup_path": "/synthetic/backups/MANUAL_REVIEW_BACKUP_PATH_SENTINEL_DO_NOT_LEAK.json.bak",
+        "raw_prompt": "MANUAL_REVIEW_RAW_PROMPT_SENTINEL_DO_NOT_LEAK",
+        "renderer": "MANUAL_REVIEW_RENDERER_SENTINEL_DO_NOT_LEAK",
+        "source": "MANUAL_REVIEW_SOURCE_SENTINEL_DO_NOT_LEAK",
+        "html": "<main>MANUAL_REVIEW_HTML_SENTINEL_DO_NOT_LEAK</main>",
+        "script": "<script>MANUAL_REVIEW_SCRIPT_SENTINEL_DO_NOT_LEAK</script>",
+        "data": "MANUAL_REVIEW_DATA_SENTINEL_DO_NOT_LEAK",
+        "body": "MANUAL_REVIEW_BODY_SENTINEL_DO_NOT_LEAK",
+        "api_auth": "MANUAL_REVIEW_API_AUTH_SENTINEL_DO_NOT_LEAK",
+        "credentials": "MANUAL_REVIEW_CREDENTIALS_SENTINEL_DO_NOT_LEAK",
+        "bearer": "Bearer MANUAL_REVIEW_BEARER_TOKEN_SENTINEL_DO_NOT_LEAK",
+        "access_token": "MANUAL_REVIEW_ACCESS_TOKEN_SENTINEL_DO_NOT_LEAK",
+        "secret": "synthetic-secret://MANUAL_REVIEW_SECRET_LOOKING_VALUE_SENTINEL_DO_NOT_LEAK",
+    }
+    hostile_message_content = "MANUAL_REVIEW_MESSAGE_CONTENT_SENTINEL_DO_NOT_LEAK"
+    hostile_session = json.loads(live.read_text(encoding="utf-8"))
+    hostile_session.update(hostile_fields)
+    hostile_session["messages"][0]["content"] = hostile_message_content
+    live.write_text(json.dumps(hostile_session), encoding="utf-8")
     bak = tmp_path / f"{sid}.json.bak"
     bak.write_text(live.read_text(encoding="utf-8"), encoding="utf-8")
     live.unlink()
@@ -329,10 +371,29 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
     assert "context_authority: untrusted_advisory" in compaction["text"]
     assert "can_bypass_safety_gates: false" in compaction["text"]
     assert "required_gates: prompt_preflight, approval, sandbox_preview, visual_qa, rollback_recovery" in compaction["text"]
-    assert str(tmp_path).lower() not in serialized_receipts
-    assert "secret" not in serialized_receipts
-    assert "api_key" not in serialized_receipts
-    assert "<script" not in serialized_receipts
+    for unsafe_value in (*hostile_fields.values(), hostile_message_content):
+        assert unsafe_value.lower() not in serialized_receipts
+    unsafe_keys = (
+        "session_path",
+        "local_path",
+        "backup_path",
+        "messages",
+        "content",
+        "raw_prompt",
+        "renderer",
+        "source",
+        "html",
+        "script",
+        "data",
+        "body",
+        "api_auth",
+        "credentials",
+        "bearer",
+        "access_token",
+        "secret",
+    )
+    for unsafe_key in unsafe_keys:
+        assert f'"{unsafe_key}":' not in serialized_receipts
 
 
 def test_repair_safe_session_recovery_leaves_unsafe_orphan_for_manual_review(tmp_path):
