@@ -716,8 +716,17 @@ def channel_version_badge(channel=None) -> str:
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    # NOTE: no ``--always`` here (deliberately different from _detect_webui_version).
+    # The current version is channel-INDEPENDENT — it's just what's installed. The
+    # channel only picks which tag family we compare AGAINST for updates. On a
+    # stable-tagged install (e.g. HEAD == v0.52.0) that opts into Experimental, no
+    # ``exp-v*`` tag is reachable BEHIND HEAD (the exp tags sit ahead on master), so
+    # ``--always`` would fall through to a bare SHA and render "WebUI: d4e80b45 ·
+    # Experimental" instead of the real installed version. Falling back to the
+    # channel-neutral WEBUI_VERSION keeps the badge showing "v0.52.0 · Experimental".
+    # (#5862)
     out, ok = _run_git(
-        ['describe', '--tags', '--always', '--match', _channel_tag_glob(channel)],
+        ['describe', '--tags', '--match', _channel_tag_glob(channel)],
         REPO_ROOT,
     )
     if ok and out:
@@ -756,6 +765,26 @@ def _release_gap(tags, current, latest):
     if current in tags:
         return tags.index(current)
     return 1
+
+
+def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
+    """Count channel release tags strictly ahead of HEAD (fast-forwardable).
+
+    Used only when NO channel tag is reachable behind HEAD — the channel-scoped
+    ``describe`` returned None — e.g. a stable ``v0.52.0`` install opting into
+    Experimental (all ``exp-v*`` tags sit ahead on master). ``_release_gap`` can't
+    position HEAD in the tag list then and returns a bogus 1. ``git tag --contains
+    HEAD`` lists tags whose history includes HEAD, i.e. tags that are ahead of (or
+    on) HEAD; since HEAD carries no channel tag in this path, that count is exactly
+    the number of channel releases the install can fast-forward to. (#5862)
+    """
+    out, ok = _run_git(
+        ['tag', '--list', _channel_tag_glob(channel), '--contains', 'HEAD'],
+        path,
+    )
+    if not (ok and out):
+        return 0
+    return sum(1 for line in out.splitlines() if line.strip())
 
 
 def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
@@ -901,6 +930,22 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     current_tag = _current_release_tag(path, channel)
     behind = _release_gap(tags, current_tag, latest_tag)
 
+    # When NO channel tag is reachable behind HEAD, _current_release_tag returns
+    # None (channel-scoped `describe --abbrev=0` fatals with "No tags can describe").
+    # This is the normal state of a stable-tagged install (HEAD == v0.52.0) opting
+    # into Experimental: every exp-v* tag sits AHEAD on master. _release_gap can't
+    # position None in the tag list and returns a bogus 1, and the display fields
+    # would carry current_version=None (rendered as "unknown"). Recover the real
+    # ahead-count and show the channel-neutral installed version as the current
+    # version — the channel only chooses the comparison tag family, not what's
+    # installed. (#5862)
+    current_version_display = current_tag
+    if current_tag is None:
+        ahead = _count_channel_tags_ahead(path, channel)
+        if ahead > 0:
+            behind = ahead
+        current_version_display = WEBUI_VERSION
+
     # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
     # keeps committing to master between tagged releases), the release check
     # would report "Up to date" even though hundreds of commits are missing.
@@ -944,13 +989,16 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
         'name': name,
         'behind': behind,
         # GitHub compare URLs accept tag names, and tag-to-tag links are the
-        # clearest "what changed in this release?" view for operators.
-        'current_sha': current_tag,
+        # clearest "what changed in this release?" view for operators. When no
+        # channel tag is reachable behind HEAD (#5862), current_version_display is
+        # the channel-neutral installed tag (e.g. v0.52.0) — a real tag name, so
+        # the /compare/<installed>...<latest> URL still resolves.
+        'current_sha': current_version_display,
         'latest_sha': latest_tag,
         'branch': latest_tag,
         'repo_url': remote_url,
         'release_based': True,
-        'current_version': current_tag,
+        'current_version': current_version_display,
         'latest_version': latest_tag,
         'channel': channel,
     }
