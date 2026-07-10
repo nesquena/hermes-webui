@@ -5458,7 +5458,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(d.usage){
             const _doneUsageFallback={...(S.lastUsage||{})};
             if(S.session){
-              for(const _usageField of ['context_length','threshold_tokens','last_prompt_tokens']){
+              for(const _usageField of ['context_length','threshold_tokens','last_prompt_tokens','post_compression_context_tokens_estimate']){
                 if(_doneUsageFallback[_usageField]==null&&S.session[_usageField]!=null){
                   _doneUsageFallback[_usageField]=S.session[_usageField];
                 }
