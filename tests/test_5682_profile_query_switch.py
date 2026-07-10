@@ -152,8 +152,8 @@ global.switchToProfile = async (name) => {
   const completedPos = bootSrc.indexOf("_profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;", profilePos);
   const changedPos = bootSrc.indexOf("_profileSwitchChangedProfile=", completedPos);
   const cleanupGuardPos = bootSrc.indexOf("if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){", profilePos);
-  const fetchPos = bootSrc.indexOf("fetchReasoningChip()");
-  console.log(JSON.stringify({ intent, switched, promoted, afterProfile, afterPrefill, historyCalls: window.history.calls, profilePos, renderPos, savedPos, loadPos, consumePos, completedPos, changedPos, cleanupGuardPos, fetchPos, savedLocalBefore, savedLocalAfterSuppress, savedLocalAfterReload, blocksSavedLocal, keepsExplicitSession }));
+  const initialReasoningFetchPos = bootSrc.indexOf("if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();", profilePos);
+  console.log(JSON.stringify({ intent, switched, promoted, afterProfile, afterPrefill, historyCalls: window.history.calls, profilePos, renderPos, savedPos, loadPos, consumePos, completedPos, changedPos, cleanupGuardPos, initialReasoningFetchPos, savedLocalBefore, savedLocalAfterSuppress, savedLocalAfterReload, blocksSavedLocal, keepsExplicitSession }));
 })().catch(err => {
   console.error(err);
   process.exit(1);
@@ -175,7 +175,7 @@ global.switchToProfile = async (name) => {
     assert payload["completedPos"] > payload["profilePos"]
     assert payload["changedPos"] > payload["completedPos"]
     assert payload["cleanupGuardPos"] > payload["consumePos"]
-    assert payload["fetchPos"] < payload["profilePos"]
+    assert payload["initialReasoningFetchPos"] > payload["completedPos"]
     assert payload["savedLocalBefore"] == "saved-local"
     assert payload["savedLocalAfterSuppress"] == "fresh-local"
     assert payload["savedLocalAfterReload"] == "fresh-local"
@@ -760,3 +760,73 @@ fetchReasoningChip();
     }
     assert payload["directLoadAfterOld"] == ""
     assert payload["directLoadAfterNew"] == "high"
+
+
+def test_blank_profile_transition_context_clears_before_explicit_model_change():
+    source = f"""
+const uiSrc = {UI_JS!r};
+const bootSrc = {BOOT_JS!r};
+function extractFunc(src, name) {{
+  const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function makeEl() {{ return {{ style: {{}}, classList: {{ toggle(){{}} }}, setAttribute(){{}}, querySelectorAll(){{ return []; }} }}; }}
+const els = {{
+  modelSelect: {{ value: 'claude-sonnet' }},
+  composerReasoningWrap: makeEl(),
+  composerReasoningLabel: makeEl(),
+  composerReasoningChip: makeEl(),
+  composerMobileReasoningAction: makeEl()
+}};
+global.$ = id => els[id] || null;
+global.S = {{ activeProfile: 'vops', session: null }};
+global._highlightReasoningOption = () => {{}};
+global._applyReasoningOptions = () => {{}};
+global._modelStateForSelect = (_, model) => ({{ model, model_provider: 'anthropic' }});
+var _currentReasoningEffort = 'high';
+var _currentReasoningEffortsSupported = ['low', 'high'];
+var _profileTransitionReasoningContext = {{ profile: 'vops', model: 'gpt-high', provider: 'openai' }};
+var _lastReasoningFetchKey = '?model=gpt-high&provider=openai';
+var _reasoningFetchSeq = 1;
+const urls = [];
+global.api = (url) => {{
+  urls.push(url);
+  return Promise.resolve({{ reasoning_effort: 'medium', supported_efforts: ['medium'] }});
+}};
+eval(extractFunc(uiSrc, '_normalizeReasoningEffort'));
+eval(extractFunc(uiSrc, '_formatReasoningEffortLabel'));
+eval(extractFunc(uiSrc, '_reasoningEffortContext'));
+eval(extractFunc(uiSrc, '_reasoningEffortQuery'));
+eval(extractFunc(uiSrc, '_applyReasoningChip'));
+eval(extractFunc(uiSrc, 'fetchReasoningChip'));
+eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
+eval(extractFunc(uiSrc, 'clearProfileTransitionReasoningContext'));
+eval(extractFunc(uiSrc, 'syncReasoningChip'));
+clearProfileTransitionReasoningContext();
+syncReasoningChip();
+const handler = bootSrc.slice(bootSrc.indexOf("$('modelSelect').onchange=async()=>"), bootSrc.indexOf("$('msg').addEventListener", bootSrc.indexOf("$('modelSelect').onchange=async()=>")));
+const clearPos = handler.indexOf("clearProfileTransitionReasoningContext");
+const rememberBlankPos = handler.indexOf("_rememberEmptyComposerModelOverride");
+const noSessionSyncPos = handler.indexOf("syncReasoningChip()", rememberBlankPos);
+console.log(JSON.stringify({{
+  urls,
+  context: _profileTransitionReasoningContext,
+  lastKey: _lastReasoningFetchKey,
+  clearPos,
+  noSessionSyncPos
+}}));
+"""
+    payload = json.loads(_run_node(source))
+    assert payload["urls"] == ["/api/reasoning?model=claude-sonnet&provider=anthropic"]
+    assert payload["context"] is None
+    assert payload["lastKey"] == "?model=claude-sonnet&provider=anthropic"
+    assert payload["clearPos"] >= 0
+    assert payload["clearPos"] < payload["noSessionSyncPos"]

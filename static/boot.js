@@ -2063,6 +2063,7 @@ $('modelSelect').onchange=async()=>{
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
+  if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
@@ -3385,8 +3386,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
-  // Initialize reasoning chip on boot (fixes #1103: chip hidden until session load)
-  if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
   const _savedLocalBeforeProfileSwitch=localStorage.getItem('hermes-webui-session');
   const _profileSwitchProfileBefore=S.activeProfile||'default';
@@ -3411,6 +3410,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       console.warn('[boot] profile query switch failed', e);
     }
   }
+  if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
