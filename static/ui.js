@@ -4493,6 +4493,10 @@ function refreshProfileTransitionReasoningChip(model, provider){
   fetchReasoningChip(params.size?'?'+params.toString():undefined);
 }
 
+function clearProfileTransitionReasoningContext(){
+  _profileTransitionReasoningContext=null;
+}
+
 function syncReasoningChip(){
   // #4650: syncTopbar() calls this on every routine UI refresh, and during
   // streaming those fire at high frequency. Before a9ce2889 this served the

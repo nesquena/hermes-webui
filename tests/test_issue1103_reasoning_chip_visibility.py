@@ -16,12 +16,9 @@ def test_boot_call_before_session_load():
     """fetchReasoningChip() should be called before session load in boot sequence."""
     with open("static/boot.js") as f:
         src = f.read()
-    # Find the boot session load; URL-anchored tabs may prefer a URL session id
-    # before falling back to the stored session id.
-    boot_marker = "localStorage.getItem('hermes-webui-session')"
+    boot_marker = "await loadSession(saved, {preserveActiveInput:true});"
     boot_pos = src.index(boot_marker)
-    fetch_pos = src.index("fetchReasoningChip()")
-    # fetchReasoningChip must be called just before the saved session load
+    fetch_pos = src.index("fetchReasoningChip()", src.index("_profileQueryIntentFromLocation"))
     assert fetch_pos < boot_pos, \
         "fetchReasoningChip() should be called before saved session load in boot.js"
 
