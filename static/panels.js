@@ -11897,29 +11897,57 @@ async function checkUpdatesNow(channelOverride){
 
 // ── Auxiliary Models ──────────────────────────────────────────────────────────
 
-// Canonical auxiliary task slots with display names.
-// Keep in sync with hermes_cli/main.py _AUX_TASKS and hermes_cli/web_server.py _AUX_TASK_SLOTS.
-const _AUX_TASK_SLOTS=[
- {key:'vision',nameKey:'settings_aux_task_vision',descKey:'settings_aux_task_vision_desc'},
- {key:'compression',nameKey:'settings_aux_task_compression',descKey:'settings_aux_task_compression_desc'},
- {key:'web_extract',nameKey:'settings_aux_task_web_extract',descKey:'settings_aux_task_web_extract_desc'},
- {key:'session_search',nameKey:'settings_aux_task_session_search',descKey:'settings_aux_task_session_search_desc'},
- {key:'approval',nameKey:'settings_aux_task_approval',descKey:'settings_aux_task_approval_desc'},
- {key:'mcp',nameKey:'settings_aux_task_mcp',descKey:'settings_aux_task_mcp_desc'},
- {key:'title_generation',nameKey:'settings_aux_task_title_generation',descKey:'settings_aux_task_title_generation_desc'},
- {key:'skills_hub',nameKey:'settings_aux_task_skills_hub',descKey:'settings_aux_task_skills_hub_desc'},
- {key:'curator',nameKey:'settings_aux_task_curator',descKey:'settings_aux_task_curator_desc'},
- {key:'kanban_decomposer',nameKey:'settings_aux_task_kanban_decomposer',descKey:'settings_aux_task_kanban_decomposer_desc'},
- {key:'profile_describer',nameKey:'settings_aux_task_profile_describer',descKey:'settings_aux_task_profile_describer_desc'},
- {key:'triage_specifier',nameKey:'settings_aux_task_triage_specifier',descKey:'settings_aux_task_triage_specifier_desc'},
-];
-
 let _auxProviders=[];       // cached provider list from /api/models
+let _auxTasks=[];           // sanitized auxiliary task configs from /api/model/auxiliary
 let _auxOriginalConfig=null; // snapshot of initial config for dirty detection
 let _mainAdvancedConfig=null; // current advanced config for the default chat model
 
 function _auxSelectStyle(){
  return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
+}
+
+function _auxTaskLabelFromMeta(taskKey, taskCfg){
+  const nameKey='settings_aux_task_'+taskKey;
+  const descKey=nameKey+'_desc';
+  const tName=t(nameKey);
+  const tDesc=t(descKey);
+  const name=(tName&&tName!==nameKey)?String(tName).trim():'';
+  const description=(tDesc&&tDesc!==descKey)?String(tDesc).trim():'';
+  const fallbackName=(taskCfg&&typeof taskCfg.label==='string'&&taskCfg.label.trim())?String(taskCfg.label).trim():taskKey;
+  const fallbackDesc=(taskCfg&&typeof taskCfg.description==='string'&&taskCfg.description.trim())?String(taskCfg.description).trim():'';
+  return {
+    task: taskKey,
+    label: name||fallbackName,
+    description: description||fallbackDesc,
+  };
+}
+
+function _normalizeAuxiliaryTasks(rawTasks){
+  const tasks=Array.isArray(rawTasks)?rawTasks:[];
+  const out=[];
+  const seen=new Set();
+  for(const rawTask of tasks){
+    if(!rawTask||typeof rawTask!=='object') continue;
+    const task=(typeof rawTask.task==='string'?String(rawTask.task).trim():'');
+    if(!task||seen.has(task)) continue;
+    seen.add(task);
+    const meta=_auxTaskLabelFromMeta(task,rawTask);
+    const entry={
+      task,
+      provider:String(rawTask.provider||'auto').trim()||'auto',
+      model:String(rawTask.model||'').trim(),
+      base_url:String(rawTask.base_url||'').trim(),
+      timeout:rawTask.timeout,
+      download_timeout:rawTask.download_timeout,
+      max_concurrency:rawTask.max_concurrency,
+      extra_body:rawTask.extra_body&&typeof rawTask.extra_body==='object'?rawTask.extra_body:{},
+      api_key_set:!!rawTask.api_key_set,
+      label:meta.label,
+      description:meta.description,
+    };
+    out.push(entry);
+  }
+  return out;
 }
 
 function _buildAuxProviderOptions(sel,providers,currentProvider){
@@ -12055,13 +12083,14 @@ function _mainModelSupportsServiceTier(cfg){
  return cfg&&cfg.supports_fast_tier===true;
 }
 
-function _openAuxAdvancedOptions(taskKey,cfg){
- const isMain=taskKey==='__main__';
- const slot=isMain?{key:taskKey,nameKey:'settings_label_model',descKey:'settings_desc_model'}:(_AUX_TASK_SLOTS.find(s=>s.key===taskKey)||{key:taskKey,nameKey:'',descKey:''});
+function _openAuxAdvancedOptions(taskCfg,cfg){
+ const isMain=taskCfg==='__main__';
+ const taskKey=isMain?'__main__':(taskCfg&&typeof taskCfg==='object'&&typeof taskCfg.task==='string'?taskCfg.task:typeof taskCfg==='string'?taskCfg:'');
+ const slot=isMain?{task:taskKey,label:(t('settings_label_model')||'Default model')}:_auxTaskLabelFromMeta(taskKey,taskCfg);
  const overlay=_ensureAuxAdvancedModal();
  overlay.dataset.task=taskKey;
  const title=$('auxAdvancedTitle'),sub=$('auxAdvancedSubtitle'),body=$('auxAdvancedBody');
- const slotName=t(slot.nameKey)||slot.key;
+ const slotName=isMain?(t('settings_label_model')||'Default model'):(slot&&slot.label)||taskKey;
  if(title) title.textContent=isMain?(t('settings_main_advanced_title')||'Main model options'):((t('settings_aux_advanced_title')||'{task} options').replace('{task}',slotName));
  if(sub) sub.textContent=isMain?(t('settings_main_advanced_subtitle')||'Advanced config for the default chat model.'):(t('settings_aux_advanced_subtitle')||'Advanced config for auxiliary.');
  const extraBody=cfg&&cfg.extra_body&&typeof cfg.extra_body==='object'&&Object.keys(cfg.extra_body).length?JSON.stringify(cfg.extra_body,null,2):'';
@@ -12185,68 +12214,68 @@ async function _loadAuxiliaryModels(){
  container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_loading')||'Loading…')+'</div>';
 
  try{
- // Fetch auxiliary config AND the WebUI's own /api/models for provider/model lists
- const [auxData,modelsData]=await Promise.all([
- api('/api/model/auxiliary').catch(()=>null),
- api('/api/models').catch(()=>null),
- ]);
- // Build provider list from /api/models groups
- // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
- const groups=(modelsData&&modelsData.groups)||[];
- _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
- slug:g.provider_id||g.provider,
- name:g.provider,
- models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
- }));
- if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
- _mainAdvancedConfig=auxData.main||{};
- }else{
- _mainAdvancedConfig=null;
- }
- _bindMainAdvancedOptionsButton();
- const tasks=(auxData&&auxData.tasks)||[];
-  // Build a quick lookup: taskKey → {provider, model}
+  // Fetch auxiliary config AND the WebUI's own /api/models for provider/model lists
+  const [auxData,modelsData]=await Promise.all([
+   api('/api/model/auxiliary').catch(()=>null),
+   api('/api/models').catch(()=>null),
+  ]);
+  // Build provider list from /api/models groups
+  // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
+  const groups=(modelsData&&modelsData.groups)||[];
+  _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
+   slug:g.provider_id||g.provider,
+   name:g.provider,
+   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
+  }));
+  if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
+   _mainAdvancedConfig=auxData.main||{};
+  }else{
+   _mainAdvancedConfig=null;
+  }
+  _bindMainAdvancedOptionsButton();
+  _auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[]);
+  // Build a quick lookup: taskKey → config
   const taskMap={};
-  for(const t of tasks) taskMap[t.task]=t;
+  for(const task of _auxTasks) taskMap[task.task]=task;
   _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
 
   container.innerHTML='';
-  for(const slot of _AUX_TASK_SLOTS){
-   const cfg=taskMap[slot.key]||{provider:'auto',model:''};
+  for(const task of _auxTasks){
+   const cfg=taskMap[task.task]||{provider:'auto',model:''};
    const row=document.createElement('div');
    row.style.cssText='display:grid;grid-template-columns:120px 1fr 1fr 34px;gap:8px;align-items:center;margin-bottom:8px';
 
    // Task name + description
    const label=document.createElement('div');
    label.style.cssText='font-size:12px;font-weight:500;color:var(--text);line-height:1.3';
-   label.innerHTML=esc(t(slot.nameKey)||slot.key)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(t(slot.descKey)||'')+'</div>';
+   label.innerHTML=esc(task.label||task.task)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(task.description||'')+'</div>';
    row.appendChild(label);
 
    // Provider select
    const provSel=document.createElement('select');
-   provSel.id='aux-prov-'+slot.key;
+   provSel.id='aux-prov-'+task.task;
    provSel.style.cssText=_auxSelectStyle();
    _buildAuxProviderOptions(provSel,_auxProviders,cfg.provider);
-   provSel.addEventListener('change',()=>_onAuxProviderChange(slot.key,_auxProviders));
+   provSel.addEventListener('change',()=>_onAuxProviderChange(task.task,_auxProviders));
    row.appendChild(provSel);
 
    // Model select
    const modelSel=document.createElement('select');
-   modelSel.id='aux-model-'+slot.key;
+   modelSel.id='aux-model-'+task.task;
    modelSel.style.cssText=_auxSelectStyle();
    _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
-   modelSel.addEventListener('change',()=>_onAuxModelChange(slot.key));
+   modelSel.addEventListener('change',()=>_onAuxModelChange(task.task));
    row.appendChild(modelSel);
 
    const advancedBtn=document.createElement('button');
    advancedBtn.type='button';
    advancedBtn.className='aux-advanced-btn model-advanced-btn';
    const advTitle=t('settings_aux_advanced_button_title')||'Advanced options';
-   const slotName=t(slot.nameKey)||slot.key;
+   const taskName=task.label||task.task;
    advancedBtn.title=advTitle;
-   advancedBtn.setAttribute('aria-label',(t('settings_aux_advanced_button_aria')||'Advanced options for {task}').replace('{task}',slotName));
+   advancedBtn.setAttribute('aria-label',(t('settings_aux_advanced_button_aria')||'Advanced options for {task}').replace('{task}',taskName));
    advancedBtn.innerHTML=typeof li==='function'?li('settings',15):'⚙';
-   advancedBtn.addEventListener('click',()=>_openAuxAdvancedOptions(slot.key,cfg));
+   advancedBtn.addEventListener('click',()=>_openAuxAdvancedOptions(task,cfg));
    row.appendChild(advancedBtn);
 
    container.appendChild(row);
@@ -12284,20 +12313,20 @@ async function _loadAuxiliaryModels(){
 
 async function _applyAuxModels(){
  let saved=0;
- for(const slot of _AUX_TASK_SLOTS){
-  const provSel=$('aux-prov-'+slot.key);
-  const modelSel=$('aux-model-'+slot.key);
+ for(const task of _auxTasks){
+  const provSel=$('aux-prov-'+task.task);
+  const modelSel=$('aux-model-'+task.task);
   if(!provSel) continue;
   const provider=provSel.value;
   const model=(modelSel&&modelSel.value!=='__custom__')?(modelSel.value||''):'';
-  const orig=_auxOriginalConfig?.[slot.key]||{provider:'auto',model:''};
+  const orig=_auxOriginalConfig?.[task.task]||{provider:'auto',model:''};
   // Only save if changed
   if(provider!==orig.provider||model!==orig.model){
    try{
-    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:slot.key,provider,model})});
+    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:task.task,provider,model})});
     saved++;
    }catch(e){
-    console.warn('[settings] failed to save aux task',slot.key,e);
+    console.warn('[settings] failed to save aux task',task.task,e);
     if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model');
     return;
    }
