@@ -6423,8 +6423,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       row._child_sessions.sort((a,b)=>{
         const readOnlyCmp = Number(resolveReadOnlySession(a))-Number(resolveReadOnlySession(b));
         if(readOnlyCmp!==0) return readOnlyCmp;
-        const aOrder = childAttachOrderById.get(a&&a.session_id) || 0;
-        const bOrder = childAttachOrderById.get(b&&b.session_id) || 0;
+        const aOrder = childAttachOrderById.get(a&&a.session_id) ?? Number.MAX_SAFE_INTEGER;
+        const bOrder = childAttachOrderById.get(b&&b.session_id) ?? Number.MAX_SAFE_INTEGER;
         return aOrder-bOrder;
       });
     }
