@@ -7017,13 +7017,6 @@ async function switchToProfile(name) {
         sessionInProgress = true;
       }
     }
-    // #4650 review: a profile switch can change agent.reasoning_effort (and other
-    // reasoning inputs like base_url) WITHOUT changing the default model/provider,
-    // which is all the reasoning-chip cache key tracks. Force exactly one reasoning
-    // refetch for the new profile so the chip reflects the new profile's effort
-    // (the syncTopbar() calls below route through syncReasoningChip()).
-    if (typeof _lastReasoningFetchKey !== 'undefined') _lastReasoningFetchKey = null;
-
     // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
     // registry is now profile-keyed (#3629), but this tab's existing EventSource is
     // still subscribed to the PREVIOUS profile's watcher — and the probe-based
@@ -7086,6 +7079,9 @@ async function switchToProfile(name) {
     // model patch above (don't touch a session about to be replaced).
     if (S.session && !sessionInProgress) {
       S.session.profile = data.active || name;
+    }
+    if (typeof refreshProfileTransitionReasoningChip === 'function') {
+      refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
     }
 
     // ── Apply workspace ────────────────────────────────────────────────────
