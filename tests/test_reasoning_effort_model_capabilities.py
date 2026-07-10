@@ -83,7 +83,7 @@ def test_coerce_preserves_effort_for_unrecognized_model():
         "max",
         "brand-new-model-2099",
         provider_id="some-custom-provider",
-    ) == "xhigh"
+    ) == "max"
     # 'none' / unset still pass through unchanged for unknown models.
     assert cfg.coerce_reasoning_effort_for_model(
         "none", "some-unknown-model-xyz", provider_id="custom"
@@ -162,6 +162,25 @@ def test_provider_config_all_invalid_falls_through(monkeypatch):
         assert result != []
         assert "bogus" not in result
         assert "typo" not in result
+    finally:
+        if original is None:
+            cfg.cfg.pop("providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "providers", original)
+
+
+def test_codex_configured_reasoning_efforts_still_apply_model_filter(monkeypatch):
+    original = cfg.cfg.get("providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "providers",
+        {"openai-codex": {"reasoning_efforts": ["none", "xhigh", "max"]}},
+    )
+    try:
+        assert cfg.resolve_model_reasoning_efforts(
+            "gpt-5.6-sol",
+            provider_id="openai-codex",
+        ) == ["none", "xhigh"]
     finally:
         if original is None:
             cfg.cfg.pop("providers", None)
@@ -313,8 +332,8 @@ def test_get_reasoning_status_for_reasoning_capable_model_has_no_max():
 
 
 def test_get_reasoning_status_coerces_stale_max_to_xhigh(monkeypatch):
-    """A previously-saved `agent.reasoning_effort: max` (no longer a valid effort)
-    must be reported as the coerced `xhigh`, not the raw stale `max`, so the
+    """A saved `max` unsupported by the active GPT-5.5 Codex model must be
+    reported as the coerced `xhigh`, not the raw `max`, so the
     boot/status/chip read paths agree with what streaming actually sends."""
     monkeypatch.setattr(
         cfg,

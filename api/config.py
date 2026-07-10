@@ -1089,10 +1089,29 @@ CLI_TOOLSETS = _resolve_cli_toolsets()
 
 # ── Model / provider discovery ───────────────────────────────────────────────
 
+# GPT-5.6 models exposed by Hermes Agent. The -pro variants select OpenAI's
+# Pro reasoning mode through the agent's model catalog.
+_GPT56_MODELS = (
+    ("gpt-5.6-sol", "GPT-5.6 Sol"),
+    ("gpt-5.6-sol-pro", "GPT-5.6 Sol Pro"),
+    ("gpt-5.6-terra", "GPT-5.6 Terra"),
+    ("gpt-5.6-terra-pro", "GPT-5.6 Terra Pro"),
+    ("gpt-5.6-luna", "GPT-5.6 Luna"),
+    ("gpt-5.6-luna-pro", "GPT-5.6 Luna Pro"),
+)
+_GPT56_MODEL_IDS = frozenset(model_id for model_id, _label in _GPT56_MODELS)
+_OPENROUTER_GPT56_MODEL_IDS = frozenset(
+    f"openai/{model_id}" for model_id in _GPT56_MODEL_IDS
+)
+
 # Hardcoded fallback models (used when no config.yaml or agent is available)
 # Also used as the OpenRouter model list — keep this curated to current, widely-used models.
 _FALLBACK_MODELS = [
     # OpenAI
+    *[
+        {"provider": "OpenRouter", "id": f"openai/{model_id}", "label": label}
+        for model_id, label in _GPT56_MODELS
+    ],
     {"provider": "OpenAI",    "id": "openai/gpt-5.4-mini",                "label": "GPT-5.4 Mini"},
     {"provider": "OpenAI",    "id": "openai/gpt-5.4",                     "label": "GPT-5.4"},
     # Anthropic — 4.6 flagship + 4.5 generation
@@ -1633,12 +1652,21 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-api": [
+        {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
+        {"id": "gpt-5.6-sol-pro", "label": "GPT-5.6 Sol Pro"},
+        {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.6-terra-pro", "label": "GPT-5.6 Terra Pro"},
+        {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna"},
+        {"id": "gpt-5.6-luna-pro", "label": "GPT-5.6 Luna Pro"},
         {"id": "gpt-5.5",      "label": "GPT-5.5"},
         {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-codex": [
+        {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
+        {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna"},
         {"id": "gpt-5.5", "label": "GPT-5.5"},
         {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4", "label": "GPT-5.4"},
@@ -1663,6 +1691,12 @@ _PROVIDER_MODELS = {
         {"id": "deepseek-reasoner", "label": "DeepSeek Reasoner (legacy)"},
     ],
     "nous": [
+        {"id": "@nous:openai/gpt-5.6-sol", "label": "GPT-5.6 Sol (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-sol-pro", "label": "GPT-5.6 Sol Pro (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-terra", "label": "GPT-5.6 Terra (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-terra-pro", "label": "GPT-5.6 Terra Pro (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-luna", "label": "GPT-5.6 Luna (via Nous)"},
+        {"id": "@nous:openai/gpt-5.6-luna-pro", "label": "GPT-5.6 Luna Pro (via Nous)"},
         {"id": "@nous:anthropic/claude-opus-4.6",     "label": "Claude Opus 4.6 (via Nous)"},
         {"id": "@nous:anthropic/claude-sonnet-4.6",   "label": "Claude Sonnet 4.6 (via Nous)"},
         {"id": "@nous:openai/gpt-5.4-mini",           "label": "GPT-5.4 Mini (via Nous)"},
@@ -2449,16 +2483,28 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
 def _get_provider_base_url(provider_id):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
-    Checks two locations, in order:
-      1. ``cfg["providers"][<provider_id>]["base_url"]`` — the explicit
+    Checks three locations, in order:
+      1. Named ``custom_providers`` entries for ``custom:<slug>`` IDs.
+      2. ``cfg["providers"][<provider_id>]["base_url"]`` — the explicit
          per-provider override.
-      2. ``cfg["model"]["base_url"]`` — falls back here when
+      3. ``cfg["model"]["base_url"]`` — falls back here when
          ``cfg["model"]["provider"] == provider_id``. This is the historical
          shape (the model block carries both the active provider AND the
          base URL for that provider in a single record).
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
+    provider_id = str(provider_id or "").strip().lower()
+    if provider_id.startswith("custom:"):
+        for entry in cfg.get("custom_providers", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            slug = _custom_provider_slug_from_name(entry.get("name"))
+            if slug != provider_id:
+                continue
+            custom_base = str(entry.get("base_url") or "").strip().rstrip("/")
+            return custom_base or None
+
     prov_cfg = _get_provider_cfg(provider_id)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
@@ -2997,7 +3043,9 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # importing from the agent tree (which may not be installed).  Any drift here
 # will show up in the shared test suite since both sides accept the same set.
 # Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+_DEFAULT_REASONING_EFFORTS = VALID_REASONING_EFFORTS[:-1]
+GPT56_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
 
 def parse_reasoning_effort(effort):
@@ -3212,7 +3260,7 @@ def _filter_reasoning_efforts_for_provider(
     normalized = [
         str(eff).strip().lower()
         for eff in efforts
-        if str(eff).strip().lower() in VALID_REASONING_EFFORTS
+        if str(eff).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}
     ]
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
@@ -3223,6 +3271,16 @@ def _filter_reasoning_efforts_for_provider(
         if bare.startswith("gpt-5"):
             return [eff for eff in normalized if eff != "max"]
     return normalized
+
+
+def _gpt56_reasoning_efforts(model_id: str, provider_id: str) -> list[str] | None:
+    """Return OpenAI's first-party GPT-5.6 effort contract when applicable."""
+    bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    if bare in _GPT56_MODEL_IDS:
+        return _filter_reasoning_efforts_for_provider(
+            list(GPT56_REASONING_EFFORTS), model_id, provider_id
+        )
+    return None
 
 
 def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
@@ -3236,13 +3294,13 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         if bare.startswith(("o1", "o3", "o4")):
             return ["low", "medium", "high"]
         return _filter_reasoning_efforts_for_provider(
-            list(VALID_REASONING_EFFORTS), model, provider
+            list(_DEFAULT_REASONING_EFFORTS), model, provider
         )
     if provider in {"copilot", "github-copilot"}:
         if bare.startswith(("gpt-5", "o1", "o3", "o4")):
             if bare.startswith(("o1", "o3", "o4")):
                 return ["low", "medium", "high"]
-            return list(VALID_REASONING_EFFORTS)
+            return list(_DEFAULT_REASONING_EFFORTS)
     prefixes = (
         "deepseek/",
         "anthropic/",
@@ -3255,15 +3313,15 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         "xiaomi/",
     )
     if any(model.startswith(prefix) for prefix in prefixes):
-        return list(VALID_REASONING_EFFORTS)
+        return list(_DEFAULT_REASONING_EFFORTS)
     if _nested_gateway_route_reasoning(model):
-        return list(VALID_REASONING_EFFORTS)
+        return list(_DEFAULT_REASONING_EFFORTS)
     # Named custom providers often rewrite model ids with dots, underscores, or
     # extra vendor namespaces. Normalize those shapes before applying family-level
     # reasoning heuristics so "deepseek.v3.2", "deepseek_v4_flash", and
     # "vendor.deepseek.v3.2" are treated consistently.
     if any(_candidate_supports_reasoning(candidate) for candidate in _reasoning_name_candidates(bare)):
-        return list(VALID_REASONING_EFFORTS)
+        return list(_DEFAULT_REASONING_EFFORTS)
     return []
 
 
@@ -3294,7 +3352,7 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     supports_reasoning = getattr(capabilities, "supports_reasoning", None)
     if supports_reasoning is True:
         return _filter_reasoning_efforts_for_provider(
-            list(VALID_REASONING_EFFORTS), model, provider
+            list(_DEFAULT_REASONING_EFFORTS), model, provider
         )
     if supports_reasoning is False:
         return []
@@ -3498,6 +3556,8 @@ def resolve_model_reasoning_efforts(
             provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
+    if not resolved_base_url and provider:
+        resolved_base_url = _get_provider_base_url(provider)
 
     # IDE-copilot providers never expose reasoning effort options.
     # Guard early so a stray config entry can't override this.
@@ -3514,8 +3574,8 @@ def resolve_model_reasoning_efforts(
 
     # 0. Provider config: providers.<name>.reasoning_efforts or named
     # custom_providers[].reasoning_efforts. When the user has explicitly listed
-    # valid efforts for a provider, return that list directly — no heuristics,
-    # no models.dev lookup.
+    # valid efforts for a provider, apply model/provider transport constraints
+    # and return that list directly — no heuristics, no models.dev lookup.
     # Only short-circuits when the filtered list is non-empty; an all-invalid
     # list (e.g. typos) falls through to heuristics instead of hiding reasoning.
     _re_list = None
@@ -3530,9 +3590,9 @@ def resolve_model_reasoning_efforts(
             if isinstance(_prov_entry, dict):
                 _re_list = _prov_entry.get("reasoning_efforts")
         if isinstance(_re_list, list) and _re_list:
-            _filtered = [str(x).strip().lower() for x in _re_list
-                         if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
-            _filtered = list(dict.fromkeys(_filtered))
+            _filtered = _filter_reasoning_efforts_for_provider(
+                _re_list, hinted_model, provider
+            )
             if _filtered:
                 return _filtered
     except Exception:
@@ -3580,6 +3640,10 @@ def resolve_model_reasoning_efforts(
             return []
         return []
 
+    gpt56_efforts = _gpt56_reasoning_efforts(hinted_model, provider)
+    if gpt56_efforts is not None:
+        return gpt56_efforts
+
     # _models_dev_reasoning_efforts already applies the provider/model filter
     # internally, so it is returned as-is here (filtering again would be
     # redundant — the filter is idempotent but the double pass obscures flow).
@@ -3602,9 +3666,6 @@ def coerce_reasoning_effort_for_model(
         return ""
     if raw == "none":
         return "none"
-    accepts_max_as_xhigh = raw == "max"
-    if accepts_max_as_xhigh:
-        raw = "xhigh"
     if raw not in VALID_REASONING_EFFORTS:
         return ""
     supported = resolve_model_reasoning_efforts(
@@ -3620,17 +3681,15 @@ def coerce_reasoning_effort_for_model(
     # those paths return a NON-empty clamped set, so the degrade ladder below
     # still applies. When the set is empty we can't tell "unsupported" from
     # "unknown", so preserve the user's configured effort verbatim where it is
-    # still valid. A stale 'max' value is no longer parser-valid on the WebUI
-    # side, so degrade that unknown-model case to xhigh instead of silently
-    # dropping reasoning later in parse_reasoning_effort(). (#3505 review)
+    # still valid.
     if not supported:
-        return "xhigh" if accepts_max_as_xhigh else raw
+        return raw
     if raw in supported:
-        return "xhigh" if accepts_max_as_xhigh else raw
+        return raw
     # Degrade to the closest *lower* supported level instead of silently
     # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
     # target model caps below the configured effort. Never escalate.
-    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..xhigh
+    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..max
     try:
         raw_idx = ladder.index(raw)
     except ValueError:
@@ -3638,9 +3697,12 @@ def coerce_reasoning_effort_for_model(
     for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
         if level in supported:
             return level
-    # raw is below every supported level (shouldn't happen for a non-empty set
-    # that excludes raw, but be safe): preserve the configured effort rather
-    # than blank it.
+    # No lower enabled effort exists. Prefer the model's explicit disabled
+    # state over escalating to a higher effort (for example GPT-5.6 minimal -> none).
+    if "none" in supported:
+        return "none"
+    # Partially-known provider metadata may omit lower values and `none`; keep
+    # the valid configured value rather than silently disabling reasoning.
     return raw
 
 
@@ -3684,9 +3746,7 @@ def get_reasoning_status(
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         # Report the COERCED effort (not the raw config value) so boot/status/chip
-        # read paths agree with what streaming actually sends — e.g. a stale
-        # `reasoning_effort: max` surfaces as `xhigh`, not the now-unsupported `max`.
-        # (Codex review of the drop-max alignment.)
+        # read paths agree with what streaming actually sends.
         "reasoning_effort": coerce_reasoning_effort_for_model(
             str(effort_raw or "").strip().lower(),
             resolve_model,
@@ -3805,7 +3865,7 @@ def set_reasoning_effort(
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
-    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh``).
+    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
     Raises ``ValueError`` on an unrecognised level so callers can return 400.
     """
     raw = str(effort or "").strip().lower()
@@ -6933,15 +6993,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     except Exception:
                         logger.debug("OpenRouter free-tier live fetch unavailable; using fallback")
 
+                    fallback_models = [
+                        {"id": m["id"], "label": m["label"]}
+                        for m in _FALLBACK_MODELS
+                        if m.get("provider") == "OpenRouter"
+                    ]
                     if not raw_models:
                         # Both live fetches failed — fall back to the curated static list.
-                        # Deepcopy so dedup/prefix mutation downstream does not bleed
+                        # Copy entries so dedup/prefix mutation downstream does not bleed
                         # into the module-level catalog.
-                        raw_models = [
-                            {"id": m["id"], "label": m["label"]}
-                            for m in _FALLBACK_MODELS
-                            if m.get("provider") == "OpenRouter"
-                        ]
+                        raw_models = fallback_models
+                    else:
+                        # Live provider catalogs can lag newly released model IDs. Keep
+                        # the verified GPT-5.6 entries available without replacing the
+                        # rest of the live catalog.
+                        for _entry in fallback_models:
+                            if (
+                                _entry["id"] in _OPENROUTER_GPT56_MODEL_IDS
+                                and _entry["id"] not in seen_ids
+                            ):
+                                seen_ids.add(_entry["id"])
+                                raw_models.append(_entry)
 
                     _append_picker_group("OpenRouter", "openrouter", raw_models)
                 elif pid == "ollama-cloud":

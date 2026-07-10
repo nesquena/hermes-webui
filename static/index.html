@@ -654,6 +654,14 @@
                 <span class="composer-model-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
               <select id="modelSelect" class="composer-model-select" title="Conversation model" aria-hidden="true" tabindex="-1">
+              <optgroup label="OpenAI API" data-provider="openai-api">
+                <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
+                <option value="gpt-5.6-sol-pro">GPT-5.6 Sol Pro</option>
+                <option value="gpt-5.6-terra">GPT-5.6 Terra</option>
+                <option value="gpt-5.6-terra-pro">GPT-5.6 Terra Pro</option>
+                <option value="gpt-5.6-luna">GPT-5.6 Luna</option>
+                <option value="gpt-5.6-luna-pro">GPT-5.6 Luna Pro</option>
+              </optgroup>
               <optgroup label="OpenAI">
                 <option value="openai/gpt-5.4-mini">GPT-5.4 Mini</option>
                 <option value="openai/gpt-4o">GPT-4o</option>
@@ -759,6 +767,7 @@
             <div class="reasoning-option" data-effort="medium">Medium</div>
             <div class="reasoning-option" data-effort="high">High</div>
             <div class="reasoning-option" data-effort="xhigh">Extra High</div>
+            <div class="reasoning-option" data-effort="max">Max</div>
           </div>
           <div class="composer-toolsets-dropdown" id="composerToolsetsDropdown">
             <div class="toolsets-dropdown-desc" id="toolsetsDropdownDesc"></div>

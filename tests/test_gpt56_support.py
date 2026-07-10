@@ -1,0 +1,157 @@
+"""GPT-5.6 model catalog and reasoning capability contracts."""
+
+import re
+from pathlib import Path
+
+import pytest
+
+from api import config
+
+
+GPT56_MODEL_IDS = {
+    "gpt-5.6-sol",
+    "gpt-5.6-sol-pro",
+    "gpt-5.6-terra",
+    "gpt-5.6-terra-pro",
+    "gpt-5.6-luna",
+    "gpt-5.6-luna-pro",
+}
+
+
+def test_openai_api_fallback_includes_all_gpt56_models():
+    model_ids = {entry["id"] for entry in config._PROVIDER_MODELS["openai-api"]}
+
+    assert GPT56_MODEL_IDS <= model_ids
+
+
+def test_bare_openai_fallback_excludes_gpt56_models():
+    model_ids = {entry["id"] for entry in config._PROVIDER_MODELS["openai"]}
+
+    assert GPT56_MODEL_IDS.isdisjoint(model_ids)
+
+
+def test_codex_fallback_includes_only_supported_gpt56_models():
+    model_ids = {entry["id"] for entry in config._PROVIDER_MODELS["openai-codex"]}
+
+    assert model_ids & GPT56_MODEL_IDS == {
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    }
+
+
+def test_nous_fallback_includes_all_gpt56_models():
+    model_ids = {entry["id"] for entry in config._PROVIDER_MODELS["nous"]}
+
+    assert {f"@nous:openai/{model_id}" for model_id in GPT56_MODEL_IDS} <= model_ids
+
+
+def test_openrouter_fallback_includes_all_gpt56_models():
+    model_ids = {
+        entry["id"]
+        for entry in config._FALLBACK_MODELS
+        if entry["provider"] == "OpenRouter"
+    }
+
+    assert {f"openai/{model_id}" for model_id in GPT56_MODEL_IDS} <= model_ids
+
+
+def test_bare_openai_catalog_excludes_gpt56_models():
+    model_ids = {
+        entry["id"]
+        for entry in config._FALLBACK_MODELS
+        if entry["provider"] == "OpenAI"
+    }
+
+    assert {f"openai/{model_id}" for model_id in GPT56_MODEL_IDS}.isdisjoint(model_ids)
+
+
+def test_static_model_fallback_includes_all_gpt56_models():
+    html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+    group = re.search(
+        r'<optgroup label="OpenAI API" data-provider="openai-api">(.*?)</optgroup>',
+        html,
+        re.S,
+    )
+
+    assert group is not None
+    for model_id in GPT56_MODEL_IDS:
+        assert f'value="{model_id}"' in group.group(1)
+        assert f'value="openai/{model_id}"' not in html
+
+
+@pytest.mark.parametrize(
+    ("model_id", "provider"),
+    [
+        ("gpt-5.6-sol", "openai-api"),
+        ("openai/gpt-5.6-terra", "openrouter"),
+        ("@nous:openai/gpt-5.6-luna", "nous"),
+    ],
+)
+def test_gpt56_exposes_its_exact_reasoning_efforts(monkeypatch, model_id, provider):
+    # GPT-5.6 is newer than models.dev metadata in some installations. Its
+    # first-party capability contract must win over a stale negative result.
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+
+    assert config.resolve_model_reasoning_efforts(model_id, provider_id=provider) == [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+
+
+def test_gpt56_codex_omits_unsupported_max(monkeypatch):
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+
+    assert config.resolve_model_reasoning_efforts(
+        "gpt-5.6-sol", provider_id="openai-codex"
+    ) == ["none", "low", "medium", "high", "xhigh"]
+
+
+def test_gpt56_max_is_preserved_for_direct_openai(monkeypatch):
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+
+    assert config.coerce_reasoning_effort_for_model(
+        "max", "gpt-5.6-sol", provider_id="openai-api"
+    ) == "max"
+
+
+def test_gpt56_max_degrades_for_codex(monkeypatch):
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+
+    assert config.coerce_reasoning_effort_for_model(
+        "max", "gpt-5.6-sol", provider_id="openai-codex"
+    ) == "xhigh"
+
+
+@pytest.mark.parametrize("provider_id", ["openai-api", "openai-codex"])
+def test_gpt56_minimal_degrades_to_none(monkeypatch, provider_id):
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+
+    assert config.coerce_reasoning_effort_for_model(
+        "minimal", "gpt-5.6-sol", provider_id=provider_id
+    ) == "none"
+
+
+def test_max_is_not_advertised_for_older_reasoning_models():
+    assert config._heuristic_reasoning_efforts(
+        "openai/gpt-5.5", "openrouter"
+    ) == list(config._DEFAULT_REASONING_EFFORTS)
+
+
+def test_unknown_gpt56_variant_does_not_inherit_max(monkeypatch):
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: None)
+
+    for model_id in ("gpt-5.6", "gpt-5.6-mini", "gpt-5.6-sol-preview"):
+        assert "max" not in config.resolve_model_reasoning_efforts(
+            model_id, provider_id="openai-api"
+        )
+
+
+def test_reasoning_dropdown_includes_max():
+    html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert 'data-effort="max"' in html

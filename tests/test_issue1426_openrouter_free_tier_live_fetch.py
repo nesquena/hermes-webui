@@ -138,6 +138,39 @@ def test_openrouter_group_uses_live_fetch_when_available(monkeypatch):
         "free pricing model must surface even without :free suffix"
 
 
+def test_live_openrouter_catalog_is_augmented_with_gpt56(monkeypatch):
+    """A non-empty but stale live catalog must not hide current GPT-5.6 IDs."""
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeResponse(_make_or_payload()),
+    )
+
+    import sys
+
+    fake_module = type(sys)("hermes_cli.models")
+    fake_module.fetch_openrouter_models = lambda **_kwargs: [
+        ("anthropic/claude-sonnet-4.6", "")
+    ]
+    fake_module.provider_model_ids = lambda *_args, **_kwargs: []
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_module)
+
+    grouped = _get_grouped_models()
+    or_group = next(g for g in grouped if g.get("provider_id") == "openrouter")
+    model_ids = {
+        model["id"]
+        for bucket_name in ("models", "extra_models")
+        for model in or_group.get(bucket_name, [])
+    }
+    expected = {
+        f"openai/gpt-5.6-{name}{suffix}"
+        for name in ("sol", "terra", "luna")
+        for suffix in ("", "-pro")
+    }
+
+    assert expected <= model_ids
+
+
 def test_openrouter_falls_back_to_static_when_live_fails(monkeypatch):
     """If both hermes_cli.fetch and the direct urlopen raise, the picker
     must fall back to the hardcoded `_FALLBACK_MODELS` list — never empty."""
@@ -161,8 +194,13 @@ def test_openrouter_falls_back_to_static_when_live_fails(monkeypatch):
     or_group = next((g for g in grouped if g.get("provider_id") == "openrouter"), None)
     assert or_group is not None, "openrouter group must still be present in fallback path"
     assert len(or_group["models"]) > 0, "fallback must produce a non-empty model list"
-    # The hardcoded free-tier entries MUST be in the fallback
-    fallback_ids = {m["id"] for m in or_group["models"]}
+    # The hardcoded fallback entries MUST remain available across both the
+    # initially visible tranche and the picker's overflow catalog.
+    fallback_ids = {
+        m["id"]
+        for bucket_name in ("models", "extra_models")
+        for m in or_group.get(bucket_name, [])
+    }
     # At least one of the contributor's hardcoded free-tier entries must be present
     expected_free_ids = {
         "openrouter/elephant-alpha",
@@ -174,6 +212,15 @@ def test_openrouter_falls_back_to_static_when_live_fails(monkeypatch):
     overlap = fallback_ids & expected_free_ids
     assert len(overlap) >= 3, \
         f"static fallback must include the contributor's hardcoded free-tier entries; got overlap={overlap}"
+    expected_gpt56_ids = {
+        "openai/gpt-5.6-sol",
+        "openai/gpt-5.6-sol-pro",
+        "openai/gpt-5.6-terra",
+        "openai/gpt-5.6-terra-pro",
+        "openai/gpt-5.6-luna",
+        "openai/gpt-5.6-luna-pro",
+    }
+    assert expected_gpt56_ids.issubset(fallback_ids)
 
 
 def test_free_tier_cap_prevents_picker_drowning(monkeypatch):
