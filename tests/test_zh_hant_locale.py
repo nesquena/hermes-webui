@@ -1,10 +1,10 @@
 from pathlib import Path
 import re
-from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.test_issue2147_profile_concept_help import ENGLISH_FALLBACK_OWNED_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
-PROFILE_CONCEPT_FALLBACK_KEYS = set(PROFILE_CONCEPT_KEYS)
+ENGLISH_FALLBACK_KEYS = set(ENGLISH_FALLBACK_OWNED_KEYS)
 
 
 def read(path: Path) -> str:
@@ -151,7 +151,7 @@ def test_zh_hant_locale_covers_english_keys_without_duplicates():
     duplicates = sorted({key for key in zh_keys if zh_keys.count(key) > 1})
     assert not duplicates, f"zh-Hant locale duplicate keys: {duplicates}"
 
-    missing = sorted((en_keys - set(zh_keys)) - PROFILE_CONCEPT_FALLBACK_KEYS)
+    missing = sorted((en_keys - set(zh_keys)) - ENGLISH_FALLBACK_KEYS)
     extra = sorted(set(zh_keys) - en_keys)
     assert not missing, f"zh-Hant locale missing keys: {missing}"
     assert not extra, f"zh-Hant locale extra keys: {extra}"
@@ -167,7 +167,7 @@ def test_zh_hant_locale_preserves_function_and_placeholder_shapes():
     placeholder_mismatches = []
     template_var_mismatches = []
     for key, en_value in en_values.items():
-        if key in PROFILE_CONCEPT_FALLBACK_KEYS:
+        if key in ENGLISH_FALLBACK_KEYS:
             continue
         assert key in zh_values, f"Missing zh-Hant translation: {key}"
         zh_value = zh_values[key]

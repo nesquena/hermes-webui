@@ -1,11 +1,11 @@
 from collections import Counter
 from pathlib import Path
 import re
-from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.test_issue2147_profile_concept_help import ENGLISH_FALLBACK_OWNED_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
-PROFILE_CONCEPT_FALLBACK_KEYS = set(PROFILE_CONCEPT_KEYS)
+ENGLISH_FALLBACK_KEYS = set(ENGLISH_FALLBACK_OWNED_KEYS)
 
 
 def read(path: Path) -> str:
@@ -102,7 +102,7 @@ def test_vietnamese_locale_covers_english_keys():
     en_keys = set(key_pattern.findall(extract_locale_block(src, "en")))
     vi_keys = set(key_pattern.findall(extract_locale_block(src, "vi")))
 
-    missing = sorted((en_keys - vi_keys) - PROFILE_CONCEPT_FALLBACK_KEYS)
+    missing = sorted((en_keys - vi_keys) - ENGLISH_FALLBACK_KEYS)
     assert not missing, f"Vietnamese locale missing keys: {missing}"
 
 
