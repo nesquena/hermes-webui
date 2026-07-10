@@ -681,7 +681,7 @@ def _trusted_group_profile_map() -> dict[str, str] | None:
                 'Ignoring invalid entry in %s; trusted-header auth falls back to default profile binding',
                 _TRUSTED_GROUP_PROFILE_MAP_ENV,
             )
-            return {}
+            continue
         mapping[group_name] = profile_name
     return mapping
 

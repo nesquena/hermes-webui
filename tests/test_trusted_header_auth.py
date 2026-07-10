@@ -212,6 +212,24 @@ def test_group_map_prefers_mapping_order_over_header_order(monkeypatch):
     assert auth.ensure_trusted_auth_session(second)["bound_profile"] == "ops"
 
 
+@pytest.mark.parametrize(
+    "group_map",
+    [
+        {"ops": "ops_profile", "": "admin"},
+        {"": "admin", "ops": "ops_profile"},
+    ],
+)
+def test_group_map_ignores_invalid_entry_without_discarding_valid_mappings(monkeypatch, group_map):
+    _trusted_env(
+        monkeypatch,
+        groups_header="Remote-Groups",
+        group_map=group_map,
+    )
+    handler = _Handler(headers={"Remote-User": "alice", "Remote-Groups": "ops"})
+
+    assert auth.ensure_trusted_auth_session(handler)["bound_profile"] == "ops_profile"
+
+
 def test_group_map_without_match_binds_default(monkeypatch):
     _trusted_env(
         monkeypatch,
