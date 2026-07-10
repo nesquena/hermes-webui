@@ -4144,22 +4144,65 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
 
 # ── Auxiliary model configuration ──────────────────────────────────────────
 
-# Canonical auxiliary task slots. Keep in sync with hermes_cli/config.py
-# DEFAULT_CONFIG["auxiliary"] and hermes_cli/web_server.py _AUX_TASK_SLOTS.
-AUX_TASK_SLOTS: tuple[str, ...] = (
- "vision",
- "web_extract",
- "compression",
- "session_search",
- "skills_hub",
- "approval",
- "mcp",
- "title_generation",
- "curator",
- "kanban_decomposer",
- "profile_describer",
- "triage_specifier",
+# Canonical auxiliary task catalog.
+# Keep in sync with hermes_cli/config.py DEFAULT_CONFIG["auxiliary"] and
+# hermes_cli/web_server.py _AUX_TASK_SLOTS.
+AUXILIARY_TASK_CATALOG: tuple[dict[str, str], ...] = (
+    {"key": "vision", "label": "Vision", "description": "image/screenshot analysis"},
+    {"key": "web_extract", "label": "Web extract", "description": "web page summarization"},
+    {"key": "compression", "label": "Compression", "description": "context summarization"},
+    {"key": "approval", "label": "Approval", "description": "smart command approval"},
+    {"key": "mcp", "label": "MCP", "description": "MCP tool reasoning"},
+    {"key": "title_generation", "label": "Title generation", "description": "session titles"},
+    {"key": "skills_hub", "label": "Skills hub", "description": "skills search/install"},
+    {"key": "curator", "label": "Curator", "description": "skill-usage review pass"},
+    {"key": "kanban_decomposer", "label": "Kanban decomposer", "description": "task decomposition"},
+    {"key": "profile_describer", "label": "Profile describer", "description": "profile summaries"},
+    {"key": "triage_specifier", "label": "Triage specifier", "description": "issue/task triage specs"},
 )
+
+AUX_TASK_SLOTS: tuple[str, ...] = tuple(item["key"] for item in AUXILIARY_TASK_CATALOG)
+
+# Slots removed from the WebUI catalog whose persisted assignments should be
+# discarded when the user explicitly resets all auxiliary-model routing.
+RETIRED_AUX_TASK_SLOTS: tuple[str, ...] = ("session_search",)
+
+
+def _aux_task_payload(task_key: str, entry: dict, fallback_label: str = "", fallback_description: str = "") -> dict:
+    """Build the API payload row for a single auxiliary task."""
+    if not isinstance(entry, dict):
+        entry = {}
+    return {
+        "task": task_key,
+        "provider": str(entry.get("provider") or "auto").strip() or "auto",
+        "model": str(entry.get("model") or "").strip(),
+        "base_url": str(entry.get("base_url") or "").strip(),
+        "timeout": entry.get("timeout", ""),
+        "download_timeout": entry.get("download_timeout", ""),
+        "max_concurrency": entry.get("max_concurrency", ""),
+        "extra_body": entry.get("extra_body") if isinstance(entry.get("extra_body"), dict) else {},
+        "api_key_set": bool(str(entry.get("api_key") or "").strip()),
+        "label": fallback_label,
+        "description": fallback_description,
+    }
+
+
+def _iter_auxiliary_task_rows() -> list[dict]:
+    """Return canonical auxiliary task payload rows."""
+    aux_cfg = cfg.get("auxiliary", {})
+    if not isinstance(aux_cfg, dict):
+        aux_cfg = {}
+
+    rows: list[dict] = []
+
+    # Canonical, first-class tasks from WebUI's catalog.
+    for slot in AUXILIARY_TASK_CATALOG:
+        key = str(slot["key"]).strip()
+        if not key:
+            continue
+        rows.append(_aux_task_payload(key, aux_cfg.get(key, {}), slot["label"], slot["description"]))
+
+    return rows
 
 
 def get_auxiliary_models() -> dict:
@@ -4181,26 +4224,7 @@ def get_auxiliary_models() -> dict:
     main_provider = str(model_cfg.get("provider") or "").strip()
     main_model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
 
-    aux_cfg = cfg.get("auxiliary", {})
-    if not isinstance(aux_cfg, dict):
-        aux_cfg = {}
-
-    tasks = []
-    for slot in AUX_TASK_SLOTS:
-        entry = aux_cfg.get(slot, {})
-        if not isinstance(entry, dict):
-            entry = {}
-        tasks.append({
-            "task": slot,
-            "provider": str(entry.get("provider") or "auto").strip(),
-            "model": str(entry.get("model") or "").strip(),
-            "base_url": str(entry.get("base_url") or "").strip(),
-            "timeout": entry.get("timeout", ""),
-            "download_timeout": entry.get("download_timeout", ""),
-            "max_concurrency": entry.get("max_concurrency", ""),
-            "extra_body": entry.get("extra_body") if isinstance(entry.get("extra_body"), dict) else {},
-            "api_key_set": bool(str(entry.get("api_key") or "").strip()),
-        })
+    tasks = _iter_auxiliary_task_rows()
 
     return {
         "tasks": tasks,
@@ -4238,20 +4262,19 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     Sensitive api_key values are write-only: get_auxiliary_models() only reports
     whether one is set.
     """
-    if task != "__reset__" and task not in AUX_TASK_SLOTS:
-        raise ValueError(
-            f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}"
-        )
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
-
+        if task != "__reset__" and task not in AUX_TASK_SLOTS:
+            raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
         if task == "__reset__":
             # Per-slot reset: set each slot to auto, preserving extra fields
             # (timeout, extra_body, api_key, base_url, download_timeout, etc.)
             aux_cfg = config_data.get("auxiliary", {})
             if not isinstance(aux_cfg, dict):
                 aux_cfg = {}
+            for retired_slot in RETIRED_AUX_TASK_SLOTS:
+                aux_cfg.pop(retired_slot, None)
             for slot in AUX_TASK_SLOTS:
                 slot_cfg = aux_cfg.get(slot, {})
                 if not isinstance(slot_cfg, dict):
