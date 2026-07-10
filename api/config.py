@@ -2687,8 +2687,17 @@ def resolve_model_provider(model_id: str) -> tuple:
         inner = model_id[1:]
         provider_hint, bare_model = inner.rsplit(":", 1)
         if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
-            _slug_rest = provider_hint[len("custom:"):]
-            if not _custom_slug_rest_looks_like_host_port(_slug_rest):
+            # The provider hint has too many colons — part of the model name
+            # may have been eaten by rsplit. Peel segments back until we
+            # match a known custom provider slug, or until we're down to a
+            # single "custom:<slug>" with one colon.
+            _known_slugs = _named_custom_provider_slugs(cfg)
+            while provider_hint.count(":") >= 2:
+                _slug_rest = provider_hint[len("custom:"):]
+                if _custom_slug_rest_looks_like_host_port(_slug_rest):
+                    break  # host:port slug — don't peel further
+                if provider_hint in _known_slugs:
+                    break  # matches a known custom provider — correct split
                 provider_hint, extra = provider_hint.rsplit(":", 1)
                 bare_model = f"{extra}:{bare_model}"
         elif (provider_hint not in _PROVIDER_MODELS
