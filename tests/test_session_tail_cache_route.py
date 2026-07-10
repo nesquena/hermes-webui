@@ -304,3 +304,134 @@ def test_messaging_session_tail_candidate_full_loads_before_merge(isolated_sessi
     assert payload["message_count"] == 400
     assert payload["messages"] == session.messages[-30:]
     assert payload["_messages_offset"] == 370
+
+
+def _eligibility_snapshot(messages, *, message_offset=1):
+    return {
+        "message_offset": message_offset,
+        "source_message_count": message_offset + len(messages),
+        "messages": messages,
+        "all_cached_timestamps_valid": True,
+        "all_tool_calls_positionable": True,
+        "anchor_scene_index": {},
+    }
+
+
+def test_tail_snapshot_eligibility_uses_canonical_renderable_rows():
+    exact_boundary = [
+        {"role": "user", "content": f"visible-{idx}"}
+        for idx in range(28)
+    ] + [
+        {"role": "assistant", "content": ""},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "matched result"},
+    ]
+    all_visible = [
+        {"role": "user", "content": f"visible-{idx}"}
+        for idx in range(300)
+    ]
+    renderable_underflow = [
+        {"role": "user", "content": f"visible-{idx}"}
+        for idx in range(29)
+    ] + [
+        {
+            "role": "assistant",
+            "content": "",
+            "_partial": True,
+            "reasoning": "cancelled activity",
+        },
+        {"role": "tool", "tool_call_id": "orphan", "content": "hidden result"},
+    ]
+
+    assert routes._session_tail_snapshot_eligible(
+        SimpleNamespace(),
+        _eligibility_snapshot(exact_boundary),
+        30,
+        None,
+    ) is True
+    assert routes._session_tail_snapshot_eligible(
+        SimpleNamespace(),
+        _eligibility_snapshot(all_visible),
+        30,
+        None,
+    ) is True
+    assert routes._session_tail_snapshot_eligible(
+        SimpleNamespace(),
+        _eligibility_snapshot(renderable_underflow),
+        30,
+        None,
+    ) is False
+
+
+def test_tail_snapshot_rejects_limits_above_fast_cohort():
+    messages = [
+        {"role": "user", "content": f"visible-{idx}"}
+        for idx in range(31)
+    ]
+
+    assert routes._session_tail_snapshot_eligible(
+        SimpleNamespace(),
+        _eligibility_snapshot(messages),
+        31,
+        None,
+    ) is False
+
+
+def test_bounded_tail_falls_back_when_raw_cache_underfills_renderable_limit(
+    isolated_session_store,
+    monkeypatch,
+):
+    monkeypatch.setattr(models, "_SESSION_TAIL_CACHE_MIN_SOURCE_BYTES", 1024 * 1024)
+    renderable = [
+        {
+            "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"synthetic-visible-{index}",
+            "timestamp": float(index + 1),
+        }
+        for index in range(40)
+    ]
+    hidden_tail = [
+        {
+            "role": "tool",
+            "content": "synthetic-hidden-output " * 180,
+            "timestamp": float(index + 41),
+            "tool_call_id": f"orphan-{index}",
+        }
+        for index in range(300)
+    ]
+    session = Session(
+        session_id="tail_route_renderable_underflow",
+        title="Synthetic renderable underflow",
+        model="test/model",
+        messages=renderable + hidden_tail,
+    )
+    session.save(touch_updated_at=False)
+    assert session.path.stat().st_size >= 1024 * 1024
+    assert models.session_tail_cache_path(session.session_id).exists()
+
+    original_load = Session.load
+    full_loads = []
+
+    def tracked_load(sid, *args, **kwargs):
+        full_loads.append(sid)
+        return original_load(sid, *args, **kwargs)
+
+    models.SESSIONS.clear()
+    with patch.object(Session, "load", side_effect=tracked_load):
+        fast = _invoke(session.session_id)["data"]["session"]
+
+    models.SESSIONS.clear()
+    with patch("api.routes.read_session_tail_cache", return_value=None), patch(
+        "api.routes.build_session_tail_cache_from_legacy_sidecar", return_value=None
+    ):
+        authoritative = _invoke(session.session_id)["data"]["session"]
+
+    assert full_loads == [session.session_id]
+    assert fast["messages"] == authoritative["messages"]
+    assert fast["_messages_offset"] == authoritative["_messages_offset"] == 10

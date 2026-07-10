@@ -8533,8 +8533,22 @@ def _session_tail_snapshot_eligible(session, snapshot, msg_limit, msg_before, is
         source_count = int(snapshot.get("source_message_count"))
     except (AttributeError, TypeError, ValueError):
         return False
-    if limit < 1 or limit > 300 or offset < 0 or source_count < offset:
+    if limit < 1 or limit > 30 or offset < 0 or source_count < offset:
         return False
+    cached_messages = snapshot.get("messages")
+    if not isinstance(cached_messages, list):
+        return False
+    if offset > 0:
+        cached_window, _cached_window_offset = _message_window_for_display(
+            cached_messages,
+            msg_limit=limit,
+        )
+        cached_renderable_count = sum(
+            _message_counts_as_renderable_for_window(message)
+            for message in cached_window
+        )
+        if cached_renderable_count < limit:
+            return False
     if snapshot.get("all_cached_timestamps_valid") is not True:
         return False
     if snapshot.get("all_tool_calls_positionable") is not True:
@@ -13026,8 +13040,9 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         try:
             from api.session_ops import session_status
-            _clear_stale_stream_state(get_session(sid, metadata_only=True))
-            return j(handler, session_status(sid))
+            session = get_session(sid, metadata_only=True)
+            _clear_stale_stream_state(session)
+            return j(handler, session_status(sid, session=session))
         except KeyError:
             return bad(handler, "Session not found", 404)
 
@@ -13223,7 +13238,7 @@ def handle_get(handler, parsed) -> bool:
         if not sid:
             return bad(handler, "session_id required")
         try:
-            s = get_session(sid)
+            s = get_session_for_file_ops(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
         from api.workspace_git import GitWorkspaceError, git_status
@@ -16819,21 +16834,10 @@ def _handle_list_dir(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session(sid)
+        s = get_session_for_file_ops(sid)
         workspace = s.workspace
     except KeyError:
-        # Fallback for CLI sessions not loaded in WebUI memory
-        try:
-            cli_meta = None
-            for cs in get_cli_sessions():
-                if cs["session_id"] == sid:
-                    cli_meta = cs
-                    break
-            if not cli_meta:
-                return bad(handler, "Session not found", 404)
-            workspace = cli_meta.get("workspace", "")
-        except Exception:
-            return bad(handler, "Session not found", 404)
+        return bad(handler, "Session not found", 404)
     try:
         rel_path = qs.get("path", ["."])[0]
         entries = list_dir(Path(workspace), rel_path)

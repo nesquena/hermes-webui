@@ -27,6 +27,7 @@ ROUTES_PY = ROOT / "api" / "routes.py"
 
 
 FILE_HANDLERS = [
+    "_handle_list_dir",
     "_handle_folder_download",
     "_handle_file_raw",
     "_handle_file_read",
@@ -117,6 +118,8 @@ def test_get_session_for_file_ops_webui_passthrough(models_module, monkeypatch):
 
     def fake_get_session(sid, metadata_only=False):
         called["get_session"] += 1
+        assert sid == "webui-sid"
+        assert metadata_only is True
         return sentinel
 
     def fake_profiles_match(session_profile, active_profile):
