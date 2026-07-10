@@ -192,3 +192,259 @@ def test_moa_gateway_chat_start_fails_closed(monkeypatch, tmp_path):
     body = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert handler.status == 409
     assert body["error"] == "MoA override is unavailable on gateway-backed sessions"
+
+
+def test_moa_gateway_configured_default_reaches_start_run(monkeypatch, tmp_path):
+    """Gateway sessions may use only the configured MoA default."""
+    import api.routes as routes
+
+    class _Handler:
+        def __init__(self):
+            import io
+
+            self.status = None
+            self.response_headers = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.response_headers.append((key, value))
+
+        def end_headers(self):
+            self.response_headers.append(("__end__", ""))
+
+    class _Session:
+        session_id = "sess-moa-gateway-default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "moa"
+        profile = "default"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+
+    captured = {}
+
+    def start_run(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(routes, "get_session", lambda _sid: _Session())
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    for name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    config_snapshot = {
+        "chat_backend": "gateway",
+        "model": {"provider": "moa", "default": "@moa:moa-configured"},
+    }
+    monkeypatch.setattr(routes, "get_config", lambda: config_snapshot)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+
+    routes._handle_chat_start(
+        _Handler(),
+        {
+            "session_id": "sess-moa-gateway-default",
+            "message": "diagnose issue",
+            "workspace": str(tmp_path),
+            "model": "moa/moa-configured",
+            "model_provider": "moa",
+        },
+    )
+
+    assert captured["model"] == "moa-configured"
+    assert captured["model_provider"] == "moa"
+    assert "moa_config" not in captured
+
+
+def test_moa_gateway_explicit_configured_default_fails_closed(monkeypatch, tmp_path):
+    """A browser picker cannot select the gateway's MoA default."""
+    import api.routes as routes
+
+    class _Handler:
+        def __init__(self):
+            import io
+
+            self.status = None
+            self.response_headers = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.response_headers.append((key, value))
+
+        def end_headers(self):
+            self.response_headers.append(("__end__", ""))
+
+    class _Session:
+        session_id = "sess-moa-gateway-picker"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "moa"
+        profile = "default"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+
+    def start_run(*_args, **_kwargs):
+        raise AssertionError("explicit MoA picker selection must fail before starting a run")
+
+    monkeypatch.setattr(routes, "get_session", lambda _sid: _Session())
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    for name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    config_snapshot = {
+        "chat_backend": "gateway",
+        "model": {"provider": "moa", "default": "@moa:moa-configured"},
+    }
+    monkeypatch.setattr(routes, "get_config", lambda: config_snapshot)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+
+    handler = _Handler()
+    routes._handle_chat_start(
+        handler,
+        {
+            "session_id": "sess-moa-gateway-picker",
+            "message": "diagnose issue",
+            "workspace": str(tmp_path),
+            "model": "moa/moa-configured",
+            "model_provider": "moa",
+            "explicit_model_pick": True,
+        },
+    )
+
+    body = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert handler.status == 409
+    assert body["error"] == "MoA override is unavailable on gateway-backed sessions"
+
+
+def test_moa_gateway_spoofed_provider_fails_closed(monkeypatch, tmp_path):
+    """A client cannot claim MoA for a model outside the configured default."""
+    import api.routes as routes
+
+    class _Handler:
+        def __init__(self):
+            import io
+
+            self.status = None
+            self.response_headers = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.response_headers.append((key, value))
+
+        def end_headers(self):
+            self.response_headers.append(("__end__", ""))
+
+    class _Session:
+        session_id = "sess-moa-gateway-spoofed"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        profile = "default"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+
+    def start_run(*_args, **_kwargs):
+        raise AssertionError("spoofed MoA provider must fail before starting a run")
+
+    monkeypatch.setattr(routes, "get_session", lambda _sid: _Session())
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    for name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    config_snapshot = {
+        "chat_backend": "gateway",
+        "model": {"provider": "moa", "default": "@moa:moa-configured"},
+    }
+    monkeypatch.setattr(routes, "get_config", lambda: config_snapshot)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+
+    handler = _Handler()
+    routes._handle_chat_start(
+        handler,
+        {
+            "session_id": "sess-moa-gateway-spoofed",
+            "message": "diagnose issue",
+            "workspace": str(tmp_path),
+            "model": "moa/moa-spoofed",
+            "model_provider": "moa",
+        },
+    )
+
+    body = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert handler.status == 409
+    assert body["error"] == "MoA override is unavailable on gateway-backed sessions"
+
+
+def test_gateway_non_moa_model_reaches_start_run(monkeypatch, tmp_path):
+    """Gateway sends keep their non-MoA provider when the default uses MoA."""
+    import api.routes as routes
+
+    class _Handler:
+        def __init__(self):
+            import io
+
+            self.status = None
+            self.response_headers = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.response_headers.append((key, value))
+
+        def end_headers(self):
+            self.response_headers.append(("__end__", ""))
+
+    class _Session:
+        session_id = "sess-gateway-non-moa"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        profile = "default"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+
+    captured = {}
+
+    def start_run(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(routes, "get_session", lambda _sid: _Session())
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    for name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    config_snapshot = {
+        "chat_backend": "gateway",
+        "model": {"provider": "moa", "default": "@moa:moa-configured"},
+    }
+    monkeypatch.setattr(routes, "get_config", lambda: config_snapshot)
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
+
+    routes._handle_chat_start(
+        _Handler(),
+        {
+            "session_id": "sess-gateway-non-moa",
+            "message": "diagnose issue",
+            "workspace": str(tmp_path),
+            "model": "gpt-5.5",
+            "model_provider": "openai-codex",
+        },
+    )
+
+    assert captured["model_provider"] == "openai-codex"
+    assert "moa_config" not in captured

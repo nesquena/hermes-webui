@@ -21986,7 +21986,8 @@ def _handle_chat_start(handler, body, diag=None):
         _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
-        gateway_chat_enabled = webui_gateway_chat_enabled(get_config())
+        config_snapshot = get_config()
+        gateway_chat_enabled = webui_gateway_chat_enabled(config_snapshot)
         if body.get("moa_config"):
             if gateway_chat_enabled:
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
@@ -22033,9 +22034,23 @@ def _handle_chat_start(handler, body, diag=None):
             explicit_model_pick=explicit_model_pick,
             profile_provider=catalog_profile_provider,
         )
-        if model_provider == "moa" and moa_config is None:
-            if webui_gateway_chat_enabled(get_config()):
+        if model_provider == "moa" and gateway_chat_enabled:
+            from api.config import get_effective_default_model
+
+            model_config = config_snapshot.get("model") if isinstance(config_snapshot, dict) else None
+            configured_provider = _clean_session_model_provider(
+                model_config.get("provider") if isinstance(model_config, dict) else None
+            )
+            configured_default, _configured_default_provider, _configured_default_normalized = (
+                _moa_fast_path_model_state(get_effective_default_model(config_snapshot))
+            )
+            if (
+                configured_provider != "moa"
+                or model != configured_default
+                or explicit_model_pick
+            ):
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
+        elif model_provider == "moa" and moa_config is None:
             from api.commands import resolve_moa_config
 
             try:
