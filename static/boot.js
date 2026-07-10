@@ -750,20 +750,31 @@ function _micToastKeyForRecognitionError(error){
   }
 
   function _commitTranscript(text, prefixOverride){
-    // `prefixOverride` lets async paths snapshot the textarea content before
-    // _setRecording(false) clears _prefix — without it, server-STT commits
-    // would see _prefix='' and replace instead of append.
-    const _p = prefixOverride !== undefined ? prefixOverride : _prefix;
+    // `prefixOverride` is the composer content captured at recording start
+    // (only used by the sync browser-SR path to rebuild the prefix without
+    // racing the recorder.onstop clear). The async server-STT path passes
+    // a snapshot so this function has a fallback if _prefix is empty.
+    //
+    // Race-condition fix (Greptile 4/5 finding): the async path previously
+    // appended to `_prefix` (the stale snapshot), which clobbered any user
+    // keystrokes made during the ~1s transcription round-trip. We now append
+    // to the live `ta.value` whenever the textarea is non-empty, so the
+    // user's mid-transcription edits are preserved.
     const clean=(text||'').trim();
     let committed;
     if(!clean){
       committed = ta.value;
-    }else if(_dictationAppend && _p){
-      // Append mode (default): preserve existing composer text, glue with a
-      // space when the prefix doesn't already end with whitespace.
-      committed = (!_p.endsWith(' ') && !_p.endsWith('\n'))
-        ? _p+' '+clean.trimStart()
-        : _p+clean;
+    }else if(_dictationAppend){
+      // Prefer the live composer state. Fall back to the snapshot only when
+      // the textarea is genuinely empty (original path — nothing to race with).
+      const base = ta.value || (prefixOverride !== undefined ? prefixOverride : _prefix);
+      if(!base){
+        committed = clean;
+      }else{
+        committed = (!base.endsWith(' ') && !base.endsWith('\n'))
+          ? base+' '+clean.trimStart()
+          : base+clean;
+      }
     }else{
       // Replace mode (explicit): dictated text overwrites the composer.
       committed = clean;
