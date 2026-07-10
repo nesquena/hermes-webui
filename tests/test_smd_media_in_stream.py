@@ -204,6 +204,20 @@ class TestSmdMediaInStream(unittest.TestCase):
         self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)
         self.assertIn("unmatchedTail = candidate", block)
 
+    def test_media_ref_boundary_extension_list_matches_renderer_formats(self):
+        # Keep the streaming boundary whitelist aligned with ui.js media
+        # renderer extension families. Otherwise complete refs at chunk end
+        # (e.g. MEDIA:clip.aac) can be buffered and then dropped on stream end.
+        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
+        block = MESSAGES_JS[idx:idx + 900]
+        for ext in [
+            "png", "jpe?g", "gif", "webp", "bmp", "ico", "svg", "avif",
+            "mp4", "webm", "mov", "m4v", "mkv", "avi", "ogv",
+            "mp3", "wav", "ogg", "m4a", "aac", "wma", "opus", "flac", "oga",
+            "pdf", "html?", "csv", "diff", "patch", "excalidraw",
+        ]:
+            self.assertIn(ext, block)
+
     def test_tail_buffer_size_cap(self):
         # Defensive: a runaway tail buffer from a malformed stream could
         # exhaust memory. The implementation must enforce a max length on
