@@ -1061,7 +1061,6 @@ def check_auth(handler, parsed) -> bool:
     has_session = bool(cookie_val and verify_session(cookie_val))
     if parsed.path == '/api/auth/logout':
         if has_session:
-            ensure_trusted_auth_session(handler)
             return True
         body = b'{"error":"Authentication required"}'
         handler.send_response(401)

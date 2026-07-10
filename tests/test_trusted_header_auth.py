@@ -610,6 +610,45 @@ def test_logout_clears_auth_and_profile_cookies(monkeypatch):
     assert auth.verify_session(cookie) is False
 
 
+def test_logout_identity_rotation_preserves_csrf_validation(monkeypatch):
+    _trusted_env(
+        monkeypatch,
+        groups_header="Remote-Groups",
+        group_map={"alice-group": "alice", "bob-group": "bob"},
+        logout_url="https://auth.example.com/logout",
+    )
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile="alice",
+    )
+    handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={cookie}",
+            "Remote-User": "bob",
+            "Remote-Groups": "bob-group",
+            auth.CSRF_HEADER_NAME: auth.csrf_token_for_session(cookie),
+        }
+    )
+    handler.command = "POST"
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {})
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/auth/logout", query="")) is True
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/auth/logout", query=""))
+
+    payload = handler.json_body()
+    assert payload["ok"] is True
+    assert payload["trusted_logout_url"] == "https://auth.example.com/logout"
+    assert handler._trusted_auth_session_info["username"] == "bob"
+    assert handler._trusted_auth_session_cookie_value != cookie
+    assert auth.verify_session(cookie) is False
+    assert auth.verify_session(handler._trusted_auth_session_cookie_value) is False
+    set_cookies = handler.header_values("Set-Cookie")
+    assert any(cookie_header.startswith("hermes_session=") and "Max-Age=0" in cookie_header for cookie_header in set_cookies)
+    assert any(cookie_header.startswith("hermes_profile=") and "Max-Age=0" in cookie_header for cookie_header in set_cookies)
+
+
 def test_unconfigured_remote_user_header_is_ordinary_header(monkeypatch):
     _trusted_env(monkeypatch, header=None)
     handler = _Handler(headers={"Remote-User": "alice"})
