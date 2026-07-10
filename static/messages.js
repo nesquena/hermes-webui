@@ -3727,6 +3727,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // for cache entries that may hold the last strong reference.
     if(typeof _anchorProseSmdCache!=='undefined'&&_anchorProseSmdCache.size){
       _anchorProseSmdCache.forEach(function(st){
+        if(st&&st.parser&&typeof _smdMediaTailFlush==='function'){
+          _smdMediaTailFlush(st.parser);
+        }
         if(st&&st.parser&&typeof _smdMediaTailClear==='function'){
           _smdMediaTailClear(st.parser);
         }
@@ -4039,10 +4042,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_streamingKatexTimer){clearTimeout(_streamingKatexTimer);_streamingKatexTimer=null;}
     if(_smdParser&&window.smd){
       try{window.smd.parser_end(_smdParser);}catch(_){}
-      // parser_end may flush remaining markdown that creates new links/images —
-      // re-sanitize the body before the DOM is handed off to highlightCode / renderMessages.
-      if(assistantBody){_sanitizeSmdLinks(assistantBody);enhanceMarkdownTables(assistantBody);}
     }
+    // parser_end may emit one final add_text chunk; flush MEDIA tails after it
+    // so a final extensionless URL is rendered before the settled re-render.
+    if(typeof _smdMediaTailFlush==='function') _smdMediaTailFlush(_smdParser);
+    if(typeof _smdMediaTailFlush==='function') _smdMediaTailFlush(__SMD_PARSER_FALLBACK);
+    // parser_end / tail flush may create new links/images — re-sanitize the
+    // body before the DOM is handed off to highlightCode / renderMessages.
+    if(assistantBody){_sanitizeSmdLinks(assistantBody);enhanceMarkdownTables(assistantBody);}
     // Clear the per-parser MEDIA tail buffer — any incomplete MEDIA
     // prefix the parser was holding is no longer relevant.
     if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(_smdParser);
@@ -4291,15 +4298,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   //      "foo.png") is buffered in a per-parser tail buffer and completed
   //      on the next add_text call.
   const _MEDIA_TAIL_MAX = 4096; // bytes; defensive cap on per-parser buffer
-  function _smdMediaTailSet(tailMap, parser, chunk){
-    if(chunk) tailMap.set(parser, chunk);
+  function _smdMediaTailSet(tailMap, parser, chunk, parent, baseAddText, data){
+    if(chunk) tailMap.set(parser, {chunk, parent, baseAddText, data});
     else tailMap.delete(parser);
+  }
+  function _smdMediaTailEntryChunk(entry){
+    return entry && typeof entry==='object' && Object.prototype.hasOwnProperty.call(entry,'chunk') ? entry.chunk : entry;
   }
   function _smdMediaRefHasReliableBoundary(rawRef){
     const raw=String(rawRef||'');
-    if(/^https?:\/\/[^\s\)\]]+$/i.test(raw) && !/[?#]$/.test(raw)) return true;
+    if(/[?#]$/.test(raw)) return false;
     const ref=raw.split(/[?#]/,1)[0];
     return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
+  }
+  function _smdMediaTailFlush(parser){
+    if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
+    const entry=_SMD_MEDIA_TAIL.get(parser);
+    const chunk=_smdMediaTailEntryChunk(entry);
+    if(!chunk) return;
+    _SMD_MEDIA_TAIL.delete(parser);
+    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
+    if(!emitted && entry && entry.baseAddText) entry.baseAddText(entry.data, chunk);
   }
   function _smdMediaAwareAddText(baseAddText, parent, data, text, tailMap, parser){
     const value=String(text||'');
@@ -4310,7 +4330,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     // Pull any pending tail from a previous (split) chunk, then clear it;
     // this call will either complete it, re-buffer it, or flush it as text.
-    const lead = tails && parser && tails.get ? tails.get(parser) : null;
+    const leadEntry = tails && parser && tails.get ? tails.get(parser) : null;
+    const lead = _smdMediaTailEntryChunk(leadEntry);
     if(lead && tails && parser && tails.delete) tails.delete(parser);
     const combined = lead ? lead + value : value;
     // Fast path: no MEDIA tokens in the (possibly combined) string.
@@ -4358,27 +4379,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     if(tails && parser){
-      _smdMediaTailSet(tails, parser, unmatchedTail);
+      _smdMediaTailSet(tails, parser, unmatchedTail, parent, baseAddText, data);
     }
   }
   // Single-token DOM splice. Only ever fed the output of
   // _inlineMediaHtmlForRef (trusted markup fragment). Plain text
   // goes through baseAddText → createTextNode — NEVER here.
   function _smdAppendMediaNode(parent, rawRef){
-    if(!parent||!rawRef) return;
+    if(!parent||!rawRef) return false;
     const mediaHtml = (typeof _inlineMediaHtmlForRef==='function')
       ? _inlineMediaHtmlForRef(String(rawRef))
       : '';
-    if(!mediaHtml) return;
+    if(!mediaHtml) return false;
     let host=null;
     try{
       const doc=new DOMParser().parseFromString('<div>'+mediaHtml+'</div>','text/html');
       host=doc.body&&doc.body.firstChild;
     }catch(_){ host=null; }
-    if(!host||!host.childNodes||!host.childNodes.length) return;
+    if(!host||!host.childNodes||!host.childNodes.length) return false;
     const frag=document.createDocumentFragment();
     while(host.firstChild) frag.appendChild(host.firstChild);
     parent.appendChild(frag);
+    return true;
   }
   // Per-parser tail buffer keyed by parser instance so concurrent
   // smd parsers (live prose + anchor-scene rows + tool-card streams)

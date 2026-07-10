@@ -225,8 +225,18 @@ class TestSmdMediaInStream(unittest.TestCase):
         # even when it has no filename extension.
         idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
         block = MESSAGES_JS[idx:idx + 900]
-        self.assertIn("/^https?:", block)
-        self.assertIn("!/[?#]$/.test(raw)", block)
+        self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
+        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
+        self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
+
+    def test_extensionless_https_tail_waits_until_stream_end(self):
+        # A chunk ending at MEDIA:https://fal.med may still be mid-URL. Do not
+        # treat http(s) scheme alone as a reliable boundary; the stream-end
+        # flush is responsible for rendering a final extensionless URL.
+        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
+        block = MESSAGES_JS[idx:idx + 900]
+        self.assertNotIn("/^https?:", block)
+        self.assertIn("_smdMediaTailFlush", MESSAGES_JS)
 
     def test_tail_buffer_size_cap(self):
         # Defensive: a runaway tail buffer from a malformed stream could
@@ -251,10 +261,20 @@ class TestSmdMediaInStream(unittest.TestCase):
         # Greptile re-review: parserFor falls back to __SMD_PARSER_FALLBACK,
         # so stream-end cleanup must clear that sentinel key, not null.
         idx = MESSAGES_JS.index("function _smdEndParser")
-        block = MESSAGES_JS[idx:idx + 1200]
+        block = MESSAGES_JS[idx:idx + 1600]
+        self.assertIn("_smdMediaTailFlush(_smdParser)", block)
+        self.assertIn("_smdMediaTailFlush(__SMD_PARSER_FALLBACK)", block)
+        self.assertLess(block.index("parser_end"), block.index("_smdMediaTailFlush(_smdParser)"))
         self.assertIn("_smdMediaTailClear(_smdParser)", block)
         self.assertIn("_smdMediaTailClear(__SMD_PARSER_FALLBACK)", block)
         self.assertNotIn("_smdMediaTailClear(null)", block)
+
+    def test_anchor_prose_cleanup_flushes_media_tail_before_clear(self):
+        idx = MESSAGES_JS.index("function _clearAnchorProseIncrementalNode")
+        block = MESSAGES_JS[idx:idx + 1800]
+        self.assertIn("_smdMediaTailFlush(st.parser)", block)
+        self.assertIn("_smdMediaTailClear(st.parser)", block)
+        self.assertLess(block.index("_smdMediaTailFlush(st.parser)"), block.index("_smdMediaTailClear(st.parser)"))
 
 
 if __name__ == "__main__":
