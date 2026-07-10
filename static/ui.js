@@ -4343,6 +4343,7 @@ if(document.readyState==='loading'){
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
 let _currentReasoningEffortsSupported=null;
+let _profileTransitionReasoningContext=null;
 
 function _normalizeReasoningEffort(eff){
   return String(eff||'').trim().toLowerCase();
@@ -4360,6 +4361,14 @@ function _formatReasoningEffortLabel(effort){
 }
 
 function _reasoningEffortContext(){
+  const transition=_profileTransitionReasoningContext;
+  const session=S&&S.session;
+  if(transition&&(!session||session.profile!==transition.profile)){
+    const ctx={};
+    if(transition.model) ctx.model=transition.model;
+    if(transition.provider) ctx.provider=transition.provider;
+    return ctx;
+  }
   const sel=$('modelSelect');
   const model=(S&&S.session&&S.session.model)||(sel&&sel.value)||'';
   let provider=(S&&S.session&&S.session.model_provider)||'';
@@ -4449,11 +4458,11 @@ let _lastReasoningFetchKey=null;
 // a different agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
 
-function fetchReasoningChip(){
+function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
   // while this GET is in flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
-  const key=_reasoningEffortQuery();
+  const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
   const seq=++_reasoningFetchSeq;
   _lastReasoningFetchKey=key;
   api('/api/reasoning'+key).then(function(st){
@@ -4469,6 +4478,19 @@ function fetchReasoningChip(){
     _lastReasoningFetchKey=null;
     _applyReasoningChip('', {supported_efforts:[]});
   });
+}
+
+function refreshProfileTransitionReasoningChip(model, provider){
+  _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
+  _currentReasoningEffort=null;
+  _currentReasoningEffortsSupported=null;
+  _lastReasoningFetchKey=null;
+  ++_reasoningFetchSeq;
+  _applyReasoningChip('', {supported_efforts:[]});
+  const params=new URLSearchParams();
+  if(model) params.set('model',model);
+  if(provider) params.set('provider',provider);
+  fetchReasoningChip(params.size?'?'+params.toString():undefined);
 }
 
 function syncReasoningChip(){

@@ -9,8 +9,12 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 SESSIONS_JS_PATH = REPO_ROOT / "static" / "sessions.js"
 BOOT_JS_PATH = REPO_ROOT / "static" / "boot.js"
+PANELS_JS_PATH = REPO_ROOT / "static" / "panels.js"
+UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 SESSIONS_JS = SESSIONS_JS_PATH.read_text(encoding="utf-8")
 BOOT_JS = BOOT_JS_PATH.read_text(encoding="utf-8")
+PANELS_JS = PANELS_JS_PATH.read_text(encoding="utf-8")
+UI_JS = UI_JS_PATH.read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -485,3 +489,182 @@ console.log(JSON.stringify({
         "implicitAfter": None,
         "explicitAfter": "saved-local",
     }
+
+
+def test_profile_transition_reasoning_refresh_hides_stale_chip_until_destination_resolves():
+    source = f"""
+const uiSrc = {UI_JS!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = uiSrc.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = uiSrc.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0 && i < uiSrc.length) {{
+    if (uiSrc[i] === '{{') depth++;
+    else if (uiSrc[i] === '}}') depth--;
+    i++;
+  }}
+  return uiSrc.slice(start, i);
+}}
+function makeEl() {{
+  return {{
+    style: {{}}, classList: {{ toggle(){{}}, add(){{}}, remove(){{}} }},
+    setAttribute(){{}}, querySelectorAll(){{ return []; }},
+  }};
+}}
+const els = {{
+  composerReasoningWrap: makeEl(), composerReasoningLabel: makeEl(),
+  composerReasoningChip: makeEl(), composerMobileReasoningAction: makeEl(),
+}};
+global.$ = id => els[id] || null;
+global.S = {{ session: {{ model: 'gpt-5', model_provider: 'openai' }} }};
+global._highlightReasoningOption = () => {{}};
+global._applyReasoningOptions = () => {{}};
+global._reasoningEffortQuery = () => '?model=gpt-5';
+const pending = [];
+let calls = 0;
+global.api = () => {{
+  calls++;
+  return {{ then(ok) {{ pending.push(ok); return {{ catch() {{}} }}; }} }};
+}};
+var _currentReasoningEffort = 'low';
+var _currentReasoningEffortsSupported = ['low', 'high'];
+var _lastReasoningFetchKey = '?model=gpt-5';
+var _reasoningFetchSeq = 7;
+eval(extractFunc('_normalizeReasoningEffort'));
+eval(extractFunc('_formatReasoningEffortLabel'));
+eval(extractFunc('_applyReasoningChip'));
+eval(extractFunc('fetchReasoningChip'));
+eval(extractFunc('refreshProfileTransitionReasoningChip'));
+fetchReasoningChip();
+refreshProfileTransitionReasoningChip();
+const beforeDestination = {{
+  effort: _currentReasoningEffort,
+  cachedKey: _lastReasoningFetchKey,
+  wrapDisplay: els.composerReasoningWrap.style.display,
+  calls,
+}};
+pending[0]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
+const afterPreviousResponse = {{ effort: _currentReasoningEffort, wrapDisplay: els.composerReasoningWrap.style.display }};
+pending[1]({{ reasoning_effort: 'high', supported_efforts: ['low', 'high'] }});
+console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDestination: _currentReasoningEffort, calls }}));
+"""
+    payload = json.loads(_run_node(source))
+    assert payload["beforeDestination"] == {
+        "effort": "",
+        "cachedKey": "?model=gpt-5",
+        "wrapDisplay": "none",
+        "calls": 2,
+    }
+    assert payload["afterPreviousResponse"] == {"effort": "", "wrapDisplay": "none"}
+    assert payload["afterDestination"] == "high"
+    assert payload["calls"] == 2
+    assert "refreshProfileTransitionReasoningChip" in PANELS_JS
+    assert PANELS_JS.index("refreshProfileTransitionReasoningChip") > PANELS_JS.index("S.activeProfile = data.active || name")
+    background = PANELS_JS[PANELS_JS.index("function _refreshProfileSwitchBackground"):PANELS_JS.index("async function loadProfilesPanel")]
+    for refresh in (
+        "_ensureComposerControlVisibilityState",
+        "_setComposerControlOrder",
+        "_renderComposerControlChips",
+        "_renderComposerSituationalControlChips",
+        "_applyComposerFooterVisibilitySettings",
+        "_applyTitlebarProfileVisibility",
+    ):
+        assert refresh in background
+
+
+def test_profile_transitions_fetch_destination_reasoning_after_hiding_stale_chip():
+    source = f"""
+const uiSrc = {UI_JS!r};
+const panelsSrc = {PANELS_JS!r};
+const sessionsSrc = {SESSIONS_JS!r};
+function extractFunc(src, name) {{
+  const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function makeEl() {{ return {{ style: {{}}, disabled: false, classList: {{ add(){{}}, remove(){{}}, toggle(){{}} }}, setAttribute(){{}}, querySelectorAll(){{ return []; }} }}; }}
+const els = {{ composerReasoningWrap: makeEl(), composerReasoningLabel: makeEl(), composerReasoningChip: makeEl(), composerMobileReasoningAction: makeEl() }};
+global.$ = id => els[id] || null;
+global.window = {{}};
+global.document = {{ title: '' }};
+global.localStorage = {{ removeItem(){{}} }};
+global.S = {{ activeProfile: 'default', activeProfileIsDefault: true, session: null, messages: [] }};
+global._highlightReasoningOption = () => {{}};
+global._applyReasoningOptions = () => {{}};
+global._applyModelToDropdown = model => model;
+global._modelStateForSelect = (_, model) => ({{ model, model_provider: 'openai' }});
+global.renderSessionList = async () => {{}};
+global.startGatewaySSE = () => {{}};
+global.showToast = () => {{}};
+global.t = value => value;
+global.assistantDisplayName = () => 'Hermes';
+global._profileSwitchPanelLoad = async () => {{}};
+global._refreshProfileSwitchBackground = () => {{}};
+var _profileSwitchGeneration = 0;
+var _skillsData = null, _workspaceList = null;
+var _currentReasoningEffort = 'low';
+var _currentReasoningEffortsSupported = ['low', 'high'];
+var _profileTransitionReasoningContext = null;
+var _lastReasoningFetchKey = null;
+var _reasoningFetchSeq = 0;
+eval(extractFunc(uiSrc, '_normalizeReasoningEffort'));
+eval(extractFunc(uiSrc, '_formatReasoningEffortLabel'));
+eval(extractFunc(uiSrc, '_reasoningEffortContext'));
+eval(extractFunc(uiSrc, '_reasoningEffortQuery'));
+eval(extractFunc(uiSrc, '_applyReasoningChip'));
+eval(extractFunc(uiSrc, 'fetchReasoningChip'));
+eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
+eval(extractFunc(uiSrc, 'syncTopbar'));
+eval(extractFunc(panelsSrc, 'switchToProfile'));
+eval(extractFunc(sessionsSrc, '_switchProfileForSessionLoad'));
+const pending = [];
+const reasoningUrls = [];
+global.api = (url) => {{
+  if (url === '/api/profile/switch') return Promise.resolve({{ active: 'vops', is_default: false, default_model: 'gpt-high', default_model_provider: 'openai' }});
+  if (url.startsWith('/api/reasoning')) {{
+    reasoningUrls.push(url);
+    return {{ then(ok) {{ pending.push(ok); return {{ catch() {{}} }}; }} }};
+  }}
+  throw new Error('unexpected API ' + url);
+}};
+fetchReasoningChip();
+(async () => {{
+  await switchToProfile('vops');
+  const blankBoot = {{ hidden: els.composerReasoningWrap.style.display, urls: reasoningUrls.slice() }};
+  pending[0]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
+  const blankBootAfterOld = _currentReasoningEffort;
+  pending[1]({{ reasoning_effort: 'high', supported_efforts: ['low', 'high'] }});
+  const blankBootAfterNew = _currentReasoningEffort;
+  S.activeProfile = 'default'; S.activeProfileIsDefault = true;
+  S.session = {{ model: 'old-model', model_provider: 'old-provider', profile: 'default' }};
+  _currentReasoningEffort = 'low'; _currentReasoningEffortsSupported = ['low', 'high']; _profileTransitionReasoningContext = null; _lastReasoningFetchKey = null;
+  fetchReasoningChip();
+  await _switchProfileForSessionLoad('vops');
+  const directLoad = {{ hidden: els.composerReasoningWrap.style.display, urls: reasoningUrls.slice(2) }};
+  pending[2]({{ reasoning_effort: 'low', supported_efforts: ['low', 'high'] }});
+  const directLoadAfterOld = _currentReasoningEffort;
+  pending[3]({{ reasoning_effort: 'high', supported_efforts: ['low', 'high'] }});
+  console.log(JSON.stringify({{ blankBoot, blankBootAfterOld, blankBootAfterNew, directLoad, directLoadAfterOld, directLoadAfterNew: _currentReasoningEffort }}));
+}})().catch(err => {{ console.error(err); process.exit(1); }});
+"""
+    payload = json.loads(_run_node(source))
+    assert payload["blankBoot"] == {
+        "hidden": "none",
+        "urls": ["/api/reasoning", "/api/reasoning?model=gpt-high&provider=openai"],
+    }
+    assert payload["blankBootAfterOld"] == ""
+    assert payload["blankBootAfterNew"] == "high"
+    assert payload["directLoad"] == {
+        "hidden": "none",
+        "urls": ["/api/reasoning?model=old-model&provider=old-provider", "/api/reasoning?model=gpt-high&provider=openai"],
+    }
+    assert payload["directLoadAfterOld"] == ""
+    assert payload["directLoadAfterNew"] == "high"
