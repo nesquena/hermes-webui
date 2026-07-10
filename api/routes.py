@@ -9203,6 +9203,7 @@ from api.models import (
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
+    delete_session_tail_cache,
     agent_session_rows_existing,
     agent_session_zero_message_sids,
     _load_webui_zero_message_orphan_tombstone,
@@ -14610,6 +14611,8 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to unlink session file %s", p)
         sidecar_deleted = not p.exists()
+        if sidecar_deleted:
+            delete_session_tail_cache(sid)
         try:
             p.with_suffix('.json.bak').unlink(missing_ok=True)
         except Exception:
@@ -20292,6 +20295,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 with LOCK:
                     SESSIONS.pop(p.stem, None)
                 p.unlink(missing_ok=True)
+                delete_session_tail_cache(p.stem)
                 cleaned += 1
                 phase1_removed_ids.add(p.stem)
         except Exception:
@@ -20515,6 +20519,7 @@ def _handle_background(handler, body):
             # next rebuild via _index_entry_exists().
             try:
                 (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                delete_session_tail_cache(bg_sid)
             except Exception:
                 pass
         except Exception:

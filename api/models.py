@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import math
+import mmap
 import os
 import re
 import threading
@@ -130,6 +131,14 @@ _LEGACY_SIDECAR_FACTS_MAX = 2000
 
 _STALE_TMP_AGE_SECONDS = 3600  # 1 hour
 
+# Rebuildable, source-signature-bound raw transcript tail. The authoritative
+# session sidecar remains the only semantic owner; these files may be deleted at
+# any time and every read fails closed to the full loader on uncertainty.
+_SESSION_TAIL_CACHE_FORMAT = 'hermes.session-tail-cache'
+_SESSION_TAIL_CACHE_VERSION = 1
+_SESSION_TAIL_CACHE_LIMIT = 300
+_SESSION_TAIL_CACHE_MAX_BYTES = 4 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Windows-safe os.replace() with retry
@@ -219,7 +228,9 @@ def _cleanup_stale_tmp_files() -> None:
     """
     cutoff = time.time() - _STALE_TMP_AGE_SECONDS
     try:
-        for p in SESSION_DIR.glob('*.tmp.*'):
+        candidates = list(SESSION_DIR.glob('*.tmp.*'))
+        candidates.extend((SESSION_DIR / '_tail_cache' / 'v1').glob('*.tmp.*'))
+        for p in candidates:
             try:
                 if p.stat().st_mtime < cutoff:
                     p.unlink(missing_ok=True)
@@ -1425,6 +1436,20 @@ class Session:
             except Exception:
                 pass
             raise
+        # The sidecar is authoritative and must land first. Tail-cache writes
+        # are derived, atomic, and strictly fail-open: a cache filesystem or
+        # validation failure can never roll back a successful session save.
+        try:
+            _write_session_tail_cache(
+                self,
+                expected_signature=_sidecar_stat_signature(self.path),
+            )
+        except Exception:
+            logger.debug(
+                "session tail-cache populate failed for %s",
+                self.session_id,
+                exc_info=True,
+            )
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1453,7 +1478,7 @@ class Session:
                 )
 
     @classmethod
-    def load(cls, sid):
+    def load(cls, sid, *, _populate_tail_cache=True):
         # Validate session ID format to prevent path traversal.  API/gateway
         # session ids may contain hyphens (for example ``api-*`` and
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
@@ -1498,6 +1523,29 @@ class Session:
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
+            # Read-old/write-new migration is allowed only for a stable full
+            # parse and only for the request's active profile. In particular,
+            # metadata-only probes and pre-authorization foreign-profile reads
+            # must not leave plaintext cache copies behind.
+            try:
+                _post_read_sig = _sidecar_stat_signature(p)
+                if (
+                    _populate_tail_cache
+                    and _pre_read_sig is not None
+                    and _pre_read_sig == _post_read_sig
+                    and _session_tail_cache_profile_is_active(session)
+                    and not _session_tail_cache_has_signature(sid, _pre_read_sig)
+                ):
+                    _write_session_tail_cache(
+                        session,
+                        expected_signature=_pre_read_sig,
+                    )
+            except Exception:
+                logger.debug(
+                    "session tail-cache opportunistic populate failed for %s",
+                    sid,
+                    exc_info=True,
+                )
         return session
 
     @classmethod
@@ -1519,11 +1567,11 @@ class Session:
         try:
             prefix = _read_metadata_json_prefix(p)
             if not prefix:
-                return cls.load(sid)
+                return cls.load(sid, _populate_tail_cache=False)
             parsed = json.loads(prefix)
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
-                return cls.load(sid)
+                return cls.load(sid, _populate_tail_cache=False)
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
@@ -1565,7 +1613,7 @@ class Session:
                 # facts cache with a TOCTOU-guarded write (expected_sig), so we
                 # do NOT re-cache here (an unguarded second write could stamp
                 # stale facts under a replacement file's signature — Codex r5).
-                return cls.load(sid)
+                return cls.load(sid, _populate_tail_cache=False)
             # Modern sidecars carry an accurate message_count, so it is the
             # source of truth and we skip the per-row _index.json read in the
             # common case. The sidebar index is only a cache (it can lag behind
@@ -1587,7 +1635,7 @@ class Session:
             return session
         except Exception:
             # Corrupt prefix or decode error — fall back to full load
-            return cls.load(sid)
+            return cls.load(sid, _populate_tail_cache=False)
 
     @staticmethod
     def _compute_user_message_count(messages) -> int:
@@ -3683,6 +3731,645 @@ def _sidecar_stat_signature(path):
         return None
     return (str(path), int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
             int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
+
+
+def session_tail_cache_path(sid: str) -> Path:
+    """Return the v1 derived-cache path for a path-safe session id."""
+    if not is_safe_session_id(sid):
+        raise ValueError(f"Unsafe session_id {sid!r}")
+    return SESSION_DIR / '_tail_cache' / 'v1' / f'{sid}.json'
+
+
+def delete_session_tail_cache(sid: str) -> bool:
+    """Best-effort removal of one derived cache entry."""
+    if not is_safe_session_id(sid):
+        return False
+    try:
+        session_tail_cache_path(sid).unlink(missing_ok=True)
+        return True
+    except OSError:
+        logger.debug("Failed to remove tail cache for %s", sid, exc_info=True)
+        return False
+
+
+def _tail_cache_strict_int(value, *, minimum=None, maximum=None) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    if minimum is not None and value < minimum:
+        return False
+    if maximum is not None and value > maximum:
+        return False
+    return True
+
+
+def _tail_cache_finite_number(value, *, positive=False) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(number) and (not positive or number > 0)
+
+
+def _tail_cache_signature_dict(signature) -> dict | None:
+    """Convert the internal stat tuple into the stable on-disk v1 shape."""
+    if not isinstance(signature, tuple) or len(signature) != 4:
+        return None
+    path, mtime_ns, size, ctime_ns = signature
+    try:
+        absolute_path = str(Path(path).expanduser().resolve())
+    except Exception:
+        return None
+    if not all(_tail_cache_strict_int(value, minimum=0) for value in (mtime_ns, size, ctime_ns)):
+        return None
+    return {
+        'path': absolute_path,
+        'mtime_ns': int(mtime_ns),
+        'size': int(size),
+        'ctime_ns': int(ctime_ns),
+    }
+
+
+def _tail_cache_signature_tuple(value) -> tuple | None:
+    if not isinstance(value, dict) or set(('path', 'mtime_ns', 'size', 'ctime_ns')) - set(value):
+        return None
+    path = value.get('path')
+    if not isinstance(path, str) or not path or not Path(path).is_absolute():
+        return None
+    numeric = (value.get('mtime_ns'), value.get('size'), value.get('ctime_ns'))
+    if not all(_tail_cache_strict_int(item, minimum=0) for item in numeric):
+        return None
+    return (str(Path(path).resolve()), int(numeric[0]), int(numeric[1]), int(numeric[2]))
+
+
+def _session_tail_cache_profile_is_active(session) -> bool:
+    """Fail closed unless a fully parsed session belongs to the active profile."""
+    try:
+        from api.profiles import _profiles_match, get_active_profile_name
+
+        return bool(_profiles_match(getattr(session, 'profile', None), get_active_profile_name()))
+    except Exception:
+        return False
+
+
+def _session_tail_cache_payload(session, source_signature) -> dict | None:
+    """Build a v1 cache payload from a fully materialized Session object."""
+    if getattr(session, '_loaded_metadata_only', False):
+        return None
+    sid = getattr(session, 'session_id', None)
+    if not is_safe_session_id(sid):
+        return None
+    signature = _tail_cache_signature_dict(source_signature)
+    if signature is None:
+        return None
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list):
+        return None
+    source_count = len(messages)
+    offset = max(0, source_count - _SESSION_TAIL_CACHE_LIMIT)
+    raw_tail = messages[offset:]
+    all_timestamps_valid = all(
+        isinstance(message, dict)
+        and _tail_cache_finite_number(message.get('timestamp'))
+        for message in raw_tail
+    )
+
+    all_tool_calls_positionable = True
+    cached_tool_calls = []
+    raw_tool_calls = getattr(session, 'tool_calls', None)
+    if not isinstance(raw_tool_calls, list):
+        raw_tool_calls = []
+        all_tool_calls_positionable = False
+    for tool_call in raw_tool_calls:
+        if not isinstance(tool_call, dict):
+            all_tool_calls_positionable = False
+            continue
+        assistant_idx = tool_call.get('assistant_msg_idx')
+        positionable = _tail_cache_strict_int(
+            assistant_idx,
+            minimum=0,
+            maximum=source_count - 1,
+        )
+        if positionable:
+            positionable = (
+                isinstance(messages[assistant_idx], dict)
+                and messages[assistant_idx].get('role') == 'assistant'
+            )
+        if not positionable:
+            all_tool_calls_positionable = False
+            continue
+        if assistant_idx >= offset:
+            cached_tool_calls.append(tool_call)
+
+    try:
+        from api.todo_state import derive_todo_state
+
+        todo_state = derive_todo_state(messages)
+    except Exception:
+        todo_state = None
+
+    timestamps = [
+        float(message.get('timestamp'))
+        for message in messages
+        if isinstance(message, dict) and _tail_cache_finite_number(message.get('timestamp'))
+    ]
+    last_message_at = max(timestamps) if timestamps else getattr(session, 'updated_at', None)
+    if last_message_at is not None and not _tail_cache_finite_number(last_message_at):
+        last_message_at = None
+    return {
+        'format': _SESSION_TAIL_CACHE_FORMAT,
+        'version': _SESSION_TAIL_CACHE_VERSION,
+        'session_id': sid,
+        'source_signature': signature,
+        'tail_limit': _SESSION_TAIL_CACHE_LIMIT,
+        'message_offset': offset,
+        'messages': raw_tail,
+        'source_message_count': source_count,
+        'source_user_message_count': Session._compute_user_message_count(messages),
+        'source_last_message_at': last_message_at,
+        'tool_calls': cached_tool_calls,
+        'all_tool_calls_positionable': all_tool_calls_positionable,
+        'todo_state': todo_state,
+        'anchor_scene_index': _anchor_scene_index_from_records(
+            getattr(session, 'anchor_activity_scenes', None)
+        ),
+        'all_cached_timestamps_valid': all_timestamps_valid,
+        'created_at': float(time.time()),
+    }
+
+
+def _write_session_tail_cache_payload(payload: dict, *, expected_signature) -> bool:
+    """Atomically publish one already-built cache payload after a final restat."""
+    sid = payload.get('session_id') if isinstance(payload, dict) else None
+    if not is_safe_session_id(sid) or expected_signature is None:
+        return False
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    if len(encoded) > _SESSION_TAIL_CACHE_MAX_BYTES:
+        return False
+    path = session_tail_cache_path(sid)
+    tmp = path.with_name(
+        f'{path.name}.tmp.{os.getpid()}.{threading.current_thread().ident}'
+    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, 'wb') as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        sidecar = SESSION_DIR / f'{sid}.json'
+        if _sidecar_stat_signature(sidecar) != expected_signature:
+            return False
+        _safe_replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return True
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _write_session_tail_cache(session, *, expected_signature) -> bool:
+    payload = _session_tail_cache_payload(session, expected_signature)
+    if payload is None:
+        return False
+    return _write_session_tail_cache_payload(
+        payload,
+        expected_signature=expected_signature,
+    )
+
+
+def _session_tail_cache_has_signature(sid: str, signature) -> bool:
+    """Cheaply decide whether an existing bounded cache describes this source."""
+    try:
+        path = session_tail_cache_path(sid)
+        if path.stat().st_size > _SESSION_TAIL_CACHE_MAX_BYTES:
+            return False
+        value = json.loads(path.read_bytes())
+        return (
+            isinstance(value, dict)
+            and value.get('format') == _SESSION_TAIL_CACHE_FORMAT
+            and value.get('version') == _SESSION_TAIL_CACHE_VERSION
+            and value.get('session_id') == sid
+            and _tail_cache_signature_tuple(value.get('source_signature'))
+            == _tail_cache_signature_tuple(_tail_cache_signature_dict(signature))
+        )
+    except Exception:
+        return False
+
+
+def _validate_session_tail_cache_payload(payload, sid: str, source_signature) -> dict | None:
+    """Strictly validate v1 shape and bounded-read eligibility."""
+    if not isinstance(payload, dict):
+        return None
+    if payload.get('format') != _SESSION_TAIL_CACHE_FORMAT:
+        return None
+    if payload.get('version') != _SESSION_TAIL_CACHE_VERSION or payload.get('session_id') != sid:
+        return None
+    embedded_signature = _tail_cache_signature_tuple(payload.get('source_signature'))
+    current_signature = _tail_cache_signature_tuple(_tail_cache_signature_dict(source_signature))
+    if embedded_signature is None or embedded_signature != current_signature:
+        return None
+    if payload.get('tail_limit') != _SESSION_TAIL_CACHE_LIMIT:
+        return None
+
+    source_count = payload.get('source_message_count')
+    user_count = payload.get('source_user_message_count')
+    offset = payload.get('message_offset')
+    messages = payload.get('messages')
+    if not _tail_cache_strict_int(source_count, minimum=0):
+        return None
+    if not _tail_cache_strict_int(user_count, minimum=0, maximum=source_count):
+        return None
+    if not _tail_cache_strict_int(offset, minimum=0, maximum=source_count):
+        return None
+    if not isinstance(messages, list) or len(messages) != min(_SESSION_TAIL_CACHE_LIMIT, source_count):
+        return None
+    if offset != source_count - len(messages):
+        return None
+    if payload.get('all_cached_timestamps_valid') is not True:
+        return None
+    for message in messages:
+        if not isinstance(message, dict):
+            return None
+        if not _tail_cache_finite_number(message.get('timestamp')):
+            return None
+
+    last_message_at = payload.get('source_last_message_at')
+    if source_count == 0:
+        if last_message_at is not None and not _tail_cache_finite_number(last_message_at):
+            return None
+    elif not _tail_cache_finite_number(last_message_at):
+        return None
+    if payload.get('all_tool_calls_positionable') is not True:
+        return None
+    tool_calls = payload.get('tool_calls')
+    if not isinstance(tool_calls, list):
+        return None
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            return None
+        assistant_idx = tool_call.get('assistant_msg_idx')
+        if not _tail_cache_strict_int(assistant_idx, minimum=offset, maximum=source_count - 1):
+            return None
+        tail_message = messages[assistant_idx - offset]
+        if tail_message.get('role') != 'assistant':
+            return None
+    todo_state = payload.get('todo_state')
+    if todo_state is not None:
+        if not isinstance(todo_state, dict) or not isinstance(todo_state.get('todos'), list):
+            return None
+    anchor_scene_index = payload.get('anchor_scene_index')
+    if not isinstance(anchor_scene_index, dict) or anchor_scene_index:
+        return None
+    if not _tail_cache_finite_number(payload.get('created_at'), positive=True):
+        return None
+    return payload
+
+
+def _read_session_tail_cache_file(sid: str) -> dict | None:
+    if not is_safe_session_id(sid):
+        return None
+    sidecar = SESSION_DIR / f'{sid}.json'
+    before = _sidecar_stat_signature(sidecar)
+    if before is None:
+        return None
+    try:
+        path = session_tail_cache_path(sid)
+        size = path.stat().st_size
+        if size <= 0 or size > _SESSION_TAIL_CACHE_MAX_BYTES:
+            return None
+        payload = json.loads(path.read_bytes())
+    except (OSError, ValueError, TypeError):
+        return None
+    after = _sidecar_stat_signature(sidecar)
+    if after is None or before != after:
+        return None
+    return _validate_session_tail_cache_payload(payload, sid, before)
+
+
+def read_session_tail_cache(sid: str) -> dict | None:
+    """Return a validated tail snapshot, never superseding a full memory object."""
+    if not is_safe_session_id(sid):
+        return None
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if cached is not None and not getattr(cached, '_loaded_metadata_only', False):
+            return None
+    return _read_session_tail_cache_file(sid)
+
+
+def _legacy_tail_cache_index_row(sid: str, source_signature, metadata: dict) -> dict | None:
+    """Return one index row only when its cheap source facts all agree."""
+    try:
+        if SESSION_INDEX_FILE.stat().st_size > _SESSION_TAIL_CACHE_MAX_BYTES:
+            return None
+        rows = json.loads(SESSION_INDEX_FILE.read_bytes())
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    matches = [row for row in rows if isinstance(row, dict) and row.get('session_id') == sid]
+    if len(matches) != 1:
+        return None
+    row = matches[0]
+    count = row.get('message_count')
+    user_count = row.get('user_message_count')
+    file_size = row.get('file_size')
+    if not _tail_cache_strict_int(count, minimum=0):
+        return None
+    if not _tail_cache_strict_int(user_count, minimum=0, maximum=count):
+        return None
+    if not _tail_cache_strict_int(file_size, minimum=0) or file_size != source_signature[2]:
+        return None
+    if _parse_nonnegative_int(metadata.get('message_count')) != count:
+        return None
+    row_updated_at = row.get('updated_at')
+    metadata_updated_at = metadata.get('updated_at')
+    if not _tail_cache_finite_number(row_updated_at) or not _tail_cache_finite_number(metadata_updated_at):
+        return None
+    if float(row_updated_at) != float(metadata_updated_at):
+        return None
+    if count and not _tail_cache_finite_number(row.get('last_message_at')):
+        return None
+    return row
+
+
+def _legacy_tail_metadata_is_eligible(metadata: dict) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get('active_stream_id') or metadata.get('pending_user_message'):
+        return False
+    if metadata.get('pending_attachments') or metadata.get('pending_started_at'):
+        return False
+    if metadata.get('pending_user_source'):
+        return False
+    if metadata.get('pre_compression_snapshot') or metadata.get('parent_session_id'):
+        return False
+    if metadata.get('compression_recovery'):
+        return False
+    if metadata.get('compression_recovery_source_session_id') or metadata.get('compression_recovery_action'):
+        return False
+    if metadata.get('truncation_watermark') is not None or metadata.get('truncation_boundary') is not None:
+        return False
+    if metadata.get('is_cli_session') or metadata.get('read_only'):
+        return False
+    if metadata.get('session_source') not in (None, '', 'webui'):
+        return False
+    if metadata.get('source_tag') not in (None, '', 'webui'):
+        return False
+    if metadata.get('raw_source') not in (None, '') or metadata.get('source_label') not in (None, ''):
+        return False
+    scene_index = metadata.get('anchor_scene_index')
+    return scene_index is None or (isinstance(scene_index, dict) and not scene_index)
+
+
+def _mmap_top_level_key_value_offset(view, key: bytes, *, scan_limit=512 * 1024) -> int | None:
+    """Locate the value of one unescaped ASCII key in the root JSON object."""
+    limit = min(len(view), scan_limit)
+    depth = 0
+    i = 0
+    while i < limit:
+        byte = view[i]
+        if byte == 34:
+            start = i + 1
+            i += 1
+            escaped = False
+            while i < limit:
+                current = view[i]
+                if current == 34 and not escaped:
+                    break
+                if current == 92 and not escaped:
+                    escaped = True
+                else:
+                    escaped = False
+                i += 1
+            if i >= limit:
+                return None
+            if depth == 1 and view[start:i] == key:
+                cursor = i + 1
+                while cursor < limit and view[cursor] in b' \t\r\n':
+                    cursor += 1
+                if cursor >= limit or view[cursor] != 58:
+                    return None
+                cursor += 1
+                while cursor < limit and view[cursor] in b' \t\r\n':
+                    cursor += 1
+                return cursor if cursor < limit else None
+        elif byte in (123, 91):
+            depth += 1
+        elif byte in (125, 93):
+            depth -= 1
+            if depth < 0:
+                return None
+        i += 1
+    return None
+
+
+def _mmap_root_suffix_after_messages(view, messages_open: int) -> tuple[int, dict] | None:
+    """Prove the messages closing bracket by parsing the bounded root suffix."""
+    marker = b'"tool_calls"'
+    search_end = len(view)
+    minimum = max(messages_open + 1, len(view) - _SESSION_TAIL_CACHE_MAX_BYTES)
+    while search_end > minimum:
+        key_pos = view.rfind(marker, minimum, search_end)
+        if key_pos < 0:
+            return None
+        cursor = key_pos - 1
+        while cursor > messages_open and view[cursor] in b' \t\r\n':
+            cursor -= 1
+        if cursor > messages_open and view[cursor] == 44:
+            cursor -= 1
+            while cursor > messages_open and view[cursor] in b' \t\r\n':
+                cursor -= 1
+            if cursor > messages_open and view[cursor] == 93:
+                try:
+                    suffix = json.loads(b'{' + view[key_pos:])
+                except (ValueError, TypeError):
+                    suffix = None
+                if isinstance(suffix, dict) and 'tool_calls' in suffix:
+                    return cursor, suffix
+        search_end = key_pos
+    return None
+
+
+def _mmap_json_array_tail_start(view, array_open: int, array_close: int, count: int) -> int | None:
+    """Reverse-scan a bounded JSON array to the first of its last `count` values."""
+    if count <= 0:
+        return array_close
+    i = array_close - 1
+    depth = 0
+    in_string = False
+    separators = 0
+    scanned = 0
+    while i > array_open and scanned <= _SESSION_TAIL_CACHE_MAX_BYTES:
+        byte = view[i]
+        if byte == 34:
+            slashes = 0
+            cursor = i - 1
+            while cursor > array_open and view[cursor] == 92:
+                slashes += 1
+                cursor -= 1
+            if slashes % 2 == 0:
+                in_string = not in_string
+        elif not in_string:
+            if byte in (125, 93):
+                depth += 1
+            elif byte in (123, 91):
+                depth -= 1
+                if depth < 0:
+                    return None
+            elif byte == 44 and depth == 0:
+                separators += 1
+                if separators == count:
+                    return i + 1
+        i -= 1
+        scanned += 1
+    if i == array_open and separators == count - 1:
+        return array_open + 1
+    return None
+
+
+def _read_legacy_tail_parts(path: Path, wanted: int) -> tuple[list, dict] | None:
+    try:
+        with open(path, 'rb') as handle:
+            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as view:
+                messages_open = _mmap_top_level_key_value_offset(view, b'messages')
+                if messages_open is None or view[messages_open] != 91:
+                    return None
+                suffix_info = _mmap_root_suffix_after_messages(view, messages_open)
+                if suffix_info is None:
+                    return None
+                messages_close, suffix = suffix_info
+                tail_start = _mmap_json_array_tail_start(
+                    view,
+                    messages_open,
+                    messages_close,
+                    wanted,
+                )
+                if tail_start is None:
+                    return None
+                # Any settled todo snapshot before the bounded tail makes the
+                # tail alone insufficient to derive the full session state.
+                if (
+                    view.find(b'"todos"', messages_open + 1, tail_start) >= 0
+                    or view.find(b'\\"todos\\"', messages_open + 1, tail_start) >= 0
+                ):
+                    return None
+                tail_bytes = b'[' + view[tail_start:messages_close] + b']'
+                if len(tail_bytes) > _SESSION_TAIL_CACHE_MAX_BYTES:
+                    return None
+                messages = json.loads(tail_bytes)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(messages, list) or len(messages) != wanted:
+        return None
+    if any(
+        not isinstance(message, dict)
+        or not _tail_cache_finite_number(message.get('timestamp'))
+        for message in messages
+    ):
+        return None
+    return messages, suffix
+
+
+def _legacy_tail_positionable_tool_calls(suffix: dict, messages: list, offset: int, source_count: int):
+    if suffix.get('anchor_activity_scenes') not in (None, {}):
+        return None
+    raw_tool_calls = suffix.get('tool_calls')
+    if not isinstance(raw_tool_calls, list):
+        return None
+    cached_tool_calls = []
+    for tool_call in raw_tool_calls:
+        if not isinstance(tool_call, dict):
+            return None
+        assistant_idx = tool_call.get('assistant_msg_idx')
+        if not _tail_cache_strict_int(assistant_idx, minimum=0, maximum=source_count - 1):
+            return None
+        assistant_idx = int(assistant_idx)
+        if assistant_idx >= offset:
+            if messages[assistant_idx - offset].get('role') != 'assistant':
+                return None
+            cached_tool_calls.append(tool_call)
+    return cached_tool_calls
+
+
+def build_session_tail_cache_from_legacy_sidecar(sid: str) -> dict | None:
+    """Build a v1 snapshot from stable prefix/tail/suffix slices, never a full parse."""
+    if not is_safe_session_id(sid):
+        return None
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if cached is not None and not getattr(cached, '_loaded_metadata_only', False):
+            return None
+    path = SESSION_DIR / f'{sid}.json'
+    before = _sidecar_stat_signature(path)
+    if before is None:
+        return None
+    try:
+        prefix = _read_metadata_json_prefix(path)
+        metadata = json.loads(prefix) if prefix else None
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    if not _legacy_tail_metadata_is_eligible(metadata) or metadata.get('session_id') != sid:
+        return None
+    index_row = _legacy_tail_cache_index_row(sid, before, metadata)
+    if index_row is None:
+        return None
+    source_count = int(index_row['message_count'])
+    wanted = min(_SESSION_TAIL_CACHE_LIMIT, source_count)
+    parts = _read_legacy_tail_parts(path, wanted)
+    if parts is None:
+        return None
+    messages, suffix = parts
+    offset = source_count - wanted
+    cached_tool_calls = _legacy_tail_positionable_tool_calls(
+        suffix,
+        messages,
+        offset,
+        source_count,
+    )
+    if cached_tool_calls is None:
+        return None
+    try:
+        from api.todo_state import derive_todo_state
+
+        todo_state = derive_todo_state(messages)
+    except Exception:
+        return None
+    payload = {
+        'format': _SESSION_TAIL_CACHE_FORMAT,
+        'version': _SESSION_TAIL_CACHE_VERSION,
+        'session_id': sid,
+        'source_signature': _tail_cache_signature_dict(before),
+        'tail_limit': _SESSION_TAIL_CACHE_LIMIT,
+        'message_offset': offset,
+        'messages': messages,
+        'source_message_count': source_count,
+        'source_user_message_count': int(index_row['user_message_count']),
+        'source_last_message_at': index_row.get('last_message_at'),
+        'tool_calls': cached_tool_calls,
+        'all_tool_calls_positionable': True,
+        'todo_state': todo_state,
+        'anchor_scene_index': {},
+        'all_cached_timestamps_valid': True,
+        'created_at': float(time.time()),
+    }
+    if _sidecar_stat_signature(path) != before:
+        return None
+    if not _write_session_tail_cache_payload(payload, expected_signature=before):
+        return None
+    return _read_session_tail_cache_file(sid)
 
 
 def _legacy_sidecar_facts_get(sid):
