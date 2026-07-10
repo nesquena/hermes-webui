@@ -817,15 +817,12 @@ function _micToastKeyForRecognitionError(error){
     return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
   }
 
-  async function _transcribeBlob(blob){
+  async function _transcribeBlob(blob, prefixSnapshot){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
-    // Snapshot the existing composer text BEFORE _setRecording(false) in the
-    // recorder.onstop handler clears _prefix. Server STT is async; without
-    // this snapshot, _commitTranscript sees _prefix='' and replaces instead
-    // of appending.
-    const prefixSnapshot = _prefix;
+    // Snapshot is passed in from the recorder.onstop handler — it was taken
+    // BEFORE _setRecording(false) cleared _prefix. See boot.js recorder.onstop.
     setComposerStatus('Transcribing…');
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
@@ -1181,6 +1178,12 @@ function _micToastKeyForRecognitionError(error){
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
         if(mediaRecorder===recorder) mediaRecorder=null;
         _isRecording=false;
+        // Capture the composer prefix BEFORE _setRecording(false) clears
+        // _prefix. The await on _transcribeBlob runs after this sync block,
+        // so by the time _transcribeBlob is called, _prefix is already ''.
+        // Passing the snapshot through keeps append-mode working on the
+        // async server-STT path.
+        const prefixSnapshot = _prefix;
         const blob=new Blob(captureChunks,{type:recorder.mimeType||mimeType||'audio/webm'});
         if(isCurrentCapture) _setRecording(false);
         _stopTracks(captureStream);
@@ -1188,7 +1191,7 @@ function _micToastKeyForRecognitionError(error){
           if(captureMode==='media-raw'){
             await _sendRawAudio(blob);
           }else{
-            await _transcribeBlob(blob);
+            await _transcribeBlob(blob, prefixSnapshot);
           }
         }
         else if(window._micPendingSend){
