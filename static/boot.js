@@ -779,24 +779,27 @@ function _micToastKeyForRecognitionError(error){
   }
 
   function _commitTranscript(text, prefixOverride){
-    // `prefixOverride` is the composer content captured at recording start
-    // (only used by the sync browser-SR path to rebuild the prefix without
-    // racing the recorder.onstop clear). The async server-STT path passes
-    // a snapshot so this function has a fallback if _prefix is empty.
+    // `prefixOverride` is the composer content captured at recording start,
+    // passed only by the async server-STT path (recorder.onstop → _transcribeBlob).
+    // The sync browser-SR path doesn't call this function — it commits inline
+    // in sr.onend using _prefix directly.
     //
-    // Race-condition fix (Greptile 4/5 finding): the async path previously
-    // appended to `_prefix` (the stale snapshot), which clobbered any user
-    // keystrokes made during the ~1s transcription round-trip. We now append
-    // to the live `ta.value` whenever the textarea is non-empty, so the
-    // user's mid-transcription edits are preserved.
+    // Three concerns this function has to balance (Greptile reviews):
+    //   1. Race condition: user types during async transcription → preserve those
+    //      keystrokes. Read live ta.value, not the stale snapshot.
+    //   2. Clear-during-transcription: user clears textarea during async wait →
+    //      respect that intent. Live ta.value (even empty) wins over snapshot.
+    //   3. Browser-SR fallback: if a future caller passes no prefixOverride
+    //      and live ta.value is empty, fall back to _prefix as a safety net.
+    //
+    // Resolution: when prefixOverride IS provided (server-STT path), trust live
+    // ta.value unconditionally — even when empty. Otherwise fall back to _prefix.
     const clean=(text||'').trim();
     let committed;
     if(!clean){
       committed = ta.value;
     }else if(_dictationAppend){
-      // Prefer the live composer state. Fall back to the snapshot only when
-      // the textarea is genuinely empty (original path — nothing to race with).
-      const base = ta.value || (prefixOverride !== undefined ? prefixOverride : _prefix);
+      const base = prefixOverride !== undefined ? ta.value : (ta.value || _prefix);
       if(!base){
         committed = clean;
       }else{
