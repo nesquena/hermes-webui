@@ -1500,6 +1500,21 @@ def _materialize_streamed_answer_result(
     return result, result_messages
 
 
+def _agent_result_has_non_synthetic_error(agent, result) -> bool:
+    """Return True when a retry result carries a real provider/agent error."""
+    if not isinstance(result, dict):
+        return False
+    raw_error = getattr(agent, '_last_error', None) or result.get('error') or ''
+    if not raw_error:
+        return False
+    classification = _classify_provider_error(
+        str(raw_error),
+        raw_error,
+        silent_failure=False,
+    )
+    return classification.get('type') != 'no_response'
+
+
 def _mark_latest_assistant_tool_limit_status(messages) -> bool:
     """Annotate the latest usable assistant final answer as limit-stopped."""
     for msg in reversed(list(messages or [])):
@@ -9197,19 +9212,13 @@ def _run_agent_streaming(
                                     agent=agent,
                                     tool_limit_reached=_heal_tool_limit_reached,
                                 )
-                                _heal_explicit_error = bool(getattr(agent, '_last_error', None)) or (
-                                    'error' in result and result.get('error') not in (None, '')
-                                )
-                                _heal_terminal_failure = (
-                                    _agent_result_terminal_failure(result)
-                                    or _heal_tool_limit_reached
-                                )
+                                _heal_explicit_error = _agent_result_has_non_synthetic_error(agent, result)
                                 _heal_has_answer = _assistant_reply_added_after_current_turn(
                                     _result_messages,
                                     _previous_context_messages,
                                     msg_text,
                                 )
-                                if _heal_explicit_error or (_heal_terminal_failure and not _heal_has_answer):
+                                if _heal_explicit_error or not _heal_has_answer:
                                     logger.info('[webui] self-heal: retry returned terminal failure')
                                     _assistant_added = False
                                 else:
@@ -10459,19 +10468,16 @@ def _run_agent_streaming(
                                     agent=_heal_agent,
                                     tool_limit_reached=_heal_tool_limit_reached,
                                 )
-                                _heal_explicit_error = bool(getattr(_heal_agent, '_last_error', None)) or (
-                                    'error' in _heal_result and _heal_result.get('error') not in (None, '')
-                                )
-                                _heal_terminal_failure = (
-                                    _agent_result_terminal_failure(_heal_result)
-                                    or _heal_tool_limit_reached
+                                _heal_explicit_error = _agent_result_has_non_synthetic_error(
+                                    _heal_agent,
+                                    _heal_result,
                                 )
                                 _heal_has_answer = _assistant_reply_added_after_current_turn(
                                     _result_messages,
                                     _previous_context_messages,
                                     msg_text,
                                 )
-                                if _heal_explicit_error or (_heal_terminal_failure and not _heal_has_answer):
+                                if _heal_explicit_error or not _heal_has_answer:
                                     logger.info('[webui] self-heal (except path): retry returned terminal failure')
                                 else:
                                     _next_context_messages = _restore_reasoning_metadata(

@@ -1569,3 +1569,130 @@ def test_display_merge_preserves_tool_distinct_partials_within_one_turn():
         "terminal",
         "read_file",
     ]
+
+
+def _run_stream_with_heal(monkeypatch, session, stream_id, agent_cls, *, workspace):
+    fake_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = fake_queue
+    config.STREAM_PARTIAL_TEXT[stream_id] = ""
+    heal_runtime = {"provider": "test-provider", "api_key": "fresh-key", "base_url": None}
+
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=agent_cls), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(streaming, "_attempt_credential_self_heal", return_value=heal_runtime):
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text=session.pending_user_message,
+            model="test-model",
+            workspace=workspace,
+            stream_id=stream_id,
+        )
+
+    return fake_queue
+
+
+def test_auth_result_retry_keeps_owned_answer_with_synthetic_no_response(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "auth_result_retry_synthetic_no_response",
+        "stream_auth_result_retry_synthetic_no_response",
+        pending_user_message="Please recover from returned auth failure",
+    )
+
+    class AuthResultRetryNoResponseAgent(MockAgent):
+        runs = 0
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            history = list(kwargs.get("conversation_history") or [])
+            if type(self).runs == 1:
+                return {"messages": history, "error": _auth_failure_error_payload()}
+            self._last_error = "No response from provider."
+            return {
+                "messages": history + [{"role": "assistant", "content": "Recovered owned answer"}],
+                "error": "No response from provider.",
+            }
+
+    fake_queue = _run_stream_with_heal(
+        monkeypatch,
+        session,
+        "stream_auth_result_retry_synthetic_no_response",
+        AuthResultRetryNoResponseAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("auth_result_retry_synthetic_no_response")
+    assert saved is not None
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert saved.messages[-1]["content"] == "Recovered owned answer"
+
+
+def test_auth_exception_retry_keeps_owned_answer_with_synthetic_no_response(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "auth_exception_retry_synthetic_no_response",
+        "stream_auth_exception_retry_synthetic_no_response",
+        pending_user_message="Please recover from raised auth failure",
+    )
+
+    class AuthExceptionRetryNoResponseAgent(MockAgent):
+        runs = 0
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            history = list(kwargs.get("conversation_history") or [])
+            if type(self).runs == 1:
+                raise RuntimeError("401 unauthorized: token expired")
+            self._last_error = "No response from provider."
+            return {
+                "messages": history + [{"role": "assistant", "content": "Recovered exception answer"}],
+                "error": "No response from provider.",
+            }
+
+    fake_queue = _run_stream_with_heal(
+        monkeypatch,
+        session,
+        "stream_auth_exception_retry_synthetic_no_response",
+        AuthExceptionRetryNoResponseAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("auth_exception_retry_synthetic_no_response")
+    assert saved is not None
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert saved.messages[-1]["content"] == "Recovered exception answer"
+
+
+def test_auth_exception_retry_without_owned_answer_still_errors(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "auth_exception_retry_without_owned_answer",
+        "stream_auth_exception_retry_without_owned_answer",
+        pending_user_message="Please do not reuse history",
+    )
+    _seed_prior_turn(session, prior_user="Old prompt", prior_assistant="Old answer")
+
+    class AuthExceptionRetryHistoryOnlyAgent(MockAgent):
+        runs = 0
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            if type(self).runs == 1:
+                raise RuntimeError("401 unauthorized: token expired")
+            return {"messages": list(kwargs.get("conversation_history") or []), "error": ""}
+
+    fake_queue = _run_stream_with_heal(
+        monkeypatch,
+        session,
+        "stream_auth_exception_retry_without_owned_answer",
+        AuthExceptionRetryHistoryOnlyAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("auth_exception_retry_without_owned_answer")
+    assert saved is not None
+    events = _queue_events(fake_queue)
+    assert any(event == "apperror" for event, _ in events)
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1].get("_error") is True
