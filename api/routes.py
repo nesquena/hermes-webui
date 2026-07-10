@@ -8524,7 +8524,61 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
     )
 
 
-def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
+def _session_tail_snapshot_eligible(session, snapshot, msg_limit, msg_before, is_messaging_session=False) -> bool:
+    if snapshot is None or msg_limit is None or msg_before is not None or is_messaging_session:
+        return False
+    try:
+        limit = int(msg_limit)
+        offset = int(snapshot.get("message_offset"))
+        source_count = int(snapshot.get("source_message_count"))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if limit < 1 or limit > 300 or offset < 0 or source_count < offset:
+        return False
+    if snapshot.get("all_cached_timestamps_valid") is not True:
+        return False
+    if snapshot.get("all_tool_calls_positionable") is not True:
+        return False
+    if snapshot.get("anchor_scene_index") not in (None, {}):
+        return False
+    if getattr(session, "active_stream_id", None) or getattr(session, "pending_user_message", None):
+        return False
+    if getattr(session, "pending_attachments", None) or getattr(session, "pending_started_at", None):
+        return False
+    if getattr(session, "pending_user_source", None):
+        return False
+    if getattr(session, "parent_session_id", None) or getattr(session, "pre_compression_snapshot", False):
+        return False
+    if getattr(session, "compression_recovery", None):
+        return False
+    if getattr(session, "compression_recovery_source_session_id", None):
+        return False
+    if getattr(session, "compression_recovery_action", None):
+        return False
+    if getattr(session, "truncation_watermark", None) not in (None, ""):
+        return False
+    if getattr(session, "truncation_boundary", None) not in (None, ""):
+        return False
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    source_tag = str(getattr(session, "source_tag", "") or "").strip().lower()
+    return (
+        source in ("", "webui")
+        and source_tag in ("", "webui")
+        and not getattr(session, "is_cli_session", False)
+        and not getattr(session, "read_only", False)
+        and getattr(session, "raw_source", None) in (None, "")
+        and getattr(session, "source_label", None) in (None, "")
+    )
+
+
+def _state_db_since_timestamp_for_limited_display(
+    session,
+    msg_limit,
+    msg_before=None,
+    *,
+    sidecar_messages=None,
+    sidecar_message_offset=0,
+):
     """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
 
     The display window limit counts visible transcript rows after WebUI sidecar
@@ -8541,7 +8595,11 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     if getattr(session, "truncation_boundary", None) not in (None, ""):
         return None, None
 
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    bounded_sidecar = sidecar_messages is not None
+    if sidecar_messages is None:
+        sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    else:
+        sidecar_messages = list(sidecar_messages or [])
     if not sidecar_messages:
         return None, sidecar_messages
     sidecar_timestamps = [_message_timestamp_as_float(msg) for msg in sidecar_messages]
@@ -8553,7 +8611,11 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     except (TypeError, ValueError):
         return None, sidecar_messages
     raw_budget = max(300, limit * 10)
-    if len(sidecar_messages) <= raw_budget:
+    try:
+        sidecar_message_offset = max(0, int(sidecar_message_offset))
+    except (TypeError, ValueError):
+        return None, sidecar_messages
+    if sidecar_message_offset + len(sidecar_messages) <= raw_budget:
         return None, sidecar_messages
 
     floor = min(sidecar_timestamps[-raw_budget:])
@@ -8572,6 +8634,11 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, sidecar_messages
     if null_timestamp_count or state_before_count != sidecar_before_count:
         return None, sidecar_messages
+    if bounded_sidecar and sidecar_message_offset:
+        # The cache omits the authoritative sidecar prefix. Only an empty
+        # state.db prefix proves that no older row can alter full-merge counts
+        # or ordering without reading the omitted sidecar bytes.
+        return floor, sidecar_messages
     if sidecar_before_count == 0:
         return floor, sidecar_messages
 
@@ -9204,6 +9271,8 @@ from api.models import (
     _hide_from_default_sidebar,
     prune_session_from_index,
     delete_session_tail_cache,
+    read_session_tail_cache,
+    build_session_tail_cache_from_legacy_sidecar,
     agent_session_rows_existing,
     agent_session_zero_message_sids,
     _load_webui_zero_message_orphan_tombstone,
@@ -12352,6 +12421,9 @@ def handle_get(handler, parsed) -> bool:
             msg_before = int(_msg_before) if _msg_before else None
         except (ValueError, TypeError):
             msg_before = None
+        _tail_snapshot_candidate = (
+            load_messages and msg_limit is not None and msg_before is None
+        )
         # ?expand_renderable=1 is retained for compatibility with older
         # frontends. msg_limit now counts visible transcript rows by default, so
         # the flag no longer changes the server-side pagination semantics.
@@ -12360,7 +12432,10 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             if _diag: _diag.stage("t1_after_get_session_check")
-            s = get_session(sid, metadata_only=(not load_messages))
+            s = get_session(
+                sid,
+                metadata_only=((not load_messages) or _tail_snapshot_candidate),
+            )
             _session_profile = getattr(s, 'profile', None) or None
             if not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
@@ -12384,6 +12459,24 @@ def handle_get(handler, parsed) -> bool:
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
+            tail_snapshot = None
+            if _tail_snapshot_candidate and not is_messaging_session:
+                candidate_snapshot = read_session_tail_cache(sid)
+                if candidate_snapshot is None:
+                    candidate_snapshot = build_session_tail_cache_from_legacy_sidecar(sid)
+                if _session_tail_snapshot_eligible(
+                    s,
+                    candidate_snapshot,
+                    msg_limit,
+                    msg_before,
+                    is_messaging_session,
+                ):
+                    tail_snapshot = candidate_snapshot
+                else:
+                    # Metadata/profile checks have completed. Fall back only now,
+                    # so a foreign-profile request never warms or parses a body.
+                    s = get_session(sid, metadata_only=False)
+                    _clear_stale_stream_state(s)
             cli_messages = []
             state_db_messages = []
             metadata_summary = None
@@ -12393,6 +12486,12 @@ def handle_get(handler, parsed) -> bool:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
                 if msg_limit is not None:
+                    _bounded_sidecar_messages = (
+                        tail_snapshot.get("messages") if tail_snapshot is not None else None
+                    )
+                    _bounded_sidecar_offset = (
+                        tail_snapshot.get("message_offset", 0) if tail_snapshot is not None else 0
+                    )
                     (
                         state_db_since_timestamp,
                         limited_sidecar_messages,
@@ -12400,7 +12499,27 @@ def handle_get(handler, parsed) -> bool:
                         s,
                         msg_limit,
                         msg_before=msg_before,
+                        sidecar_messages=_bounded_sidecar_messages,
+                        sidecar_message_offset=_bounded_sidecar_offset,
                     )
+                    if (
+                        tail_snapshot is not None
+                        and int(tail_snapshot.get("message_offset", 0)) > 0
+                        and state_db_since_timestamp is None
+                    ):
+                        # The prefix preflight could not prove equivalence. Load
+                        # the authoritative body and rerun the established path.
+                        s = get_session(sid, metadata_only=False)
+                        _clear_stale_stream_state(s)
+                        tail_snapshot = None
+                        (
+                            state_db_since_timestamp,
+                            limited_sidecar_messages,
+                        ) = _state_db_since_timestamp_for_limited_display(
+                            s,
+                            msg_limit,
+                            msg_before=msg_before,
+                        )
                 _state_db_reader_kwargs = {"profile": _session_profile}
                 if state_db_since_timestamp is not None:
                     _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
@@ -12482,6 +12601,21 @@ def handle_get(handler, parsed) -> bool:
             else:
                 _summary_message_count = None
                 _summary_last_message_at = None
+            _tail_message_offset = (
+                int(tail_snapshot.get("message_offset", 0))
+                if tail_snapshot is not None
+                else 0
+            )
+            _tail_local_tool_calls = []
+            if tail_snapshot is not None:
+                for _tail_call in tail_snapshot.get("tool_calls", []):
+                    if not isinstance(_tail_call, dict):
+                        continue
+                    _local_call = dict(_tail_call)
+                    _local_call["assistant_msg_idx"] = (
+                        int(_local_call["assistant_msg_idx"]) - _tail_message_offset
+                    )
+                    _tail_local_tool_calls.append(_local_call)
             if load_messages:
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,
@@ -12495,7 +12629,11 @@ def handle_get(handler, parsed) -> bool:
                     _truncated_msgs,
                     getattr(s, "anchor_activity_scenes", None),
                     message_offset=_messages_offset,
-                    tool_calls=getattr(s, "tool_calls", None),
+                    tool_calls=(
+                        _tail_local_tool_calls
+                        if tail_snapshot is not None
+                        else getattr(s, "tool_calls", None)
+                    ),
                 )
             else:
                 _truncated_msgs = []
@@ -12505,7 +12643,11 @@ def handle_get(handler, parsed) -> bool:
             _windowed_messages = (
                 load_messages
                 and msg_limit is not None
-                and (msg_before is not None or len(_truncated_msgs) < len(_all_msgs))
+                and (
+                    msg_before is not None
+                    or _tail_message_offset > 0
+                    or len(_truncated_msgs) < len(_all_msgs)
+                )
             )
             # Resolve effective context_length with model-metadata fallback so
             # older sessions (pre-#1318) that have context_length=0 persisted
@@ -12563,7 +12705,11 @@ def handle_get(handler, parsed) -> bool:
                             _fb_cl,
                         )
                     _persisted_cl = _fb_cl
-            _session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+            _session_tool_calls = (
+                _tail_local_tool_calls
+                if load_messages and tail_snapshot is not None
+                else (getattr(s, "tool_calls", []) if load_messages else [])
+            )
             # Always include session-level tool_calls so the browser can merge
             # them with per-message tool_calls for messages that lack the
             # per-message variant (older messages whose tool_calls live only
@@ -12575,15 +12721,38 @@ def handle_get(handler, parsed) -> bool:
                     _messages_offset,
                     len(_truncated_msgs),
                 )
-            _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
-            _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
-            if _summary_last_message_at is None and _all_msgs:
+            _messages_offset += _tail_message_offset
+            if tail_snapshot is not None:
+                _tail_messages = list(tail_snapshot.get("messages") or [])
+                _tail_delta_messages = _all_msgs[len(_tail_messages):]
+                _merged_message_count = int(tail_snapshot["source_message_count"]) + len(_tail_delta_messages)
+                _merged_user_message_count = int(tail_snapshot["source_user_message_count"]) + sum(
+                    str((message or {}).get("role") or "").lower() == "user"
+                    for message in _tail_delta_messages
+                    if isinstance(message, dict)
+                )
+                _merged_last_message_at = tail_snapshot.get("source_last_message_at") or 0
+            else:
+                _merged_message_count = (
+                    _summary_message_count
+                    if _summary_message_count is not None
+                    else len(_all_msgs)
+                )
+                _merged_user_message_count = None
+                _merged_last_message_at = (
+                    _summary_last_message_at
+                    if _summary_last_message_at is not None
+                    else 0
+                )
+            if (tail_snapshot is not None or _summary_last_message_at is None) and _all_msgs:
                 try:
-                    _merged_last_message_at = max(
+                    _merged_last_message_at = max([
+                        float(_merged_last_message_at or 0),
+                    ] + [
                         float((m or {}).get("timestamp") or 0)
                         for m in _all_msgs
                         if isinstance(m, dict)
-                    )
+                    ])
                 except (TypeError, ValueError):
                     _merged_last_message_at = 0
             active_stream_ids = _active_stream_ids()
@@ -12597,6 +12766,11 @@ def handle_get(handler, parsed) -> bool:
             raw = compact_session | {
                 "messages": _truncated_msgs,
                 "message_count": _merged_message_count,
+                "user_message_count": (
+                    _merged_user_message_count
+                    if _merged_user_message_count is not None
+                    else compact_session.get("user_message_count", 0)
+                ),
                 "tool_calls": _session_tool_calls,
                 "active_stream_id": getattr(s, "active_stream_id", None),
                 "pending_user_message": getattr(s, "pending_user_message", None),
@@ -12637,13 +12811,21 @@ def handle_get(handler, parsed) -> bool:
             # tool result is outside msg_limit, and treats an explicit empty
             # todo list as the current state instead of falling through to an
             # older non-empty write.
-            if load_messages and _all_msgs:
+            if load_messages and tail_snapshot is not None:
+                if tail_snapshot.get("todo_state") is not None:
+                    raw["todo_state"] = tail_snapshot.get("todo_state")
+                else:
+                    raw.pop("todo_state", None)
+            elif load_messages and _all_msgs:
                 attach_todo_state(raw, _all_msgs)
             if _merged_last_message_at:
-                raw["last_message_at"] = max(
-                    float(raw.get("last_message_at") or 0),
-                    _merged_last_message_at,
-                )
+                if tail_snapshot is not None:
+                    raw["last_message_at"] = _merged_last_message_at
+                else:
+                    raw["last_message_at"] = max(
+                        float(raw.get("last_message_at") or 0),
+                        _merged_last_message_at,
+                    )
                 raw["updated_at"] = max(
                     float(raw.get("updated_at") or 0),
                     _merged_last_message_at,
