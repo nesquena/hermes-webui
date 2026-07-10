@@ -142,6 +142,38 @@ def test_self_hosted_exact_owner_is_preserved(monkeypatch, provider):
     assert _repair(session, None) == provider
 
 
+def test_stored_owner_in_extra_models_is_preserved(monkeypatch):
+    session = _session()
+    stored_group = _group("ollama", "llama3.2")
+    stored_group["extra_models"] = [{"id": "kilo/minimax/minimax-m3"}]
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda *, prefer_cache=False: _catalog(
+            stored_group,
+            _group("kilocode", "kilo/minimax/minimax-m3"),
+        ),
+    )
+
+    assert _repair(session, None) == "ollama"
+
+
+def test_stored_provider_discovery_failure_is_preserved(monkeypatch):
+    session = _session()
+    stored_group = _group("ollama", "llama3.2")
+    stored_group["models_endpoint_error"] = "catalog unavailable"
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda *, prefer_cache=False: _catalog(
+            stored_group,
+            _group("kilocode", "kilo/minimax/minimax-m3"),
+        ),
+    )
+
+    assert _repair(session, None) == "ollama"
+
+
 @pytest.mark.parametrize(
     ("requested_model", "explicit_model_pick"),
     [

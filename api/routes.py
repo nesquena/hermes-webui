@@ -6004,14 +6004,15 @@ def _catalog_model_id_matches(candidate: str, model: str) -> bool:
 def _catalog_group_owns_exact_model(group: dict, model: str) -> bool:
     provider_id = str(group.get("provider_id") or "").strip()
     wrapper = f"@{provider_id}:"
-    for entry in group.get("models") or []:
-        if not isinstance(entry, dict):
-            continue
-        candidate = str(entry.get("id") or "").strip()
-        if candidate.lower().startswith(wrapper.lower()):
-            candidate = candidate[len(wrapper):]
-        if candidate == model or _catalog_model_id_matches(candidate, model):
-            return True
+    for bucket in ("models", "extra_models"):
+        for entry in group.get(bucket) or []:
+            if not isinstance(entry, dict):
+                continue
+            candidate = str(entry.get("id") or "").strip()
+            if candidate.lower().startswith(wrapper.lower()):
+                candidate = candidate[len(wrapper):]
+            if candidate == model or _catalog_model_id_matches(candidate, model):
+                return True
     return False
 
 
@@ -6062,7 +6063,11 @@ def _repair_foreign_session_model_provider(
         for group in groups
         if str(group.get("provider_id") or "").strip().lower() == stored_provider
     ]
-    if not stored_groups or any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups):
+    if (
+        not stored_groups
+        or any(group.get("models_endpoint_error") for group in stored_groups)
+        or any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups)
+    ):
         return resolved_provider
     owners = [
         group
