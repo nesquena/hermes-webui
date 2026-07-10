@@ -59,7 +59,7 @@ def test_disabled_list_round_trip(tmp_path):
     config_path = tmp_path / "config.yaml"
 
     # Write initial config
-    _save_yaml_config_file(config_path, {"skills": {"disabled": []}})
+    _save_yaml_config_file(config_path, {"skills": {"disabled": []}}, dirty_set={("skills",)})
 
     # Read, add skill, write
     cfg = _load_yaml_config_file(config_path)
@@ -68,7 +68,7 @@ def test_disabled_list_round_trip(tmp_path):
     disabled.append("skill-a")
     disabled.append("skill-b")
     cfg["skills"]["disabled"] = disabled
-    _save_yaml_config_file(config_path, cfg)
+    _save_yaml_config_file(config_path, cfg, dirty_set={("skills",)})
 
     # Read back and verify
     cfg2 = _load_yaml_config_file(config_path)
@@ -76,7 +76,7 @@ def test_disabled_list_round_trip(tmp_path):
 
     # Remove one skill, write, verify
     cfg2["skills"]["disabled"] = [d for d in cfg2["skills"]["disabled"] if d != "skill-a"]
-    _save_yaml_config_file(config_path, cfg2)
+    _save_yaml_config_file(config_path, cfg2, dirty_set={("skills",)})
 
     cfg3 = _load_yaml_config_file(config_path)
     assert cfg3["skills"]["disabled"] == ["skill-b"]

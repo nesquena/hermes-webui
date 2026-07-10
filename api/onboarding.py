@@ -246,6 +246,22 @@ def _load_yaml_config(config_path: Path) -> dict:
 
 
 
+def _save_yaml_config(config_path: Path, config: dict) -> None:
+    """Legacy compatibility wrapper — delegates to the central sink.
+
+    All keys in *config* are treated as authored by the caller (the
+    onboarding callers that use this load raw YAML with no ``${VAR}``
+    expansion, so the guard is a no-op on their values anyway).
+
+    New callers should use ``_save_yaml_config_file`` directly with an
+    explicit ``dirty_set``.
+    """
+    _save_yaml_config_file(
+        config_path, config,
+        dirty_set={(k,) for k in config},
+    )
+
+
 def _normalize_model_for_provider(provider: str, model: str) -> str:
     clean = (model or "").strip()
     if not clean:
@@ -1004,10 +1020,7 @@ def apply_onboarding_setup(body: dict) -> dict:
         model_cfg.pop("base_url", None)
 
     cfg["model"] = model_cfg
-    dirty = {("model", "provider"), ("model", "default")}
-    if "base_url" in model_cfg:
-        dirty.add(("model", "base_url"))
-    _save_yaml_config_file(config_path, cfg, dirty_set=dirty)
+    _save_yaml_config(config_path, cfg)
 
     if api_key:
         _write_env_file(env_path, {provider_meta["env_var"]: api_key})
@@ -1083,12 +1096,10 @@ def apply_self_hosted_provider_setup(body: dict) -> dict:
         model_cfg["default"] = _normalize_model_for_provider(provider, model)
         model_cfg["base_url"] = base_url
         cfg["model"] = model_cfg
-        _save_yaml_config_file(config_path, cfg,
-            dirty_set={("providers", provider, "base_url"), ("model", "provider"), ("model", "default"), ("model", "base_url")})
+        _save_yaml_config(config_path, cfg)
     elif "model" in cfg:
         cfg["model"] = original_model_cfg
-        _save_yaml_config_file(config_path, cfg,
-            dirty_set={("providers", provider, "base_url"), ("model",)})
+        _save_yaml_config(config_path, cfg)
 
     if api_key and env_var:
         _write_env_file(_get_active_hermes_home() / ".env", {env_var: api_key})

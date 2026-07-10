@@ -111,7 +111,7 @@ def test_config_save_strips_generated_builtin_personalities(tmp_path):
     cfg["webui"] = {"theme": "dark"}
 
     path = tmp_path / "config.yaml"
-    config._save_yaml_config_file(path, cfg)
+    config._save_yaml_config_file(path, cfg, dirty_set=set())
 
     text = path.read_text(encoding="utf-8")
     assert "webui:" in text
@@ -133,7 +133,7 @@ def test_config_save_preserves_custom_personality_overrides(tmp_path):
     config._apply_config_defaults(cfg)
 
     path = tmp_path / "config.yaml"
-    config._save_yaml_config_file(path, cfg)
+    config._save_yaml_config_file(path, cfg, dirty_set=set())
 
     text = path.read_text(encoding="utf-8")
     assert "personalities:" in text

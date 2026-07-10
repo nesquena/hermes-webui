@@ -123,7 +123,7 @@ def test_save_evicts_cache_so_next_read_is_fresh(tmp_path, clean_cache):
     assert str(cfg) in config._yaml_file_cache, "first read should populate the cache"
 
     # Save new content through the WebUI writer.
-    config._save_yaml_config_file(cfg, {"agent": {"reasoning_effort": "low"}})
+    config._save_yaml_config_file(cfg, {"agent": {"reasoning_effort": "low"}}, dirty_set={("agent", "reasoning_effort")})
     assert str(cfg) not in config._yaml_file_cache, (
         "_save_yaml_config_file must evict the memoized parse for the written path"
     )
