@@ -401,6 +401,321 @@ class TestDiffConfigPaths:
 
         assert _diff_config_paths({}, {}) == set()
 
+    def test_nested_list_leaf_changed(self):
+        from api.config import _diff_config_paths
+
+        old = {
+            "servers": [
+                {"name": "alpha", "headers": [{"key": "Authorization", "value": "old"}]},
+            ],
+        }
+        new = {
+            "servers": [
+                {"name": "alpha", "headers": [{"key": "Authorization", "value": "new"}]},
+            ],
+        }
+
+        assert _diff_config_paths(old, new) == {
+            ("servers", 0, "headers", 0, "value"),
+        }
+
+
+class TestListConfigGuard:
+    """List edits preserve raw env references at item and nested-item level."""
+
+    @staticmethod
+    def _write_provider_list(config_path, monkeypatch):
+        monkeypatch.setenv("FIRST_KEY", "first-secret")
+        monkeypatch.setenv("SECOND_KEY", "second-secret")
+        config_path.write_text(
+            "\n".join([
+                "custom_providers:",
+                "  - name: first",
+                "    api_key: ${FIRST_KEY}",
+                "    base_url: https://first.example.com",
+                "  - name: second",
+                "    api_key: ${SECOND_KEY}",
+                "    base_url: https://second.example.com",
+            ]),
+            encoding="utf-8",
+        )
+
+    def test_equal_length_item_edit_preserves_sibling_secret(self, tmp_path, monkeypatch):
+        import api.config as config
+        from copy import deepcopy
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        self._write_provider_list(config_path, monkeypatch)
+        config._yaml_file_cache.clear()
+
+        cfg = config._load_yaml_config_file(config_path)
+        snapshot = deepcopy(cfg)
+        cfg["custom_providers"][0]["base_url"] = "https://new.example.com"
+        config._save_yaml_config_file(config_path, cfg, snapshot=snapshot)
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        providers = saved["custom_providers"]
+        assert providers[0]["base_url"] == "https://new.example.com"
+        assert "${FIRST_KEY}" in providers[0]["api_key"]
+        assert "${SECOND_KEY}" in providers[1]["api_key"]
+
+    def test_structural_delete_aligns_by_stable_name(self, tmp_path, monkeypatch):
+        import api.config as config
+        from copy import deepcopy
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        self._write_provider_list(config_path, monkeypatch)
+        config._yaml_file_cache.clear()
+
+        cfg = config._load_yaml_config_file(config_path)
+        snapshot = deepcopy(cfg)
+        cfg["custom_providers"] = [cfg["custom_providers"][1]]
+        config._save_yaml_config_file(config_path, cfg, snapshot=snapshot)
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        providers = saved["custom_providers"]
+        assert [provider["name"] for provider in providers] == ["second"]
+        assert "${SECOND_KEY}" in providers[0]["api_key"]
+
+    def test_reorder_aligns_by_stable_name(self, tmp_path, monkeypatch):
+        import api.config as config
+        from copy import deepcopy
+
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        self._write_provider_list(config_path, monkeypatch)
+        config._yaml_file_cache.clear()
+
+        cfg = config._load_yaml_config_file(config_path)
+        snapshot = deepcopy(cfg)
+        cfg["custom_providers"] = list(reversed(cfg["custom_providers"]))
+        config._save_yaml_config_file(config_path, cfg, snapshot=snapshot)
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        providers = saved["custom_providers"]
+        assert [provider["name"] for provider in providers] == ["second", "first"]
+        assert "${SECOND_KEY}" in providers[0]["api_key"]
+        assert "${FIRST_KEY}" in providers[1]["api_key"]
+
+    def test_nested_list_edit_preserves_nested_secret(self, tmp_path, monkeypatch):
+        import api.config as config
+        from copy import deepcopy
+
+        monkeypatch.setenv("NESTED_KEY", "nested-secret")
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        config_path.write_text(
+            "\n".join([
+                "servers:",
+                "  - name: first",
+                "    headers:",
+                "      - name: Authorization",
+                "        value: ${NESTED_KEY}",
+                "        label: old",
+            ]),
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+
+        cfg = config._load_yaml_config_file(config_path)
+        snapshot = deepcopy(cfg)
+        cfg["servers"][0]["headers"][0]["label"] = "new"
+        config._save_yaml_config_file(config_path, cfg, snapshot=snapshot)
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        header = saved["servers"][0]["headers"][0]
+        assert header["label"] == "new"
+        assert header["value"] == "${NESTED_KEY}"
+
+    def test_scalar_reorder_aligns_by_unique_exact_value(self, tmp_path, monkeypatch):
+        import api.config as config
+        from copy import deepcopy
+
+        monkeypatch.setenv("ENDPOINT_KEY", "https://secret.example.com")
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        config_path.write_text(
+            "endpoints:\n  - ${ENDPOINT_KEY}\n  - https://plain.example.com\n",
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+
+        cfg = config._load_yaml_config_file(config_path)
+        snapshot = deepcopy(cfg)
+        cfg["endpoints"] = list(reversed(cfg["endpoints"]))
+        config._save_yaml_config_file(config_path, cfg, snapshot=snapshot)
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        assert saved["endpoints"] == [
+            "https://plain.example.com",
+            "${ENDPOINT_KEY}",
+        ]
+
+    def test_ambiguous_structural_list_stays_raw_and_warns(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        import api.config as config
+        from copy import deepcopy
+
+        monkeypatch.setenv("DUPLICATE_KEY", "duplicate-secret")
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        config_path.write_text(
+            "items:\n  - ${DUPLICATE_KEY}\n  - ${DUPLICATE_KEY}\n",
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+
+        cfg = config._load_yaml_config_file(config_path)
+        snapshot = deepcopy(cfg)
+        cfg["items"] = [cfg["items"][0]]
+        with caplog.at_level("WARNING", logger="api.config"):
+            config._save_yaml_config_file(config_path, cfg, snapshot=snapshot)
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        assert saved["items"] == ["${DUPLICATE_KEY}", "${DUPLICATE_KEY}"]
+        assert "items" in caplog.text
+        assert "duplicate-secret" not in caplog.text
+
+
+class TestAuthorshipModeContract:
+    def test_snapshot_and_explicit_dirty_preserve_same_value_literal(self, tmp_path, monkeypatch):
+        import api.config as config
+        from copy import deepcopy
+
+        monkeypatch.setenv("SAME_VALUE_KEY", "same-secret")
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        config_path.write_text(
+            "model:\n  api_key: ${SAME_VALUE_KEY}\n",
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+
+        cfg = config._load_yaml_config_file(config_path)
+        snapshot = deepcopy(cfg)
+        config._save_yaml_config_file(
+            config_path,
+            cfg,
+            snapshot=snapshot,
+            explicit_dirty={("model", "api_key")},
+        )
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        assert saved["model"]["api_key"] == "same-secret"
+
+    def test_explicit_dirty_requires_snapshot(self, _prepare_config_path):
+        import api.config as config
+
+        with pytest.raises(TypeError, match="explicit_dirty requires snapshot"):
+            config._save_yaml_config_file(
+                _prepare_config_path,
+                {},
+                explicit_dirty={("model", "default")},
+            )
+
+    def test_dirty_set_and_explicit_dirty_without_snapshot_is_invalid(self, _prepare_config_path):
+        import api.config as config
+
+        with pytest.raises(TypeError, match="cannot be combined with dirty_set"):
+            config._save_yaml_config_file(
+                _prepare_config_path,
+                {},
+                dirty_set=set(),
+                explicit_dirty={("model", "default")},
+            )
+
+    def test_snapshot_wins_over_dirty_set_and_unions_explicit(self, tmp_path, monkeypatch):
+        import api.config as config
+        from copy import deepcopy
+
+        monkeypatch.setenv("MODE_CONTRACT_KEY", "contract-secret")
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        config_path.write_text(
+            "model:\n  default: old-model\n  api_key: ${MODE_CONTRACT_KEY}\n",
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+
+        cfg = config._load_yaml_config_file(config_path)
+        snapshot = deepcopy(cfg)
+        cfg["model"]["default"] = "new-model"
+        config._save_yaml_config_file(
+            config_path,
+            cfg,
+            dirty_set={("model", "api_key")},
+            snapshot=snapshot,
+            explicit_dirty={("model", "default")},
+        )
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        assert saved["model"]["default"] == "new-model"
+        assert saved["model"]["api_key"] == "${MODE_CONTRACT_KEY}"
+
+
+class TestAdvancedOptionAuthorship:
+    def test_advanced_options_return_nested_extra_body_paths(self):
+        from api.config import _apply_advanced_model_options
+
+        model_cfg = {
+            "extra_body": {
+                "headers": [{"name": "Authorization", "value": "old"}],
+            },
+        }
+        dirty = _apply_advanced_model_options(
+            model_cfg,
+            {
+                "timeout": 30,
+                "extra_body": {
+                    "headers": [{"name": "Authorization", "value": "new"}],
+                },
+            },
+        )
+
+        assert ("timeout",) in dirty
+        assert ("extra_body", "headers", 0, "value") in dirty
+
+    def test_unchanged_extra_body_is_not_marked_explicit(self):
+        from api.config import _apply_advanced_model_options
+
+        model_cfg = {"extra_body": {"Authorization": "expanded-secret"}}
+        dirty = _apply_advanced_model_options(
+            model_cfg,
+            {"extra_body": {"Authorization": "expanded-secret"}},
+        )
+
+        assert dirty == set()
+
+    def test_auxiliary_reset_uses_snapshot(self, tmp_path, monkeypatch):
+        import api.config as config
+
+        monkeypatch.setenv("AUX_RESET_KEY", "aux-reset-secret")
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        config_path.write_text(
+            "\n".join([
+                "auxiliary:",
+                "  vision:",
+                "    provider: openai",
+                "    model: gpt-4o",
+                "    api_key: ${AUX_RESET_KEY}",
+            ]),
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+
+        config.set_auxiliary_model("__reset__", "", "")
+
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        vision = saved["auxiliary"]["vision"]
+        assert vision["provider"] == "auto"
+        assert vision["model"] == ""
+        assert "${AUX_RESET_KEY}" in vision["api_key"]
+
 
 class TestProductionCallerRegression:
     """Verify each fixed production caller preserves ``${VAR}`` and writes
@@ -449,6 +764,35 @@ class TestProductionCallerRegression:
         assert model.get("timeout") == 60, (
             f"Expected timeout=60, got {model.get('timeout')!r}"
         )
+
+    def test_set_model_same_value_advanced_secret_is_authored(self, tmp_path, monkeypatch):
+        import api.config as config
+
+        monkeypatch.setenv("MODEL_KEY", "same-model-secret")
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(
+            config,
+            "resolve_model_provider",
+            lambda model: (model, "", None),
+        )
+        config_path.write_text(
+            "model:\n  default: claude-opus-4\n  api_key: ${MODEL_KEY}\n",
+            encoding="utf-8",
+        )
+        config._yaml_file_cache.clear()
+        _orig_cache = config._cfg_cache
+        config._cfg_cache = None
+
+        config.set_hermes_default_model(
+            "claude-opus-4",
+            advanced={"api_key": "same-model-secret"},
+        )
+
+        config._cfg_cache = _orig_cache
+        saved = config._load_yaml_config_file_raw(config_path, _copy=False)
+        assert saved["model"]["api_key"] == "same-model-secret"
 
     def test_set_aux_with_advanced_preserves_unrelated_var(self, tmp_path, monkeypatch):
         """``set_auxiliary_model`` with advanced options: authored fields

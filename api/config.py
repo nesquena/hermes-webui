@@ -751,29 +751,262 @@ def _config_for_yaml_save(config_data: dict) -> dict:
     return data
 
 
+_LIST_STRUCTURE_DIRTY = object()
+_ConfigPath = tuple[object, ...]
+_LIST_IDENTITY_FIELDS = ("id", "name", "key", "slug")
+
+
+def _freeze_config_value(value):
+    """Return a hashable, type-sensitive representation of a config value."""
+    if isinstance(value, dict):
+        return (
+            "dict",
+            tuple(sorted(
+                (
+                    (
+                        _freeze_config_value(key),
+                        _freeze_config_value(item),
+                    )
+                    for key, item in value.items()
+                ),
+                key=repr,
+            )),
+        )
+    if isinstance(value, list):
+        return ("list", tuple(_freeze_config_value(item) for item in value))
+    return (type(value).__name__, repr(value))
+
+
+def _list_item_identity(item):
+    """Return a stable identity for a mapping list item, when one is clear."""
+    if not isinstance(item, dict):
+        return None
+    for field in _LIST_IDENTITY_FIELDS:
+        value = item.get(field)
+        if isinstance(value, str):
+            if not value.strip():
+                continue
+        elif not isinstance(value, (int, float, bool)):
+            continue
+        return (field, _freeze_config_value(value))
+    return None
+
+
+def _unique_index_map(values):
+    """Map unique values to indexes; return ``None`` when duplicates exist."""
+    result = {}
+    for index, value in enumerate(values):
+        key = _freeze_config_value(value)
+        if key in result:
+            return None
+        result[key] = index
+    return result
+
+
+def _keyed_list_alignment(before: list, after: list):
+    """Align mapping lists by a unique stable identity, or return ``None``."""
+    before_keys = [_list_item_identity(item) for item in before]
+    after_keys = [_list_item_identity(item) for item in after]
+    if any(key is None for key in before_keys + after_keys):
+        return None
+    before_map = _unique_index_map(before_keys)
+    after_map = _unique_index_map(after_keys)
+    if before_map is None or after_map is None:
+        return None
+    return [before_map.get(_freeze_config_value(key)) for key in after_keys]
+
+
+def _exact_list_alignment(before: list, after: list):
+    """Align lists by unique exact values, or return ``None`` if ambiguous."""
+    if any(
+        isinstance(value, (dict, list))
+        for value in before + after
+    ):
+        return None
+    before_map = _unique_index_map(before)
+    after_map = _unique_index_map(after)
+    if before_map is None or after_map is None:
+        return None
+    return [before_map.get(_freeze_config_value(value)) for value in after]
+
+
+def _align_config_lists(before: list, after: list):
+    """Return ``(after-index -> before-index, structural_change)``.
+
+    Equal-length lists are positional by default.  Stable-key or exact-value
+    matching is used when it can prove a reorder or structural edit.  A
+    ``None`` return means that preserving raw provenance is ambiguous.
+    """
+    if len(before) == len(after):
+        positional = list(range(len(after)))
+        if before == after:
+            return positional, False
+
+        # Equal-length lists are normally positional: the caller edited the
+        # existing slots in place.  Detect a real reorder only when a stable
+        # identity (or a unique exact scalar value) proves it; this keeps
+        # ordinary positional edits from depending on opinionated key names.
+        keyed = _keyed_list_alignment(before, after)
+        if (
+            keyed is not None
+            and all(index is not None for index in keyed)
+            and keyed != positional
+        ):
+            return keyed, keyed != positional
+
+        exact = _exact_list_alignment(before, after)
+        if (
+            exact is not None
+            and all(index is not None for index in exact)
+            and exact != positional
+        ):
+            return exact, exact != positional
+
+        # Equal-length positional lists are allowed to edit their elements in
+        # place.  The recursive merge below preserves untouched fields.
+        return positional, False
+
+    keyed = _keyed_list_alignment(before, after)
+    if keyed is not None:
+        return keyed, True
+
+    exact = _exact_list_alignment(before, after)
+    if exact is not None:
+        return exact, True
+
+    return None
+
+
+def _diff_config_value_paths(
+    snapshot,
+    modified,
+    prefix: _ConfigPath,
+) -> set[_ConfigPath]:
+    """Return changed paths for one config value, recursing through lists."""
+    if isinstance(snapshot, dict) and isinstance(modified, dict):
+        return _diff_config_paths(snapshot, modified, prefix)
+
+    if isinstance(snapshot, list) and isinstance(modified, list):
+        alignment = _align_config_lists(snapshot, modified)
+        if alignment is None:
+            _warn_ambiguous_list(prefix)
+            return set()
+
+        old_indexes, structural_change = alignment
+        dirty: set[_ConfigPath] = set()
+        if structural_change:
+            dirty.add(prefix + (_LIST_STRUCTURE_DIRTY,))
+
+        for new_index, old_index in enumerate(old_indexes):
+            item_path = prefix + (new_index,)
+            if old_index is None:
+                dirty.add(item_path)
+            else:
+                dirty |= _diff_config_value_paths(
+                    snapshot[old_index], modified[new_index], item_path,
+                )
+        return dirty
+
+    if snapshot != modified:
+        return {prefix}
+    return set()
+
+
+def _format_config_path(path: tuple[object, ...]) -> str:
+    """Format an internal config path without exposing any config values."""
+    rendered = []
+    for part in path:
+        if part is _LIST_STRUCTURE_DIRTY:
+            continue
+        if isinstance(part, int):
+            rendered.append(f"[{part}]")
+        else:
+            rendered.append(str(part) if not rendered else f".{part}")
+    return "".join(rendered) or "<root>"
+
+
+def _warn_ambiguous_list(path: tuple[object, ...]) -> None:
+    logger.warning(
+        "Preserving raw config list at %s because item identity is ambiguous; "
+        "the list update was not persisted",
+        _format_config_path(path),
+    )
+
+
+def _merge_config_list(
+    raw: list,
+    expanded_raw: list,
+    updates: list,
+    dirty_set: set[_ConfigPath],
+    path: tuple[object, ...],
+) -> list:
+    alignment = _align_config_lists(expanded_raw, updates)
+    if alignment is None:
+        _warn_ambiguous_list(path)
+        return copy.deepcopy(raw)
+    old_indexes, _structural_change = alignment
+
+    merged = []
+    for new_index, value in enumerate(updates):
+        old_index = old_indexes[new_index]
+        item_path = (new_index,)
+        exact_dirty = item_path in dirty_set
+        child_dirty = {
+            item[1:]
+            for item in dirty_set
+            if len(item) > 1 and item[0] == new_index
+        }
+
+        if old_index is None:
+            merged.append(copy.deepcopy(value))
+            continue
+        if old_index >= len(raw) or old_index >= len(expanded_raw):
+            merged.append(copy.deepcopy(value))
+            continue
+        if exact_dirty:
+            merged.append(copy.deepcopy(value))
+        elif not child_dirty:
+            merged.append(copy.deepcopy(raw[old_index]))
+        elif (
+            isinstance(value, dict)
+            and isinstance(raw[old_index], dict)
+            and isinstance(expanded_raw[old_index], dict)
+        ):
+            merged.append(_deep_merge_onto_raw(
+                raw[old_index], expanded_raw[old_index], value,
+                dirty_set=child_dirty,
+                _path=path + (new_index,),
+            ))
+        elif (
+            isinstance(value, list)
+            and isinstance(raw[old_index], list)
+            and isinstance(expanded_raw[old_index], list)
+        ):
+            merged.append(_merge_config_list(
+                raw[old_index], expanded_raw[old_index], value,
+                child_dirty, path + (new_index,),
+            ))
+        else:
+            merged.append(copy.deepcopy(value))
+    return merged
+
+
 def _deep_merge_onto_raw(
     raw: dict,
     expanded_raw: dict,
     updates: dict,
-    dirty_set: set[tuple[str, ...]] | None = None,
+    dirty_set: set[_ConfigPath] | None = None,
+    *,
+    _path: tuple[object, ...] = (),
 ) -> dict:
-    """Merge ``updates`` onto ``raw``, preserving raw's ``${VAR}`` references.
+    """Merge updates onto raw YAML while preserving environment references.
 
-    The caller declares authorship via ``dirty_set`` — a set of path tuples
-    such as ``{("model", "default")}``.  How each key is resolved:
-
-      * The key itself is in ``dirty_set`` → the caller authored it wholesale
-        — use ``updates[key]``, no recursion.
-
-      * No sub-path under the key is in ``dirty_set`` → the caller did not
-        touch this branch — preserve ``raw[key]`` unchanged.
-
-      * A sub-path under the key (e.g. ``("model", "provider")`` when the
-        current key is ``"model"``) is in ``dirty_set`` → the caller touched
-        sub-fields — recurse with the filtered sub-path set.
-
-    Equality with the expanded value is never tested.  The dirty set is the
-    single source of truth for write intent.
+    ``dirty_set`` is explicit write intent.  It may contain string mapping keys
+    from legacy callers and private integer list indexes from snapshot diffs.
+    Untouched branches always retain their raw representation.  Lists recurse
+    by position where safe, use unique identity/value matching for structural
+    edits, and preserve the raw list with a warning when provenance is
+    ambiguous.
     """
     if dirty_set is None:
         dirty_set = set()
@@ -782,44 +1015,42 @@ def _deep_merge_onto_raw(
 
     for key, value in updates.items():
         keypath = (key,)
+        key_or_sub_dirty = any(path and path[0] == key for path in dirty_set)
 
-        if key in raw and key in expanded_raw:
-            # Does the caller claim authorship at or below this key?
-            key_or_sub_dirty = any(
-                p and p[0] == key for p in dirty_set
-            )
-
-            if keypath in dirty_set:
-                # Caller authored this key wholesale
-                merged[key] = value
-            elif not key_or_sub_dirty:
-                # Nothing under this key was authored — preserve raw
-                merged[key] = raw[key]
-            elif (
+        if key not in raw or key not in expanded_raw:
+            merged[key] = copy.deepcopy(value)
+        elif keypath in dirty_set:
+            merged[key] = copy.deepcopy(value)
+        elif not key_or_sub_dirty:
+            merged[key] = copy.deepcopy(raw[key])
+        else:
+            sub_dirty = {
+                path[1:]
+                for path in dirty_set
+                if len(path) > 1 and path[0] == key
+            }
+            if (
                 isinstance(value, dict)
                 and isinstance(raw[key], dict)
                 and isinstance(expanded_raw[key], dict)
             ):
-                # Sub-paths are dirty — recurse to merge per-key
-                sub_dirty = {
-                    p[1:] for p in dirty_set
-                    if len(p) > 1 and p[0] == key
-                }
                 merged[key] = _deep_merge_onto_raw(
                     raw[key], expanded_raw[key], value,
                     dirty_set=sub_dirty,
+                    _path=_path + (key,),
+                )
+            elif (
+                isinstance(value, list)
+                and isinstance(raw[key], list)
+                and isinstance(expanded_raw[key], list)
+            ):
+                merged[key] = _merge_config_list(
+                    raw[key], expanded_raw[key], value,
+                    sub_dirty, _path + (key,),
                 )
             else:
-                # Dict/list mismatch, or scalar with sub-path dirty
-                # (e.g. caller passed a list for what was a scalar).
-                # The caller authored something under this key, so use
-                # their value.
-                merged[key] = value
-        else:
-            # New key not in the original file
-            merged[key] = value
+                merged[key] = copy.deepcopy(value)
 
-    # Handle deletions: keys the caller removed from the config dict
     for key in list(merged.keys()):
         if key not in updates:
             del merged[key]
@@ -832,12 +1063,23 @@ def _save_yaml_config_file(
     config_data: dict,
     dirty_set: set[tuple[str, ...]] | None = None,
     snapshot: dict | None = None,
+    explicit_dirty: set[tuple[str, ...]] | None = None,
 ) -> None:
     """Write *config_data* to *config_path* via the architectural guard.
 
     The guard prevents ``${VAR}`` secret leaks during read-modify-write
-    cycles.  Two mutually-exclusive modes control which paths are treated
-    as authored:
+    cycles.  Authorship modes follow this matrix:
+
+    * ``snapshot`` + ``explicit_dirty``: union the snapshot diff and explicit
+      authored paths.
+    * ``snapshot`` + ``dirty_set`` + ``explicit_dirty``: same as the previous
+      case; snapshot wins over ``dirty_set`` and explicit paths are unioned.
+    * ``snapshot`` alone: use only the snapshot diff.
+    * ``explicit_dirty`` without ``snapshot``: raise ``TypeError``.
+    * ``dirty_set`` alone: preserve the legacy explicit dirty-set behavior.
+    * ``dirty_set`` + ``snapshot``: snapshot wins, as in the historical
+      contract; ``dirty_set`` is ignored.
+    * ``dirty_set`` + ``explicit_dirty`` without a snapshot: raise ``TypeError``.
 
     *snapshot* (preferred)
         The pre-mutation expanded config dict (use ``copy.deepcopy()``
@@ -854,11 +1096,19 @@ def _save_yaml_config_file(
         ``${VAR}`` siblings under the same parent will be overwritten
         with expanded secrets.
 
-    When both are provided, *snapshot* wins and *dirty_set* is derived
-    automatically.
+    ``explicit_dirty`` uses the legacy caller-facing ``set[tuple[str, ...]]``
+    shape.  Private list-index paths are produced only by snapshot diffing.
     """
     if snapshot is not None:
         dirty_set = _diff_config_paths(snapshot, config_data)
+        if explicit_dirty is not None:
+            dirty_set |= explicit_dirty
+    elif explicit_dirty is not None:
+        if dirty_set is not None:
+            raise TypeError(
+                "explicit_dirty cannot be combined with dirty_set without a snapshot"
+            )
+        raise TypeError("explicit_dirty requires snapshot")
     elif dirty_set is None:
         raise TypeError(
             "dirty_set is required. Callers must declare which config keys "
@@ -895,16 +1145,16 @@ def _save_yaml_config_file(
 def _diff_config_paths(
     snapshot: dict,
     modified: dict,
-    prefix: tuple[str, ...] = (),
-) -> set[tuple[str, ...]]:
-    """Return leaf-path tuples for every value that differs between two dicts.
+    prefix: _ConfigPath = (),
+) -> set[_ConfigPath]:
+    """Return internal leaf paths for values differing between two configs.
 
     Walks both dicts recursively so that changing ``model.openai_runtime``
     yields ``{("model", "openai_runtime")}`` — not ``{("model",)}`` which
     would mark the entire ``model`` branch as authored and potentially
     overwrite untouched ``${VAR}`` fields like ``model.api_key``.
     """
-    dirty: set[tuple[str, ...]] = set()
+    dirty: set[_ConfigPath] = set()
     keys = set(list(snapshot.keys()) + list(modified.keys()))
     for key in keys:
         path = prefix + (key,)
@@ -919,8 +1169,8 @@ def _diff_config_paths(
             dirty |= _diff_config_paths(
                 snapshot[key], modified[key], path,
             )
-        elif snapshot[key] != modified[key]:
-            dirty.add(path)
+        else:
+            dirty |= _diff_config_value_paths(snapshot[key], modified[key], path)
     return dirty
 
 
@@ -4172,13 +4422,23 @@ def _main_model_request_overrides(
     return overrides
 
 
-def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:
-    """Apply supported advanced model options to a config block in-place."""
+def _apply_advanced_model_options(
+    model_cfg: dict,
+    advanced: dict | None,
+) -> set[_ConfigPath]:
+    """Apply advanced options and return the authored relative paths.
+
+    Paths are relative to ``model_cfg``.  The private list indexes returned
+    for nested ``extra_body`` values are consumed by snapshot diffing; callers
+    filter those indexes before passing legacy-shaped ``explicit_dirty``.
+    """
+    dirty: set[_ConfigPath] = set()
     if advanced is None:
-        return
+        return dirty
     if not isinstance(advanced, dict):
         raise ValueError("advanced model options must be an object")
     if "base_url" in advanced:
+        dirty.add(("base_url",))
         base_url = str(advanced.get("base_url") or "").strip().rstrip("/")
         if base_url:
             model_cfg["base_url"] = base_url
@@ -4186,12 +4446,15 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
             model_cfg.pop("base_url", None)
     for field in ("timeout", "download_timeout", "max_concurrency"):
         if field in advanced:
+            dirty.add((field,))
             coerced = _coerce_optional_positive_int(advanced.get(field), field)
             if coerced == "":
                 model_cfg.pop(field, None)
             elif coerced is not None:
                 model_cfg[field] = coerced
     if "extra_body" in advanced:
+        missing = object()
+        before_extra_body = copy.deepcopy(model_cfg.get("extra_body", missing))
         extra_body = advanced.get("extra_body")
         if isinstance(extra_body, str):
             text = extra_body.strip()
@@ -4208,7 +4471,14 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
                 model_cfg.pop("extra_body", None)
         else:
             raise ValueError("extra_body must be a JSON object")
+        after_extra_body = model_cfg.get("extra_body", missing)
+        dirty |= _diff_config_value_paths(
+            before_extra_body,
+            after_extra_body,
+            ("extra_body",),
+        )
     if "service_tier" in advanced:
+        dirty.add(("service_tier",))
         service_tier = str(advanced.get("service_tier") or "").strip().lower()
         if not service_tier or service_tier == "default":
             model_cfg.pop("service_tier", None)
@@ -4217,10 +4487,13 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         else:
             raise ValueError("service_tier must be one of: default, priority")
     if advanced.get("api_key_clear"):
+        dirty.add(("api_key",))
         model_cfg.pop("api_key", None)
     api_key = str(advanced.get("api_key") or "").strip()
     if api_key:
+        dirty.add(("api_key",))
         model_cfg["api_key"] = api_key
+    return dirty
 
 
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
@@ -4269,11 +4542,17 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if persisted_provider:
             model_cfg["provider"] = persisted_provider
 
+        explicit_dirty = {("model", "default")}
+        if persisted_provider:
+            explicit_dirty.add(("model", "provider"))
+
         if resolved_base_url and not provider_override_won:
             model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+            explicit_dirty.add(("model", "base_url"))
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
+                explicit_dirty.add(("model", "base_url"))
             else:
                 # Provider changed and we have no resolved URL for the new one.
                 # Drop the previous provider's base_url so New Chat doesn't route
@@ -4281,14 +4560,21 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
                 # (a different custom provider has a different URL); leaving the
                 # stale base_url sent requests to the wrong host (#4728).
                 model_cfg.pop("base_url", None)
+                explicit_dirty.add(("model", "base_url"))
 
-        _apply_advanced_model_options(model_cfg, advanced)
+        advanced_dirty = _apply_advanced_model_options(model_cfg, advanced)
+        explicit_dirty.update(
+            ("model", *path)
+            for path in advanced_dirty
+            if all(isinstance(part, str) for part in path)
+        )
         if not _main_model_supports_service_tier(persisted_model, persisted_provider):
             model_cfg.pop("service_tier", None)
 
         config_data["model"] = model_cfg
         _save_yaml_config_file(config_path, config_data,
-            snapshot=_snapshot)
+            snapshot=_snapshot,
+            explicit_dirty=explicit_dirty)
     # Reload outside the lock — reload_config() acquires _cfg_lock itself.
     reload_config()
     # Invalidate the TTL cache so the next /api/models call returns fresh data
@@ -4442,7 +4728,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 aux_cfg[slot] = slot_cfg
             config_data["auxiliary"] = aux_cfg
             _save_yaml_config_file(config_path, config_data,
-                dirty_set={("auxiliary",)})
+                snapshot=_snapshot)
         else:
             aux_cfg = config_data.get("auxiliary", {})
             if not isinstance(aux_cfg, dict):
@@ -4452,6 +4738,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 slot_cfg = {}
             slot_cfg["provider"] = provider or "auto"
             slot_cfg["model"] = model or ""
+            resolved_base_url = None
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 try:
                     _, _, resolved_base_url = resolve_model_provider(model)
@@ -4459,16 +4746,28 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                         slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
                 except Exception:
                     pass
+            explicit_dirty = {
+                ("auxiliary", task, "provider"),
+                ("auxiliary", task, "model"),
+            }
+            if resolved_base_url:
+                explicit_dirty.add(("auxiliary", task, "base_url"))
             if advanced is not None:
                 try:
-                    _apply_advanced_model_options(slot_cfg, advanced)
+                    advanced_dirty = _apply_advanced_model_options(slot_cfg, advanced)
                 except ValueError as exc:
                     msg = str(exc).replace("advanced model options", "advanced auxiliary options")
                     raise ValueError(msg) from exc
+                explicit_dirty.update(
+                    ("auxiliary", task, *path)
+                    for path in advanced_dirty
+                    if all(isinstance(part, str) for part in path)
+                )
             aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
             _save_yaml_config_file(config_path, config_data,
-                snapshot=_snapshot)
+                snapshot=_snapshot,
+                explicit_dirty=explicit_dirty)
 
     reload_config()
     return {"ok": True, "task": task, "provider": provider, "model": model}

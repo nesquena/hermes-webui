@@ -660,6 +660,41 @@ Default toolset list (hardcoded fallback):
 The web UI always runs with the full CLI toolset. There is no per-session toolset
 restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
 
+### 8.1 Config YAML authorship and raw-value preservation
+
+The runtime config loader expands `${VAR}` references for consumers, while
+`config.yaml` remains the source of truth and must retain those references on
+unrelated read-modify-write saves.  `_save_yaml_config_file()` is the single
+production YAML sink.  Its raw-on-disk/expanded-in-memory contract is:
+
+- A snapshot is a deep copy of the expanded config taken immediately after a
+  caller loads it and before mutating it.  Snapshot diffing derives leaf paths,
+  so only changed or deleted values are authored; untouched siblings are merged
+  from the raw file.
+- `snapshot` plus `explicit_dirty` uses the union of the derived diff and the
+  explicitly authored paths.  The same rule applies when all three arguments
+  are supplied: snapshot wins over `dirty_set`, while `explicit_dirty` is
+  still unioned.  `explicit_dirty` is valid only with a snapshot.  `dirty_set`
+  remains the legacy explicit-authorship mode; when a snapshot is present it
+  is ignored, and combining it with `explicit_dirty` without a snapshot is an
+  error.
+- Lists use positional matching for equal-length in-place edits.  A stable
+  `id`, `name`, `key`, or `slug` identity (or a unique exact scalar value) is
+  used when it proves a reorder or when a structural length change occurs.
+  Ambiguous structural lists stay raw and emit a path-only warning; they never
+  fall back to first-unused matching or log config values.  Duplicate scalar
+  entries are therefore a known limitation: deletion/reorder provenance cannot
+  be inferred safely when identical values are indistinguishable.
+- Advanced model options return exact authored relative paths, including
+  nested `extra_body` paths.  The skills toggle is an intentional legacy
+  exception because it already declares the two leaf paths it owns:
+  `skills.disabled` and `skills.platform_disabled.webui`.
+
+Onboarding and profile setup may load raw YAML and use the legacy dirty-set
+wrapper because those flows author their complete input.  All other production
+config writers should use a snapshot, with `explicit_dirty` reserved for an
+authored value that is equal to its expanded snapshot value.
+
 ---
 
 ## 9. Known Bugs and Technical Debt Summary
