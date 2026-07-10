@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A session no longer gets stuck sending to the wrong provider after its stored provider becomes stale.** When a session's persisted model/provider no longer matches where that model actually lives (e.g. the model moved groups, or an older session carried a now-foreign provider), chat start now repairs the binding to the correct provider — but only on positive proof: it reroutes solely when the live model catalog shows the stored group genuinely lacks the model AND exactly one other healthy group owns it. It checks both the primary and overflow (`extra_models`) model buckets before deciding a group doesn't own a model, and it fails safe — preserving the stored provider without rerouting — whenever any relevant catalog probe failed (a transient discovery error is never treated as proof the model is absent). Ordinary matching-provider sends make no catalog call, and explicit/ambiguous/unknown/stored-owner picks are all left untouched. Thanks @rodboev. (#5873, #5731)
+
 ### Internal
 
 - **Centralized WebUI static-asset resolution.** The app-shell (`index.html`), `/static/*`, manifest, service worker, and favicon now resolve through a single shared resolver instead of scattered `__file__`-relative logic — behavior-preserving (same bytes, headers, cache signature, CSRF-per-request injection, and path-traversal rejection), with new resolver regression tests. Thanks @rodboev. (#5557, #2695)
