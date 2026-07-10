@@ -110,9 +110,9 @@ global.switchToProfile = async (name) => {
   S.activeProfile = name;
   S.activeProfileIsDefault = false;
   localStorage.setItem('hermes-webui-session', 'fresh-local');
+  return true;
 };
 (async () => {
-  const promoted = _sessionUrlForSid('abc 123');
   const savedLocalBefore = localStorage.getItem('hermes-webui-session');
   const profileSwitchProfileBefore = S.activeProfile || 'default';
   const profileSwitchIsDefaultBefore = !!S.activeProfileIsDefault;
@@ -122,17 +122,17 @@ global.switchToProfile = async (name) => {
     try {
       if (intent.valid) {
         if (typeof switchToProfile === 'function') {
-          await switchToProfile(intent.name);
-          profileSwitchCompleted = true;
-          profileSwitchChangedProfile = (S.activeProfile || 'default') !== profileSwitchProfileBefore || !!S.activeProfileIsDefault !== profileSwitchIsDefaultBefore;
+          profileSwitchCompleted = await switchToProfile(intent.name) === true;
+          if (profileSwitchCompleted) {
+            profileSwitchChangedProfile = (S.activeProfile || 'default') !== profileSwitchProfileBefore || !!S.activeProfileIsDefault !== profileSwitchIsDefaultBefore;
+            if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
+          }
         }
       } else {
         console.warn('[boot] ignored invalid profile query', intent.name);
       }
     } catch (e) {
       console.warn('[boot] profile query switch failed', e);
-    } finally {
-      if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
     }
   }
   const blocksSavedLocal = _profileQueryBlocksSavedLocalRestore(intent, null);
@@ -141,6 +141,7 @@ global.switchToProfile = async (name) => {
   const savedLocalAfterReload = localStorage.getItem('hermes-webui-session');
   const keepsExplicitSession = _profileQueryBlocksSavedLocalRestore(intent, 'session-123');
   const afterProfile = window.location.pathname + window.location.search + window.location.hash;
+  const promoted = _sessionUrlForSid('abc 123');
   _consumeComposerPrefillParamsFromLocation();
   const afterPrefill = window.location.pathname + window.location.search + window.location.hash;
   const profilePos = bootSrc.indexOf("const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;");
@@ -148,7 +149,7 @@ global.switchToProfile = async (name) => {
   const savedPos = bootSrc.indexOf("const saved=urlSession||savedLocal;", profilePos);
   const loadPos = bootSrc.indexOf("await loadSession(saved, {preserveActiveInput:true});", profilePos);
   const consumePos = bootSrc.indexOf("if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();", profilePos);
-  const completedPos = bootSrc.indexOf("_profileSwitchCompleted=true;", profilePos);
+  const completedPos = bootSrc.indexOf("_profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;", profilePos);
   const changedPos = bootSrc.indexOf("_profileSwitchChangedProfile=", completedPos);
   const cleanupGuardPos = bootSrc.indexOf("if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){", profilePos);
   const fetchPos = bootSrc.indexOf("fetchReasoningChip()");
@@ -217,9 +218,11 @@ global.localStorage = {
 };
 evalSession('_profileQueryIntentFromLocation');
 evalSession('_consumeProfileQueryParamFromLocation');
+evalSession('_consumeComposerPrefillParamsFromLocation');
+evalSession('_sessionUrlForSid');
 evalBoot('_profileQueryBlocksSavedLocalRestore');
 const intent = _profileQueryIntentFromLocation();
-global.switchToProfile = async () => {};
+global.switchToProfile = async () => true;
 (async () => {
   const savedLocalBefore = localStorage.getItem('hermes-webui-session');
   const profileSwitchProfileBefore = S.activeProfile || 'default';
@@ -230,17 +233,17 @@ global.switchToProfile = async () => {};
     try {
       if (intent.valid) {
         if (typeof switchToProfile === 'function') {
-          await switchToProfile(intent.name);
-          profileSwitchCompleted = true;
-          profileSwitchChangedProfile = (S.activeProfile || 'default') !== profileSwitchProfileBefore || !!S.activeProfileIsDefault !== profileSwitchIsDefaultBefore;
+          profileSwitchCompleted = await switchToProfile(intent.name) === true;
+          if (profileSwitchCompleted) {
+            profileSwitchChangedProfile = (S.activeProfile || 'default') !== profileSwitchProfileBefore || !!S.activeProfileIsDefault !== profileSwitchIsDefaultBefore;
+            if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
+          }
         }
       } else {
         console.warn('[boot] ignored invalid profile query', intent.name);
       }
     } catch (e) {
       console.warn('[boot] profile query switch failed', e);
-    } finally {
-      if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
     }
   }
   const blocksSavedLocal = _profileQueryBlocksSavedLocalRestore(intent, null);
@@ -306,6 +309,8 @@ global.localStorage = {
 };
 evalSession('_profileQueryIntentFromLocation');
 evalSession('_consumeProfileQueryParamFromLocation');
+evalSession('_consumeComposerPrefillParamsFromLocation');
+evalSession('_sessionUrlForSid');
 evalBoot('_profileQueryBlocksSavedLocalRestore');
 const intent = _profileQueryIntentFromLocation();
 global.switchToProfile = async () => { throw new Error('boom'); };
@@ -316,25 +321,30 @@ global.switchToProfile = async () => { throw new Error('boom'); };
     try {
       if (intent.valid) {
         if (typeof switchToProfile === 'function') {
-          await switchToProfile(intent.name);
-          profileSwitchCompleted = true;
+          profileSwitchCompleted = await switchToProfile(intent.name) === true;
+          if (profileSwitchCompleted && typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
         }
       } else {
         console.warn('[boot] ignored invalid profile query', intent.name);
+        if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
       }
     } catch (e) {
       console.warn('[boot] profile query switch failed', e);
-    } finally {
-      if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
     }
   }
   const blocksSavedLocal = _profileQueryBlocksSavedLocalRestore(intent, null);
   if (blocksSavedLocal && profileSwitchCompleted && localStorage.getItem('hermes-webui-session') === savedLocalBefore) localStorage.removeItem('hermes-webui-session');
+  const afterBoot = window.location.pathname + window.location.search + window.location.hash;
+  _consumeComposerPrefillParamsFromLocation();
+  const afterPrefill = window.location.pathname + window.location.search + window.location.hash;
+  const promoted = _sessionUrlForSid('abc 123');
   console.log(JSON.stringify({
     blocksSavedLocal,
     profileSwitchCompleted,
     savedLocalAfter: localStorage.getItem('hermes-webui-session'),
-    url: window.location.pathname + window.location.search + window.location.hash,
+    afterBoot,
+    afterPrefill,
+    promoted,
     warns,
   }));
 })().catch(err => {
@@ -346,8 +356,91 @@ global.switchToProfile = async () => { throw new Error('boom'); };
     assert payload["blocksSavedLocal"] is True
     assert payload["profileSwitchCompleted"] is False
     assert payload["savedLocalAfter"] == "saved-local"
-    assert payload["url"] == "/app/?q=hello&keep=1#frag"
+    assert payload["afterBoot"] == "/app/?profile=vops&q=hello&keep=1#frag"
+    assert payload["afterPrefill"] == "/app/?profile=vops&keep=1#frag"
+    assert payload["promoted"] == "/app/session/abc%20123?profile=vops&keep=1#frag"
     assert payload["warns"] == [["[boot] profile query switch failed", "Error: boom"]]
+
+
+def test_unsuccessful_profile_query_result_keeps_retry_url_without_warning():
+    source = _node_prelude() + """
+function applyUrl(rel) {
+  const next = new URL(rel, 'https://example.test');
+  window.location.href = next.href;
+  window.location.pathname = next.pathname;
+  window.location.search = next.search;
+  window.location.hash = next.hash;
+}
+global.window = {
+  location: {},
+  history: {
+    state: null,
+    calls: [],
+    replaceState(state, title, url) {
+      this.calls.push({ state, title, url });
+      this.state = state;
+      applyUrl(url);
+    }
+  }
+};
+global.document = { baseURI: 'https://example.test/app/' };
+const warns = [];
+console.warn = (...args) => { warns.push(args.map(String)); };
+applyUrl('/app/?profile=vops&q=hello&keep=1#frag');
+global.localStorage = {
+  store: { 'hermes-webui-session': 'saved-local' },
+  getItem(key) {
+    return Object.prototype.hasOwnProperty.call(this.store, key) ? this.store[key] : null;
+  },
+  removeItem(key) {
+    delete this.store[key];
+  }
+};
+evalSession('_profileQueryIntentFromLocation');
+evalSession('_consumeProfileQueryParamFromLocation');
+evalBoot('_profileQueryBlocksSavedLocalRestore');
+const intent = _profileQueryIntentFromLocation();
+global.switchToProfile = async () => false;
+(async () => {
+  const savedLocalBefore = localStorage.getItem('hermes-webui-session');
+  let profileSwitchCompleted = false;
+  if (intent && intent.hasParam) {
+    try {
+      if (intent.valid) {
+        if (typeof switchToProfile === 'function') {
+          profileSwitchCompleted = await switchToProfile(intent.name) === true;
+          if (profileSwitchCompleted && typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
+        }
+      } else {
+        console.warn('[boot] ignored invalid profile query', intent.name);
+        if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
+      }
+    } catch (e) {
+      console.warn('[boot] profile query switch failed', e);
+    }
+  }
+  const blocksSavedLocal = _profileQueryBlocksSavedLocalRestore(intent, null);
+  if (blocksSavedLocal && profileSwitchCompleted && localStorage.getItem('hermes-webui-session') === savedLocalBefore) localStorage.removeItem('hermes-webui-session');
+  console.log(JSON.stringify({
+    blocksSavedLocal,
+    profileSwitchCompleted,
+    savedLocalAfter: localStorage.getItem('hermes-webui-session'),
+    url: window.location.pathname + window.location.search + window.location.hash,
+    historyCalls: window.history.calls,
+    warns,
+  }));
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"""
+    payload = json.loads(_run_node(source))
+    assert payload["blocksSavedLocal"] is True
+    assert payload["profileSwitchCompleted"] is False
+    assert payload["savedLocalAfter"] == "saved-local"
+    assert payload["url"] == "/app/?profile=vops&q=hello&keep=1#frag"
+    assert payload["historyCalls"] == []
+    assert payload["warns"] == []
 
 
 def test_invalid_profile_query_warns_and_skips_switch():
@@ -387,11 +480,10 @@ global.switchToProfile = async (name) => { switched.push(name); };
         if (typeof switchToProfile === 'function') await switchToProfile(intent.name);
       } else {
         console.warn('[boot] ignored invalid profile query', intent.name);
+        if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
       }
     } catch (e) {
       console.warn('[boot] profile query switch failed', e);
-    } finally {
-      if (typeof _consumeProfileQueryParamFromLocation === 'function') _consumeProfileQueryParamFromLocation();
     }
   }
   console.log(JSON.stringify({

@@ -3179,17 +3179,18 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     try{
       if(profileIntent.valid){
         if(typeof switchToProfile==='function'){
-          await switchToProfile(profileIntent.name);
-          _profileSwitchCompleted=true;
-          _profileSwitchChangedProfile=(S.activeProfile||'default')!==_profileSwitchProfileBefore||!!S.activeProfileIsDefault!==_profileSwitchIsDefaultBefore;
+          _profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;
+          if(_profileSwitchCompleted){
+            _profileSwitchChangedProfile=(S.activeProfile||'default')!==_profileSwitchProfileBefore||!!S.activeProfileIsDefault!==_profileSwitchIsDefaultBefore;
+            if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
+          }
         }
       }else{
         console.warn('[boot] ignored invalid profile query', profileIntent.name);
+        if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
       }
     }catch(e){
       console.warn('[boot] profile query switch failed', e);
-    }finally{
-      if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
     }
   }
   // Fetch available models without blocking session restore. The static HTML
