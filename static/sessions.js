@@ -1405,10 +1405,9 @@ async function loadSession(sid){
   const opts = arguments[1] || {};
   // Extension pre-open hook — allows extensions (e.g. chat-tiling) to intercept
   // before the core navigates. Handler returns {cancel:true} to prevent load.
-  if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
-      if(_loadingSessionId===sid) _loadingSessionId=null;
       return;
     }
   }
@@ -2139,12 +2138,18 @@ async function _ensureSidebarSessionProfile(session){
 
 async function _openSidebarSession(session, loadOpts={}){
   if(!session||!session.session_id) return;
+  // Extension pre-open hook — before any side-effects (external import, profile switching).
+  // Handler returns {cancel:true} to prevent the open.
+  if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
+    var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
+    if(_preResult&&_preResult.cancel===true) return;
+  }
   if(_isExternalSession(session)){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
   await _ensureSidebarSessionProfile(session);
-  await loadSession(session.session_id, loadOpts);
+  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
   renderSessionListFromCache();
 }
 

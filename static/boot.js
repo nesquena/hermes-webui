@@ -1225,7 +1225,7 @@ window.renderTranscript=function(container, messages, opts){
   if(!container||!Array.isArray(messages)) return container;
   opts=opts||{};
   container.innerHTML='';
-  var md=window.renderMd||function(s){return String(s||'')};
+  var md=window.renderMd||null;
   for(var i=0;i<messages.length;i++){
     var msg=messages[i];
     if(!msg||!msg.role||msg.role==='tool') continue;
@@ -1239,8 +1239,12 @@ window.renderTranscript=function(container, messages, opts){
     var inner=document.createElement('div');
     inner.className='msg-body-inner';
     try{
-      var html=md(content);
-      if(html!=null){inner.innerHTML=html}else{inner.textContent=content}
+      if(md){
+        var html=md(content);
+        if(html!=null){inner.innerHTML=html}else{inner.textContent=content}
+      }else{
+        inner.textContent=content;
+      }
     }catch(_){inner.textContent=content}
     body.appendChild(inner);
     row.appendChild(body);
