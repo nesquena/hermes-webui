@@ -99,15 +99,22 @@ def test_atomic_write_preserves_existing_group(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not hasattr(os, "fchown"), reason="POSIX ownership semantics")
+@pytest.mark.parametrize(
+    "failure",
+    [
+        PermissionError("simulated ownership denial"),
+        OSError(errno.EINVAL, "simulated unsupported ownership transfer"),
+    ],
+)
 def test_fchown_denial_falls_back_without_temp_debris(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, failure: OSError
 ) -> None:
     """A writer unable to transfer ownership must keep the old inode contract."""
     target = tmp_path / "config.yaml"
     target.write_text("old: true\n", encoding="utf-8")
 
     def _deny_fchown(*_args) -> None:
-        raise PermissionError("simulated ownership denial")
+        raise failure
 
     monkeypatch.setattr(os, "fchown", _deny_fchown)
 

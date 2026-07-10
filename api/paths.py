@@ -144,7 +144,18 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         if existing_stat is not None and hasattr(os, "fchown"):
             try:
                 os.fchown(fd, existing_stat.st_uid, existing_stat.st_gid)
-            except (PermissionError, NotImplementedError):
+            except (OSError, NotImplementedError) as exc:
+                unsupported_ownership_errnos = {
+                    errno.EINVAL,
+                    errno.ENOSYS,
+                    errno.ENOTSUP,
+                }
+                if (
+                    isinstance(exc, OSError)
+                    and not isinstance(exc, PermissionError)
+                    and exc.errno not in unsupported_ownership_errnos
+                ):
+                    raise
                 os.close(fd)
                 owns_fd = False
                 os.unlink(tmp)
