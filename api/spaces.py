@@ -9711,6 +9711,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         prompt_preflight = _space_layout_raw_prompt_preflight_receipt({"widgets": planned_layouts}, data)
         if prompt_preflight.get("status") != "pass":
             raise ValueError("Space rearrange prompt preflight blocked")
+        progress_events = [
+            _record_space_tool_progress_event(
+                space_id,
+                run_prefix="layout.rearrange",
+                event_type="tool.started",
+            )
+        ]
         saved_widgets: list[dict[str, Any]] = []
         revision_event_ids: list[str] = []
         for planned in planned_layouts:
@@ -9718,7 +9725,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             result = patch_widget(space_id, widget_id, {"layout": planned["layout"]})
             revision_event_ids.append(result["revision_event_id"])
             saved_widgets.append(read_widget_detail(space_id, widget_id))
-        progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.rearrange")
+        progress_event = _record_space_tool_progress_event(
+            space_id,
+            run_prefix="layout.rearrange",
+            event_type="tool.completed",
+        )
+        progress_events.append(progress_event)
         autonomy_policy = _space_layout_action_policy_receipt(name)
         memory_advisory = _memory_advisory_public_envelope()
         return {
@@ -9732,6 +9744,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "progress_events": progress_events,
             "memory_advisory": memory_advisory,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
@@ -9740,6 +9753,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 revision_event_ids=revision_event_ids,
                 autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
+                progress_events=progress_events,
                 memory_advisory=memory_advisory,
                 include_memory_required_gates=True,
             ),
