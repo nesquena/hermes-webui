@@ -11039,12 +11039,77 @@ function _onLiveActivityToggle(group){
   if(group.getAttribute('data-live-tool-call-group')!=='1') return;
   _liveActivityUserExpanded = !group.classList.contains('tool-call-group-collapsed');
 }
+function _materializeDeferredWorklogRows(group){
+  // #5839: build the row DOM for a settled worklog whose rows were deferred at
+  // render time (collapsed). Idempotent — clears the marker so it runs once.
+  if(!group||group.getAttribute('data-worklog-rows-deferred')!=='1') return false;
+  let rows=group._deferredWorklogRows;
+  // The JS-property stash is dropped when the transcript is restored from the
+  // HTML cache (innerHTML round-trip). Recover the rows from the owning message
+  // via the disclosure key (anchor-scene:<rawIdx>) so a post-restore expand
+  // still fills the worklog. (#5839)
+  if((!rows||!rows.length)&&typeof _deferredWorklogRowsFromGroup==='function'){
+    rows=_deferredWorklogRowsFromGroup(group);
+  }
+  group.removeAttribute('data-worklog-rows-deferred');
+  group._deferredWorklogRows=null;
+  if(!rows||!rows.length) return false;
+  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
+  if(!ok) return false;
+  // #5839 fix: the eager render path post-processes its rows (syntax highlight,
+  // copy buttons, mermaid, katex, structured trees) and restores detail-disclosure
+  // state; a lazily-materialized group must do the same or expanded rows render
+  // un-enhanced and any captured open/scroll state is lost. Post-process on the
+  // next frame (matching the eager rebuild paths), then re-apply the disclosure
+  // state stashed with the group at defer time.
+  const disclosure=group._deferredWorklogDisclosure;
+  group._deferredWorklogDisclosure=null;
+  if(typeof _postProcessWithAnchorSuppression==='function'
+     && typeof requestAnimationFrame==='function'){
+    requestAnimationFrame(()=>{
+      _postProcessWithAnchorSuppression(group);
+      if(disclosure&&disclosure.size&&typeof _restoreWorklogDetailDisclosureState==='function'){
+        _restoreWorklogDetailDisclosureState(group, disclosure);
+      }
+    });
+  }else if(disclosure&&disclosure.size&&typeof _restoreWorklogDetailDisclosureState==='function'){
+    _restoreWorklogDetailDisclosureState(group, disclosure);
+  }
+  return true;
+}
+function _deferredWorklogRowsFromGroup(group){
+  // Recover a settled worklog's rows from S.messages using the group's
+  // disclosure key `anchor-scene:<rawIdx>`. Used after an HTML-cache restore
+  // where the _deferredWorklogRows JS property was dropped. (#5839)
+  const key=group&&group.getAttribute&&group.getAttribute('data-activity-disclosure-key');
+  const m=key&&/^anchor-scene:(\d+)$/.exec(key);
+  if(!m) return null;
+  const msg=S.messages&&S.messages[Number(m[1])];
+  const scene=msg&&msg._anchor_activity_scene;
+  if(!scene) return null;
+  return _anchorSceneRowsForRendering(scene,{settled:true});
+}
+function _rehydrateDeferredWorklogsFromCache(root){
+  // After restoring a transcript from _sessionHtmlCache, deferred settled
+  // worklogs carry data-worklog-rows-deferred="1" but lost their stashed rows
+  // (JS properties don't survive innerHTML). Re-stash from the owning message so
+  // the first expand materializes correctly. (#5839)
+  if(!root||!root.querySelectorAll) return;
+  root.querySelectorAll('[data-worklog-rows-deferred="1"]').forEach(group=>{
+    if(group._deferredWorklogRows&&group._deferredWorklogRows.length) return;
+    const rows=_deferredWorklogRowsFromGroup(group);
+    if(rows&&rows.length) group._deferredWorklogRows=rows;
+    else group.removeAttribute('data-worklog-rows-deferred'); // nothing to defer
+  });
+}
 function _toggleActivityGroup(summary){
   const group=summary&&summary.closest?summary.closest('.agent-activity-group,.tool-call-group'):null;
   if(!group) return;
   const collapsed=group.classList.toggle('tool-call-group-collapsed');
   group.classList.toggle('open',!collapsed);
   summary.setAttribute('aria-expanded',String(!collapsed));
+  // #5839: materialize deferred settled rows on first expand (lazy render).
+  if(!collapsed) _materializeDeferredWorklogRows(group);
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
   if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
 }
@@ -12313,6 +12378,24 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   });
   if(!group) return false;
   group.setAttribute('data-anchor-settled-scene-owner','1');
+  // #5839: for a COLLAPSED settled worklog, defer building the row DOM until the
+  // user first expands it. A reasoning-heavy turn can carry 80+ activity rows;
+  // eagerly materializing them for every historical turn balloons the DOM and a
+  // later synchronous layout (e.g. opening a dropdown) tips the tab into a
+  // multi-GB freeze. The summary chip renders from data-turn-duration, not the
+  // rows, so a deferred worklog still shows its "Processed in Xs" label. On
+  // expand, _toggleActivityGroup materializes the stashed rows exactly once.
+  const collapsed=group.classList.contains('tool-call-group-collapsed');
+  if(collapsed){
+    group._deferredWorklogRows=rows;
+    group.setAttribute('data-worklog-rows-deferred','1');
+    const list=_toolWorklogListEl(group);
+    if(list) list.innerHTML='';
+    _syncToolCallGroupSummary(group);
+    return true;
+  }
+  group._deferredWorklogRows=null;
+  group.removeAttribute('data-worklog-rows-deferred');
   return _renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
 }
 function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){
@@ -14103,6 +14186,7 @@ function renderMessages(options){
       _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
+      _rehydrateDeferredWorklogsFromCache(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
@@ -15265,7 +15349,15 @@ function renderMessages(options){
     }
   }
   _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);
-  _messageVirtualWindowKey=renderWindowKey;
+  // #5839 fix: deferred settled worklogs have no rows yet at restore time, so
+  // the disclosure restore above can't reach their detail elements. Stash the
+  // captured state on each still-deferred group; _materializeDeferredWorklogRows
+  // re-applies it (key-scoped + idempotent) once the rows exist on expand.
+  if(worklogDetailDisclosureState&&worklogDetailDisclosureState.size){
+    inner.querySelectorAll('[data-worklog-rows-deferred="1"]').forEach(group=>{
+      group._deferredWorklogDisclosure=worklogDetailDisclosureState;
+    });
+  }
   // Render per-turn duration and optional token usage on assistant messages.
   // Duration stays visible even when token usage is disabled, because it answers
   // the basic "how long did that turn take?" UX question. Only walk rendered
@@ -15437,6 +15529,9 @@ function renderMessages(options){
           group.classList.add('open');
           const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
           if(summary) summary.setAttribute('aria-expanded','true');
+          // #5839: this turn is otherwise blank, so materialize any deferred
+          // settled rows now that we're force-expanding the worklog to fill it.
+          if(typeof _materializeDeferredWorklogRows==='function') _materializeDeferredWorklogRows(group);
         }
         // `revealed` means "this turn has a non-empty Worklog group that the user
         // can see" — NOT "we just expanded something". An already-open non-empty
