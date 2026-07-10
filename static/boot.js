@@ -821,7 +821,8 @@ function _micToastKeyForRecognitionError(error){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
-    // prefixSnapshot is captured in the stop handler before _setRecording(false).
+    // Snapshot is passed in from the recorder.onstop handler — taken there
+    // BEFORE _setRecording(false) clears _prefix (async server STT path).
     setComposerStatus('Transcribing…');
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
@@ -1177,7 +1178,11 @@ function _micToastKeyForRecognitionError(error){
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
         if(mediaRecorder===recorder) mediaRecorder=null;
         _isRecording=false;
-        // Snapshot prefix before _setRecording(false) clears _prefix (async server STT).
+        // Capture the composer prefix BEFORE _setRecording(false) clears _prefix.
+        // The await on _transcribeBlob runs after this sync block, so by the
+        // time _transcribeBlob is called, _prefix is already ''. Passing the
+        // snapshot through keeps append-mode working on the async server-STT
+        // path. See _commitTranscript() for how the snapshot is consumed.
         const prefixSnapshot = _prefix;
         const blob=new Blob(captureChunks,{type:recorder.mimeType||mimeType||'audio/webm'});
         if(isCurrentCapture) _setRecording(false);
