@@ -15686,6 +15686,131 @@ def _session_search_preview(text, query, max_len=124):
     return excerpt
 
 
+def _discover_rg_candidates(query: str, sessions: list) -> set | None:
+    """Use ripgrep to find session JSON files containing `query`.
+    Returns a set of matching session_ids, or None if rg is unavailable
+    (in which case the caller falls back to full Python iteration).
+    """
+    if not query or not SESSION_DIR.is_dir():
+        return None
+    try:
+        import subprocess
+        proc = subprocess.run(
+            ["rg", "-F", "-l", "-g", "*.json", "-i", "--", query, str(SESSION_DIR)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode == 1:  # no matches
+            return set()
+        if proc.returncode != 0:
+            return None
+        from pathlib import Path
+        return {
+            Path(line.strip()).stem
+            for line in proc.stdout.strip().split("\n")
+            if line.strip()
+        }
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _load_messages_head(filepath, n: int) -> list:
+    """Fast partial load: parse only the first `n` messages from a session JSON file.
+    Scans the raw text to find message boundaries, then loads truncated JSON.
+    Returns the full messages list when n <= 0 or on any parse failure.
+    """
+    if n <= 0:
+        return []
+    try:
+        raw = filepath.read_text("utf-8")
+    except Exception:
+        return []
+
+    idx = raw.find('"messages"')
+    if idx < 0:
+        return []
+    arr_start = raw.find("[", idx)
+    if arr_start < 0:
+        return []
+
+    pos = arr_start + 1
+    depth = 0
+    obj_count = 0
+    in_string = False
+    escape = False
+    last_good_end = pos
+
+    while pos < len(raw):
+        ch = raw[pos]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            pos += 1
+            continue
+        if ch == '"':
+            in_string = True
+            pos += 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                obj_count += 1
+                last_good_end = pos + 1
+                if obj_count >= n:
+                    break
+        elif ch == "[" and depth == 0:
+            depth -= 1
+        elif ch == "]" and depth == -1:
+            last_good_end = pos + 1
+            break
+        pos += 1
+
+    if obj_count == 0:
+        return []
+
+    truncated = raw[:last_good_end] + "]}" if not raw[:last_good_end].rstrip().endswith("]}") else raw[:last_good_end]
+    try:
+        import json
+        data = json.loads(truncated)
+        return data.get("messages", [])
+    except Exception:
+        try:
+            data = json.loads(raw)
+            return data.get("messages", [])
+        except Exception:
+            return []
+
+
+def _rg_content_match(session_id: str, query: str, depth: int) -> str | None:
+    """Search session messages for `query`, return matching message text or None.
+    Uses partial JSON loading when depth > 0; falls back to full get_session.
+    """
+    fpath = SESSION_DIR / f"{session_id}.json"
+    if not fpath.exists():
+        return None
+
+    if depth > 0:
+        msgs = _load_messages_head(fpath, depth)
+    else:
+        try:
+            import json
+            data = json.loads(fpath.read_text("utf-8"))
+            msgs = data.get("messages", [])
+        except Exception:
+            return None
+
+    for m in msgs:
+        c = _session_search_message_text(m)
+        if query in str(c).lower():
+            return c
+    return None
+
+
 def _handle_sessions_search(handler, parsed):
     qs = parse_qs(parsed.query)
     q = qs.get("q", [""])[0].lower().strip()
@@ -15720,6 +15845,9 @@ def _handle_sessions_search(handler, parsed):
             "all_profiles": all_profiles,
             "active_profile": active_profile,
         })
+    rg_candidates = None
+    if content_search:
+        rg_candidates = _discover_rg_candidates(q, sessions)
     results = []
     for s in sessions:
         title_match = q in (s.get("title") or "").lower()
@@ -15730,21 +15858,23 @@ def _handle_sessions_search(handler, parsed):
             results.append(item)
             continue
         if content_search:
+            sid = str(s.get("session_id") or "")
+            if not sid:
+                continue
+            # rg filter: skip sessions that don't contain the query string at all
+            if rg_candidates is not None and sid not in rg_candidates:
+                continue
             try:
-                sess = get_session(s["session_id"])
-                msgs = sess.messages[:depth] if depth else sess.messages
-                for m in msgs:
-                    c = _session_search_message_text(m)
-                    if q in str(c).lower():
-                        item = dict(s, match_type="content")
-                        preview = _session_search_preview(c, q)
-                        if preview:
-                            item["match_preview"] = _redact_text(preview)
-                        if isinstance(item.get("title"), str):
-                            item["title"] = _redact_text(item["title"])
-                        results.append(item)
-                        break
-            except (KeyError, Exception):
+                matched_text = _rg_content_match(sid, q, depth)
+                if matched_text is not None:
+                    item = dict(s, match_type="content")
+                    preview = _session_search_preview(matched_text, q)
+                    if preview:
+                        item["match_preview"] = _redact_text(preview)
+                    if isinstance(item.get("title"), str):
+                        item["title"] = _redact_text(item["title"])
+                    results.append(item)
+            except Exception:
                 pass
     return j(handler, {
         "sessions": results,

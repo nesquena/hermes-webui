@@ -15,25 +15,48 @@ meaning), mirroring the guard sibling handlers already use.
 
 from __future__ import annotations
 
+import json
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
 
+import pytest
 
-def _run_search(query):
-    """Invoke _handle_sessions_search against one synthetic session whose match
-    lives in its LAST message, capturing the JSON payload/status."""
-    import api.routes as routes
 
-    sessions_meta = [{"session_id": "s1", "title": "Untitled", "profile": "default"}]
-    session = SimpleNamespace(
-        session_id="s1",
-        messages=[
+# ── Fixtures ────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def session_s1_json(tmp_path):
+    """Write the synthetic s1 session to a real JSON file and patch SESSION_DIR."""
+    s1 = {
+        "session_id": "s1",
+        "title": "Untitled",
+        "profile": "default",
+        "messages": [
             {"role": "user", "content": "first message"},
             {"role": "assistant", "content": "second message"},
             {"role": "user", "content": "NEEDLE in the latest message"},
         ],
-    )
+    }
+    session_file = tmp_path / "s1.json"
+    session_file.write_text(json.dumps(s1), encoding="utf-8")
+    return tmp_path
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _run_search(query, session_dir):
+    """Invoke _handle_sessions_search against one synthetic session whose match
+    lives in its LAST message, capturing the JSON payload/status.
+
+    The session lives at session_dir/s1.json so the ripgrep-backed content
+    search can find it.
+    """
+    import api.routes as routes
+
+    sessions_meta = [{"session_id": "s1", "title": "Untitled", "profile": "default"}]
     captured = {}
 
     def fake_j(handler, payload, status=200, extra_headers=None):
@@ -41,7 +64,40 @@ def _run_search(query):
         captured["payload"] = payload
 
     with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
-        "api.routes.get_session", return_value=session
+        "api.profiles.get_active_profile_name", return_value="default"
+    ), patch("api.routes.j", side_effect=fake_j):
+        routes._handle_sessions_search(SimpleNamespace(), urlparse(query))
+    return captured
+
+
+def _run_search_via_api(query, session_dir, monkeypatch=None):
+    """Alternative: invoke the full HTTP handler via the routes module."""
+    import api.routes as routes
+
+    sessions_meta = [{"session_id": "s1", "title": "Untitled", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    # Patch both the SESSION_DIR reference in routes.py and the
+    # all_sessions so we drive the session list from the mock.
+    patches = [
+        patch("api.routes.all_sessions", return_value=list(sessions_meta)),
+        patch("api.routes.get_session"),  # no longer called by content search
+        patch("api.profiles.get_active_profile_name", return_value="default"),
+        patch("api.routes.j", side_effect=fake_j),
+    ]
+    if monkeypatch:
+        # Allow monkeypatch to override SESSION_DIR for the imported routes module
+        import api.routes as routes
+        monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    else:
+        patches.append(patch("api.routes.SESSION_DIR", session_dir))
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session",
     ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
         "api.routes.j", side_effect=fake_j
     ):
@@ -49,26 +105,163 @@ def _run_search(query):
     return captured
 
 
-def test_search_non_numeric_depth_does_not_500():
-    # Before the fix this raised ValueError -> 500.
-    captured = _run_search("/api/sessions/search?q=needle&content=1&depth=deep")
+# ── Depth validation tests ───────────────────────────────────────────────────
+
+def test_search_non_numeric_depth_does_not_500(session_s1_json, monkeypatch):
+    """depth=deep falls back to 5; the needle in the latest message is found."""
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Untitled", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(SimpleNamespace(), urlparse("/api/sessions/search?q=needle&content=1&depth=deep"))
+
     assert captured["status"] == 200
-    # depth falls back to 5 (>= 3 messages here), so the needle is found.
     assert captured["payload"]["count"] == 1
 
 
-def test_search_negative_depth_still_scans_newest_message():
-    # depth=-2 with 3 messages: an unclamped messages[:-2] scan would look only
-    # at the first message and MISS the needle in the latest one. Clamped to a
-    # default >= 0, the newest message is searched and the match is found.
-    captured = _run_search("/api/sessions/search?q=needle&content=1&depth=-2")
+def test_search_negative_depth_still_scans_newest_message(session_s1_json, monkeypatch):
+    """depth=-2 is clamped to >= 0 so the latest message is searched."""
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Untitled", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(
+            SimpleNamespace(),
+            urlparse("/api/sessions/search?q=needle&content=1&depth=-2"),
+        )
+
     assert captured["status"] == 200
     assert captured["payload"]["count"] == 1
 
 
-def test_search_valid_depth_still_caps_scan():
-    # depth=1 scans only the first message, which does NOT contain the needle,
-    # so no match — proving the cap still works for well-formed input.
-    captured = _run_search("/api/sessions/search?q=needle&content=1&depth=1")
+def test_search_valid_depth_still_caps_scan(session_s1_json, monkeypatch):
+    """depth=1 scans only the first message; the needle in the last is missed."""
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Untitled", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(
+            SimpleNamespace(),
+            urlparse("/api/sessions/search?q=needle&content=1&depth=1"),
+        )
+
     assert captured["status"] == 200
     assert captured["payload"]["count"] == 0
+
+
+# ── Metacharacter query tests (Blocker 2 regression) ────────────────────────
+
+def test_metacharacter_query_dollar_sign(session_s1_json, monkeypatch):
+    """Query '$5' is matched literally; ripgrep -F prevents regex false negatives."""
+    import api.routes as routes
+
+    # Rewrite the session so it contains literal '$5' in a message
+    s1_with_metachar = {
+        "session_id": "s1",
+        "title": "Metachar test",
+        "profile": "default",
+        "messages": [
+            {"role": "user", "content": "first message"},
+            {"role": "assistant", "content": "total is $5"},
+            {"role": "user", "content": "done"},
+        ],
+    }
+    session_file = session_s1_json / "s1.json"
+    session_file.write_text(json.dumps(s1_with_metachar), encoding="utf-8")
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Metachar test", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(
+            SimpleNamespace(),
+            urlparse("/api/sessions/search?q=$5&content=1"),
+        )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["count"] == 1
+
+
+def test_metacharacter_query_plus(session_s1_json, monkeypatch):
+    """Query '1+1' is matched literally; ripgrep -F prevents regex false negatives."""
+    import api.routes as routes
+
+    s1_with_plus = {
+        "session_id": "s1",
+        "title": "Plus test",
+        "profile": "default",
+        "messages": [
+            {"role": "user", "content": "compute 1+1"},
+            {"role": "assistant", "content": "result is 2"},
+        ],
+    }
+    session_file = session_s1_json / "s1.json"
+    session_file.write_text(json.dumps(s1_with_plus), encoding="utf-8")
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Plus test", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(
+            SimpleNamespace(),
+            urlparse("/api/sessions/search?q=1%2B1&content=1"),  # 1+1 URL-encoded
+        )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["count"] == 1
