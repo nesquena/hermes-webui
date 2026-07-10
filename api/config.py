@@ -3271,7 +3271,7 @@ def _filter_reasoning_efforts_for_provider(
     if provider == "openai-codex":
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5"):
+        if bare.startswith("gpt-5") and bare not in _GPT56_MODEL_IDS:
             return [eff for eff in normalized if eff != "max"]
     return normalized
 

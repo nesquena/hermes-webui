@@ -180,7 +180,7 @@ def test_codex_configured_reasoning_efforts_still_apply_model_filter(monkeypatch
         assert cfg.resolve_model_reasoning_efforts(
             "gpt-5.6-sol",
             provider_id="openai-codex",
-        ) == ["none", "xhigh"]
+        ) == ["none", "xhigh", "max"]
     finally:
         if original is None:
             cfg.cfg.pop("providers", None)

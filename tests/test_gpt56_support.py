@@ -126,12 +126,12 @@ def test_gpt56_exposes_its_exact_reasoning_efforts(monkeypatch, model_id, provid
     ]
 
 
-def test_gpt56_codex_omits_unsupported_max(monkeypatch):
+def test_gpt56_codex_exposes_supported_max(monkeypatch):
     monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
 
     assert config.resolve_model_reasoning_efforts(
         "gpt-5.6-sol", provider_id="openai-codex"
-    ) == ["none", "low", "medium", "high", "xhigh"]
+    ) == ["none", "low", "medium", "high", "xhigh", "max"]
 
 
 def test_gpt56_max_is_preserved_for_direct_openai(monkeypatch):
@@ -142,12 +142,12 @@ def test_gpt56_max_is_preserved_for_direct_openai(monkeypatch):
     ) == "max"
 
 
-def test_gpt56_max_degrades_for_codex(monkeypatch):
+def test_gpt56_max_is_preserved_for_codex(monkeypatch):
     monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
 
     assert config.coerce_reasoning_effort_for_model(
         "max", "gpt-5.6-sol", provider_id="openai-codex"
-    ) == "xhigh"
+    ) == "max"
 
 
 @pytest.mark.parametrize("provider_id", ["openai-api", "openai-codex"])
