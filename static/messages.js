@@ -4296,7 +4296,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     else tailMap.delete(parser);
   }
   function _smdMediaRefHasReliableBoundary(rawRef){
-    const ref=String(rawRef||'').split(/[?#]/,1)[0];
+    const raw=String(rawRef||'');
+    if(/^https?:\/\/[^\s\)\]]+$/i.test(raw) && !/[?#]$/.test(raw)) return true;
+    const ref=raw.split(/[?#]/,1)[0];
     return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
   }
   function _smdMediaAwareAddText(baseAddText, parent, data, text, tailMap, parser){

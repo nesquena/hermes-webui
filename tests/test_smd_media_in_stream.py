@@ -218,6 +218,16 @@ class TestSmdMediaInStream(unittest.TestCase):
         ]:
             self.assertIn(ext, block)
 
+    def test_extensionless_https_media_ref_is_a_reliable_boundary(self):
+        # _inlineMediaHtmlForRef renders any http(s) ref as an image, including
+        # extensionless CDN URLs such as fal.media generated assets. The stream
+        # boundary check must therefore treat a complete http(s) ref as complete
+        # even when it has no filename extension.
+        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
+        block = MESSAGES_JS[idx:idx + 900]
+        self.assertIn("/^https?:", block)
+        self.assertIn("!/[?#]$/.test(raw)", block)
+
     def test_tail_buffer_size_cap(self):
         # Defensive: a runaway tail buffer from a malformed stream could
         # exhaust memory. The implementation must enforce a max length on
