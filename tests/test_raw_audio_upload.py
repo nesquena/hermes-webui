@@ -179,21 +179,26 @@ def test_send_raw_audio_honors_explicit_pending_send():
 
 def test_commit_transcript_appends_to_live_text_not_stale_snapshot():
     # Regression: server-STT transcription is async (~1s round-trip). During
-    # that window the user can keep typing. The previous implementation appended
-    # to `_prefix` (the recording-start snapshot), which clobbered any keystrokes
-    # made after the recording stopped but before the response came back.
-    # Fix: append to live `ta.value` instead, falling back to the snapshot only
-    # when the textarea is genuinely empty.
+    # that window the user can keep typing OR clear the textarea. The original
+    # implementation appended to `_prefix` (the recording-start snapshot),
+    # which clobbered live edits AND resurrected text the user had cleared.
+    #
+    # Fix: when prefixOverride IS passed (server-STT path), trust live ta.value
+    # unconditionally — even when empty. The fallback to _prefix only applies
+    # when no prefixOverride is given AND ta.value is empty (defensive only —
+    # no current caller hits this branch; browser-SR commits inline in sr.onend).
     idx = _BOOT_JS.index("function _commitTranscript")
     end = _BOOT_JS.index("\n  function ", idx + 1)
     body = _BOOT_JS[idx:end]
-    # Must read live ta.value as the append base, with snapshot as fallback.
-    assert "ta.value ||" in body, (
-        "_commitTranscript must fall back from live ta.value to the snapshot, "
-        "not the other way around (regression on async server-STT race)"
+    # The append base must be `prefixOverride !== undefined ? ta.value : ...`
+    # so live ta.value (including empty) wins for the server-STT path.
+    assert "prefixOverride !== undefined ? ta.value" in body, (
+        "_commitTranscript must use live ta.value when prefixOverride is set, "
+        "even when empty — otherwise cleared textarea resurrects on resolve "
+        "(Greptile P1 finding on 0239bb4e)"
     )
-    # The fallback expression should mention the snapshot parameter.
-    assert "prefixOverride" in body, (
-        "_commitTranscript still needs prefixOverride as a fallback for "
-        "browser-SR path"
+    # Sanity: the fallback branch should still exist for the defensive case.
+    assert "_prefix" in body, (
+        "_commitTranscript must keep _prefix as a fallback for any future "
+        "caller that passes no prefixOverride"
     )
