@@ -44,9 +44,12 @@ def _prepare_config_path(tmp_path, monkeypatch):
     # Wipe any in-memory config caches so the raw file is read fresh
     import yaml as _yaml  # noqa: F811
     config._yaml_file_cache.clear()
+    _orig_cfg_cache = config._cfg_cache
     config._cfg_cache = None
 
     yield config_path
+
+    config._cfg_cache = _orig_cfg_cache
 
 
 class TestArchitecturalConfigGuard:
