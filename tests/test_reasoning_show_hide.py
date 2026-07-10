@@ -308,27 +308,29 @@ class TestReasoningCommand:
     def test_cmd_reasoning_supports_all_webui_effort_levels(self):
         """The command must accept shared Hermes efforts plus Codex ultra."""
         src = read('static/commands.js')
-        m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
-        assert m
-        fn = m.group(0)
+        efforts = re.search(r"const REASONING_EFFORTS=\[(.*?)\];", src, re.DOTALL)
+        assert efforts, "shared reasoning effort list not found"
         for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
-            assert f"'{level}'" in fn, (
+            assert f"'{level}'" in efforts.group(1), (
                 f"cmdReasoning must accept WebUI effort '{level}'"
             )
+        m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
+        assert m
+        assert "REASONING_EFFORTS.includes(arg)" in m.group(0)
 
-    def test_reasoning_subargs_match_cli_levels(self):
-        """Autocomplete subArgs must expose every CLI effort level + show/hide."""
+    def test_reasoning_subargs_are_loaded_from_model_capabilities(self):
+        """Autocomplete must not advertise effort levels unsupported by the active model."""
         src = read('static/commands.js')
         m = re.search(r"\{name:'reasoning'[^}]*\}", src, re.DOTALL)
         assert m, "reasoning COMMANDS entry not found"
         entry = m.group(0)
-        for suggestion in (
-            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
-            'ultra',
-        ):
-            assert f"'{suggestion}'" in entry, (
-                f"reasoning subArgs must include WebUI option '{suggestion}'"
-            )
+        assert "arg:'show|hide|effort'" in entry
+        assert "subArgs:'reasoning'" in entry
+        assert "subArgs:[" not in entry, (
+            "reasoning autocomplete must use the dynamic capability source, not a static list"
+        )
+        assert "if(spec==='reasoning') return Promise.resolve(_reasoningSlashSubArgs());" in src
+        assert "_currentReasoningEffortsSupported" in src
 
 
 # ── api/config.py — reasoning helpers ────────────────────────────────────────

@@ -30,7 +30,7 @@ const COMMANDS=[
   {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max|ultra', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max','ultra'], noEcho:true},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|effort', subArgs:'reasoning', noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
@@ -381,6 +381,7 @@ function _getSlashSubArgOptions(spec){
   if(spec==='models') return _loadSlashModelSubArgs();
   if(spec==='personalities') return _loadSlashPersonalitySubArgs();
   if(spec==='skills') return _loadSlashSkillSubArgs();
+  if(spec==='reasoning') return Promise.resolve(_reasoningSlashSubArgs());
   return Promise.resolve([]);
 }
 
@@ -1794,18 +1795,35 @@ function cmdStatus(){
   });
   renderMessages();
 }
+
+const REASONING_EFFORTS=['none','minimal','low','medium','high','xhigh','max','ultra'];
+
+function _reasoningSlashSubArgs(meta){
+  const supported=(meta&&Array.isArray(meta.supported_efforts))
+    ?meta.supported_efforts
+    :((typeof _currentReasoningEffortsSupported!=='undefined'
+       &&Array.isArray(_currentReasoningEffortsSupported))
+      ?_currentReasoningEffortsSupported
+      :[]);
+  const options=['show','hide','none'];
+  supported.forEach(function(value){
+    const effort=String(value||'').trim().toLowerCase();
+    if(effort!=='none'&&REASONING_EFFORTS.includes(effort)&&!options.includes(effort)){
+      options.push(effort);
+    }
+  });
+  return options;
+}
+
 function cmdReasoning(args){
   const arg=(args||'').trim().toLowerCase();
   const BRAIN='\uD83E\uDDE0';
-  // Includes Codex's model-advertised ultra level; the API clamps each
-  // selection against the active model's exact capability set.
-  const EFFORTS=['none','minimal','low','medium','high','xhigh','max','ultra'];
   // Shared status renderer used by the no-args branch and as a fallback.
   function _fmtStatus(st){
     const vis=(st && st.show_reasoning===false)?'off':'on';
     const eff=(st && st.reasoning_effort)||'default';
     return BRAIN+' Reasoning effort: '+eff+' \u00B7 display: '+vis
-      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh|max|ultra';
+      +'  |  /reasoning '+_reasoningSlashSubArgs(st).join('|');
   }
   if(!arg){
     // Status — read from the same config.yaml keys the CLI uses.
@@ -1829,7 +1847,7 @@ function cmdReasoning(args){
     showToast(BRAIN+' Thinking blocks: '+(on?'on':'off')+' (saved)');
     return true;
   }
-  if(EFFORTS.includes(arg)){
+  if(REASONING_EFFORTS.includes(arg)){
     // Persist via /api/reasoning → config.yaml agent.reasoning_effort.
     // Takes effect on the NEXT session/turn (agent re-reads config at
     // construction time), matching CLI semantics where `/reasoning high`
@@ -1846,7 +1864,7 @@ function cmdReasoning(args){
       });
     return true;
   }
-  showToast('Unknown argument: '+arg+' \u2014 use show|hide|'+EFFORTS.join('|'));
+  showToast('Unknown argument: '+arg+' \u2014 use '+_reasoningSlashSubArgs().join('|'));
   return true;
 }
 function cmdVoice(){
