@@ -1512,3 +1512,76 @@ def test_display_merge_preserves_identical_partial_text_across_separate_turns():
         "terminal",
         "read_file",
     ]
+
+
+def test_display_merge_scopes_identical_partial_signature_per_user_turn():
+    partial = {
+        "role": "assistant",
+        "content": "Same partial progress",
+        "reasoning": "Same reasoning",
+        "_partial": True,
+        "_partial_tool_calls": [
+            {"name": "terminal", "args": {"command": "same"}, "done": True}
+        ],
+    }
+    previous_display = [
+        {"role": "user", "content": "first cancelled turn"},
+        dict(partial),
+        {"role": "assistant", "content": "First turn cancelled", "_error": True},
+        {"role": "user", "content": "second cancelled turn"},
+        dict(partial),
+        {"role": "assistant", "content": "Second turn cancelled", "_error": True},
+        {"role": "user", "content": "successful turn"},
+    ]
+    previous_context = list(previous_display)
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        previous_context + [{"role": "assistant", "content": "Successful final answer"}],
+        "successful turn",
+    )
+
+    assert [msg["content"] for msg in merged if msg.get("_partial")] == [
+        "Same partial progress",
+        "Same partial progress",
+    ]
+
+
+def test_display_merge_preserves_tool_distinct_partials_within_one_turn():
+    previous_display = [
+        {"role": "user", "content": "cancelled turn"},
+        {
+            "role": "assistant",
+            "content": "Same partial progress",
+            "reasoning": "Same reasoning",
+            "_partial": True,
+            "_partial_tool_calls": [
+                {"name": "terminal", "args": {"command": "same"}, "done": True}
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": "Same partial progress",
+            "reasoning": "Same reasoning",
+            "_partial": True,
+            "_partial_tool_calls": [
+                {"name": "read_file", "args": {"path": "same"}, "done": True}
+            ],
+        },
+        {"role": "assistant", "content": "Turn cancelled", "_error": True},
+        {"role": "user", "content": "successful turn"},
+    ]
+    previous_context = list(previous_display)
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        previous_context + [{"role": "assistant", "content": "Successful final answer"}],
+        "successful turn",
+    )
+
+    assert [msg["_partial_tool_calls"][0]["name"] for msg in merged if msg.get("_partial")] == [
+        "terminal",
+        "read_file",
+    ]
