@@ -16,6 +16,12 @@ GPT56_MODEL_IDS = {
     "gpt-5.6-luna",
     "gpt-5.6-luna-pro",
 }
+GPT56_ULTRA_MODEL_IDS = {
+    "gpt-5.6-sol",
+    "gpt-5.6-sol-pro",
+    "gpt-5.6-terra",
+    "gpt-5.6-terra-pro",
+}
 
 
 def test_openai_api_fallback_includes_all_gpt56_models():
@@ -63,7 +69,9 @@ def test_bare_openai_catalog_excludes_gpt56_models():
 
 
 def test_static_model_fallback_includes_all_gpt56_models():
-    html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+    html = (Path(__file__).parents[1] / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
     group = re.search(
         r'<optgroup label="OpenAI API" data-provider="openai-api">(.*?)</optgroup>',
         html,
@@ -104,34 +112,35 @@ def test_live_openai_api_catalog_is_augmented_with_gpt56(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("model_id", "provider"),
+    ("model_id", "provider", "supports_ultra"),
     [
-        ("gpt-5.6-sol", "openai-api"),
-        ("openai/gpt-5.6-terra", "openrouter"),
-        ("@nous:openai/gpt-5.6-luna", "nous"),
+        ("gpt-5.6-sol", "openai-api", True),
+        ("openai/gpt-5.6-terra-pro", "openrouter", True),
+        ("@nous:openai/gpt-5.6-luna", "nous", False),
+        ("gpt-5.6-luna-pro", "openai-codex", False),
     ],
 )
-def test_gpt56_exposes_its_exact_reasoning_efforts(monkeypatch, model_id, provider):
+def test_gpt56_exposes_its_exact_reasoning_efforts(
+    monkeypatch, model_id, provider, supports_ultra
+):
     # GPT-5.6 is newer than models.dev metadata in some installations. Its
     # first-party capability contract must win over a stale negative result.
     monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+    expected = ["none", "low", "medium", "high", "xhigh", "max"]
+    if supports_ultra:
+        expected.append("ultra")
 
-    assert config.resolve_model_reasoning_efforts(model_id, provider_id=provider) == [
-        "none",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    ]
+    assert config.resolve_model_reasoning_efforts(
+        model_id, provider_id=provider
+    ) == expected
 
 
-def test_gpt56_codex_exposes_supported_max(monkeypatch):
+def test_gpt56_codex_sol_exposes_supported_max_and_ultra(monkeypatch):
     monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
 
     assert config.resolve_model_reasoning_efforts(
         "gpt-5.6-sol", provider_id="openai-codex"
-    ) == ["none", "low", "medium", "high", "xhigh", "max"]
+    ) == ["none", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 
 def test_gpt56_max_is_preserved_for_direct_openai(monkeypatch):
@@ -150,6 +159,26 @@ def test_gpt56_max_is_preserved_for_codex(monkeypatch):
     ) == "max"
 
 
+@pytest.mark.parametrize("provider_id", ["openai-api", "openai-codex", "openrouter"])
+@pytest.mark.parametrize("model_id", sorted(GPT56_ULTRA_MODEL_IDS))
+def test_sol_and_terra_ultra_is_preserved(monkeypatch, provider_id, model_id):
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+
+    assert config.coerce_reasoning_effort_for_model(
+        "ultra", model_id, provider_id=provider_id
+    ) == "ultra"
+
+
+@pytest.mark.parametrize("provider_id", ["openai-api", "openai-codex", "openrouter"])
+@pytest.mark.parametrize("model_id", ["gpt-5.6-luna", "gpt-5.6-luna-pro"])
+def test_luna_ultra_degrades_to_max(monkeypatch, provider_id, model_id):
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
+
+    assert config.coerce_reasoning_effort_for_model(
+        "ultra", model_id, provider_id=provider_id
+    ) == "max"
+
+
 @pytest.mark.parametrize("provider_id", ["openai-api", "openai-codex"])
 def test_gpt56_minimal_degrades_to_none(monkeypatch, provider_id):
     monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: [])
@@ -159,22 +188,39 @@ def test_gpt56_minimal_degrades_to_none(monkeypatch, provider_id):
     ) == "none"
 
 
-def test_max_is_not_advertised_for_older_reasoning_models():
-    assert config._heuristic_reasoning_efforts(
+def test_max_and_ultra_are_not_advertised_for_older_reasoning_models():
+    efforts = config._heuristic_reasoning_efforts(
         "openai/gpt-5.5", "openrouter"
-    ) == list(config._DEFAULT_REASONING_EFFORTS)
+    )
+
+    assert efforts == list(config._DEFAULT_REASONING_EFFORTS)
+    assert "max" not in efforts
+    assert "ultra" not in efforts
 
 
-def test_unknown_gpt56_variant_does_not_inherit_max(monkeypatch):
+def test_unknown_gpt56_variant_does_not_inherit_max_or_ultra(monkeypatch):
     monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: None)
 
     for model_id in ("gpt-5.6", "gpt-5.6-mini", "gpt-5.6-sol-preview"):
-        assert "max" not in config.resolve_model_reasoning_efforts(
+        efforts = config.resolve_model_reasoning_efforts(
             model_id, provider_id="openai-api"
         )
+        assert "max" not in efforts
+        assert "ultra" not in efforts
 
 
-def test_reasoning_dropdown_includes_max():
-    html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+def test_unknown_gpt56_variant_ultra_degrades_to_xhigh(monkeypatch):
+    monkeypatch.setattr(config, "_models_dev_reasoning_efforts", lambda *_args: None)
+
+    assert config.coerce_reasoning_effort_for_model(
+        "ultra", "gpt-5.6-sol-preview", provider_id="openai-api"
+    ) == "xhigh"
+
+
+def test_reasoning_dropdown_includes_max_and_ultra():
+    html = (Path(__file__).parents[1] / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
 
     assert 'data-effort="max"' in html
+    assert 'data-effort="ultra"' in html

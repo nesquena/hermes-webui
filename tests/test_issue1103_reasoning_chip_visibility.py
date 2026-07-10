@@ -48,6 +48,9 @@ def test_reasoning_chip_html_starts_hidden():
     assert 'data-effort="max"' in src, (
         "composer reasoning dropdown must include Max"
     )
+    assert 'data-effort="ultra"' in src, (
+        "composer reasoning dropdown must include Ultra for capable models"
+    )
 
 
 def test_ui_js_passes_model_context_to_reasoning_api():

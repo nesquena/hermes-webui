@@ -1100,6 +1100,14 @@ _GPT56_MODELS = (
     ("gpt-5.6-luna-pro", "GPT-5.6 Luna Pro"),
 )
 _GPT56_MODEL_IDS = frozenset(model_id for model_id, _label in _GPT56_MODELS)
+_GPT56_ULTRA_MODEL_IDS = frozenset(
+    {
+        "gpt-5.6-sol",
+        "gpt-5.6-sol-pro",
+        "gpt-5.6-terra",
+        "gpt-5.6-terra-pro",
+    }
+)
 _OPENROUTER_GPT56_MODEL_IDS = frozenset(
     f"openai/{model_id}" for model_id in _GPT56_MODEL_IDS
 )
@@ -3051,11 +3059,20 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 
 # ── Reasoning config (CLI parity for /reasoning) ─────────────────────────────
 # Mirrors hermes_constants.parse_reasoning_effort so WebUI can validate without
-# importing from the agent tree (which may not be installed).  Any drift here
-# will show up in the shared test suite since both sides accept the same set.
-# Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
-_DEFAULT_REASONING_EFFORTS = VALID_REASONING_EFFORTS[:-1]
+# importing from the agent tree (which may not be installed), plus Codex's
+# catalog-advertised ``ultra`` level. The Responses transport forwards effort
+# strings verbatim, while the model-aware capability filter below prevents
+# unsupported models from receiving ``max`` or ``ultra``.
+VALID_REASONING_EFFORTS = (
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
+_DEFAULT_REASONING_EFFORTS = VALID_REASONING_EFFORTS[:-2]
 GPT56_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
 
@@ -3276,11 +3293,13 @@ def _filter_reasoning_efforts_for_provider(
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    if bare in _GPT56_MODEL_IDS and bare not in _GPT56_ULTRA_MODEL_IDS:
+        normalized = [eff for eff in normalized if eff != "ultra"]
     if provider == "openai-codex":
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
         if bare.startswith("gpt-5") and bare not in _GPT56_MODEL_IDS:
-            return [eff for eff in normalized if eff != "max"]
+            return [eff for eff in normalized if eff not in {"max", "ultra"}]
     return normalized
 
 
@@ -3288,8 +3307,11 @@ def _gpt56_reasoning_efforts(model_id: str, provider_id: str) -> list[str] | Non
     """Return OpenAI's first-party GPT-5.6 effort contract when applicable."""
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
     if bare in _GPT56_MODEL_IDS:
+        efforts = list(GPT56_REASONING_EFFORTS)
+        if bare in _GPT56_ULTRA_MODEL_IDS:
+            efforts.append("ultra")
         return _filter_reasoning_efforts_for_provider(
-            list(GPT56_REASONING_EFFORTS), model_id, provider_id
+            efforts, model_id, provider_id
         )
     return None
 
@@ -3693,18 +3715,18 @@ def coerce_reasoning_effort_for_model(
     # still applies.
     if not supported:
         # Historical behavior was to preserve arbitrary configured effort values when
-        # capabilities are unknown. For ``max`` specifically, keep endpoints that do
-        # not understand it safe by falling back to ``xhigh`` which remains the
-        # highest widely supported request path for unknown providers in this system.
-        if raw == "max":
+        # capabilities are unknown. For newer ``max`` and ``ultra`` levels, keep
+        # endpoints that do not understand them safe by falling back to ``xhigh``,
+        # which remains the highest widely supported unknown-provider request path.
+        if raw in {"max", "ultra"}:
             return "xhigh"
         return raw
     if raw in supported:
         return raw
     # Degrade to the closest *lower* supported level instead of silently
-    # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
+    # disabling reasoning. e.g. ultra -> max -> xhigh, or xhigh -> high when the
     # target model caps below the configured effort. Never escalate.
-    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..max
+    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..ultra
     try:
         raw_idx = ladder.index(raw)
     except ValueError:
@@ -3879,8 +3901,8 @@ def set_reasoning_effort(
 ) -> dict:
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
-    Mirrors CLI ``/reasoning <level>``: same key, same valid values
-    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
+    Uses the same config key as CLI ``/reasoning <level>`` and accepts the
+    WebUI's model-aware effort set (``none`` through ``ultra``).
     Raises ``ValueError`` on an unrecognised level so callers can return 400.
     """
     raw = str(effort or "").strip().lower()

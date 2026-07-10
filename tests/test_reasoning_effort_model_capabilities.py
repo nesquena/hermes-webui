@@ -19,6 +19,7 @@ def test_openai_codex_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
     assert "xhigh" in efforts
     assert "max" not in efforts
+    assert "ultra" not in efforts
 
 
 def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
@@ -30,11 +31,20 @@ def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
     assert "xhigh" in efforts
     assert "max" not in efforts
+    assert "ultra" not in efforts
 
 
 def test_openai_codex_max_effort_is_clamped_before_streaming():
     assert cfg.coerce_reasoning_effort_for_model(
         "max",
+        "gpt-5.5",
+        provider_id="openai-codex",
+    ) == "xhigh"
+
+
+def test_openai_codex_ultra_effort_is_clamped_before_streaming():
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra",
         "gpt-5.5",
         provider_id="openai-codex",
     ) == "xhigh"
@@ -69,8 +79,8 @@ def test_coerce_preserves_effort_for_unrecognized_model():
     # #3505 review: resolve_model_reasoning_efforts() returns [] for BOTH
     # known-unsupported AND simply-unrecognized models (custom providers,
     # aggregator-rewritten ids, brand-new releases). Coercion must preserve most
-    # configured efforts when we can't determine support, while still keeping ``max``
-    # safe by lowering to ``xhigh``.
+    # configured efforts when we can't determine support, while still keeping
+    # ``max`` and ``ultra`` safe by lowering them to ``xhigh``.
     assert cfg.coerce_reasoning_effort_for_model(
         "high",
         "some-unknown-model-xyz",
@@ -78,6 +88,11 @@ def test_coerce_preserves_effort_for_unrecognized_model():
     ) == "high"
     assert cfg.coerce_reasoning_effort_for_model(
         "max",
+        "brand-new-model-2099",
+        provider_id="some-custom-provider",
+    ) == "xhigh"
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra",
         "brand-new-model-2099",
         provider_id="some-custom-provider",
     ) == "xhigh"
@@ -171,11 +186,19 @@ def test_codex_configured_reasoning_efforts_still_apply_model_filter(monkeypatch
     monkeypatch.setitem(
         cfg.cfg,
         "providers",
-        {"openai-codex": {"reasoning_efforts": ["none", "xhigh", "max"]}},
+        {
+            "openai-codex": {
+                "reasoning_efforts": ["none", "xhigh", "max", "ultra"]
+            }
+        },
     )
     try:
         assert cfg.resolve_model_reasoning_efforts(
             "gpt-5.6-sol",
+            provider_id="openai-codex",
+        ) == ["none", "xhigh", "max", "ultra"]
+        assert cfg.resolve_model_reasoning_efforts(
+            "gpt-5.6-luna",
             provider_id="openai-codex",
         ) == ["none", "xhigh", "max"]
     finally:

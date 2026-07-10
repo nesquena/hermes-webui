@@ -271,7 +271,7 @@ class TestReasoningCommand:
             )
 
     def test_cmd_reasoning_routes_effort_through_api_reasoning(self):
-        """Effort levels (none|minimal|low|medium|high|xhigh|max) must POST to
+        """Effort levels (none|minimal|low|medium|high|xhigh|max|ultra) must POST to
         /api/reasoning so the agent's config.yaml agent.reasoning_effort is
         updated — the same key the CLI writes via `/reasoning <level>`.
         Previous design stored in a dead client variable, which did nothing."""
@@ -305,17 +305,15 @@ class TestReasoningCommand:
             "config.yaml display.show_reasoning matches the CLI's source"
         )
 
-    def test_cmd_reasoning_supports_all_cli_effort_levels(self):
-        """The effort-level set must match hermes_constants.VALID_REASONING_EFFORTS
-        + 'none' — i.e. the exact set the CLI accepts in /reasoning."""
+    def test_cmd_reasoning_supports_all_webui_effort_levels(self):
+        """The command must accept shared Hermes efforts plus Codex ultra."""
         src = read('static/commands.js')
         m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
-        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
             assert f"'{level}'" in fn, (
-                f"cmdReasoning must accept '{level}' (CLI parity with "
-                f"hermes_constants.parse_reasoning_effort)"
+                f"cmdReasoning must accept WebUI effort '{level}'"
             )
 
     def test_reasoning_subargs_match_cli_levels(self):
@@ -325,10 +323,11 @@ class TestReasoningCommand:
         assert m, "reasoning COMMANDS entry not found"
         entry = m.group(0)
         for suggestion in (
-            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+            'ultra',
         ):
             assert f"'{suggestion}'" in entry, (
-                f"reasoning subArgs must include '{suggestion}' for CLI parity"
+                f"reasoning subArgs must include WebUI option '{suggestion}'"
             )
 
 
@@ -353,13 +352,12 @@ class TestReasoningConfigHelpers:
         # Case-insensitive + trimmed
         assert parse_reasoning_effort('  HIGH  ') == {'enabled': True, 'effort': 'high'}
 
-    def test_valid_reasoning_efforts_matches_hermes_constants(self):
-        """Ensure our mirror stays in sync with hermes_constants."""
+    def test_valid_reasoning_efforts_includes_codex_ultra(self):
+        """WebUI accepts shared Hermes efforts plus Codex-advertised ultra."""
         from api.config import VALID_REASONING_EFFORTS
-        # Snapshot-style assertion: if hermes_constants adds a level, this
-        # test will fail fast so we know to update WebUI too.
+        # Snapshot-style assertion keeps command/API/dropdown handling aligned.
         assert VALID_REASONING_EFFORTS == (
-            'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
         )
 
     def test_set_reasoning_effort_persists_to_config_yaml(self, tmp_path, monkeypatch):
@@ -368,6 +366,7 @@ class TestReasoningConfigHelpers:
         import api.config as cfg
         cfgfile = tmp_path / 'config.yaml'
         monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
+        monkeypatch.setattr(cfg, 'reload_config', lambda: None)
         cfg.set_reasoning_effort('high')
         import yaml as _yaml
         data = _yaml.safe_load(cfgfile.read_text(encoding='utf-8'))
@@ -381,6 +380,7 @@ class TestReasoningConfigHelpers:
         import api.config as cfg
         cfgfile = tmp_path / 'config.yaml'
         monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
+        monkeypatch.setattr(cfg, 'reload_config', lambda: None)
         cfg.set_reasoning_display(False)
         import yaml as _yaml
         data = _yaml.safe_load(cfgfile.read_text(encoding='utf-8'))
