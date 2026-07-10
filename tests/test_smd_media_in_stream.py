@@ -247,6 +247,15 @@ class TestSmdMediaInStream(unittest.TestCase):
             "concurrent streams don't cross-pollinate",
         )
 
+    def test_smd_end_parser_clears_fallback_media_tail(self):
+        # Greptile re-review: parserFor falls back to __SMD_PARSER_FALLBACK,
+        # so stream-end cleanup must clear that sentinel key, not null.
+        idx = MESSAGES_JS.index("function _smdEndParser")
+        block = MESSAGES_JS[idx:idx + 1200]
+        self.assertIn("_smdMediaTailClear(_smdParser)", block)
+        self.assertIn("_smdMediaTailClear(__SMD_PARSER_FALLBACK)", block)
+        self.assertNotIn("_smdMediaTailClear(null)", block)
+
 
 if __name__ == "__main__":
     import unittest

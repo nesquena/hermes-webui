@@ -4049,9 +4049,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdParser=null;
     _smdWrittenLen=0;
     _smdWrittenText='';
-    // Clear the per-parser MEDIA tail buffer — any incomplete MEDIA
-    // prefix the parser was holding is no longer relevant.
-    if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(null);
+    // Clear the fallback MEDIA tail buffer too; fallback chunks are keyed
+    // by __SMD_PARSER_FALLBACK, not null.
+    if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(__SMD_PARSER_FALLBACK);
   }
   function _scheduleStreamingKatex(){
     if(_streamingKatexTimer) return;
