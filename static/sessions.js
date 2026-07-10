@@ -3833,7 +3833,6 @@ function _consumeComposerPrefillParamsFromLocation(){
   try{
     const current=new URL(window.location.href);
     const before=current.searchParams.toString();
-    current.searchParams.delete('profile');
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
@@ -3858,7 +3857,6 @@ function _sessionUrlForSid(sid){
     const current=new URL(window.location.href);
     current.searchParams.delete('session');
     current.searchParams.delete('session_id');
-    current.searchParams.delete('profile');
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
