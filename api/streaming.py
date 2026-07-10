@@ -1475,8 +1475,9 @@ def _materialize_streamed_answer_result(
     explicit_result_error = bool(raw_result_error) and error_classification['type'] != 'no_response'
     result_status = str(result.get('status') or result.get('state') or '').strip().lower()
     result_is_hard_terminal = (
-        result_status in {'failed', 'error', 'compression_exhausted'}
+        result_status in {'failed', 'error', 'partial', 'compression_exhausted'}
         or result.get('failed')
+        or result.get('partial')
         or result.get('compression_exhausted')
         or bool(tool_limit_reached)
     )

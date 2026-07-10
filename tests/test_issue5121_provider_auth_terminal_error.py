@@ -1277,7 +1277,7 @@ def test_stale_partial_with_unfinished_tool_call_still_reports_no_response(tmp_p
     assert saved.messages[-1]["_error"] is True
 
 
-def test_soft_partial_streamed_answer_for_repeated_prompt_is_saved_as_current_answer(tmp_path, monkeypatch):
+def test_soft_partial_streamed_answer_for_repeated_prompt_is_not_promoted(tmp_path, monkeypatch):
     session = _prepare_session(
         "repeated_prompt_replay_stale_partial",
         "stream_repeated_prompt_replay_stale_partial",
@@ -1311,12 +1311,11 @@ def test_soft_partial_streamed_answer_for_repeated_prompt_is_saved_as_current_an
     assert saved is not None
 
     events = _queue_events(fake_queue)
-    assert any(event == "done" for event, _ in events)
-    assert not any(event == "apperror" for event, _ in events)
-    assert saved.messages[-1]["role"] == "assistant"
-    assert saved.messages[-1]["content"] == "Current streamed answer for the repeated prompt"
+    assert any(event == "apperror" for event, _ in events)
+    assert not any(event == "done" for event, _ in events)
     assert any(msg.get("role") == "assistant" and msg.get("content") == "Old answer" for msg in saved.messages)
-    assert not any(msg.get("_error") for msg in saved.messages)
+    assert any(msg.get("_partial") and msg.get("content") == "Current streamed answer for the repeated prompt" for msg in saved.messages)
+    assert saved.messages[-1].get("_error") is True
 
 
 def test_hard_failure_with_completed_answer_still_reports_no_response(tmp_path, monkeypatch):
@@ -1353,15 +1352,8 @@ def test_hard_failure_with_completed_answer_still_reports_no_response(tmp_path, 
     assert saved.messages[-1]["_error"] is True
 
 
-def test_streamed_answer_with_soft_partial_result_is_saved_as_final_answer(tmp_path, monkeypatch):
-    """Soft partial/no-error results must not append no_response after visible text.
-
-    Regression for live session dc3acc5acdaa: the agent streamed a complete
-    answer via ``stream_delta_callback`` and then returned a soft ``partial``
-    result with no explicit provider error and no final assistant row. WebUI
-    should trust the visible streamed answer instead of appending a misleading
-    ``No response from provider`` card.
-    """
+def test_streamed_answer_with_soft_partial_result_remains_partial(tmp_path, monkeypatch):
+    """Explicit partial results must not become fabricated final answers."""
     session = _prepare_session(
         "soft_partial_streamed_answer",
         "stream_soft_partial_streamed_answer",
@@ -1390,17 +1382,13 @@ def test_streamed_answer_with_soft_partial_result_is_saved_as_final_answer(tmp_p
     assert saved is not None
 
     events = _queue_events(fake_queue)
-    assert any(event == "done" for event, _ in events)
-    assert not any(event == "apperror" for event, _ in events)
-    assert saved.messages[-1]["role"] == "assistant"
-    assert saved.messages[-1]["content"] == "Completed visible answer from the stream."
-    assert saved.context_messages[-1]["role"] == "assistant"
-    assert saved.context_messages[-1]["content"] == "Completed visible answer from the stream."
-    assert not any(msg.get("_partial") for msg in saved.messages)
-    assert not any(msg.get("_error") for msg in saved.messages)
+    assert any(event == "apperror" for event, _ in events)
+    assert not any(event == "done" for event, _ in events)
+    assert any(msg.get("_partial") and msg.get("content") == "Completed visible answer from the stream." for msg in saved.messages)
+    assert saved.messages[-1].get("_error") is True
 
 
-def test_non_auth_seeded_multi_turn_partial_saves_streamed_text_as_final_answer(tmp_path, monkeypatch):
+def test_non_auth_seeded_multi_turn_partial_preserves_partial_then_errors(tmp_path, monkeypatch):
     session = _prepare_session(
         "seeded_partial_escape",
         "stream_seeded_partial_escape",
@@ -1428,16 +1416,12 @@ def test_non_auth_seeded_multi_turn_partial_saves_streamed_text_as_final_answer(
     assert saved is not None
 
     assert any(msg.get("role") == "assistant" and msg.get("content") == "Earlier answer" for msg in saved.messages)
-    assert saved.messages[-1]["role"] == "assistant"
-    assert saved.messages[-1]["content"] == "Streamed answer before soft partial result"
-    assert saved.context_messages[-1]["role"] == "assistant"
-    assert saved.context_messages[-1]["content"] == "Streamed answer before soft partial result"
-    assert not any(msg.get("_partial") for msg in saved.messages)
-    assert not any(msg.get("_error") for msg in saved.messages)
+    assert any(msg.get("_partial") and msg.get("content") == "Streamed answer before soft partial result" for msg in saved.messages)
+    assert saved.messages[-1].get("_error") is True
 
     events = _queue_events(fake_queue)
-    assert any(event == "done" for event, _ in events)
-    assert not any(event == "apperror" for event, _ in events)
+    assert any(event == "apperror" for event, _ in events)
+    assert not any(event == "done" for event, _ in events)
 
 
 def test_non_auth_seeded_replayed_assistant_does_not_satisfy_current_turn(tmp_path, monkeypatch):
