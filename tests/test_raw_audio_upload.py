@@ -175,3 +175,25 @@ def test_send_raw_audio_honors_explicit_pending_send():
     end = _BOOT_JS.index("function _commitTranscript", idx)
     body = _BOOT_JS[idx:end]
     assert "window._micPendingSend" in body and "send()" in body
+
+
+def test_commit_transcript_appends_to_live_text_not_stale_snapshot():
+    # Regression: server-STT transcription is async (~1s round-trip). During
+    # that window the user can keep typing. The previous implementation appended
+    # to `_prefix` (the recording-start snapshot), which clobbered any keystrokes
+    # made after the recording stopped but before the response came back.
+    # Fix: append to live `ta.value` instead, falling back to the snapshot only
+    # when the textarea is genuinely empty.
+    idx = _BOOT_JS.index("function _commitTranscript")
+    end = _BOOT_JS.index("\n  function ", idx + 1)
+    body = _BOOT_JS[idx:end]
+    # Must read live ta.value as the append base, with snapshot as fallback.
+    assert "ta.value ||" in body, (
+        "_commitTranscript must fall back from live ta.value to the snapshot, "
+        "not the other way around (regression on async server-STT race)"
+    )
+    # The fallback expression should mention the snapshot parameter.
+    assert "prefixOverride" in body, (
+        "_commitTranscript still needs prefixOverride as a fallback for "
+        "browser-SR path"
+    )
