@@ -4213,8 +4213,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // the shared interceptor so the token becomes a real media element
       // instead of plain text. The fade renderer would otherwise wrap every
       // word in a stream-fade-word span, leaving MEDIA: paths visible.
-      if(/MEDIA:/.test(String(text||''))){
-        _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parserFor(data));
+      const parser=parserFor(data);
+      const hasMediaTail=!!(_SMD_MEDIA_TAIL&&parser&&_SMD_MEDIA_TAIL.has&&_SMD_MEDIA_TAIL.has(parser));
+      if(/MEDIA:/.test(String(text||''))||hasMediaTail){
+        _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser);
         return;
       }
       const frag=document.createDocumentFragment();
@@ -4293,6 +4295,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(chunk) tailMap.set(parser, chunk);
     else tailMap.delete(parser);
   }
+  function _smdMediaRefHasReliableBoundary(rawRef){
+    const ref=String(rawRef||'').split(/[?#]/,1)[0];
+    return /\.(?:png|jpe?g|gif|webp|bmp|svg|avif|mp4|webm|mov|m4v|mp3|wav|ogg|m4a|flac|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
+  }
   function _smdMediaAwareAddText(baseAddText, parent, data, text, tailMap, parser){
     const value=String(text||'');
     const tails=tailMap||(typeof _SMD_MEDIA_TAIL!=='undefined'&&_SMD_MEDIA_TAIL)||null;
@@ -4300,50 +4306,51 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(baseAddText) baseAddText(data,'');
       return;
     }
-    // Pull any pending tail from a previous (split) chunk.
-    let lead = tails && parser && tails.get ? tails.get(parser) : null;
-    if(lead){
-      tails.delete(parser);
-      // If lead by itself matches a complete MEDIA: token, emit it now
-      // and process `value` from scratch; otherwise prepend and try to
-      // match across the boundary.
-      const m0 = /^MEDIA:(\S+?)(?=[\s)\]]*$)/.exec(lead);
-      if(m0 && lead === 'MEDIA:'+m0[1]){
-        _smdAppendMediaNode(parent, m0[1]);
-        lead = null;
-      }
-    }
+    // Pull any pending tail from a previous (split) chunk, then clear it;
+    // this call will either complete it, re-buffer it, or flush it as text.
+    const lead = tails && parser && tails.get ? tails.get(parser) : null;
+    if(lead && tails && parser && tails.delete) tails.delete(parser);
+    const combined = lead ? lead + value : value;
     // Fast path: no MEDIA tokens in the (possibly combined) string.
-    if(!/MEDIA:/.test(lead + value)){
-      if(baseAddText) baseAddText(data, lead ? lead + value : value);
-      if(lead && tails && parser) _smdMediaTailSet(tails, parser, null);
+    if(!/MEDIA:/.test(combined)){
+      if(baseAddText) baseAddText(data, combined);
       return;
     }
     // Walk the combined string, slicing into prose + MEDIA token runs.
     // Prose runs go through baseAddText (text nodes). MEDIA tokens go
-    // through the single-token DOMParser helper.
-    const combined = lead ? lead + value : value;
+    // through the single-token DOMParser helper only after a delimiter or
+    // reliable filename suffix proves the ref is complete.
     const re=/MEDIA:([^\s\)\]]+)/g;
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
+      const matchEnd = m.index + m[0].length;
       if(m.index>last){
         const slice = combined.slice(last, m.index);
         if(baseAddText) baseAddText(data, slice);
       }
+      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+        const candidate = combined.slice(m.index);
+        if(candidate.length < _MEDIA_TAIL_MAX){
+          unmatchedTail = candidate;
+        } else if(baseAddText){
+          baseAddText(data, candidate);
+        }
+        last = combined.length;
+        break;
+      }
       _smdAppendMediaNode(parent, m[1]);
-      last = m.index + m[0].length;
+      last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
-    // MEDIA prefix; write through plain prose, clear empty rests.
+    // MEDIA prefix; flush any prose before the partial MEDIA suffix.
     const rest = combined.slice(last);
     if(rest){
-      const endsWithBarePrefix = rest.endsWith('MEDIA:');
-      const mEnd = /MEDIA:([^\s)\]]*?)$/.exec(rest);
-      const endsWithOpenRef = !!(mEnd && mEnd[1].length > 0);
-      if((endsWithBarePrefix || endsWithOpenRef)
-         && rest.length < _MEDIA_TAIL_MAX){
-        unmatchedTail = rest;
+      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      if(tailMatch && rest.length < _MEDIA_TAIL_MAX){
+        const tailStart = tailMatch.index;
+        if(tailStart>0 && baseAddText) baseAddText(data, rest.slice(0, tailStart));
+        unmatchedTail = rest.slice(tailStart);
       } else if(baseAddText){
         baseAddText(data, rest);
       }

@@ -99,6 +99,17 @@ class TestSmdMediaInStream(unittest.TestCase):
             "span and stay visible as literal text)",
         )
 
+    def test_stream_fade_renderer_consumes_buffered_media_tail(self):
+        # Greptile re-review: fade streaming previously only checked the
+        # current chunk for /MEDIA:/. If the previous chunk buffered "MEDIA:"
+        # and the next chunk was only the ref, fade wrapping rendered the path
+        # as literal text instead of completing the MEDIA token.
+        idx = MESSAGES_JS.index("function _streamFadeRenderer")
+        block = MESSAGES_JS[idx:idx + 6500]
+        self.assertIn("const parser=parserFor(data);", block)
+        self.assertIn("_SMD_MEDIA_TAIL.has(parser)", block)
+        self.assertIn("||hasMediaTail", block)
+
     def test_media_interceptor_handles_token_at_chunk_start(self):
         # The smd parser can split chunks mid-text. The fix must handle MEDIA
         # tokens wherever they appear in a single add_text call, not just at
@@ -179,6 +190,19 @@ class TestSmdMediaInStream(unittest.TestCase):
                       "Interceptor must record the trailing bytes that look "
                       "like an incomplete MEDIA prefix so the next add_text "
                       "call can prepend them and finish the token")
+
+    def test_partial_media_ref_at_chunk_end_is_buffered_until_boundary(self):
+        # Greptile re-review: /MEDIA:([^\s)\]]+)/g will happily match
+        # "MEDIA:fo" at the end of a chunk even if the next chunk is "o.png".
+        # The interceptor must not emit a media node for that partial ref;
+        # it should keep the candidate in unmatchedTail unless a delimiter or
+        # reliable filename suffix proves the ref is complete.
+        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
+        block = MESSAGES_JS[idx:idx + 6500]
+        self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
+        self.assertIn("matchEnd===combined.length", block)
+        self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)
+        self.assertIn("unmatchedTail = candidate", block)
 
     def test_tail_buffer_size_cap(self):
         # Defensive: a runaway tail buffer from a malformed stream could
