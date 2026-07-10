@@ -5590,7 +5590,27 @@ def _turn_transcript_lacks_final_assistant_answer(
     merged_messages = list(merged_messages or [])
     previous_display = list(previous_display or [])
     current_user_idx = _find_current_user_turn(merged_messages, msg_text)
-    if current_user_idx is None or current_user_idx < len(previous_display):
+    # The durable transcript boundary is normally len(previous_display): the
+    # pre-turn snapshot ends and the active turn begins after it. But eager
+    # session-save / pending-message recovery / mid-turn checkpoints can
+    # persist the CURRENT user prompt into previous_display before the agent
+    # result is finalized. In that state the active turn starts AT the last
+    # snapshot row, not after it — treating that row as "older" appends a
+    # phantom duplicate of the current prompt below the real assistant answer
+    # and misclassifies a completed turn as a silent no_response failure.
+    # Mirror the checkpoint detection used by
+    # _merge_display_messages_after_agent_result (current_user_already_
+    # checkpointed) so the two layers agree on where the turn begins.
+    _boundary = len(previous_display)
+    if previous_display:
+        _current_user_key = _message_identity({'role': 'user', 'content': msg_text})
+        _last_snapshot_row = previous_display[-1]
+        if (
+            _message_identity(_last_snapshot_row) == _current_user_key
+            or _looks_like_current_user_turn(_last_snapshot_row, msg_text)
+        ):
+            _boundary -= 1
+    if current_user_idx is None or current_user_idx < _boundary:
         # The active turn lives after the durable transcript boundary. If the
         # merged display only exposes an older user row, materialize the pending
         # prompt so a replayed assistant row cannot satisfy the wrong turn.
