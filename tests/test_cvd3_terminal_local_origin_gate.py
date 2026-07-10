@@ -200,3 +200,120 @@ def test_terminal_start_loopback_client_passes_gate(monkeypatch):
     # Gate passed → lookup ran → 404 (no such session), NOT 403.
     assert reached["called"] is True
     assert handler.status == 404
+
+
+# ---------------------------------------------------------------------------
+# #5764 — trusted-proxy forwarded-client trust model, full truth table.
+# The gate honors a forwarded client IP ONLY when the un-spoofable raw socket
+# peer is a trusted proxy (loopback, or in HERMES_WEBUI_TRUSTED_PROXY_CIDRS),
+# and only when HERMES_WEBUI_TRUST_FORWARDED_FOR=1. It must (a) never let a
+# direct public client spoof itself local, (b) never lock out a direct
+# loopback/LAN client with no proxy header, and (c) fail closed on malformed
+# chains. See api/routes.py::_onboarding_request_is_local.
+# ---------------------------------------------------------------------------
+
+
+class _MultiHeaders(dict):
+    """Headers stub supporting repeated X-Forwarded-For via get_all()."""
+
+    def get(self, key, default=None):
+        for k, v in self.items():
+            if k.lower() == key.lower():
+                return v[-1] if isinstance(v, list) else v
+        return default
+
+    def get_all(self, key):
+        for k, v in self.items():
+            if k.lower() == key.lower():
+                return v if isinstance(v, list) else [v]
+        return []
+
+
+class _MHandler:
+    def __init__(self, *, client_ip, headers=None):
+        self.client_address = (client_ip, 12345)
+        self.headers = _MultiHeaders(headers or {})
+
+
+def _clear_fwd_env(monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", raising=False)
+
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    "name,client_ip,headers,env,expected",
+    [
+        # --- spoof attempts: direct client sets a forwarded header ---
+        ("spoof_xff_loopback_default", "8.8.8.8", {"X-Forwarded-For": "127.0.0.1"}, {}, False),
+        ("spoof_xrealip_default", "8.8.8.8", {"X-Real-IP": "127.0.0.1"}, {}, False),
+        ("spoof_xff_loopback_trust_on", "8.8.8.8", {"X-Forwarded-For": "127.0.0.1"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, False),
+        # --- direct clients, no proxy ---
+        ("direct_loopback", "127.0.0.1", {}, {}, True),
+        ("direct_lan", "192.168.1.50", {}, {}, True),
+        ("direct_public", "8.8.8.8", {}, {}, False),
+        ("direct_lan_trust_on_no_header", "192.168.1.50", {},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, True),
+        # --- trusted loopback proxy, TRUST on ---
+        ("loopback_proxy_public_client", "127.0.0.1", {"X-Forwarded-For": "8.8.8.8"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, False),
+        ("loopback_proxy_private_client", "127.0.0.1", {"X-Forwarded-For": "192.168.1.50"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, True),
+        # right-to-left: first non-trusted hop is the client
+        ("chain_public_then_proxy", "127.0.0.1", {"X-Forwarded-For": "8.8.8.8, 127.0.0.1"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, False),
+        # ATTACK: hide a public field behind a trusted first field
+        ("attack_hide_public_behind_trusted", "127.0.0.1",
+         {"X-Forwarded-For": "127.0.0.1, 8.8.8.8"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, False),
+        # repeated XFF headers (get_all): "8.8.8.8" then "127.0.0.1"
+        ("attack_repeated_xff_headers", "127.0.0.1",
+         {"X-Forwarded-For": ["127.0.0.1", "8.8.8.8"]},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, False),
+        # --- malformed chains fail closed ---
+        ("malformed_empty_xff", "127.0.0.1", {"X-Forwarded-For": ","},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, False),
+        ("malformed_garbage_xff", "127.0.0.1", {"X-Forwarded-For": "notanip"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, False),
+        ("malformed_blank_hop_in_chain", "127.0.0.1", {"X-Forwarded-For": "192.168.1.5, , 127.0.0.1"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1"}, False),
+        # --- remote proxy via CIDR allowlist ---
+        ("remote_trusted_proxy_private_client", "10.9.9.9", {"X-Forwarded-For": "192.168.1.50"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1", "HERMES_WEBUI_TRUSTED_PROXY_CIDRS": "10.9.9.0/24"}, True),
+        ("remote_trusted_proxy_public_client", "10.9.9.9", {"X-Forwarded-For": "8.8.8.8"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1", "HERMES_WEBUI_TRUSTED_PROXY_CIDRS": "10.9.9.0/24"}, False),
+        # invalid CIDR is skipped (never widens trust); peer 10.9.9.9 is a direct
+        # private LAN box with a forwarded header present but no trusted proxy →
+        # denied (could be relaying an unseen client).
+        ("invalid_cidr_private_peer_with_header", "10.9.9.9", {"X-Forwarded-For": "8.8.8.8"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1", "HERMES_WEBUI_TRUSTED_PROXY_CIDRS": "not-a-cidr"}, False),
+        # --- opt-in OFF: raw peer authoritative, header ignored ---
+        ("trust_off_loopback_proxy_xff_public", "127.0.0.1", {"X-Forwarded-For": "8.8.8.8"}, {}, True),
+        ("trust_off_lan_peer_with_header", "10.0.0.5", {"X-Real-IP": "203.0.113.7"}, {}, False),
+        # --- #5764 re-gate: IPv4-mapped-IPv6 must be family-aware ---
+        # mapped-IPv6 proxy peer matches an IPv4 CIDR allowlist -> trusted -> private client local
+        ("mapped_ipv6_proxy_peer_in_ipv4_cidr", "::ffff:10.9.9.9", {"X-Forwarded-For": "192.168.1.50"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1", "HERMES_WEBUI_TRUSTED_PROXY_CIDRS": "10.9.9.0/24"}, True),
+        # mapped-IPv6 proxy peer, public client -> DENY
+        ("mapped_ipv6_proxy_peer_public_client", "::ffff:10.9.9.9", {"X-Forwarded-For": "8.8.8.8"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1", "HERMES_WEBUI_TRUSTED_PROXY_CIDRS": "10.9.9.0/24"}, False),
+        # mapped-IPv6 TRUSTED HOP inside the chain must be skipped so the preceding
+        # PUBLIC client is returned -> DENY (the security-critical case).
+        ("mapped_ipv6_trusted_hop_hides_public", "127.0.0.1",
+         {"X-Forwarded-For": "8.8.8.8, ::ffff:10.9.9.9"},
+         {"HERMES_WEBUI_TRUST_FORWARDED_FOR": "1", "HERMES_WEBUI_TRUSTED_PROXY_CIDRS": "10.9.9.0/24"}, False),
+    ],
+)
+def test_onboarding_local_gate_trust_model_truth_table(
+    monkeypatch, name, client_ip, headers, env, expected
+):
+    from api import routes
+
+    _clear_fwd_env(monkeypatch)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    handler = _MHandler(client_ip=client_ip, headers=headers)
+    assert routes._onboarding_request_is_local(handler) is expected, name

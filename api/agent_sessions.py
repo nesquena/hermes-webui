@@ -7,6 +7,38 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
+    """Open the live agent ``state.db`` read-only for a pure-read projection.
+
+    Same rationale as the session-listing path (#5455): a write-capable handle
+    on the multi-GB, WAL ``state.db`` while the agent streams into it adds
+    needless checkpoint/lock surface. The read-only ``file:...?mode=ro`` URI
+    avoids that. Falls back to a writable connection (and warns) if the
+    read-only open fails, so callers never lose data on exotic filesystems.
+
+    The caller must ensure ``db_path`` exists — this raises ``FileNotFoundError``
+    for a missing path rather than letting the writable fallback below create an
+    empty, writable ``state.db`` there (a ghost DB in the agent's HOME). The
+    fallback is only for an *existing* DB whose read-only open fails on an exotic
+    filesystem, so a real read never loses data.
+
+    Callers own the returned connection (wrap it in ``contextlib.closing``).
+    """
+    log = log or logger
+    if not db_path.exists():
+        raise FileNotFoundError(f"agent state.db not found: {db_path}")
+    read_only_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    try:
+        return sqlite3.connect(read_only_uri, uri=True)
+    except sqlite3.Error as exc:
+        log.warning(
+            "agent state.db read-only open failed for %s; falling back to writable connection: %s",
+            db_path,
+            exc,
+        )
+        return sqlite3.connect(str(db_path))
+
+
 MESSAGING_SOURCES = {
     'discord',
     'email',
@@ -186,6 +218,17 @@ def is_cli_session_row(row: dict) -> bool:
     if source == "messaging":
         return False
     if source == "cli":
+        return True
+    # External-agent imports (Claude Code, Codex, etc.) are read-only sessions
+    # that Hermes discovers on disk and lists alongside CLI/TUI sessions. The
+    # client renderer (static/sessions.js: _isCliSession) files them in the CLI
+    # bucket via the is_cli_session fallthrough, so the server session-count
+    # classifier MUST agree — otherwise the server counts them under
+    # webui_session_count while the client renders them under CLI, and the WebUI
+    # filter shows a non-zero count with an empty list (#5831). These carry a
+    # real title, so they'd otherwise fall through to the conservative
+    # default-title gate below and be misclassified as non-CLI.
+    if source in {"external_agent", "external-agent"}:
         return True
     if (
         source_tag in {"cli", "tui"}
@@ -756,7 +799,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
         return _empty_lineage_report(sid)
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -895,7 +938,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         return {}
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")

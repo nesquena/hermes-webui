@@ -2786,7 +2786,6 @@ from api.config import (
     STREAM_LAST_EVENT_ID,
     SERVER_START_TIME,
     _resolve_cli_toolsets,
-    _INDEX_HTML_PATH,
     get_available_models,
     get_available_models_for_session_visit,
     _provider_is_known_or_configured,
@@ -2822,9 +2821,11 @@ from api.config import (
     _load_yaml_config_file,
     _save_yaml_config_file,
     reload_config,
+    get_config_for_profile_home,
     _cfg_lock,
     PENDING_BG_TASK_COMPLETIONS,
 )
+from api import config as api_config
 from api.helpers import (
     require,
     bad,
@@ -5471,53 +5472,85 @@ def _request_client_ip(handler) -> str:
     return ""
 
 
-def _onboarding_request_is_local(handler) -> bool:
-    """Return True when an unauthenticated onboarding request is local/private.
+def _ip_is_loopback_or_private(raw: str):
+    """Parse an IP string; return (parsed_ok, is_loopback_or_private).
 
-    Forwarded client-IP headers are ignored by default because direct clients can
-    spoof them. Operators behind a trusted reverse proxy may opt in with
-    HERMES_WEBUI_TRUST_FORWARDED_FOR=1, matching the explicit forwarded-header
-    trust model used elsewhere in the server.
-
-    When forwarded headers are PRESENT but not trusted, the request arrived
-    through a proxy, so the raw socket address is the proxy's (typically
-    loopback/private) and tells us nothing about the real client's locality.
-    In that case we deny rather than fall back to the proxy socket — otherwise a
-    public client behind any reverse proxy would be treated as local. Operators
-    who front the WebUI with a trusted proxy must set
-    HERMES_WEBUI_TRUST_FORWARDED_FOR=1 (or HERMES_WEBUI_ONBOARDING_OPEN=1).
+    Returns (False, False) for empty/malformed input so callers fail closed.
     """
     import ipaddress
 
-    trust_forwarded = _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR")
-    if trust_forwarded:
-        candidates = [
-            handler.headers.get("X-Forwarded-For", "").split(",")[-1].strip(),
-            handler.headers.get("X-Real-IP", "").strip(),
-            _request_client_ip(handler),
-        ]
-        for raw in candidates:
-            if not raw:
-                continue
-            try:
-                addr = ipaddress.ip_address(raw)
-            except ValueError:
-                continue
-            return bool(addr.is_loopback or addr.is_private)
-        return False
+    raw = (raw or "").strip()
+    if not raw:
+        return (False, False)
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return (False, False)
+    return (True, bool(addr.is_loopback or addr.is_private))
 
-    # Untrusted forwarded headers present → the request arrived through a proxy.
-    # Ignore the spoofable header and judge by the raw socket, but only LOOPBACK
-    # counts as local in that case: a loopback raw socket is a genuine same-host
-    # client (or a same-host proxy the operator controls), whereas a PRIVATE/LAN
-    # raw socket is a separate proxy box that could be forwarding an arbitrary
-    # (public) client we can't see without trusting the header. Operators who
-    # front the WebUI with a LAN proxy must set HERMES_WEBUI_TRUST_FORWARDED_FOR=1
-    # (or HERMES_WEBUI_ONBOARDING_OPEN=1).
-    forwarded_present = bool(
-        handler.headers.get("X-Forwarded-For", "").strip()
-        or handler.headers.get("X-Real-IP", "").strip()
-    )
+
+def _trusted_proxy_networks():
+    """Networks whose socket peer is allowed to assert a forwarded client IP.
+
+    Loopback is ALWAYS trusted implicitly (the common same-host reverse-proxy
+    deployment). Operators fronting the WebUI with a LAN/remote proxy add its
+    address(es) via HERMES_WEBUI_TRUSTED_PROXY_CIDRS (comma-separated CIDRs or
+    bare IPs). Malformed entries are skipped, never widening trust.
+    """
+    import ipaddress
+
+    nets = [
+        ipaddress.ip_network("127.0.0.0/8"),
+        ipaddress.ip_network("::1/128"),
+        ipaddress.ip_network("::ffff:127.0.0.0/104"),
+    ]
+    raw = os.getenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "") or ""
+    for token in raw.replace(";", ",").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(token, strict=False))
+        except ValueError:
+            # Invalid CIDR/IP → skip (fail closed: never widens trust).
+            continue
+    return nets
+
+
+def _ip_in_networks(addr, networks) -> bool:
+    """Family-aware membership test.
+
+    Checks the parsed address against each network, and — for an IPv4-mapped
+    IPv6 address (e.g. ``::ffff:10.9.9.9``) — ALSO checks its embedded IPv4 form
+    against IPv4 networks. Without this, a mapped-IPv6 proxy peer would never
+    match an IPv4 CIDR allowlist: the trusted proxy would be treated as
+    untrusted (locking out legitimate clients behind it) and, inside an XFF
+    chain, a mapped trusted hop would be mis-returned as the client (admitting a
+    public client that preceded it). See #5764.
+    """
+    candidates = [addr]
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        candidates.append(mapped)
+    for cand in candidates:
+        for net in networks:
+            try:
+                if cand in net:
+                    return True
+            except TypeError:
+                # IPv4/IPv6 family mismatch between candidate and net → skip.
+                continue
+    return False
+
+
+def _raw_peer_is_trusted_proxy(handler) -> bool:
+    """True when the immediate socket peer is loopback or an allowlisted proxy.
+
+    Only such a peer is allowed to assert a forwarded client IP. Judged on the
+    RAW socket address (never a header), so it cannot be spoofed.
+    """
+    import ipaddress
+
     raw = _request_client_ip(handler)
     if not raw:
         return False
@@ -5525,9 +5558,132 @@ def _onboarding_request_is_local(handler) -> bool:
         addr = ipaddress.ip_address(raw)
     except ValueError:
         return False
+    return _ip_in_networks(addr, _trusted_proxy_networks())
+
+
+def _forwarded_client_ip_from_trusted_proxy(handler):
+    """Resolve the real client IP from a chain fronted by a trusted proxy.
+
+    Precondition: the caller has verified the raw socket peer is a trusted proxy.
+    Consumes ALL X-Forwarded-For values (across repeated headers), preserves wire
+    order, walks RIGHT-TO-LEFT skipping hops that are themselves trusted-proxy
+    addresses, and returns the first non-trusted (i.e. real-client) hop. Falls
+    back to X-Real-IP, then the raw socket peer. Returns None when the chain is
+    present-but-empty / malformed so the caller fails closed.
+    """
+    import ipaddress
+
+    try:
+        xff_values = handler.headers.get_all("X-Forwarded-For") or []
+    except AttributeError:
+        single = handler.headers.get("X-Forwarded-For", "")
+        xff_values = [single] if single else []
+
+    hops: list[str] = []
+    for header_value in xff_values:
+        for token in str(header_value or "").split(","):
+            hops.append(token.strip())
+
+    if xff_values:
+        # A present-but-empty / all-blank XFF is malformed → fail closed.
+        if not any(hops):
+            return None
+        trusted_nets = _trusted_proxy_networks()
+
+        def _is_trusted_hop(ip_str: str) -> bool:
+            try:
+                addr = ipaddress.ip_address(ip_str)
+            except ValueError:
+                return False
+            return _ip_in_networks(addr, trusted_nets)
+
+        for hop in reversed(hops):
+            if not hop:
+                # An empty hop inside the chain is malformed → fail closed
+                # rather than skip past it (an attacker could inject blanks).
+                return None
+            try:
+                ipaddress.ip_address(hop)
+            except ValueError:
+                # Non-IP token in the chain → malformed → fail closed.
+                return None
+            if _is_trusted_hop(hop):
+                continue
+            return hop
+        # Every hop was a trusted proxy → no distinct client; treat as the proxy
+        # tier itself (loopback/private), i.e. resolve to the raw peer below.
+        return _request_client_ip(handler)
+
+    real_ip = handler.headers.get("X-Real-IP", "").strip()
+    if real_ip:
+        return real_ip
+    # No forwarded header at all → the trusted proxy is speaking for itself.
+    return _request_client_ip(handler)
+
+
+def _onboarding_request_is_local(handler) -> bool:
+    """Return True when an unauthenticated onboarding request is local/private.
+
+    Trust model (single, symmetric — see the full truth table in
+    tests/test_cvd3_terminal_local_origin_gate.py):
+
+    * Forwarded client-IP headers are honored ONLY when the RAW socket peer is a
+      trusted proxy (loopback, or an address in HERMES_WEBUI_TRUSTED_PROXY_CIDRS).
+      This is checked on the un-spoofable socket address, so a direct client
+      cannot promote itself to "local" by sending X-Forwarded-For: 127.0.0.1.
+    * When the peer is NOT a trusted proxy, forwarded headers are ignored and the
+      request is classified by the raw socket peer directly. A direct loopback or
+      private/LAN client (no proxy) is therefore still correctly local — so
+      onboarding, first-password/passkey setup, and passwordless embedded-terminal
+      access keep working on the common direct-LAN deployment.
+    * HERMES_WEBUI_TRUST_FORWARDED_FOR=1 is the opt-in that makes us CONSULT the
+      forwarded chain at all; without it the raw peer is authoritative. Either
+      way the classification fails closed on malformed/empty chains.
+    """
+    trust_forwarded = _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR")
+    peer_is_trusted_proxy = _raw_peer_is_trusted_proxy(handler)
+
+    if trust_forwarded and peer_is_trusted_proxy:
+        client_ip = _forwarded_client_ip_from_trusted_proxy(handler)
+        if client_ip is None:
+            # Malformed/empty forwarded chain from a trusted proxy → fail closed.
+            return False
+        parsed_ok, is_local = _ip_is_loopback_or_private(client_ip)
+        return parsed_ok and is_local
+
+    # Not consulting the forwarded chain (either the opt-in is off, or the raw
+    # peer is not a trusted proxy). Classify by the raw socket peer — it cannot
+    # be spoofed by a header. A public peer sending X-Forwarded-For: 127.0.0.1 is
+    # therefore correctly rejected (its raw peer is public).
+    raw = _request_client_ip(handler)
+    parsed_ok, is_local = _ip_is_loopback_or_private(raw)
+    if not parsed_ok:
+        return False
+
+    import ipaddress
+
+    addr = ipaddress.ip_address(raw.strip())
+    if addr.is_loopback:
+        # A loopback TCP source is genuinely same-host and unspoofable → local
+        # even if a (ignored) forwarded header is present.
+        return True
+
+    # Non-loopback raw peer. A forwarded header being PRESENT here means the
+    # request most likely arrived through a proxy we have NOT been told to trust
+    # (no trusted-proxy env, or the peer isn't in the allowlist) — so a
+    # private/LAN raw peer could be an untrusted proxy relaying an arbitrary
+    # (public) client we can't see. Deny in that case; require the operator to
+    # opt in via HERMES_WEBUI_TRUST_FORWARDED_FOR (+ HERMES_WEBUI_TRUSTED_PROXY_CIDRS
+    # for a non-loopback proxy). With NO forwarded header, a direct private/LAN
+    # client (the common direct-LAN deployment) stays local so onboarding,
+    # first-password/passkey setup, and passwordless terminal keep working.
+    forwarded_present = bool(
+        (handler.headers.get("X-Forwarded-For", "") or "").strip()
+        or (handler.headers.get("X-Real-IP", "") or "").strip()
+    )
     if forwarded_present:
-        return bool(addr.is_loopback)
-    return bool(addr.is_loopback or addr.is_private)
+        return False
+    return bool(is_local)
 
 
 def _onboarding_gate_allows(handler, auth_enabled: bool | None = None) -> bool:
@@ -5564,11 +5720,30 @@ def _embedded_terminal_gate_allows(handler) -> bool:
     return _onboarding_gate_allows(handler)
 
 
+# Above this many distinct client keys, sweep out entries whose timestamps have
+# all aged past the window on the next update. Behind a reverse proxy the map
+# holds a single key (the proxy IP) and never trips this; a directly-exposed
+# deployment would otherwise keep one entry forever for every IP that ever hit
+# the endpoint, since a key is only revisited when that same IP calls again.
+_RATE_LIMIT_MAP_SWEEP_THRESHOLD = 4096
+
+
+def _prune_stale_rate_limit_keys(mapping: dict, cutoff: float) -> None:
+    """Drop keys whose newest timestamp has aged out of the window. Caller holds
+    the map's lock. Size-gated so the common (few-key) path stays O(1)."""
+    if len(mapping) <= _RATE_LIMIT_MAP_SWEEP_THRESHOLD:
+        return
+    stale = [k for k, ts in mapping.items() if not ts or ts[-1] < cutoff]
+    for k in stale:
+        del mapping[k]
+
+
 def _csp_report_rate_limited(handler, *, now: float | None = None) -> bool:
     now = time.time() if now is None else now
     key = _client_ip_for_rate_limit(handler)
     cutoff = now - _CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS
     with _CSP_REPORT_RATE_LIMIT_LOCK:
+        _prune_stale_rate_limit_keys(_CSP_REPORT_RATE_LIMIT, cutoff)
         timestamps = [ts for ts in _CSP_REPORT_RATE_LIMIT.get(key, []) if ts >= cutoff]
         if len(timestamps) >= _CSP_REPORT_RATE_LIMIT_MAX:
             _CSP_REPORT_RATE_LIMIT[key] = timestamps
@@ -5583,6 +5758,7 @@ def _client_event_rate_limited(handler, *, now: float | None = None) -> bool:
     key = _client_ip_for_rate_limit(handler)
     cutoff = now - _CLIENT_EVENT_RATE_LIMIT_WINDOW_SECONDS
     with _CLIENT_EVENT_RATE_LIMIT_LOCK:
+        _prune_stale_rate_limit_keys(_CLIENT_EVENT_RATE_LIMIT, cutoff)
         timestamps = [ts for ts in _CLIENT_EVENT_RATE_LIMIT.get(key, []) if ts >= cutoff]
         if len(timestamps) >= _CLIENT_EVENT_RATE_LIMIT_MAX:
             _CLIENT_EVENT_RATE_LIMIT[key] = timestamps
@@ -6261,6 +6437,15 @@ def _read_profile_model_config(
     does not override the session provider. ``profile_default_model`` is still
     returned for suffix repair (#5127) only when the profile's configured
     provider matches ``requested_provider`` after normalization.
+
+    perf(webui/session-load-latency) tier2a: the parse is wrapped in a
+    per-process LRU keyed by (profile_name, config_mtime, size). The
+    function fires on every chat-open for sessions under a named
+    profile (resolve_model=1 path), and the YAML parse alone is
+    hundreds of µs to single-digit ms on the Chromebook. Cache TTL
+    60s is a backstop in case mtime resolution is poor on a given
+    filesystem; under normal edits the mtime changes and invalidates
+    immediately.
     """
     if not getattr(session, "profile", None):
         return None, None, None
@@ -6268,15 +6453,13 @@ def _read_profile_model_config(
     try:
         from api.profiles import get_hermes_home_for_profile
 
-        _profile_home = get_hermes_home_for_profile(session.profile)
+        _profile_name = str(session.profile or "")
+        _profile_home = get_hermes_home_for_profile(_profile_name)
         _profile_cfg_path = os.path.join(str(_profile_home), "config.yaml")
         if not os.path.isfile(_profile_cfg_path):
             return None, None, None
-        import yaml
-
-        with open(_profile_cfg_path, encoding="utf-8") as _f:
-            _pcfg = yaml.safe_load(_f) or {}
-        if not isinstance(_pcfg, dict):
+        _pcfg = _read_profile_config_cached(_profile_name, _profile_cfg_path)
+        if _pcfg is None:
             return None, None, None
         _model_cfg = _pcfg.get("model") or {}
         if not isinstance(_model_cfg, dict):
@@ -6298,6 +6481,89 @@ def _read_profile_model_config(
             return None, None, _pcfg
         return None, _default, _pcfg
     return _provider, _default, _pcfg
+
+
+# perf(webui/session-load-latency) tier2a: process-wide cache for parsed
+# profile config.yaml. Key = (profile_name, inode, mtime, size); value = parsed
+# dict. inode tracks atomic-rename edits (most editors replace files, giving a
+# new inode on Linux). mtime+size auto-invalidates on in-place edits; a 60s TTL
+# is the backstop in case of coarse mtime resolution (some network filesystems
+# round mtime to whole seconds — the size guard catches a write of equal-length
+# bytes within the same second). On cache hit, a full-content comparison catches
+# any in-place rewrite that inode+mtime+size missed (Greptile P1, PR#5803
+# discussion_r3548477915). Reading and comparing the full file content (~1-10KB)
+# is much cheaper than yaml.safe_load(). Reads are guarded by a single Lock to
+# keep the hot path simple; the underlying yaml.safe_load is the slow step, not
+# the lock, so contention is bounded.
+_PROFILE_CONFIG_CACHE: "dict[tuple, tuple[float, str, dict]]" = {}
+_PROFILE_CONFIG_CACHE_TTL_SECONDS = 60.0
+_PROFILE_CONFIG_CACHE_LOCK = threading.Lock()
+
+
+def _read_profile_config_cached(profile_name: str, cfg_path: str) -> dict | None:
+    """Return parsed profile config, caching by (inode, mtime, size) with
+    TTL backstop and full-content verification.
+
+    The full-content comparison reads the current file and compares it to a
+    copy stored in the cache entry. This catches any in-place rewrite where
+    inode+mtime+size are identical, regardless of where in the file the change
+    occurs — unlike a fixed-length prefix comparison, edits to fields after the
+    first N characters are always detected. Reading and comparing the full file
+    content (~1-10KB for a typical config.yaml) is much cheaper than
+    yaml.safe_load().
+
+    NOTE: The cache key uses inode+mtime+size to handle the common cases
+    (atomic-rename editors -> new inode; in-place editors -> mtime/size
+    change). The full-content comparison is a backstop for the rare case where
+    all three collide (e.g., sed -i on a filesystem with coarse mtime
+    resolution, writing the same byte count).
+    """
+    try:
+        st = os.stat(cfg_path)
+    except OSError:
+        return None
+    mtime = float(getattr(st, "st_mtime", 0.0) or 0.0)
+    size = int(getattr(st, "st_size", 0) or 0)
+    inode = int(getattr(st, "st_ino", 0) or 0)
+    key = (str(profile_name or ""), inode, mtime, size)
+    now = time.monotonic()
+    with _PROFILE_CONFIG_CACHE_LOCK:
+        cached = _PROFILE_CONFIG_CACHE.get(key)
+        if cached is not None:
+            cached_at, cached_content, cached_dict = cached
+            if (now - cached_at) <= _PROFILE_CONFIG_CACHE_TTL_SECONDS:
+                # Full content comparison catches any in-place rewrite where
+                # inode+mtime+size are identical but the file content changed.
+                # Reading and comparing the full file (~1-10KB) is cheaper than
+                # yaml.safe_load(). Unlike a fixed-length prefix, this detects
+                # edits anywhere in the file. Greptile P1 (PR#5803).
+                _current_content = None
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as _f:
+                        _current_content = _f.read()
+                except Exception:
+                    pass
+                if _current_content == cached_content:
+                    return cached_dict
+                # Content changed while key collided — fall through to re-parse
+    import yaml
+    try:
+        with open(cfg_path, encoding="utf-8") as _f:
+            content = _f.read()
+            parsed = yaml.safe_load(content) or {}
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    with _PROFILE_CONFIG_CACHE_LOCK:
+        _PROFILE_CONFIG_CACHE[key] = (now, content, parsed)
+        # Cap the cache at 32 entries; profiles are bounded in practice
+        # and unbounded growth would be a leak.
+        if len(_PROFILE_CONFIG_CACHE) > 32:
+            # Drop the oldest entry by insertion order (dict is ordered).
+            for old_key in list(_PROFILE_CONFIG_CACHE.keys())[:max(0, len(_PROFILE_CONFIG_CACHE) - 32)]:
+                _PROFILE_CONFIG_CACHE.pop(old_key, None)
+    return parsed
 
 
 def _load_profile_config_dict(session) -> dict | None:
@@ -7148,7 +7414,7 @@ def _session_index_marks_was_webui(sid: str) -> bool:
     if not SESSION_INDEX_FILE.exists():
         return False
     try:
-        entries = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+        entries = json.loads(SESSION_INDEX_FILE.read_bytes())
     except Exception:
         return False
     for entry in entries if isinstance(entries, list) else []:
@@ -8721,7 +8987,7 @@ def _pre_compression_continuation_session_id(session) -> str | None:
         if not SESSION_INDEX_FILE.exists():
             return None
         try:
-            entries = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+            entries = json.loads(SESSION_INDEX_FILE.read_bytes())
         except Exception:
             return None
         if not isinstance(entries, list):
@@ -11092,7 +11358,7 @@ def _serve_manifest(handler) -> bool:
     routes so Firefox Android can fetch the manifest when installing from
     a /session/<id> page.  See #2226.
     """
-    static_root = Path(__file__).parent.parent / "static"
+    static_root = api_config.get_static_root()
     manifest_path = (static_root / "manifest.json").resolve()
     if manifest_path.exists():
         data = manifest_path.read_bytes()
@@ -11153,8 +11419,9 @@ def _render_index_shell_base() -> str:
     """
     from api.updates import WEBUI_VERSION
 
-    st = _INDEX_HTML_PATH.stat()
-    sig = (st.st_size, st.st_mtime_ns)
+    index_path = api_config.get_index_html_path()
+    st = index_path.stat()
+    sig = (index_path, st.st_size, st.st_mtime_ns)
     with _INDEX_SHELL_CACHE_LOCK:
         cached = _INDEX_SHELL_CACHE.get("base")
         if cached and cached[0] == sig:
@@ -11163,7 +11430,7 @@ def _render_index_shell_base() -> str:
 
     version_token = quote(WEBUI_VERSION, safe="")
     base = (
-        _INDEX_HTML_PATH.read_text(encoding="utf-8")
+        index_path.read_text(encoding="utf-8")
         .replace("__WEBUI_VERSION__", version_token)
         .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
     )
@@ -11337,7 +11604,7 @@ def handle_get(handler, parsed) -> bool:
         return _serve_manifest(handler)
 
     if parsed.path == "/sw.js":
-        static_root = Path(__file__).parent.parent / "static"
+        static_root = api_config.get_static_root()
         sw_path = (static_root / "sw.js").resolve()
         if sw_path.exists():
             # Inject the current git-derived version as the cache name so the
@@ -11360,7 +11627,7 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"error": "not found"}, status=404)
 
     if parsed.path == "/favicon.ico":
-        static_root = Path(__file__).parent.parent / "static"
+        static_root = api_config.get_static_root()
         ico_path = (static_root / "favicon.ico").resolve()
         if ico_path.exists() and ico_path.is_file():
             data = ico_path.read_bytes()
@@ -11505,7 +11772,7 @@ def handle_get(handler, parsed) -> bool:
         # which the request-thread wrapper could not reach. See
         # api.config.get_available_models cold path + profile_scope_for_detached_worker.
         freshness = parse_qs(parsed.query or "").get("freshness", [""])[0].strip().lower()
-        diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
+        diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
         try:
             diag.stage(f"enter:freshness={freshness or 'default'}") if diag else None
             if freshness == "session_visit":
@@ -11627,6 +11894,16 @@ def handle_get(handler, parsed) -> bool:
             settings["agent_version"] = AGENT_VERSION
         except Exception:
             pass
+        # Channel-scoped display badge — SEPARATE from webui_version (which is
+        # load-bearing for asset cache-busting / SW cache / skew detection and
+        # must stay channel-neutral). update_channel_version is display-only.
+        try:
+            from api.updates import channel_version_badge, _read_update_channel
+            channel = _read_update_channel()
+            settings["update_channel"] = channel
+            settings["update_channel_version"] = channel_version_badge(channel)
+        except Exception:
+            pass
         return j(handler, settings)
 
     if parsed.path == "/api/transcribe/capability":
@@ -11699,9 +11976,22 @@ def handle_get(handler, parsed) -> bool:
         import time as _time
         _t0 = _time.monotonic()
         _debug_slow = os.environ.get("HERMES_DEBUG_SLOW", "")
+        # perf(webui/session-load-latency) tier2c: per-stage breakdown via
+        # RequestDiagnostics. maybe_start() returns None for paths not in
+        # the allowlist, in which case the existing _tN-driven [SLOW] log
+        # is the only signal — same as before.
+        _diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
+        # perf(webui/session-load-latency) tier2c-followup: every early-return
+        # in this handler calls `_diag.finish()` before returning so the
+        # watchdog's _watchdog_pending dict stays bounded to in-flight requests.
+        # Greptile flagged this in PR review — finish() unregisters the
+        # pending watchdog entry; without it the entry stays for the full
+        # 5s slow-request timeout and emits a spurious "Slow WebUI request
+        # still running" log. Idempotent — finish() no-ops if already called.
         query = parse_qs(parsed.query)
         sid = query.get("session_id", [""])[0]
         if not sid:
+            if _diag: _diag.finish()
             return j(handler, {"error": "session_id is required"}, status=400)
         # ?messages=0 skips the message payload for fast session switching.
         # The frontend uses this when switching conversations in the sidebar
@@ -11734,12 +12024,14 @@ def handle_get(handler, parsed) -> bool:
         expand_renderable = str(_expand_renderable).strip() in ("1", "true", "True")
         try:
             _t1 = _time.monotonic()
+            if _diag: _diag.stage("t1_after_get_session_check")
             s = get_session(sid, metadata_only=(not load_messages))
             _session_profile = getattr(s, 'profile', None) or None
             if not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
                     # Valid session owned by a KNOWN other profile: 409 so the
                     # client can offer to switch to it (#5419).
+                    if _diag: _diag.finish()
                     return j(handler, {
                         "error": "Session belongs to a different profile",
                         "code": "session_profile_mismatch",
@@ -11751,6 +12043,7 @@ def handle_get(handler, parsed) -> bool:
                 # fires. _profiles_match coerces None->'default', so a truly
                 # missing/legacy session under a non-default active profile would
                 # otherwise emit a useless 409 with profile=null.
+                if _diag: _diag.finish()
                 return bad(handler, "Session not found", 404)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
@@ -11788,6 +12081,7 @@ def handle_get(handler, parsed) -> bool:
                 # honor #2827's TLS-vs-thread fix.
                 metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
             _t2 = _time.monotonic()
+            if _diag: _diag.stage("t2_after_state_db_load")
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
                 if resolve_model
@@ -11799,6 +12093,7 @@ def handle_get(handler, parsed) -> bool:
                 else None
             )
             _t3 = _time.monotonic()
+            if _diag: _diag.stage("t3_after_model_resolve")
             if load_messages:
                 if is_messaging_session and cli_messages:
                     # Recovery/aggregate sidecars can intentionally contain a
@@ -12041,6 +12336,7 @@ def handle_get(handler, parsed) -> bool:
             raw["_messages_truncated"] = _truncated
             raw["_messages_offset"] = _messages_offset
             _t4 = _time.monotonic()
+            if _diag: _diag.stage("t4_after_compact_and_merge")
             if effective_model:
                 raw["model"] = effective_model
             if effective_provider:
@@ -12056,22 +12352,42 @@ def handle_get(handler, parsed) -> bool:
                 raw["read_only"] = True
             redact = redact_session_data(raw)
             _t5 = _time.monotonic()
+            if _diag: _diag.stage("t5_after_redact")
             resp = j(handler, {"session": redact})
             _t6 = _time.monotonic()
+            if _diag: _diag.stage("t6_after_json_write")
             _total_ms = (_t6 - _t0) * 1000
             # Always log when slow (>2s) so we don't need HERMES_DEBUG_SLOW env var
             # to diagnose latency regressions. Opt-in env var still forces
             # logging on every request for development.
             if _debug_slow or _total_ms >= 2000:
-                logger.warning(
+                # perf(webui/session-load-latency) tier2c: route the [SLOW] line
+                # through handler._safe_webui_print() rather than logger.warning().
+                # The WebUI process starts the root logger without any handler, so
+                # logger.warning() calls are silently dropped (the [SLOW] line
+                # previously worked only on PIDs that happened to have a logger
+                # handler set up by an earlier run; today the line is invisible).
+                # _safe_webui_print writes to the systemd journal socket directly,
+                # same as the per-request ms line — which is why THAT line keeps
+                # working.
+                handler._safe_webui_print(
                     "[SLOW] session_id=%s get_session=%.1fms model_resolve=%.1fms "
-                    "compact=%.1fms redact=%.1fms json_write=%.1fms total=%.1fms",
-                    sid,
-                    (_t2-_t1)*1000, (_t3-_t2)*1000, (_t4-_t3)*1000,
-                    (_t5-_t4)*1000, (_t6-_t5)*1000, _total_ms,
+                    "compact=%.1fms redact=%.1fms json_write=%.1fms total=%.1fms" % (
+                        sid,
+                        (_t2-_t1)*1000, (_t3-_t2)*1000, (_t4-_t3)*1000,
+                        (_t5-_t4)*1000, (_t6-_t5)*1000, _total_ms,
+                    )
                 )
+            if _diag: _diag.finish()
             return resp
         except KeyError:
+            # perf(webui/session-load-latency) tier2c-followup: fire
+            # _diag.finish() in the exception branch too. Greptile flagged
+            # this in PR review — finish() unregisters the pending watchdog
+            # entry; without it the entry stays for the full 5s slow-request
+            # timeout and emits a spurious "Slow WebUI request still
+            # running" log. Idempotent — finish() no-ops if already called.
+            if _diag: _diag.finish()
             # No WebUI sidecar. Delegate to the shared foreign-session
             # synthesizer so GET and POST have symmetric writeable/read-only
             # behaviour for CLI/TUI/Desktop sessions. The helper enforces the
@@ -12203,7 +12519,7 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"results": get_results(sid)})
 
     if parsed.path == "/api/sessions":
-        diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
+        diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
         try:
             from api import profiles as profiles_api
 
@@ -12702,7 +13018,7 @@ def handle_get(handler, parsed) -> bool:
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
         from api import profiles as profiles_api
-        diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
+        diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
         try:
             diag.stage("list_profiles_api") if diag else None
             profiles_payload = profiles_api.list_profiles_api()
@@ -12958,7 +13274,7 @@ def _validate_session_toolsets_shape(toolsets):
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
-    diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
+    diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
     if parsed.path == "/api/csp-report":
         if diag:
             diag.stage("csp_report")
@@ -13071,9 +13387,18 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, {"disabled": True})
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         force = bool(body.get("force", False))
+        # Allow the client to pass the channel explicitly in the POST body. This
+        # avoids a race on channel switch: the Settings dropdown re-checks
+        # immediately, but its autosave PUT (debounced) may not have landed
+        # server-side yet, so reading the saved setting here could answer for the
+        # OLD channel. An explicit body channel (validated against the enum) wins;
+        # otherwise fall back to the saved setting. (Fable UX gate.)
+        channel = body.get("channel") if isinstance(body, dict) else None
+        if channel not in ("stable", "experimental"):
+            channel = settings.get("update_channel")
         from api.updates import check_for_updates
 
-        return j(handler, check_for_updates(force=force, include_agent=include_agent_updates))
+        return j(handler, check_for_updates(force=force, include_agent=include_agent_updates, channel=channel))
 
     if parsed.path == "/api/extensions/toggle":
         from api.extensions import ExtensionToggleError, set_extension_user_enabled
@@ -13630,6 +13955,13 @@ def handle_post(handler, parsed) -> bool:
         # GET ?session_id=X  → return current draft
         # POST body          → save draft { session_id, text?, files? }
         # HTTP method is in handler.command (e.g. "POST", "GET"), parsed has no .method
+        import time as _draft_time
+        _draft_t0 = _draft_time.monotonic()
+        _draft_stages = []
+
+        def _draft_mark(name):
+            _draft_stages.append((name, _draft_time.monotonic()))
+        _draft_mark("enter")
         if handler.command == "GET":
             query = parse_qs(parsed.query)
             sid = query.get("session_id", [""])[0] if parsed.query else ""
@@ -13669,8 +14001,10 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        _draft_mark("after_get_session")
         unchanged = False
         with _get_session_agent_lock(sid):
+            _draft_mark("acquired_lock")
             current_draft = dict(getattr(s, "composer_draft", {}) or {})
             next_draft = dict(current_draft)
             if text is not None:
@@ -13686,12 +14020,29 @@ def handle_post(handler, parsed) -> bool:
                 # here makes the active-session external-refresh poll force-reload the
                 # current chat every few seconds while the user is typing, and that
                 # delayed reload can restore an older draft over newer local input.
+                _draft_mark("before_save")
                 s.save(touch_updated_at=False, skip_index=True)
+                _draft_mark("after_save")
                 saved_draft = s.composer_draft
+        _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
             payload["unchanged"] = True
+        _draft_mark("before_json")
         j(handler, payload)
+        _draft_mark("after_json")
+        _draft_stages.append(("end", _draft_time.monotonic()))
+        if _draft_stages[-1][1] - _draft_t0 > 0.2:
+            parts = " ".join(
+                f"{n}={((t - prev[1]) * 1000):.1f}ms"
+                for (n, t), prev in zip(_draft_stages[1:], _draft_stages[:-1], strict=True)
+            )
+            handler._safe_webui_print(
+                "[SLOW] /api/session/draft total=%.1fms stages: %s" % (
+                    (_draft_stages[-1][1] - _draft_t0) * 1000,
+                    parts,
+                )
+            )
         return True
 
     if parsed.path == "/api/session/update":
@@ -13848,6 +14199,15 @@ def handle_post(handler, parsed) -> bool:
         # Lock entries in SESSION_AGENT_LOCKS forever.
         with SESSION_AGENT_LOCKS_LOCK:
             SESSION_AGENT_LOCKS.pop(sid, None)
+        # Prune the completion-dedup entry too. The reaper sweeps it once the
+        # completion is delivered (drained from PENDING); a session deleted
+        # while a completion is still pending would otherwise keep its entry.
+        try:
+            from api.background_process import forget_bg_task_completion_dedup
+
+            forget_bg_task_completion_dedup(sid)
+        except Exception:
+            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
         try:
             from api.terminal import close_terminal
             close_terminal(sid)
@@ -15052,7 +15412,7 @@ def handle_post(handler, parsed) -> bool:
         # update so one slow/failing session can't abort the whole request.
         if SESSION_INDEX_FILE.exists():
             try:
-                index = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+                index = json.loads(SESSION_INDEX_FILE.read_bytes())
                 active_ids = _active_stream_ids()
                 deferred_to_stream = []
                 for entry in index:
@@ -15097,17 +15457,27 @@ def handle_post(handler, parsed) -> bool:
         target = body.get("target", "")
         if target not in ("webui", "agent"):
             return bad(handler, 'target must be "webui" or "agent"')
+        # Honor an explicit validated body channel (the client sends the channel
+        # the banner was offering) so a channel switch whose debounced autosave
+        # hasn't landed can't make apply read the OLD saved channel (Codex gate).
+        # Fall back to the saved setting when absent/invalid.
+        _apply_channel = body.get("channel") if isinstance(body, dict) else None
+        if _apply_channel not in ("stable", "experimental"):
+            _apply_channel = None
         from api.updates import apply_update
 
-        return j(handler, apply_update(target))
+        return j(handler, apply_update(target, _apply_channel))
 
     if parsed.path == "/api/updates/force":
         target = body.get("target", "")
         if target not in ("webui", "agent"):
             return bad(handler, 'target must be "webui" or "agent"')
+        _force_channel = body.get("channel") if isinstance(body, dict) else None
+        if _force_channel not in ("stable", "experimental"):
+            _force_channel = None
         from api.updates import apply_force_update
 
-        return j(handler, apply_force_update(target))
+        return j(handler, apply_force_update(target, _force_channel))
 
     if parsed.path == "/api/updates/clear_lock":
         # Manual-instruction recovery for the .git/index.lock case. The
@@ -15297,13 +15667,15 @@ def handle_post(handler, parsed) -> bool:
             _record_login_attempt(client_ip)
             return bad(handler, str(e), status=401)
         cookie_val = create_session()
+        body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
         handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
+        handler.wfile.write(body)
         return True
 
     if parsed.path == "/api/auth/passkey/register/options":
@@ -15519,7 +15891,7 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 
 def _serve_static(handler, parsed):
-    static_root = (Path(__file__).parent.parent / "static").resolve()
+    static_root = api_config.get_static_root().resolve()
     # Strip the leading '/static/' prefix, then resolve and sandbox
     rel = parsed.path[len("/static/") :]
     static_file = (static_root / rel).resolve()
@@ -16004,6 +16376,185 @@ def _run_journal_same_run_seq(event_id: str | None, stream_id: str) -> int | Non
     return event_seq
 
 
+def _run_journal_covers_offline_gap(
+    stream_id: str, after_seq: int | None, cutoff_seq: int | None
+) -> bool:
+    """Return True when the run journal PROVABLY backfills a dropped-frame gap.
+
+    When StreamChannel evicted frames from its offline buffer
+    (``offline_dropped_events > 0``), draining the retained tail to a
+    reconnecting client is only safe if the journal replay actually covers
+    everything from the client's cursor (*after_seq*, ``None`` = start of run)
+    through the snapshot cutoff — journal seqs are assigned contiguously from 1,
+    so coverage means every seq in ``(after_seq, cutoff_seq]`` is present. A
+    missing journal, a journal that stops short of the cutoff, or a window with
+    malformed/dropped lines all mean the evicted frames are unrecoverable here
+    and the caller must signal recovery instead of streaming tail-only.
+
+    ``cutoff_seq is None`` (the channel never saw a same-run journaled event id)
+    counts as not covered: nothing can be proven against an unknown cutoff.
+    """
+    if cutoff_seq is None:
+        return False
+    floor = max(0, int(after_seq)) if after_seq is not None else 0
+    if floor >= cutoff_seq:
+        # Client cursor is already at/past everything the buffer ever held.
+        return True
+    try:
+        summary = find_run_summary(stream_id)
+        if not summary:
+            return False
+        journal = read_run_events(
+            str(summary.get("session_id") or ""),
+            stream_id,
+            after_seq=floor,
+            max_seq=cutoff_seq,
+        )
+    except Exception:
+        logger.debug(
+            "Run journal coverage check failed for stream %s", stream_id, exc_info=True
+        )
+        return False
+    cutoff = int(cutoff_seq)
+    seqs = set()
+    for entry in journal.get("events") or []:
+        try:
+            seq = int(entry.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        if floor < seq <= cutoff:
+            seqs.add(seq)
+    # Seqs are unique and bounded to the window, so full coverage means one
+    # distinct seq per slot — no need to materialize the whole range.
+    return len(seqs) == cutoff - floor
+
+
+def _sse_replay_run_journal_gap_checked(
+    handler, qs: dict, stream_id: str, stream_snapshot: dict
+) -> tuple[bool, int | None]:
+    """Journal-replay for a reconnecting client, enforcing offline-gap coverage.
+
+    Returns ``(gap_recovered, replay_cutoff_seq)``. When the channel evicted
+    frames from its offline buffer (``offline_dropped_events > 0`` in the
+    subscribe snapshot) and the run journal cannot PROVE it backfills the gap
+    (see ``_run_journal_covers_offline_gap``), a recovery_control apperror has
+    been emitted and the caller must return instead of draining the retained
+    tail (``gap_recovered=True``).
+    """
+    if not (
+        qs.get("replay", [""])[0]
+        or qs.get("after_seq", [None])[0] not in (None, "")
+        or qs.get("after_event_id", [None])[0]
+    ):
+        return False, None
+    try:
+        offline_dropped = int(stream_snapshot.get("offline_dropped_events") or 0)
+    except (TypeError, ValueError):
+        offline_dropped = 0
+    snapshot_cutoff_seq = _run_journal_same_run_seq(
+        str(stream_snapshot.get("last_event_id") or ""),
+        stream_id,
+    )
+    after_seq = _parse_run_journal_after_seq(qs, stream_id)
+    # The subscribe snapshot already queued the retained offline tail, which
+    # covers [first buffered frame → snapshot cutoff] by itself. The journal
+    # only has to bridge (client cursor → first buffered frame) — and the
+    # replay/dedup cutoff must stop there too, or the drain loop's
+    # `seq <= replay_cutoff_seq` filter would eat queued frames the journal
+    # never emitted. Without a parseable first-frame id (empty buffer, foreign
+    # run, unjournaled head frame) fall back to the full (cursor → cutoff]
+    # window as before.
+    replay_max_seq = snapshot_cutoff_seq
+    first_buffered_seq = _run_journal_same_run_seq(
+        str(stream_snapshot.get("offline_first_event_id") or ""),
+        stream_id,
+    )
+    if first_buffered_seq is not None:
+        replay_max_seq = first_buffered_seq - 1
+        if snapshot_cutoff_seq is not None:
+            replay_max_seq = min(replay_max_seq, snapshot_cutoff_seq)
+    covered = offline_dropped <= 0 or _run_journal_covers_offline_gap(
+        stream_id, after_seq, replay_max_seq
+    )
+    replay_cutoff_seq = None
+    replay_failed = False
+    if covered:
+        try:
+            if _replay_run_journal(
+                handler,
+                stream_id,
+                after_seq,
+                max_seq=replay_max_seq,
+                include_stale=False,
+            ):
+                replay_cutoff_seq = replay_max_seq
+        except _CLIENT_DISCONNECT_ERRORS:
+            raise
+        except Exception:
+            replay_failed = True
+            logger.debug("Failed to replay active run journal for stream %s", stream_id, exc_info=True)
+    if offline_dropped > 0 and (not covered or replay_failed):
+        _sse_offline_gap_recovery(handler, stream_id, offline_dropped)
+        return True, None
+    # Two distinct dedup bounds feed the drain loop's `seq <=` filter: frames
+    # the journal replay just emitted (replay_cutoff_seq, capped at the buffer
+    # head so queued frames the journal never sent survive) AND frames the
+    # client already holds per its own cursor. A cursor at/inside the retained
+    # tail (after_seq >= first buffered frame) would otherwise get the queued
+    # copy of frames it already rendered — a double-render, since this filter
+    # is the only dedup for replayed streams.
+    if after_seq is not None:
+        cursor_bound = after_seq
+        if snapshot_cutoff_seq is not None:
+            # A legitimate cursor can never exceed the channel's last known
+            # frame; clamping keeps a bogus/corrupt cursor from filtering the
+            # queued terminal frame and pinning the loop on heartbeats.
+            cursor_bound = min(cursor_bound, snapshot_cutoff_seq)
+        replay_cutoff_seq = (
+            cursor_bound
+            if replay_cutoff_seq is None
+            else max(replay_cutoff_seq, cursor_bound)
+        )
+    return False, replay_cutoff_seq
+
+
+def _sse_offline_gap_recovery(handler, stream_id: str, offline_dropped: int) -> None:
+    """Signal an unrecoverable replay gap instead of streaming tail-only.
+
+    Frames were evicted from the channel's capped offline buffer and the run
+    journal cannot prove it backfills (client cursor → snapshot cutoff]:
+    draining the retained tail would render a silent transcript hole that ends
+    in a normal ``stream_end``. Emit the established ``recovery_control``
+    apperror (same client contract as ``run_journal.stale_interrupted_event``)
+    so the tab restores the transcript from persisted session state instead.
+    """
+    # The client only acts on the recovery signal when the payload names its
+    # session (eventMatchesCurrent), so fall back to the journal summary when
+    # the pre-worker owner registration is already gone.
+    try:
+        session_id = stream_owner_session_id(stream_id) or ""
+        if not session_id:
+            session_id = str((find_run_summary(stream_id) or {}).get("session_id") or "")
+    except Exception:
+        session_id = ""
+    _sse(
+        handler,
+        "apperror",
+        {
+            "type": "interrupted",
+            "recovery_control": True,
+            "message": (
+                "The live stream's replay buffer overflowed while no tab was "
+                "attached and the run journal cannot backfill the dropped frames."
+            ),
+            "hint": "The transcript was restored to the last saved state.",
+            "session_id": session_id,
+            "stream_id": stream_id,
+            "offline_dropped_events": offline_dropped,
+        },
+    )
+
+
 def _runner_stream_cursor_from_query(qs: dict) -> str | None:
     cursor = str(qs.get("cursor", [""])[0] or "").strip()
     if cursor:
@@ -16135,27 +16686,13 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Connection", "close")
     end_sse_headers(handler)
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
-    replay_cutoff_seq = None
-    if qs.get("replay", [""])[0] or qs.get("after_seq", [None])[0] not in (None, "") or qs.get("after_event_id", [None])[0]:
-        snapshot_cutoff_seq = _run_journal_same_run_seq(
-            str(stream_snapshot.get("last_event_id") or ""),
-            stream_id,
-        )
-        try:
-            replayed = _replay_run_journal(
-                handler,
-                stream_id,
-                _parse_run_journal_after_seq(qs, stream_id),
-                max_seq=snapshot_cutoff_seq,
-                include_stale=False,
-            )
-            if replayed:
-                replay_cutoff_seq = snapshot_cutoff_seq
-        except _CLIENT_DISCONNECT_ERRORS:
-            raise
-        except Exception:
-            logger.debug("Failed to replay active run journal for stream %s", stream_id, exc_info=True)
+    # Replay shares the drain loop's try/finally so every exit path unsubscribes.
     try:
+        gap_recovered, replay_cutoff_seq = _sse_replay_run_journal_gap_checked(
+            handler, qs, stream_id, stream_snapshot
+        )
+        if gap_recovered:
+            return True
         while True:
             try:
                 item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
@@ -16445,6 +16982,7 @@ def _handle_session_events_stream(handler):
     # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
     # EventSource reconnect storms in browsers on long-lived SSE.
     end_sse_headers(handler)
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = subscribe_session_events()
     try:
@@ -18511,7 +19049,11 @@ def _handle_live_models(handler, parsed):
         # Normalise to {id, label} — provider_model_ids() returns plain string IDs.
         # For ollama-cloud use the shared Ollama formatter (handles `:variant` suffix).
         # For all other providers use a simpler hyphen-split capitaliser.
-        from api.config import _format_ollama_label as _fmt_ollama
+        from api.config import (
+            _format_ollama_label as _fmt_ollama,
+            _is_openai_family_provider as _is_fast_tier_provider,
+            _model_supports_fast_tier_for_provider,
+        )
 
         def _make_label(mid):
             """Best-effort human label from a model ID string."""
@@ -18538,7 +19080,15 @@ def _handle_live_models(handler, parsed):
                 label = label.replace(orig.title(), orig)
             return label
 
-        models_out = [{"id": mid, "label": _make_label(mid)} for mid in ids if mid]
+        annotate_fast_tier = _is_fast_tier_provider(provider)
+        models_out = []
+        for mid in ids:
+            if not mid:
+                continue
+            entry = {"id": mid, "label": _make_label(mid)}
+            if annotate_fast_tier:
+                entry["supports_fast_tier"] = _model_supports_fast_tier_for_provider(mid, provider)
+            models_out.append(entry)
         return _finish({"provider": provider, "models": models_out,
                         "count": len(models_out)})
 
@@ -19096,7 +19646,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
 
             with _INDEX_WRITE_LOCK:
                 index_file_data = json.loads(
-                    SESSION_INDEX_FILE.read_text(encoding="utf-8")
+                    SESSION_INDEX_FILE.read_bytes()
                 )
                 if isinstance(index_file_data, list):
                     live_ids = {
@@ -24181,7 +24731,7 @@ def _mcp_tools_from_registry(server_summaries):
 
 def _handle_mcp_tools_list(handler):
     """List known MCP tools from already-available runtime inventory only."""
-    cfg = get_config()
+    cfg = get_config_for_profile_home(get_active_hermes_home())
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
@@ -24695,7 +25245,7 @@ def _handle_notes_item(handler, parsed):
 
 def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
-    cfg = get_config()
+    cfg = get_config_for_profile_home(get_active_hermes_home())
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}

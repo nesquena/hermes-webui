@@ -17,6 +17,16 @@ RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
+# Next-seq to assign per run-journal file path, kept in memory so repeat appends
+# to the same run do not re-parse the whole file on every call. The per-path
+# ``_lock_for(path)`` serializes same-path reserve→append so seqs stay monotonic
+# and file order matches; ``_SEQ_CACHE_LOCK`` (below) additionally guards every
+# *structural* access to the dict (reserve/note/evict) so ``delete_run_journal``
+# can iterate + drop keys while a concurrent append on ANOTHER path inserts one,
+# without a ``dictionary changed size during iteration`` crash. See
+# ``_reserve_next_seq`` and ``delete_run_journal`` (which evicts stale entries).
+_SEQ_CACHE: dict[str, int] = {}
+_SEQ_CACHE_LOCK = threading.Lock()
 _TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
@@ -79,6 +89,49 @@ def _next_seq(path: Path) -> int:
     events, _malformed = _read_jsonl(path)
     seqs = [int(event.get("seq") or 0) for event in events if isinstance(event.get("seq"), int)]
     return (max(seqs) + 1) if seqs else 1
+
+
+def _reserve_next_seq(path: Path) -> int:
+    """Reserve and return the next seq for ``path``, advancing the in-memory cache.
+
+    Callers MUST hold ``_lock_for(path)``. The first append per path in this
+    process seeds the cache from ``_next_seq(path)`` (one file read); every later
+    append is a pure in-memory increment, avoiding the O(n) re-parse that
+    re-reading the whole journal on every append caused (O(n^2) over a run).
+    Because ``RunJournalWriter`` and the free ``append_run_event`` share this one
+    cache under the same per-path lock, their seqs stay monotonic and gapless
+    even when both write the same path. ``_SEQ_CACHE_LOCK`` additionally makes the
+    dict get+set atomic against a concurrent cross-path eviction.
+    """
+    key = str(path)
+    with _SEQ_CACHE_LOCK:
+        nxt = _SEQ_CACHE.get(key)
+        if nxt is not None:
+            _SEQ_CACHE[key] = nxt + 1
+            return nxt
+    # Cache miss: seed from disk WITHOUT holding the module-global lock, so a
+    # slow first-access file read for one path can't block every other path's
+    # cache ops. The caller holds the per-path lock, so only one thread per path
+    # can reach this branch — no double-seed, and no same-path writer can race
+    # the value in between.
+    seeded = _next_seq(path)
+    with _SEQ_CACHE_LOCK:
+        _SEQ_CACHE[key] = seeded + 1
+        return seeded
+
+
+def _note_assigned_seq(path: Path, seq: int) -> None:
+    """Keep the cache at least one past an explicitly-supplied ``seq``.
+
+    Callers MUST hold ``_lock_for(path)``. When an append carries a caller-chosen
+    ``seq`` rather than drawing from the cache, advance the cache so a later
+    cache-based append on the same path cannot re-issue an already-used seq.
+    """
+    key = str(path)
+    nxt = int(seq) + 1
+    with _SEQ_CACHE_LOCK:
+        if _SEQ_CACHE.get(key, 0) < nxt:
+            _SEQ_CACHE[key] = nxt
 
 
 def _terminal_state_for_event(event_name: str, payload) -> str | None:
@@ -145,7 +198,11 @@ def append_run_event(
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
-        assigned_seq = int(seq) if seq is not None else _next_seq(path)
+        if seq is not None:
+            assigned_seq = int(seq)
+            _note_assigned_seq(path, assigned_seq)
+        else:
+            assigned_seq = _reserve_next_seq(path)
         terminal_state = _terminal_state_for_event(event_name, payload)
         event = {
             "version": 1,
@@ -183,13 +240,13 @@ class RunJournalWriter:
         self.session_dir = Path(session_dir) if session_dir is not None else None
         self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
         self._lock = _lock_for(self._path)
-        with self._lock:
-            self._next_seq = _next_seq(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
+        # Draw from the shared module-level seq cache under the per-path lock so
+        # this writer and any direct append_run_event() call on the same path
+        # agree on one monotonic, gapless sequence.
         with self._lock:
-            seq = self._next_seq
-            self._next_seq += 1
+            seq = _reserve_next_seq(self._path)
         return append_run_event(
             self.session_id,
             self.run_id,
@@ -285,7 +342,32 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
     if not session_journal_dir.exists():
         return False
     shutil.rmtree(session_journal_dir, ignore_errors=True)
-    return not session_journal_dir.exists()
+    removed = not session_journal_dir.exists()
+    # Evict any writer locks the removed runs left behind. `_lock_for` keys are
+    # ``(str(path.parent), path.name, pid)`` and every run file for this session
+    # lives directly under ``session_journal_dir``, so drop all keys whose parent
+    # dir matches — pid-independent — to keep `_WRITER_LOCKS` from growing forever.
+    # Guard on confirmed removal: `rmtree(ignore_errors=True)` can silently leave
+    # the directory (locked files on Windows, permission transients). If the files
+    # still exist their locks are still live — evicting them would hand a later
+    # `_lock_for` caller a brand-new Lock, breaking mutual exclusion with a writer
+    # still holding the old one.
+    if removed:
+        dir_key = str(session_journal_dir)
+        with _WRITER_LOCKS_GUARD:
+            for key in [k for k in _WRITER_LOCKS if k[0] == dir_key]:
+                del _WRITER_LOCKS[key]
+        # Drop cached next-seq entries for the removed runs too. Every run file
+        # for this session lives directly under ``session_journal_dir``, so its
+        # cache key's parent dir matches. Without this, a run re-created at the
+        # same path would resume the stale cached seq instead of restarting at 1.
+        # Hold ``_SEQ_CACHE_LOCK`` — the SAME mutex ``_reserve_next_seq``/
+        # ``_note_assigned_seq`` take — so a concurrent append on another path
+        # cannot mutate the dict mid-iteration (``dictionary changed size``).
+        with _SEQ_CACHE_LOCK:
+            for key in [k for k in _SEQ_CACHE if str(Path(k).parent) == dir_key]:
+                del _SEQ_CACHE[key]
+    return removed
 
 
 def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | None = None) -> dict | None:

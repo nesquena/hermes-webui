@@ -327,8 +327,27 @@ def find_git_repo_root(workspace: str | Path) -> Path:
 
 def _setup_agent_worktree(repo_root: str) -> dict:
     try:
-        import api.config  # noqa: F401  # ensure Hermes Agent dir is on sys.path
-        from cli import _setup_worktree
+        import importlib.util
+        from pathlib import Path
+
+        from api.config import _AGENT_DIR  # Hermes Agent source root
+
+        # Use importlib to load cli.py from its absolute path instead of a bare
+        # ``from cli import _setup_worktree``.  The bare import is vulnerable to
+        # namespace-package shadowing — any third-party package (e.g. the ``cli``
+        # namespace shipped by stringzilla) that creates a cli/ directory in
+        # site-packages will preempt the real hermes-agent/cli.py module.
+        cli_path = str(Path(_AGENT_DIR) / "cli.py")
+        spec = importlib.util.spec_from_file_location(
+            "hermes_cli_worktree", cli_path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(
+                f"Could not locate hermes-agent worktree helper at {cli_path}"
+            )
+        cli_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli_mod)
+        _setup_worktree = cli_mod._setup_worktree
     except Exception as exc:
         raise RuntimeError("Hermes Agent worktree helper is unavailable") from exc
     output = StringIO()

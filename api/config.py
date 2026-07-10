@@ -703,6 +703,13 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
         target = Path(profile_home).expanduser()
     except Exception:
         return get_config()
+    try:
+        from api.profiles import get_active_hermes_home
+
+        if Path(get_active_hermes_home()).expanduser() == target:
+            return get_config()
+    except Exception:
+        pass
     # If the ambient resolver already points at this profile home, defer to
     # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
     # MUST run before the nonexistent-home guard below: a matching ambient home
@@ -1759,22 +1766,29 @@ _PROVIDER_MODELS = {
         {"id": "nemotron-3-super-free", "label": "Nemotron 3 Super Free"},
         {"id": "big-pickle", "label": "Big Pickle"},
     ],
-    # OpenCode Go — flat-rate models via opencode.ai/go ($10/month)
+    # OpenCode Go — flat-rate models via opencode.ai/go ($10/month).
+    # Synced 2026-07-08 from the public Go docs and documented models endpoint.
+    # Keep preview/free-only Zen models out of this Go picker snapshot.
     "opencode-go": [
+        {"id": "minimax-m3",       "label": "MiniMax M3"},
+        {"id": "minimax-m2.7",     "label": "MiniMax M2.7"},
+        {"id": "minimax-m2.5",     "label": "MiniMax M2.5"},
+        {"id": "kimi-k2.7-code",   "label": "Kimi K2.7 Code"},
+        {"id": "kimi-k2.6",        "label": "Kimi K2.6"},
+        {"id": "kimi-k2.5",        "label": "Kimi K2.5"},
+        {"id": "glm-5.2",          "label": "GLM-5.2"},
         {"id": "glm-5.1",          "label": "GLM-5.1"},
         {"id": "glm-5",            "label": "GLM-5"},
-        {"id": "kimi-k2.5",        "label": "Kimi K2.5"},
-        {"id": "kimi-k2.6",        "label": "Kimi K2.6"},
         {"id": "deepseek-v4-pro",  "label": "DeepSeek V4 Pro"},
         {"id": "deepseek-v4-flash","label": "DeepSeek V4 Flash"},
+        {"id": "qwen3.7-max",      "label": "Qwen3.7 Max"},
+        {"id": "qwen3.7-plus",     "label": "Qwen3.7 Plus"},
+        {"id": "qwen3.6-plus",     "label": "Qwen3.6 Plus"},
+        {"id": "qwen3.5-plus",     "label": "Qwen3.5 Plus"},
         {"id": "mimo-v2-pro",      "label": "MiMo V2 Pro"},
         {"id": "mimo-v2-omni",     "label": "MiMo V2 Omni"},
         {"id": "mimo-v2.5-pro",    "label": "MiMo V2.5 Pro"},
         {"id": "mimo-v2.5",        "label": "MiMo V2.5"},
-        {"id": "minimax-m2.7",     "label": "MiniMax M2.7"},
-        {"id": "minimax-m2.5",     "label": "MiniMax M2.5"},
-        {"id": "qwen3.6-plus",     "label": "Qwen3.6 Plus"},
-        {"id": "qwen3.5-plus",     "label": "Qwen3.5 Plus"},
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
     # Model IDs are bare — sent directly to:
@@ -2212,10 +2226,12 @@ def _apply_provider_prefix(
     result = []
     for m in raw_models:
         mid = m["id"]
+        entry = dict(m)
         if mid.startswith("@") or "/" in mid:
-            result.append({"id": mid, "label": m["label"]})
+            result.append(entry)
         else:
-            result.append({"id": f"@{provider_id}:{mid}", "label": m["label"]})
+            entry["id"] = f"@{provider_id}:{mid}"
+            result.append(entry)
     return result
 
 
@@ -3839,6 +3855,74 @@ def _is_openai_family_provider(provider: str | None) -> bool:
     return resolved in ("openai", "openai-api", "openai-codex")
 
 
+def _normalize_openai_family_model_id(model_id: str | None) -> str:
+    """Return a model id in the form expected by hermes_cli fast-mode resolution."""
+    model = str(model_id or "").strip()
+    if not model:
+        return ""
+
+    if model.startswith("@") and ":" in model:
+        model = model.split(":", 1)[1].strip()
+
+    if "://" in model:
+        return model
+
+    if "/" in model:
+        provider_hint, candidate = model.split("/", 1)
+        if provider_hint.strip().lower() in {"openai", "openai-api", "openai-codex"}:
+            model = candidate.strip()
+        else:
+            return ""
+
+    return model
+
+
+def _legacy_openai_service_tier_overrides(model_id: str | None, provider: str | None) -> dict:
+    """Compatibility fallback for standalone WebUI installs without hermes_cli.
+
+    Normal operation delegates to Hermes Agent model metadata.  This fallback
+    preserves the old WebUI behavior when the agent package is unavailable,
+    while still failing closed for codex model slugs and foreign provider IDs.
+    """
+    if not _is_openai_family_provider(provider):
+        return {}
+    resolved_provider = str(_resolve_provider_alias(str(provider or "").strip().lower()))
+    raw_model = str(model_id or "").strip()
+    if "://" not in raw_model and "/" in raw_model:
+        provider_hint = raw_model.split("/", 1)[0].strip().lower()
+        if provider_hint not in {"openai", "openai-api", "openai-codex"}:
+            return {}
+    normalized_model = _normalize_openai_family_model_id(model_id)
+    if not normalized_model:
+        if resolved_provider == "openai-codex":
+            return {}
+        return {"service_tier": "priority"}
+    lowered = normalized_model.lower()
+    if "codex" in lowered:
+        return {}
+    if lowered.startswith(("gpt-", "o1", "o3", "o4")):
+        return {"service_tier": "priority"}
+    return {}
+
+
+def _resolve_main_model_fast_mode_overrides(model_id: str | None, provider: str | None = None) -> dict:
+    """Return provider request overrides for the main model fast-mode setting."""
+    normalized_model = _normalize_openai_family_model_id(model_id)
+    if not normalized_model:
+        return _legacy_openai_service_tier_overrides(model_id, provider)
+    try:
+        from hermes_cli.models import resolve_fast_mode_overrides
+    except Exception:
+        logger.debug("Failed to import hermes_cli.models.resolve_fast_mode_overrides; using WebUI compatibility fallback.")
+        return _legacy_openai_service_tier_overrides(model_id, provider)
+    try:
+        resolved = resolve_fast_mode_overrides(normalized_model)
+    except Exception:
+        logger.debug("Failed to resolve fast-mode overrides for %r; using WebUI compatibility fallback.", normalized_model)
+        return _legacy_openai_service_tier_overrides(model_id, provider)
+    return resolved if isinstance(resolved, dict) else {}
+
+
 def _main_model_supports_service_tier(
     model_id: str | None,
     provider: str | None,
@@ -3846,24 +3930,41 @@ def _main_model_supports_service_tier(
     """Return True when the current main-model selection can use OpenAI service tier."""
     if not _is_openai_family_provider(provider):
         return False
-    resolved = str(provider or "").strip().lower()
-    if resolved == "openai-codex":
-        return False
-    raw_model = str(model_id or "").strip().lower()
-    if not raw_model:
-        return True
-    if "/" in raw_model:
-        prefix, bare_model = raw_model.split("/", 1)
-        if prefix != "openai":
-            return False
-    else:
-        bare_model = raw_model
-    if "codex" in bare_model:
-        return False
     return (
-        _is_first_party_model("openai", bare_model)
-        or bare_model.startswith(("gpt-", "o1", "o3", "o4"))
+        str(_resolve_main_model_fast_mode_overrides(model_id, provider).get("service_tier", "")).strip().lower()
+        == "priority"
     )
+
+
+def _model_supports_fast_tier_for_provider(model_id: str | None, provider: str | None) -> bool:
+    """Return whether a provider/model entry supports WebUI's service-tier toggle."""
+    return _main_model_supports_service_tier(model_id, provider)
+
+
+def _annotate_fast_tier_model_groups(payload: dict | None) -> dict | None:
+    """Add service-tier capability metadata to OpenAI-family model groups."""
+    if not isinstance(payload, dict):
+        return payload
+    groups = payload.get("groups")
+    if not isinstance(groups, list):
+        return payload
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        provider_id = str(group.get("provider_id") or "").strip()
+        if not _is_openai_family_provider(provider_id):
+            continue
+        for bucket in ("models", "extra_models"):
+            models = group.get(bucket)
+            if not isinstance(models, list):
+                continue
+            for model in models:
+                if not isinstance(model, dict):
+                    continue
+                model_id = str(model.get("id") or "").strip()
+                if model_id:
+                    model["supports_fast_tier"] = _model_supports_fast_tier_for_provider(model_id, provider_id)
+    return payload
 
 
 def _public_main_service_tier(model_cfg: dict) -> str:
@@ -4106,6 +4207,7 @@ def get_auxiliary_models() -> dict:
         "main": {
             "provider": main_provider,
             "model": main_model,
+            "supports_fast_tier": _main_model_supports_service_tier(main_model, main_provider),
             "service_tier": _public_main_service_tier(model_cfg),
             **_public_advanced_model_options(model_cfg),
         },
@@ -4433,13 +4535,13 @@ def _minimal_static_models_catalog() -> dict:
                     "models": [{"id": default_model, "label": label}],
                 }
             )
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": {},
             "groups": groups,
             "aliases": {},
-        }
+        })
     except Exception:
         logger.debug("minimal static models catalog build failed", exc_info=True)
         return {
@@ -4798,7 +4900,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         if not groups and default_model:
             return copy.deepcopy(_minimal_static_models_catalog())
 
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": _configured_model_badges_from_static_catalog(
@@ -4808,7 +4910,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             ),
             "groups": groups,
             "aliases": model_aliases,
-        }
+        })
     except Exception:
         logger.debug("static models catalog build failed", exc_info=True)
         return copy.deepcopy(_minimal_static_models_catalog())
@@ -5325,7 +5427,7 @@ def _load_models_cache_from_disk() -> dict | None:
         # disk save path does not persist `aliases`, so reconstruct them from
         # current config to keep the /api/models.aliases contract intact (a
         # disk-cache hit must not silently drop `/model <alias>` resolution).
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -5335,7 +5437,7 @@ def _load_models_cache_from_disk() -> dict | None:
                 if isinstance(cache.get("aliases"), dict)
                 else _model_aliases_from_config()
             ),
-        }
+        })
     except Exception:
         return None
 
@@ -5393,13 +5495,13 @@ def _load_stale_models_cache_from_disk() -> dict | None:
             # duration of the over-budget stale fallback. Reconstruct from
             # current config, mirroring the live/static catalog alias build.
             aliases = _model_aliases_from_config()
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
             "aliases": aliases,
-        }
+        })
     except Exception:
         return None
 
@@ -5464,7 +5566,7 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
         _available_models_cache_source_fingerprint = None
         return None
     if _is_valid_models_cache(_available_models_cache):
-        return copy.deepcopy(_available_models_cache)
+        return _annotate_fast_tier_model_groups(copy.deepcopy(_available_models_cache))
     _available_models_cache = None
     _available_models_cache_ts = 0.0
     _available_models_live_rebuild_ts = 0.0
@@ -6647,6 +6749,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 allow_empty: bool = False,
             ) -> None:
                 picker_models = copy.deepcopy(raw_models or [])
+                if _is_openai_family_provider(provider_id):
+                    for _model in picker_models:
+                        if not isinstance(_model, dict):
+                            continue
+                        _model_id = str(_model.get("id") or "").strip()
+                        if not _model_id:
+                            continue
+                        _model["supports_fast_tier"] = (
+                            str(
+                                _resolve_main_model_fast_mode_overrides(_model_id, provider_id).get("service_tier", "")
+                            ).strip().lower()
+                            == "priority"
+                        )
                 if apply_prefix:
                     picker_models = _apply_provider_prefix(picker_models, provider_id, active_provider)
                 visible_models, extra_models = _split_picker_overflow_models(
@@ -7681,7 +7796,17 @@ def _maybe_log_slow_stages(
 
 
 # ── Static file path ─────────────────────────────────────────────────────────
-_INDEX_HTML_PATH = REPO_ROOT / "static" / "index.html"
+
+
+def get_static_root() -> Path:
+    return REPO_ROOT / "static"
+
+
+def get_index_html_path() -> Path:
+    return get_static_root() / "index.html"
+
+
+_INDEX_HTML_PATH = get_index_html_path()
 
 # ── Thread synchronisation ───────────────────────────────────────────────────
 LOCK = threading.Lock()
@@ -7738,10 +7863,39 @@ class StreamChannel:
     of them instead of being consumed destructively by a single queue reader.
     """
 
+    # Cap on the offline replay buffer (drop-oldest). While no tab is subscribed,
+    # put_nowait() buffers the stream tail so a first/reconnecting subscriber can
+    # catch up. But a client that disconnects without cancelling leaves the turn
+    # running with zero subscribers, so an unbounded buffer here grows for the
+    # WHOLE turn (a busy turn emits thousands of coalesced token frames) — an OOM
+    # risk per abandoned turn (#4633). Bounding to the most recent N frames keeps
+    # a reconnecting tab's needed *tail* intact; older dropped frames stay
+    # recoverable via the run journal by last_event_id. 8192 is generous enough
+    # to hold a long multi-tool turn's backlog while capping worst-case memory to
+    # a fixed number of small (event, data, id) tuples — deliberately far above
+    # SessionChannel's per-subscriber maxsize of 16 (that queue drops on a *slow*
+    # reader; this buffer must survive a legitimate reconnect gap).
+    _OFFLINE_BUFFER_MAXLEN = 8192
+
     def __init__(self):
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
-        self._offline_buffer: list[tuple[str, object]] = []
+        self._offline_buffer: collections.deque = collections.deque(
+            maxlen=self._OFFLINE_BUFFER_MAXLEN
+        )
+        # Frames evicted at the cap from the CURRENT buffer content. Scoped to
+        # the buffer, NOT to an attach cycle: it resets exactly when the buffer
+        # itself is cleared (first live broadcast), never on subscribe/
+        # unsubscribe alone — a drain is a non-destructive copy, so after a
+        # transient attach the buffer is STILL truncated and reporting 0 would
+        # hand the next subscriber a silently-holed tail. Whether a given
+        # reconnect actually NEEDS the evicted frames is decided server-side
+        # against offline_first_event_id (its cursor may sit inside the
+        # retained tail). Also gates the one-shot eviction log.
+        self._offline_dropped = 0
+        # Cumulative evictions over the channel's lifetime, never reset — for ops
+        # visibility via diagnostic_snapshot().
+        self._offline_dropped_total = 0
         self._last_event_id: str | None = None
 
     def subscribe(self) -> queue.Queue:
@@ -7758,8 +7912,19 @@ class StreamChannel:
             # is safe. Per Opus advisor on stage-292.
             for item in self._offline_buffer:
                 q.put_nowait(item)
+            first = self._offline_buffer[0] if self._offline_buffer else None
             snapshot = {
                 "offline_buffered_events": len(self._offline_buffer),
+                # Surface eviction so the SSE handler can tell the tail it is
+                # about to drain may be truncated (older frames were dropped at
+                # the cap) and must be proven contiguous before streaming.
+                "offline_dropped_events": self._offline_dropped,
+                # Event id of the oldest retained frame: the handler needs run-
+                # journal coverage only for (client cursor → this frame); a
+                # cursor already inside the retained tail needs no journal.
+                "offline_first_event_id": (
+                    first[2] if first is not None and len(first) >= 3 else None
+                ),
                 "last_event_id": self._last_event_id,
             }
             self._subscribers.append(q)
@@ -7786,9 +7951,27 @@ class StreamChannel:
                 self._last_event_id = event_id
             subscribers = list(self._subscribers)
             if not subscribers:
+                # deque(maxlen) evicts the oldest frame automatically when full.
+                # Log once on the first eviction (debug: an abandoned/disconnected
+                # turn is expected to hit this) and keep a running dropped count
+                # for diagnostics.
+                if len(self._offline_buffer) >= self._OFFLINE_BUFFER_MAXLEN:
+                    if self._offline_dropped == 0:  # first eviction this cycle
+                        logger.debug(
+                            "StreamChannel offline buffer full (cap=%d); dropping "
+                            "oldest frames while no subscriber is connected",
+                            self._OFFLINE_BUFFER_MAXLEN,
+                        )
+                    self._offline_dropped += 1
+                    self._offline_dropped_total += 1
                 self._offline_buffer.append(item)
                 return
+            # A subscriber is live: events now broadcast directly, so the offline
+            # tail is drained. Reset the per-cycle eviction count (which also
+            # re-arms the one-shot log) so the NEXT disconnect/overflow cycle
+            # reports and logs its own truncation, not a stale carry-over.
             self._offline_buffer.clear()
+            self._offline_dropped = 0
         for q in subscribers:
             q.put_nowait(item)
 
@@ -7798,6 +7981,9 @@ class StreamChannel:
             return {
                 "subscriber_count": len(self._subscribers),
                 "offline_buffered_events": len(self._offline_buffer),
+                # Cumulative over the channel lifetime (ops visibility), vs. the
+                # per-cycle count subscribe_with_snapshot() reports for truncation.
+                "offline_dropped_events": self._offline_dropped_total,
             }
 
 
@@ -8176,6 +8362,7 @@ _SETTINGS_DEFAULTS = {
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
+    "update_channel": "stable",  # stable | experimental — which release stream to track (stable = soaked/promoted; experimental = every batch)
     "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "tts_enabled": False,
@@ -8456,6 +8643,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},
     "sidebar_density": {"compact", "detailed"},
+    "update_channel": {"stable", "experimental"},
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "default_message_mode": {"queue", "interrupt", "steer"},
@@ -8539,6 +8727,64 @@ _SETTINGS_TTS_ENGINE_RE = __import__("re").compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0
 
 _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").Lock()
+
+
+def _atomic_write_settings_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically (temp file + fsync + os.replace).
+
+    ``settings.json`` was rewritten with a plain ``Path.write_text``, which
+    truncates the file in place: a crash or full disk mid-write leaves it
+    truncated/empty, so the next start loses every persisted setting (theme,
+    workspace, tab order, and the login ``password_hash``). Writing to a
+    sibling temp file, fsyncing, then ``os.replace`` keeps the old contents
+    intact until the rename commits the new ones in one step.  Mirrors the
+    tempfile+fsync+os.replace pattern already used by
+    ``webui_session_db.WebUIJsonSessionDB._atomic_write``.
+
+    The existing file's mode is carried onto the replacement: ``os.replace``
+    swaps in the temp file's inode, and a plain ``open`` respects the umask
+    (typically 0644), so without this an operator-hardened ``settings.json``
+    (chmod 0600 because it holds the password hash) would be silently loosened
+    on the next save.  New files fall back to the umask-adjusted default.
+
+    A symlinked target is written through to its referent (same follow-through
+    as the ``Path.write_text`` this replaces), rather than replacing the link
+    itself with a regular file.
+    """
+    path = Path(path)
+    write_path = path.resolve(strict=False) if path.is_symlink() else path
+    tmp = write_path.with_name(
+        f".{write_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        mode = os.stat(write_path).st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o666 & ~_current_umask()
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, write_path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _current_umask() -> int:
+    """Read the process umask without leaving it changed.
+
+    ``os.umask`` has no read-only form (it sets and returns the prior value),
+    so we set-then-restore. Called only on the new-``settings.json`` path, which
+    is rare; the tiny set-to-0 window is acceptable here (unlike a per-write
+    hot path).
+    """
+    umask = os.umask(0)
+    os.umask(umask)
+    return umask
 
 
 def _coerce_provider_cost_budget(value: Any) -> float | None:
@@ -8700,9 +8946,9 @@ def save_settings(settings: dict) -> dict:
     effective_persisted_speech_keys.update(applied_speech_keys)
     persisted = _settings_payload_for_write(current, effective_persisted_speech_keys)
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(
+    _atomic_write_settings_text(
+        SETTINGS_FILE,
         json.dumps(persisted, ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
     global _SETTINGS_WRITE_VERSION
     with _SETTINGS_WRITE_LOCK:
@@ -8743,7 +8989,8 @@ if _settings_file_exists:
             startup_persisted_speech_keys = _extract_persisted_speech_keys(
                 _read_raw_settings_file()
             )
-            SETTINGS_FILE.write_text(
+            _atomic_write_settings_text(
+                SETTINGS_FILE,
                 json.dumps(
                     _settings_payload_for_write(
                         _startup_settings, startup_persisted_speech_keys
@@ -8751,7 +8998,6 @@ if _settings_file_exists:
                     ensure_ascii=False,
                     indent=2,
                 ),
-                encoding="utf-8",
             )
         except Exception:
             pass

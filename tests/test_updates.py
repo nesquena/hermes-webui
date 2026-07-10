@@ -15,7 +15,7 @@ def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
         return 'would clobber existing tag v0.50.294', False
     if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
         return 'v0.51.106\nv0.51.103', True
-    if args == ['describe', '--tags', '--abbrev=0']:
+    if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
         return 'v0.51.103', True
     if args == ['merge-base', '--is-ancestor', 'v0.51.106', 'HEAD']:
         return '', False
@@ -251,11 +251,11 @@ def test_check_for_updates_can_skip_agent_repo(tmp_path):
 
     seen = []
 
-    def fake_check_repo(path, name):
+    def fake_check_repo(path, name, channel='stable'):
         seen.append(name)
         return {'name': name, 'behind': 2 if name == 'webui' else 9}
 
-    cache_defaults = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True}
+    cache_defaults = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'stable'}
     with patch.dict(updates._update_cache, cache_defaults, clear=True), \
          patch.object(updates, 'REPO_ROOT', webui_path), \
          patch.object(updates, '_AGENT_DIR', agent_path), \
@@ -273,11 +273,11 @@ def test_update_cache_is_scoped_by_agent_inclusion(tmp_path):
     (tmp_path / '.git').mkdir()
     calls = []
 
-    def fake_check_repo(path, name):
+    def fake_check_repo(path, name, channel='stable'):
         calls.append(name)
         return {'name': name, 'behind': len(calls)}
 
-    with patch.dict(updates._update_cache, {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True}, clear=True), \
+    with patch.dict(updates._update_cache, {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'stable'}, clear=True), \
          patch.object(updates, 'REPO_ROOT', tmp_path), \
          patch.object(updates, '_AGENT_DIR', tmp_path), \
          patch.object(updates, '_check_repo', side_effect=fake_check_repo):
@@ -484,9 +484,9 @@ def test_check_repo_recovers_from_remote_retag(tmp_path):
             return '', True
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v0.51.110\nv0.51.109', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v0.51.110', True
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             return 'v0.51.110', True
         if args == ['remote', 'get-url', 'origin']:
             return 'https://github.com/nesquena/hermes-webui.git', True
@@ -529,10 +529,10 @@ def test_check_repo_release_falls_through_when_head_is_past_tag(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v2026.5.16', True
         # HEAD is 608 commits past the tag — describe includes a suffix.
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -552,10 +552,10 @@ def test_check_repo_release_not_affected_when_head_exactly_on_tag(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16\nv2026.5.10', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v2026.5.16', True
         # No -N-gSHA suffix: HEAD is exactly on the tag.
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             return 'v2026.5.16', True
         if args == ['remote', 'get-url', 'origin']:
             return 'https://github.com/nesquena/hermes-agent.git', True
@@ -583,10 +583,10 @@ def test_check_repo_branch_check_runs_for_post_tag_commits(tmp_path):
             return '', True
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v2026.5.16', True
         # HEAD is 608 commits past the tag.
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         # Branch-check path follows: rev-parse upstream, default branch, rev-list.
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
@@ -633,9 +633,9 @@ def test_select_apply_compare_ref_uses_tag_when_head_is_on_tag(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16\nv2026.5.10', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             return 'v2026.5.16', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -658,17 +658,17 @@ def test_select_apply_compare_ref_falls_through_when_head_is_past_tag(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             # HEAD's nearest tag is v2026.5.16; HEAD is 608 commits past it.
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/main', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
     with patch.object(updates, '_run_git', side_effect=fake_git):
-        ref = updates._select_apply_compare_ref(tmp_path)
+        ref = updates._select_apply_compare_ref(tmp_path, 'stable', 'agent')
 
     assert ref == 'origin/main', (
         'apply path must advance to the upstream branch when HEAD is past the '
@@ -724,9 +724,9 @@ def test_check_and_apply_paths_agree_when_head_is_past_tag(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/main', True
@@ -734,7 +734,7 @@ def test_check_and_apply_paths_agree_when_head_is_past_tag(tmp_path):
 
     with patch.object(updates, '_run_git', side_effect=fake_git):
         check_result = updates._check_repo_release(tmp_path, 'agent')
-        apply_ref = updates._select_apply_compare_ref(tmp_path)
+        apply_ref = updates._select_apply_compare_ref(tmp_path, 'stable', 'agent')
 
     # Check side falls through (release check returns None → branch check runs)
     assert check_result is None, (
@@ -761,7 +761,7 @@ def test_check_repo_release_falls_through_when_head_contains_newer_tag(tmp_path)
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v2026.5.29', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', True
@@ -783,7 +783,7 @@ def test_select_apply_compare_ref_falls_through_when_head_contains_newer_tag(tmp
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v2026.5.29', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', True
@@ -792,7 +792,7 @@ def test_select_apply_compare_ref_falls_through_when_head_contains_newer_tag(tmp
         raise AssertionError(f'unexpected git args: {args!r}')
 
     with patch.object(updates, '_run_git', side_effect=fake_git):
-        ref = updates._select_apply_compare_ref(tmp_path)
+        ref = updates._select_apply_compare_ref(tmp_path, 'stable', 'agent')
 
     assert ref == 'origin/main', (
         'Update Now must not target a release tag that HEAD already contains; '
@@ -819,10 +819,10 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16\nv2026.5.10', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             # HEAD's nearest reachable tag (older one)
             return 'v2026.5.10', True
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             # HEAD has 3 commits past v2026.5.10, but it does not contain
             # the newer v2026.5.16 release tag.
             return 'v2026.5.10-3-gabcdef12', True
@@ -857,9 +857,9 @@ def test_check_repo_release_falls_through_when_latest_tag_is_not_ff_reachable(tm
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v2026.5.29', True
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             return 'v2026.5.29-265-g5921d6678', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', False
@@ -880,9 +880,9 @@ def test_select_apply_compare_ref_falls_through_when_latest_tag_is_not_ff_reacha
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
             return 'v2026.5.29', True
-        if args == ['describe', '--tags', '--always']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
             return 'v2026.5.29-265-g5921d6678', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', False
@@ -893,7 +893,7 @@ def test_select_apply_compare_ref_falls_through_when_latest_tag_is_not_ff_reacha
         raise AssertionError(f'unexpected git args: {args!r}')
 
     with patch.object(updates, '_run_git', side_effect=fake_git):
-        ref = updates._select_apply_compare_ref(tmp_path)
+        ref = updates._select_apply_compare_ref(tmp_path, 'stable', 'agent')
 
     assert ref == 'origin/main'
 
@@ -1141,7 +1141,7 @@ def test_apply_clear_lock_with_no_lock_runs_normal_update(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(
         updates, '_select_apply_compare_ref',
-        lambda path: 'origin/main'
+        lambda path, channel='stable', target=None: 'origin/main'
     )
     result = updates.apply_clear_lock('webui')
     assert result['ok'] is True, result
@@ -1258,7 +1258,7 @@ def test_apply_update_pull_lock_restores_stash(tmp_path, monkeypatch):
     monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
     monkeypatch.setattr(
         updates, '_select_apply_compare_ref',
-        lambda path: 'origin/main'
+        lambda path, channel='stable', target=None: 'origin/main'
     )
 
     result = updates._apply_update_inner('webui')
@@ -1310,7 +1310,7 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
     monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
     monkeypatch.setattr(
         updates, '_select_apply_compare_ref',
-        lambda path: 'origin/main'
+        lambda path, channel='stable', target=None: 'origin/main'
     )
 
     result = updates._apply_update_inner('webui')

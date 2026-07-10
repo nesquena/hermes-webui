@@ -44,6 +44,83 @@ _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 
+# Total byte-silence budget (seconds) for the gateway SSE socket, applied via
+# ``urlopen(timeout=...)``. A stream that emits ANY byte within the window never
+# trips it, so a genuinely alive (if slow) token stream is untouched; only more
+# than this much *total* byte-silence is treated as a dead/stalled gateway.
+#
+# This is a TERMINAL budget, not a per-read grace: CPython's ``socket.makefile``
+# latches ``_timeout_occurred`` on the first ``socket.timeout``, after which every
+# further read raises a bare ``OSError`` — the connection cannot be resumed. So a
+# read timeout ends the turn (surfacing Stop if pressed). It replaces the old flat
+# 600s timeout, under which a half-open gateway (TCP open, zero bytes) pinned the
+# worker for the full 10 minutes and ignored Stop (cancel is only re-checked
+# between SSE lines). We KEEP the 600s default budget: there is no Gateway
+# protocol heartbeat guaranteeing sub-600s progress bytes, so a legitimately
+# long/fully-silent server-side tool call must not be terminated early — reducing
+# the default below 600s would kill currently-working turns (gate finding, #5789).
+# The win here is that a read timeout is now TERMINAL and Stop-honoring (the old
+# flat timeout ignored Stop on a half-open gateway); the budget itself stays 600s
+# for backward compatibility. Deployments that want a tighter dead-gateway cap can
+# lower ``HERMES_WEBUI_GATEWAY_READ_TIMEOUT``.
+_GATEWAY_READ_TIMEOUT_ENV = "HERMES_WEBUI_GATEWAY_READ_TIMEOUT"
+_GATEWAY_READ_TIMEOUT_DEFAULT = 600.0
+
+
+def _gateway_read_timeout_secs() -> float:
+    """Total byte-silence budget for gateway SSE reads (default 600s, env-tunable)."""
+    raw = os.environ.get(_GATEWAY_READ_TIMEOUT_ENV)
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return _GATEWAY_READ_TIMEOUT_DEFAULT
+
+
+def _iter_sse_lines_cancellable(resp, cancel_event):
+    """Yield raw SSE lines from ``resp``, unblocking cleanly on a read timeout.
+
+    ``resp``'s socket carries a read timeout (``urlopen(timeout=...)``). A read
+    that blocks past it raises ``socket.timeout``, and that timeout is TERMINAL:
+    CPython's ``socket.makefile`` latches ``_timeout_occurred`` on the first
+    timeout, so every subsequent read raises a bare ``OSError`` ("cannot read
+    from timed out object") — there is no multi-read grace to reclaim. So on a
+    read timeout (or the poisoned-socket ``OSError``/any read error) this either
+    surfaces the user's Stop or tears the stalled turn down:
+
+      - cancel set -> yield ``b""`` (the caller's ``if cancel_event.is_set()``
+        branch emits its cancel event), then stop. This is why the old flat 600s
+        pin — where a stalled gateway ignored Stop until it eventually errored —
+        is gone: Stop is honored within one timeout window.
+      - otherwise -> re-raise, so the caller's error handling reports the stall.
+
+    A stream that keeps emitting bytes within the timeout window never trips it,
+    so a genuinely alive (if slow) token stream is untouched. Emitting ``b""`` is
+    safe: the SSE loops decode it to an empty line and ``continue`` (same as a
+    real blank line).
+
+    Iterates ``resp`` via the iterator protocol so a real ``HTTPResponse`` and the
+    test fakes (which implement ``__iter__``) behave identically.
+    """
+    resp_iter = iter(resp)
+    while True:
+        try:
+            raw_line = next(resp_iter)
+        except StopIteration:
+            return  # EOF
+        except OSError:
+            # socket.timeout / TimeoutError are OSError subclasses, as is the
+            # post-timeout poisoned-socket "cannot read" error. All are terminal
+            # for this connection.
+            if cancel_event.is_set():
+                yield b""  # let the caller emit its cancel event
+                return
+            raise
+        yield raw_line
+
 
 def webui_chat_backend_mode(config_data=None, environ: dict[str, str] | None = None) -> str:
     """Return the explicitly selected browser chat backend.
@@ -368,8 +445,8 @@ def _run_gateway_runs_api_streaming(
     final_text = ""
     usage: dict = {}
     sse_event = "message"
-    with urllib.request.urlopen(req_events, timeout=600) as resp:
-        for raw_line in resp:
+    with urllib.request.urlopen(req_events, timeout=_gateway_read_timeout_secs()) as resp:
+        for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
             if cancel_event.is_set():
                 put_gateway_event("cancel", {"message": "Cancelled by user"})
                 return None, usage
@@ -717,8 +794,8 @@ def _run_gateway_chat_streaming(
             update_active_run(stream_id, phase="gateway-request")
             last_payload = {}
             sse_event = "message"
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                for raw_line in resp:
+            with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
+                for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
                         put_gateway_event("cancel", {"message": "Cancelled by user"})
                         return

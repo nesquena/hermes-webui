@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 
 import api.auth as auth
+import api.config as api_config
 import api.routes as routes
 
 
@@ -152,7 +153,7 @@ def test_login_route_remains_csrf_exempt(monkeypatch):
 
 
 def test_index_shell_includes_csrf_fetch_and_sendbeacon_injection():
-    src = (routes._INDEX_HTML_PATH).read_text(encoding="utf-8")
+    src = api_config.get_index_html_path().read_text(encoding="utf-8")
 
     assert "csrfToken:__CSRF_TOKEN_JSON__" in src
     assert "X-Hermes-CSRF-Token" in src

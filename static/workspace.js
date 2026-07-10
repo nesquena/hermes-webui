@@ -242,6 +242,23 @@ function _workspacePathIsReadOnly(path){
 }
 
 function _workspaceRouteForPath(path, kind, opts={}){
+  // Resolve the app-relative "/api/…" route against document.baseURI so the
+  // URLs that are consumed OUTSIDE api() — previewImg.src, the media/pdf/html
+  // frame src, the download anchor, window.open — keep working under a subpath
+  // mount like /hermes/. A bare "/api/…" string resolves to the server root
+  // there and 404s. (api() strips the leading slash and re-resolves against
+  // baseURI itself, so routes passed through it are unaffected by already
+  // being absolute.)
+  const route=_workspaceRouteForPathRel(path, kind, opts);
+  if(!route) return route;
+  // Non-browser test harnesses have no document/location: keep the app-relative form.
+  const base=(typeof document!=='undefined'&&document.baseURI)||(typeof location!=='undefined'&&location.href)||'';
+  if(!base||!/^https?:\/\//i.test(base)) return route;
+  const rel=route.startsWith('/') ? route.slice(1) : route;
+  return new URL(rel, base).href;
+}
+
+function _workspaceRouteForPathRel(path, kind, opts={}){
   if(!S.session) return '';
   const normalizedPath = _normalizeWorkspaceRelPath(path);
   const grant = _workspaceEscapeGrantForPath(normalizedPath);

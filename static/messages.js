@@ -3495,11 +3495,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const rows=[];
     const seen=new Set();
     const seenTextKeys=[];
-    const pushRow=(row)=>{
+    const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
+    const orderedRows=[];
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') continue;
+      orderedRows.push(row);
+    }
+    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
+      const bucket=messageRows.get(idx)||[];
+      for(const row of bucket) orderedRows.push(row);
+    }
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') orderedRows.push(row);
+    }
+    const lastNonTerminalWorkRowIndex=orderedRows.reduce((last,row,idx)=>(row&&row.role==='tool')?idx:last,-1);
+    const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
+    const pushRow=(row,rowIndex)=>{
       if(!row||typeof row!=='object') return;
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
       if(!row||typeof row!=='object') return;
       const textKey=_anchorSceneTextKey(row.text);
+      if(rowIsLiveTokenFinalPrefix(row,textKey,rowIndex>lastNonTerminalWorkRowIndex)) return;
       const isTextual=row.role==='prose'||row.role==='thinking';
       if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
       if(isTextual&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
@@ -3514,18 +3530,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         seq:rows.length,
       });
     };
-    const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
-    for(const row of projectedRows){
-      if(row&&row.role==='terminal') continue;
-      pushRow(row);
-    }
-    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
-      const bucket=messageRows.get(idx)||[];
-      for(const row of bucket) pushRow(row);
-    }
-    for(const row of projectedRows){
-      if(row&&row.role==='terminal') pushRow(row);
-    }
+    orderedRows.forEach((row,idx)=>pushRow(row,idx));
     const scene={
       ...base,
       version:'activity_scene_v1',
@@ -5174,8 +5179,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
       if(text&&S.session&&S.session.session_id===activeSid){
-        _upsertAnchorReasoning(_liveThinkingText());
-        _updateLiveThinkingCard(_liveThinkingText());
+        const liveThinkingText=_liveThinkingText();
+        if(!_upsertAnchorReasoning(liveThinkingText)){
+          _updateLiveThinkingCard(liveThinkingText);
+        }
       }
     });
 
@@ -6022,7 +6029,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st&&st.active){
               setComposerStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
             if(st&&st.replay_available){

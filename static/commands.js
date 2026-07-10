@@ -1350,6 +1350,7 @@ async function cmdSteer(args){
 }
 
 function _steerFailureMessageKey(fallback) {
+  if(fallback==='gateway_steer_queued')return 'steer_fail_no_cached_agent';
   const key = 'steer_fail_' + (fallback || 'unknown');
   return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
     ? key : 'steer_fail_unknown';
@@ -1546,6 +1547,10 @@ async function _trySteer(msg, explicitSteer){
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
   const ownerStreamId=(typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id)))||null;
   const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const ownerProfile=typeof S!=='undefined'&&(S.activeProfile||'default');
+  const ownerModelState=typeof _chatPayloadModelState==='function'
+    ? _chatPayloadModelState()
+    : {model:(typeof S!=='undefined'&&S.session&&S.session.model)||'',model_provider:(typeof S!=='undefined'&&S.session&&S.session.model_provider)||''};
   if(!ownerSid){showToast(t('no_active_session'));return false;}
   let steerText=originalMsg;
   try{
@@ -1610,6 +1615,25 @@ async function _trySteer(msg, explicitSteer){
       _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
     }
     showToast(t('cmd_steer_delivered'),2500);
+    return true;
+  }
+  if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){
+    _steerUploadCache=null;
+    queueSessionMessage(ownerSid,{
+      text:originalMsg,
+      files:pendingFilesSnapshot,
+      model:ownerModelState.model,
+      model_provider:ownerModelState.model_provider,
+      profile:ownerProfile,
+    });
+    if(typeof updateQueueBadge==='function')updateQueueBadge(ownerSid);
+    if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+    if(_steerOwnerIsCurrent(ownerSid)&&typeof S!=='undefined'&&Array.isArray(S.pendingFiles)&&S.pendingFiles.length&&pendingFilesSnapshot.length){
+      const _queued=new Set(pendingFilesSnapshot);
+      const _remaining=S.pendingFiles.filter(f=>!_queued.has(f));
+      if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
+    }
+    showToast(t('steer_leftover_queued'),3000);
     return true;
   }
   // Do not fall back to interrupt: Steer failure is not permission to cancel

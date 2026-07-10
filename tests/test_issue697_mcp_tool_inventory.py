@@ -29,8 +29,10 @@ def _read(relative_path: str) -> str:
 
 class TestMcpToolInventoryApi:
     @patch("api.routes._mcp_runtime_status_by_name")
-    @patch("api.routes.get_config")
-    def test_endpoint_returns_sanitized_registered_mcp_tools(self, mock_cfg, mock_runtime):
+    @patch("api.routes.get_config_for_profile_home")
+    @patch("api.routes.get_active_hermes_home")
+    def test_endpoint_returns_sanitized_registered_mcp_tools(self, mock_home, mock_cfg, mock_runtime):
+        mock_home.return_value = sentinel_home = object()
         mock_cfg.return_value = {
             "mcp_servers": {
                 "web-reader": {"url": "http://localhost:3001/mcp", "headers": {"Authorization": "Bearer secret-token"}},
@@ -72,6 +74,7 @@ class TestMcpToolInventoryApi:
             {"name": "url", "type": "string", "required": True, "description": "URL to fetch"},
             {"name": "limit", "type": "integer", "required": False, "description": "Maximum bytes"},
         ]
+        mock_cfg.assert_called_once_with(sentinel_home)
         raw = json.dumps(payload)
         assert "secret-token" not in raw
         assert "default" not in raw
