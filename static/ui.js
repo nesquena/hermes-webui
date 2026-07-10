@@ -2013,6 +2013,9 @@ function _mountMermaidViewer(svgEl, options = {}) {
     viewport,
     x: 0,
     y: 0,
+    pinching: false,
+    pinchStartDist: 0,
+    pinchStartScale: 1,
   };
   root._mermaidViewer = state;
 
@@ -2157,6 +2160,7 @@ function _mountMermaidViewer(svgEl, options = {}) {
   }
 
   function _onPointerDown(e){
+    if(state.pinching) return;
     if(e.button != null && e.button !== 0) return;
     state.dragging = true;
     state.dragged = false;
@@ -2171,6 +2175,7 @@ function _mountMermaidViewer(svgEl, options = {}) {
   }
 
   function _onPointerMove(e){
+    if(state.pinching) return;
     if(!state.dragging) return;
     const dx = (Number(e.clientX) || 0) - state.dragOriginX;
     const dy = (Number(e.clientY) || 0) - state.dragOriginY;
@@ -2191,6 +2196,7 @@ function _mountMermaidViewer(svgEl, options = {}) {
   }
 
   function _openViewerOnClick(e){
+    if(state.pinching) return;
     if(mode !== 'inline') return;
     if(state.dragged){
       state.dragged = false;
@@ -2201,6 +2207,41 @@ function _mountMermaidViewer(svgEl, options = {}) {
     openLightbox();
   }
 
+  function _touchDist(touches){
+    if(!touches || touches.length < 2) return 0;
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function _onTouchStart(e){
+    if(e.touches.length === 2){
+      state.pinching = true;
+      state.pinchStartDist = _touchDist(e.touches);
+      state.pinchStartScale = state.scale;
+      _endPointerDrag();
+      if(e.preventDefault) e.preventDefault();
+    }
+  }
+
+  function _onTouchMove(e){
+    if(!state.pinching || e.touches.length < 2) return;
+    const currDist = _touchDist(e.touches);
+    if(state.pinchStartDist > 0){
+      const rect = viewport.getBoundingClientRect();
+      const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
+      const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
+      _setScale(state.pinchStartScale * (currDist / state.pinchStartDist), cx, cy);
+    }
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _onTouchEnd(e){
+    if(e.touches.length < 2){
+      state.pinching = false;
+    }
+  }
+
   viewport.onpointerdown = _onPointerDown;
   viewport.onpointermove = _onPointerMove;
   viewport.onpointerup = _endPointerDrag;
@@ -2208,6 +2249,10 @@ function _mountMermaidViewer(svgEl, options = {}) {
   viewport.onpointerleave = _endPointerDrag;
   viewport.onwheel = _zoomFromWheel;
   viewport.onclick = _openViewerOnClick;
+  viewport.addEventListener('touchstart', _onTouchStart, {passive: false});
+  viewport.addEventListener('touchmove', _onTouchMove, {passive: false});
+  viewport.addEventListener('touchend', _onTouchEnd);
+  viewport.addEventListener('touchcancel', function _onTouchCancel(){ state.pinching = false; });
   root.onclick = e => e.stopPropagation();
   state.fit = _fitViewer;
   state.reset = _resetViewer;
