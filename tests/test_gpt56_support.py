@@ -30,14 +30,10 @@ def test_bare_openai_fallback_excludes_gpt56_models():
     assert GPT56_MODEL_IDS.isdisjoint(model_ids)
 
 
-def test_codex_fallback_includes_only_supported_gpt56_models():
+def test_codex_fallback_includes_all_gpt56_models():
     model_ids = {entry["id"] for entry in config._PROVIDER_MODELS["openai-codex"]}
 
-    assert model_ids & GPT56_MODEL_IDS == {
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-    }
+    assert GPT56_MODEL_IDS <= model_ids
 
 
 def test_nous_fallback_includes_all_gpt56_models():

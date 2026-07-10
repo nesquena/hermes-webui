@@ -1665,8 +1665,11 @@ _PROVIDER_MODELS = {
     ],
     "openai-codex": [
         {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
+        {"id": "gpt-5.6-sol-pro", "label": "GPT-5.6 Sol Pro"},
         {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.6-terra-pro", "label": "GPT-5.6 Terra Pro"},
         {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna"},
+        {"id": "gpt-5.6-luna-pro", "label": "GPT-5.6 Luna Pro"},
         {"id": "gpt-5.5", "label": "GPT-5.5"},
         {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4", "label": "GPT-5.4"},
