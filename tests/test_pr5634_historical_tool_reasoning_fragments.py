@@ -101,10 +101,10 @@ def _node_harness() -> str:
           'tool-call anchor must still be recognized');
         assert(_assistantReasoningPayloadIsHistoricalToolCallOnly(historicalToolCallReasoning) === true,
           'historical empty tool-call row should be classified as tool-call-only');
-        assert(_messageHasReasoningPayload(historicalToolCallReasoning) === false,
-          'historical tool-call fragments must not count as visible reasoning payloads');
-        assert(_assistantReasoningPayloadText(historicalToolCallReasoning) === '',
-          'historical tool-call fragments must not render Thinking text');
+        assert(_messageHasReasoningPayload(historicalToolCallReasoning) === true,
+          'reasoning without explicit fragment provenance must remain visible');
+        assert(_assistantReasoningPayloadText(historicalToolCallReasoning) === 'need to get a readback',
+          'tool ownership alone must not suppress distinct historical reasoning');
         assert(_assistantToolAnchorIdxForMessage([historicalToolCallReasoning], 0) === 0,
           'suppressing Thinking must not move tool-card anchoring off the tool-call row');
 
@@ -138,12 +138,23 @@ def _node_harness() -> str:
         assert(_assistantReasoningPayloadText(anchorSceneReasoning) === 'recovered activity thought',
           'anchor-scene recovered reasoning remains visible');
 
+        const substantiveHistoricalToolReasoning = {
+          role: 'assistant',
+          content: '',
+          reasoning: 'The persisted session owns the final answer, so the stale worker must not overwrite it.',
+          tool_calls: [{ id: 'call_substantive', function: { name: 'read_file', arguments: '{}' } }],
+        };
+        assert(_messageHasReasoningPayload(substantiveHistoricalToolReasoning) === true,
+          'substantive historical tool reasoning must remain in the Worklog');
+        assert(_assistantReasoningPayloadText(substantiveHistoricalToolReasoning) === substantiveHistoricalToolReasoning.reasoning,
+          'substantive historical tool reasoning text must be preserved exactly');
+
         console.log(JSON.stringify({ok: true}));
         """
     )
 
 
-def test_historical_tool_call_reasoning_fragments_do_not_render_as_thinking():
+def test_historical_tool_call_reasoning_without_provenance_remains_visible():
     result = subprocess.run(
         ["node", "-e", _node_harness()],
         cwd=REPO_ROOT,

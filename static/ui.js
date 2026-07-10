@@ -10038,7 +10038,6 @@ function _assistantReasoningPayloadIsHistoricalToolCallOnly(m){
 }
 function _messageHasReasoningPayload(m){
   if(!m||m.role!=='assistant') return false;
-  if(_assistantReasoningPayloadIsHistoricalToolCallOnly(m)) return false;
   if(m.reasoning||m.reasoning_content||m.thinking||m._reasoning) return true;
   if(Array.isArray(m.content)) return m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'));
   if(typeof window!=='undefined'&&typeof window._extractInlineThinkingFromContentForRender==='function'){
@@ -10137,7 +10136,6 @@ function _assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs){
 }
 function _assistantReasoningPayloadText(m){
   if(!m||m.role!=='assistant') return '';
-  if(_assistantReasoningPayloadIsHistoricalToolCallOnly(m)) return '';
   const direct=m.reasoning_content||m.reasoning||m.thinking||m._reasoning||'';
   if(String(direct||'').trim()) return String(direct).trim();
   if(Array.isArray(m.content)){
