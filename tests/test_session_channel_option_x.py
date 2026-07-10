@@ -937,7 +937,7 @@ def test_load_session_rearms_stream_on_every_early_return():
 
     # Isolate the loadSession body.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 14000]
+    body = js[fn_ix:fn_ix + 15000]
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).

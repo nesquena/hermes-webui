@@ -1403,8 +1403,10 @@ async function _switchProfileForSessionLoad(profile){
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
-  // Extension pre-open hook (fires once per click — see _hermesSessionOpenAlreadyFired)
-  if(!opts.skipExtHooks && !_hermesSessionOpenAlreadyFired && typeof _hermesNotifySessionOpen==='function'){
+  // Extension pre-open hook — fires once per sidebar click, not on every call.
+  // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
+  // when loadSession runs the actual navigation inside it.
+  if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
       return;
@@ -2148,9 +2150,8 @@ async function _openSidebarSession(session, loadOpts={}){
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
   await _ensureSidebarSessionProfile(session);
-  // Set flag so the pre-hook in loadSession skips its own fire — we already ran it above.
-  _hermesSessionOpenAlreadyFired = true;
-  await loadSession(session.session_id, loadOpts);
+  // Tell loadSession to skip its pre-hook — we already ran it above.
+  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
   renderSessionListFromCache();
 }
 
