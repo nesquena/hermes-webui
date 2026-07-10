@@ -27,9 +27,13 @@ _NEVER_EXPOSE: frozenset[str] = frozenset({
 
 # Narrow agent-side execution allowlist for /api/commands/exec.
 _AGENT_COMMAND_ALIASES = {
+    'bp': 'blueprint',
     'reload_mcp': 'reload-mcp',
     'reload_skills': 'reload-skills',
     'codex_runtime': 'codex-runtime',
+    'suggest': 'suggestions',
+    'tasks': 'agents',
+    'v': 'version',
 }
 # NB: which commands seed an agent turn is NOT a static list — a handler opts in
 # purely by returning a ``{"output": ..., "message": ...}`` dict (``message`` is
@@ -598,14 +602,15 @@ def _run_kanban_command(arg_string: str) -> str:
 
 def _run_memory_command(command: str) -> str:
     args = _shellish_args(command)
-    # WebUI-safe: `/memory approval on|off` writes memory.write_approval to the
+    # WebUI-safe: `/memory approval on|off` (also spelled `/memory mode on|off`)
+    # writes memory.write_approval to the
     # SHARED Hermes config (set_config_value), silently changing write-approval for
     # every CLI session under the same HERMES_HOME — a persistent cross-boundary
     # mutation. Block that toggle; `pending`/`approve`/`reject` act on in-session
-    # pending writes and stay allowed, and bare `approval` just reports status.
-    if args and args[0] == "approval" and len(args) > 1:
+    # pending writes and stay allowed, and bare `approval`/`mode` just report status.
+    if args and args[0] in {"approval", "mode"} and len(args) > 1:
         raise RuntimeError(
-            "`/memory approval on|off` is not available from the WebUI — it changes "
+            "`/memory approval|mode on|off` is not available from the WebUI — it changes "
             "write-approval in the shared Hermes config, affecting every CLI session under "
             "the same HERMES_HOME. Use `/memory pending`, `approve`, or `reject` here; "
             "toggle the persistent setting from the terminal."
@@ -632,7 +637,11 @@ def _run_memory_command(command: str) -> str:
     except Exception as exc:
         logger.warning("Memory command failed", exc_info=True)
         raise RuntimeError("Memory command failed") from exc
-    return _text_or_no_output(out or "Unknown /memory subcommand. Use: pending, approve <id>, reject <id>, approval <on|off>.")
+    return _text_or_no_output(
+        out
+        or "Unknown /memory subcommand. Use here: pending, approve <id>, reject <id>, "
+        "or approval (status only). Toggle approval mode from the terminal."
+    )
 
 
 def _run_suggestions_command(arg_string: str) -> str:

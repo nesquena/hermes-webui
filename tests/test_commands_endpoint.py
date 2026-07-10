@@ -711,15 +711,20 @@ def test_suggestions_command_blocks_subcommands(monkeypatch):
 
 
 def test_memory_command_blocks_shared_config_approval_toggle(monkeypatch):
-    """WebUI-safe: `/memory approval on|off` writes memory.write_approval to the
+    """WebUI-safe: `/memory approval|mode on|off` writes memory.write_approval to the
     shared Hermes config (cross-session) and is blocked; pending/approve/reject
-    (in-session) and bare `approval` (status) pass through."""
+    (in-session) and bare `approval`/`mode` (status) pass through."""
     import sys
     import types
 
     from api import commands
 
-    for blocked in ("/memory approval on", "/memory approval off"):
+    for blocked in (
+        "/memory approval on",
+        "/memory approval off",
+        "/memory mode on",
+        "/memory mode off",
+    ):
         with pytest.raises(RuntimeError, match="not available from the WebUI"):
             commands._run_memory_command(blocked)
 
@@ -739,9 +744,15 @@ def test_memory_command_blocks_shared_config_approval_toggle(monkeypatch):
     mt.load_on_disk_store = lambda: {}
     monkeypatch.setitem(sys.modules, "tools.memory_tool", mt)
 
-    for allowed in ("/memory pending", "/memory approve 1", "/memory reject 1", "/memory approval"):
+    for allowed in (
+        "/memory pending",
+        "/memory approve 1",
+        "/memory reject 1",
+        "/memory approval",
+        "/memory mode",
+    ):
         assert commands._run_memory_command(allowed) == "mem-ok"
-    assert ["pending"] in seen and ["approval"] in seen
+    assert ["pending"] in seen and ["approval"] in seen and ["mode"] in seen
 
 
 def test_webui_safe_agent_commands_are_allowlisted(monkeypatch):
@@ -753,6 +764,21 @@ def test_webui_safe_agent_commands_are_allowlisted(monkeypatch):
 
     assert commands.execute_agent_command('/kanban list') == "kanban list"
     assert commands.execute_agent_command('/whoami') == "profile ok"
+
+
+def test_webui_safe_agent_command_aliases_resolve_to_allowlisted_handlers(monkeypatch):
+    """Registry aliases must not be intercepted by the frontend then rejected by the API."""
+    from api import commands
+
+    monkeypatch.setattr(commands, "_run_agents_command", lambda: "agents ok")
+    monkeypatch.setattr(commands, "_run_suggestions_command", lambda arg: f"suggestions {arg}")
+    monkeypatch.setattr(commands, "_run_blueprint_command", lambda arg: f"blueprint {arg}")
+    monkeypatch.setattr(commands, "_run_version_command", lambda: "version ok")
+
+    assert commands.execute_agent_command('/tasks') == "agents ok"
+    assert commands.execute_agent_command('/suggest') == "suggestions "
+    assert commands.execute_agent_command('/bp morning') == "blueprint morning"
+    assert commands.execute_agent_command('/v') == "version ok"
 
 
 @requires_agent_modules
