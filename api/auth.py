@@ -104,15 +104,8 @@ _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 _TRUSTED_AUTH_HEADER_ENV = 'HERMES_WEBUI_TRUSTED_AUTH_HEADER'
 _TRUSTED_GROUPS_HEADER_ENV = 'HERMES_WEBUI_TRUSTED_GROUPS_HEADER'
 _TRUSTED_GROUP_PROFILE_MAP_ENV = 'HERMES_WEBUI_GROUP_PROFILE_MAP'
-_TRUSTED_AUTH_PROXY_IPS_ENV = 'HERMES_WEBUI_TRUSTED_AUTH_PROXY_IPS'
 _TRUSTED_AUTH_LOGOUT_URL_ENV = 'HERMES_WEBUI_TRUSTED_AUTH_LOGOUT_URL'
-_TRUSTED_PROXY_DEFAULT_ALLOWLIST = (
-    '127.0.0.0/8',
-    '::1/128',
-    '::ffff:127.0.0.0/104',
-)
 _TRUSTED_AUTH_WARNINGS_EMITTED: set[str] = set()
-_TRUSTED_PROXY_NETWORKS_CACHE: tuple[str, tuple[object, ...]] | None = None
 
 
 def _warn_trusted_auth_once(key: str, message: str, *args) -> None:
@@ -658,52 +651,6 @@ def _trusted_auth_header_configured() -> bool:
     return bool(os.getenv(_TRUSTED_AUTH_HEADER_ENV, '').strip())
 
 
-def _trusted_auth_proxy_networks() -> tuple[object, ...] | None:
-    import ipaddress as _ipaddress
-
-    global _TRUSTED_PROXY_NETWORKS_CACHE
-    raw = os.getenv(_TRUSTED_AUTH_PROXY_IPS_ENV, '').strip()
-    cached = _TRUSTED_PROXY_NETWORKS_CACHE
-    if cached and cached[0] == raw:
-        return cached[1]
-    parts = [part.strip() for part in raw.split(',') if part.strip()] if raw else list(_TRUSTED_PROXY_DEFAULT_ALLOWLIST)
-    networks = []
-    try:
-        for part in parts:
-            networks.append(_ipaddress.ip_network(part, strict=False))
-    except ValueError:
-        _warn_trusted_auth_once(
-            'trusted-proxy-ips',
-            'Ignoring invalid %s=%r; trusted-header auth rejects every proxy peer',
-            _TRUSTED_AUTH_PROXY_IPS_ENV,
-            raw or parts,
-        )
-        result = ()
-    else:
-        result = tuple(networks)
-    _TRUSTED_PROXY_NETWORKS_CACHE = (raw, result)
-    return result
-
-
-def _trusted_auth_proxy_peer_allowed(handler) -> bool:
-    import ipaddress as _ipaddress
-
-    networks = _trusted_auth_proxy_networks()
-    if not networks:
-        return False
-    try:
-        peer = str(handler.client_address[0]).strip()
-    except Exception:
-        return False
-    if not peer:
-        return False
-    try:
-        ip = _ipaddress.ip_address(peer)
-    except ValueError:
-        return False
-    return any(ip in network for network in networks)
-
-
 def _trusted_group_profile_map() -> dict[str, str] | None:
     raw = os.getenv(_TRUSTED_GROUP_PROFILE_MAP_ENV, '').strip()
     if not raw:
@@ -871,49 +818,84 @@ def get_trusted_auth_logout_url() -> str | None:
     return value or None
 
 
+def _remember_trusted_auth_session(handler, info: dict | None, cookie_value: str | None = None) -> dict | None:
+    handler._trusted_auth_session_reconciled = info
+    if info and info.get('auth_type') == 'trusted':
+        handler._trusted_auth_session_info = info
+        handler._trusted_auth_session_cookie_value = cookie_value
+    return info
+
+
+def reset_trusted_auth_request_state(handler) -> None:
+    for name in (
+        '_trusted_auth_session_reconciled',
+        '_trusted_auth_session_rejected',
+        '_trusted_auth_session_info',
+        '_trusted_auth_session_cookie_value',
+    ):
+        try:
+            delattr(handler, name)
+        except AttributeError:
+            pass
+
+
+def _apply_trusted_session_profile(handler, bound_profile: str | None, cookie_value: str) -> None:
+    if bound_profile is None:
+        return
+    from api.helpers import get_profile_cookie
+    from api.profiles import set_request_profile
+
+    set_request_profile(bound_profile)
+    if get_profile_cookie(handler) != bound_profile:
+        _queue_pending_cookie(handler, _build_profile_cookie_header(bound_profile, cookie_value))
+
+
 def ensure_trusted_auth_session(handler) -> dict | None:
+    if hasattr(handler, '_trusted_auth_session_reconciled'):
+        return handler._trusted_auth_session_reconciled
     cookie_value = parse_cookie(handler)
-    if cookie_value and verify_session(cookie_value):
-        return get_session_info(cookie_value)
+    info = get_session_info(cookie_value) if cookie_value and verify_session(cookie_value) else None
+    if info and info.get('auth_type') != 'trusted':
+        return _remember_trusted_auth_session(handler, info)
     if not is_trusted_auth_enabled():
-        return None
-    if not _trusted_auth_proxy_peer_allowed(handler):
-        return None
+        if info:
+            invalidate_session(cookie_value)
+            handler._trusted_auth_session_rejected = True
+        return _remember_trusted_auth_session(handler, None)
+    from api.routes import _raw_peer_is_trusted_proxy
+
+    if not _raw_peer_is_trusted_proxy(handler):
+        if info:
+            invalidate_session(cookie_value)
+            handler._trusted_auth_session_rejected = True
+        return _remember_trusted_auth_session(handler, None)
     username = _trusted_auth_username(handler)
     if not username:
-        return None
+        if info:
+            invalidate_session(cookie_value)
+            handler._trusted_auth_session_rejected = True
+        return _remember_trusted_auth_session(handler, None)
     bound_profile = _trusted_auth_bound_profile(handler)
+    if info and info.get('username') == username and info.get('bound_profile') == bound_profile:
+        _apply_trusted_session_profile(handler, bound_profile, cookie_value)
+        return _remember_trusted_auth_session(handler, info, cookie_value)
+    if info:
+        invalidate_session(cookie_value)
     cookie_value = create_session(
         auth_type='trusted',
         username=username,
         bound_profile=bound_profile,
     )
     _queue_pending_cookie(handler, _auth_cookie_header(cookie_value, handler))
-    if bound_profile is not None:
-        _queue_pending_cookie(handler, _build_profile_cookie_header(bound_profile, cookie_value))
-        try:
-            from api.profiles import set_request_profile
-
-            set_request_profile(bound_profile)
-        except Exception:
-            logger.debug("Failed to bind trusted request profile", exc_info=True)
+    _apply_trusted_session_profile(handler, bound_profile, cookie_value)
     info = get_session_info(cookie_value)
-    if info is not None:
-        handler._trusted_auth_session_info = info
-        handler._trusted_auth_session_cookie_value = cookie_value
-    return info
+    return _remember_trusted_auth_session(handler, info, cookie_value)
 
 
 def trusted_session_allows_active_profile(info: dict | None) -> bool:
     if not info:
         return True
     return _request_profile_matches_bound(str(info.get('bound_profile') or '') or None)
-
-
-def trusted_session_allows_current_peer(handler, info: dict | None) -> bool:
-    if not info or info.get('auth_type') != 'trusted':
-        return True
-    return is_trusted_auth_enabled() and _trusted_auth_proxy_peer_allowed(handler)
 
 
 def _session_token_from_cookie_value(cookie_value: str) -> str | None:
@@ -1075,26 +1057,21 @@ def check_auth(handler, parsed) -> bool:
         or parsed.path.startswith('/session/static/')
     ):
         return True
-    # Check session cookie
     cookie_val = parse_cookie(handler)
-    if cookie_val and verify_session(cookie_val):
-        session_info = get_session_info(cookie_val)
-        if parsed.path == '/api/auth/logout':
+    has_session = bool(cookie_val and verify_session(cookie_val))
+    if parsed.path == '/api/auth/logout':
+        if has_session:
+            ensure_trusted_auth_session(handler)
             return True
-        if not trusted_session_allows_current_peer(handler, session_info):
-            if parsed.path.startswith('/api/'):
-                body = b'{"error":"Authentication required"}'
-                handler.send_response(401)
-                handler.send_header('Content-Type', 'application/json')
-            else:
-                body = b'Authentication required'
-                handler.send_response(302)
-                handler.send_header('Location', '/login')
-                handler.send_header('Content-Type', 'text/plain; charset=utf-8')
-            handler.send_header('Content-Length', str(len(body)))
-            handler.end_headers()
-            handler.wfile.write(body)
-            return False
+        body = b'{"error":"Authentication required"}'
+        handler.send_response(401)
+        handler.send_header('Content-Type', 'application/json')
+        handler.send_header('Content-Length', str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+        return False
+    session_info = ensure_trusted_auth_session(handler)
+    if session_info:
         if not trusted_session_allows_active_profile(session_info):
             if parsed.path.startswith('/api/'):
                 body = b'{"error":"Profile access forbidden"}'
@@ -1104,25 +1081,6 @@ def check_auth(handler, parsed) -> bool:
                 body = b'Profile access forbidden'
                 handler.send_response(403)
                 handler.send_header('Content-Type', 'text/plain; charset=utf-8')
-            handler.send_header('Content-Length', str(len(body)))
-            handler.end_headers()
-            handler.wfile.write(body)
-            return False
-        return True
-    if parsed.path == '/api/auth/logout':
-        body = b'{"error":"Authentication required"}'
-        handler.send_response(401)
-        handler.send_header('Content-Type', 'application/json')
-        handler.send_header('Content-Length', str(len(body)))
-        handler.end_headers()
-        handler.wfile.write(body)
-        return False
-    trusted_session = ensure_trusted_auth_session(handler)
-    if trusted_session and trusted_session.get('auth_type') == 'trusted':
-        if not trusted_session_allows_active_profile(trusted_session):
-            body = b'{"error":"Profile access forbidden"}'
-            handler.send_response(403)
-            handler.send_header('Content-Type', 'application/json')
             handler.send_header('Content-Length', str(len(body)))
             handler.end_headers()
             handler.wfile.write(body)

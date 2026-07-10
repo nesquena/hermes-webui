@@ -11833,13 +11833,9 @@ def handle_get(handler, parsed) -> bool:
             _passkey_feature_flag_enabled,
             ensure_trusted_auth_session,
             get_password_hash,
-            get_session_info,
             is_auth_enabled,
             is_oidc_auth_enabled,
             is_trusted_auth_enabled,
-            parse_cookie,
-            trusted_session_allows_current_peer,
-            verify_session,
         )
         from api.passkeys import registered_credentials
 
@@ -11848,16 +11844,8 @@ def handle_get(handler, parsed) -> bool:
         auth_enabled = is_auth_enabled()
         oidc_enabled = is_oidc_auth_enabled()
         if auth_enabled:
-            cv = parse_cookie(handler)
-            logged_in = bool(cv and verify_session(cv))
-            if logged_in and cv:
-                session_info = get_session_info(cv)
-                if not trusted_session_allows_current_peer(handler, session_info):
-                    logged_in = False
-                    session_info = None
-            elif is_trusted_auth_enabled():
-                session_info = ensure_trusted_auth_session(handler)
-                logged_in = bool(session_info)
+            session_info = ensure_trusted_auth_session(handler)
+            logged_in = bool(session_info)
         passkey_flag = _passkey_feature_flag_enabled()
         passkeys = registered_credentials() if passkey_flag else []
         password_auth_enabled = get_password_hash() is not None
@@ -15162,20 +15150,14 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
-            from api.auth import ensure_trusted_auth_session, parse_cookie
+            from api.auth import ensure_trusted_auth_session
             from api.profiles import switch_profile, _validate_profile_name
             from api.helpers import build_profile_cookie
             if name != 'default':
                 _validate_profile_name(name)
-            session_info = getattr(handler, '_trusted_auth_session_info', None)
-            if session_info is None:
-                session_info = ensure_trusted_auth_session(handler)
-            if session_info is None:
-                cookie_val = parse_cookie(handler)
-                if cookie_val:
-                    from api.auth import get_session_info
-
-                    session_info = get_session_info(cookie_val)
+            session_info = ensure_trusted_auth_session(handler)
+            if getattr(handler, '_trusted_auth_session_rejected', False):
+                return bad(handler, 'Authentication required', 401)
             bound_profile = str((session_info or {}).get("bound_profile") or "").strip() or None
             if bound_profile and name != bound_profile:
                 return bad(handler, "Profile is bound to the current session", 403)
@@ -16136,11 +16118,11 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"credentials": registered_credentials()})
 
     if parsed.path == "/api/auth/logout":
-        from api.auth import clear_auth_cookie, get_session_info, get_trusted_auth_logout_url, invalidate_session, parse_cookie
+        from api.auth import clear_auth_cookie, ensure_trusted_auth_session, get_trusted_auth_logout_url, invalidate_session, parse_cookie
         from api.helpers import clear_profile_cookie
 
-        cookie_val = parse_cookie(handler)
-        session_info = get_session_info(cookie_val) if cookie_val else None
+        session_info = ensure_trusted_auth_session(handler)
+        cookie_val = getattr(handler, '_trusted_auth_session_cookie_value', None) or parse_cookie(handler)
         if cookie_val:
             invalidate_session(cookie_val)
         payload = {"ok": True}

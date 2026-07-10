@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import subprocess
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +13,11 @@ import pytest
 import api.auth as auth
 import api.routes as routes
 import api.profiles as profiles
+from tests.js_source_extract import extract_function
+
+
+PANELS_JS = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 class _Handler:
@@ -55,12 +63,10 @@ def isolated_auth_state(monkeypatch, tmp_path):
     monkeypatch.setattr(auth, "is_oidc_auth_enabled", lambda: False)
     auth._sessions.clear()
     auth._TRUSTED_AUTH_WARNINGS_EMITTED.clear()
-    auth._TRUSTED_PROXY_NETWORKS_CACHE = None
     profiles.clear_request_profile()
     yield
     auth._sessions.clear()
     auth._TRUSTED_AUTH_WARNINGS_EMITTED.clear()
-    auth._TRUSTED_PROXY_NETWORKS_CACHE = None
     profiles.clear_request_profile()
 
 
@@ -70,14 +76,14 @@ def _trusted_env(
     header="Remote-User",
     groups_header=None,
     group_map=None,
-    proxy_ips=None,
+    proxy_cidrs=None,
     logout_url=None,
 ):
     for key in (
         "HERMES_WEBUI_TRUSTED_AUTH_HEADER",
         "HERMES_WEBUI_TRUSTED_GROUPS_HEADER",
         "HERMES_WEBUI_GROUP_PROFILE_MAP",
-        "HERMES_WEBUI_TRUSTED_AUTH_PROXY_IPS",
+        "HERMES_WEBUI_TRUSTED_PROXY_CIDRS",
         "HERMES_WEBUI_TRUSTED_AUTH_LOGOUT_URL",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -87,8 +93,8 @@ def _trusted_env(
         monkeypatch.setenv("HERMES_WEBUI_TRUSTED_GROUPS_HEADER", groups_header)
     if group_map is not None:
         monkeypatch.setenv("HERMES_WEBUI_GROUP_PROFILE_MAP", json.dumps(group_map))
-    if proxy_ips is not None:
-        monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_PROXY_IPS", proxy_ips)
+    if proxy_cidrs is not None:
+        monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", proxy_cidrs)
     if logout_url is not None:
         monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_LOGOUT_URL", logout_url)
 
@@ -114,9 +120,9 @@ def test_untrusted_peer_header_does_not_create_session(monkeypatch):
     assert getattr(handler, "_pending_set_cookies", []) == []
 
 
-def test_invalid_trusted_proxy_allowlist_fails_closed(monkeypatch):
-    _trusted_env(monkeypatch, proxy_ips="bad-cidr")
-    handler = _Handler(headers={"Remote-User": "alice"})
+def test_malformed_trusted_proxy_cidr_rejects_non_loopback_peer(monkeypatch):
+    _trusted_env(monkeypatch, proxy_cidrs="bad-cidr")
+    handler = _Handler(headers={"Remote-User": "alice"}, client_address=("10.0.0.5", 12345))
 
     result = auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query=""))
 
@@ -127,10 +133,13 @@ def test_invalid_trusted_proxy_allowlist_fails_closed(monkeypatch):
     assert getattr(handler, "_pending_set_cookies", []) == []
 
 
-def test_invalid_trusted_proxy_allowlist_rejects_existing_trusted_session(monkeypatch):
-    _trusted_env(monkeypatch, proxy_ips="bad-cidr")
+def test_malformed_trusted_proxy_cidr_rejects_existing_trusted_session(monkeypatch):
+    _trusted_env(monkeypatch, proxy_cidrs="bad-cidr")
     cookie = auth.create_session(auth_type="trusted", username="alice")
-    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler = _Handler(
+        headers={"Cookie": f"hermes_session={cookie}", "Remote-User": "alice"},
+        client_address=("10.0.0.5", 12345),
+    )
 
     result = auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query=""))
 
@@ -139,6 +148,7 @@ def test_invalid_trusted_proxy_allowlist_rejects_existing_trusted_session(monkey
     assert result is False
     assert handler.status == 401
     assert handler.body_text() == '{"error":"Authentication required"}'
+    assert auth.verify_session(cookie) is False
 
 
 def test_invalid_trusted_header_name_fails_closed(monkeypatch):
@@ -222,13 +232,13 @@ def test_group_map_without_match_binds_default(monkeypatch):
 
 
 def test_bound_profile_mismatch_rejected(monkeypatch):
-    _trusted_env(monkeypatch)
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
     cookie = auth.create_session(
         auth_type="trusted",
         username="alice",
         bound_profile="devops",
     )
-    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}", "Remote-User": "alice", "Remote-Groups": "hermes_devops"})
     monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "coworkers")
 
     result = auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query=""))
@@ -239,13 +249,13 @@ def test_bound_profile_mismatch_rejected(monkeypatch):
 
 
 def test_bound_profile_match_allowed(monkeypatch):
-    _trusted_env(monkeypatch)
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
     cookie = auth.create_session(
         auth_type="trusted",
         username="alice",
         bound_profile="devops",
     )
-    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}", "Remote-User": "alice", "Remote-Groups": "hermes_devops"})
     monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "devops")
 
     result = auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query=""))
@@ -260,7 +270,8 @@ def test_profile_switch_rejects_other_bound_profile(monkeypatch):
         username="alice",
         bound_profile="devops",
     )
-    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}", "Remote-User": "alice", "Remote-Groups": "hermes_devops"})
     handler.command = "POST"
     monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "devops")
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
@@ -303,13 +314,13 @@ def test_first_trusted_profile_switch_rejection_keeps_session_cookies(monkeypatc
 
 
 def test_profile_switch_accepts_bound_profile(monkeypatch):
-    _trusted_env(monkeypatch)
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
     cookie = auth.create_session(
         auth_type="trusted",
         username="alice",
         bound_profile="devops",
     )
-    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}", "Remote-User": "alice", "Remote-Groups": "hermes_devops"})
     handler.command = "POST"
     monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "devops")
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
@@ -326,13 +337,13 @@ def test_profile_switch_accepts_bound_profile(monkeypatch):
 
 
 def test_auth_status_reports_trusted_session_fields(monkeypatch):
-    _trusted_env(monkeypatch)
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
     cookie = auth.create_session(
         auth_type="trusted",
         username="alice",
         bound_profile="devops",
     )
-    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}", "Remote-User": "alice", "Remote-Groups": "hermes_devops"})
     monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: False)
     monkeypatch.setattr("api.passkeys.registered_credentials", lambda: [])
 
@@ -347,14 +358,17 @@ def test_auth_status_reports_trusted_session_fields(monkeypatch):
     assert payload["bound_profile"] == "devops"
 
 
-def test_auth_status_rejects_trusted_cookie_when_proxy_allowlist_invalid(monkeypatch):
-    _trusted_env(monkeypatch, proxy_ips="bad-cidr")
+def test_auth_status_rejects_trusted_cookie_when_proxy_cidr_is_malformed(monkeypatch):
+    _trusted_env(monkeypatch, proxy_cidrs="bad-cidr")
     cookie = auth.create_session(
         auth_type="trusted",
         username="alice",
         bound_profile="devops",
     )
-    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler = _Handler(
+        headers={"Cookie": f"hermes_session={cookie}", "Remote-User": "alice"},
+        client_address=("10.0.0.5", 12345),
+    )
     monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: False)
     monkeypatch.setattr("api.passkeys.registered_credentials", lambda: [])
 
@@ -367,6 +381,172 @@ def test_auth_status_rejects_trusted_cookie_when_proxy_allowlist_invalid(monkeyp
     assert "auth_type" not in payload
     assert "user" not in payload
     assert "bound_profile" not in payload
+    assert auth.verify_session(cookie) is False
+
+
+def test_malformed_trusted_proxy_cidr_keeps_loopback_trusted(monkeypatch):
+    _trusted_env(monkeypatch, proxy_cidrs="bad-cidr")
+    handler = _Handler(headers={"Remote-User": "alice"})
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+
+
+def test_mapped_ipv6_peer_matches_canonical_trusted_proxy_cidr(monkeypatch):
+    _trusted_env(monkeypatch, proxy_cidrs="10.0.0.0/8")
+    handler = _Handler(
+        headers={"Remote-User": "alice"},
+        client_address=("::ffff:10.0.0.5", 12345),
+    )
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert handler._trusted_auth_session_info["username"] == "alice"
+
+
+def test_existing_trusted_session_rotates_for_current_identity(monkeypatch):
+    _trusted_env(
+        monkeypatch,
+        groups_header="Remote-Groups",
+        group_map={"alice-group": "alice", "bob-group": "bob"},
+    )
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile="alice",
+    )
+    handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={cookie}",
+            "Remote-User": "bob",
+            "Remote-Groups": "bob-group",
+        }
+    )
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert auth.verify_session(cookie) is False
+    assert handler._trusted_auth_session_info["username"] == "bob"
+    assert handler._trusted_auth_session_info["bound_profile"] == "bob"
+    assert handler._trusted_auth_session_cookie_value != cookie
+    assert profiles.get_active_profile_name() == "bob"
+
+
+def test_trusted_reconciliation_cache_resets_between_requests(monkeypatch):
+    _trusted_env(monkeypatch)
+    handler = _Handler(headers={"Remote-User": "alice"})
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    alice_cookie = handler._trusted_auth_session_cookie_value
+    handler.headers = {"Cookie": f"hermes_session={alice_cookie}", "Remote-User": "bob"}
+    handler._pending_set_cookies = []
+    auth.reset_trusted_auth_request_state(handler)
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert auth.verify_session(alice_cookie) is False
+    assert handler._trusted_auth_session_info["username"] == "bob"
+
+
+def test_server_resets_trusted_auth_request_state_per_request():
+    server_source = (Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
+
+    assert server_source.count("reset_trusted_auth_request_state(self)") == 2
+
+
+def test_auth_status_reports_reconciled_trusted_identity(monkeypatch):
+    _trusted_env(
+        monkeypatch,
+        groups_header="Remote-Groups",
+        group_map={"alice-group": "alice", "bob-group": "bob"},
+    )
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile="alice",
+    )
+    handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={cookie}",
+            "Remote-User": "bob",
+            "Remote-Groups": "bob-group",
+        }
+    )
+    monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: False)
+    monkeypatch.setattr("api.passkeys.registered_credentials", lambda: [])
+
+    routes.handle_get(handler, SimpleNamespace(path="/api/auth/status", query=""))
+
+    payload = handler.json_body()
+    assert payload["logged_in"] is True
+    assert payload["user"] == "bob"
+    assert payload["bound_profile"] == "bob"
+    assert auth.verify_session(cookie) is False
+
+
+def test_existing_trusted_session_without_header_is_invalidated(monkeypatch):
+    _trusted_env(monkeypatch)
+    cookie = auth.create_session(auth_type="trusted", username="alice")
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is False
+    assert handler.status == 401
+    assert auth.verify_session(cookie) is False
+
+
+def test_untrusted_existing_trusted_session_is_rejected_by_all_consumers(monkeypatch):
+    _trusted_env(monkeypatch)
+    headers = {"Remote-User": "alice"}
+
+    protected_cookie = auth.create_session(auth_type="trusted", username="alice")
+    protected = _Handler(
+        headers={**headers, "Cookie": f"hermes_session={protected_cookie}"},
+        client_address=("10.0.0.5", 12345),
+    )
+    assert auth.check_auth(protected, SimpleNamespace(path="/api/sessions", query="")) is False
+    assert protected.status == 401
+    assert auth.verify_session(protected_cookie) is False
+
+    status_cookie = auth.create_session(auth_type="trusted", username="alice")
+    status = _Handler(
+        headers={**headers, "Cookie": f"hermes_session={status_cookie}"},
+        client_address=("10.0.0.5", 12345),
+    )
+    monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: False)
+    monkeypatch.setattr("api.passkeys.registered_credentials", lambda: [])
+    routes.handle_get(status, SimpleNamespace(path="/api/auth/status", query=""))
+    assert status.json_body()["logged_in"] is False
+    assert auth.verify_session(status_cookie) is False
+
+    switch_cookie = auth.create_session(auth_type="trusted", username="alice")
+    switch = _Handler(
+        headers={**headers, "Cookie": f"hermes_session={switch_cookie}"},
+        client_address=("10.0.0.5", 12345),
+    )
+    switch.command = "POST"
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"name": "default"})
+    monkeypatch.setattr(
+        "api.profiles.switch_profile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not switch")),
+    )
+    routes.handle_post(switch, SimpleNamespace(path="/api/profile/switch", query=""))
+    assert switch.status == 401
+    assert auth.verify_session(switch_cookie) is False
+
+
+def test_trusted_session_rehydrates_bound_profile_cookie(monkeypatch):
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
+    cookie = auth.create_session(
+        auth_type="trusted",
+        username="alice",
+        bound_profile="devops",
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}", "Remote-User": "alice", "Remote-Groups": "hermes_devops"})
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert profiles.get_active_profile_name() == "devops"
+    profile_cookie = next(
+        cookie_header for cookie_header in handler._pending_set_cookies if cookie_header.startswith("hermes_profile=")
+    )
+    profile_value = profile_cookie.split("=", 1)[1].split(";", 1)[0]
+    assert auth.verify_profile_cookie_value(profile_value, cookie) == "devops"
 
 
 def test_first_trusted_shell_response_includes_csrf_token(monkeypatch):
@@ -386,6 +566,8 @@ def test_first_trusted_shell_response_includes_csrf_token(monkeypatch):
 def test_logout_clears_auth_and_profile_cookies(monkeypatch):
     _trusted_env(
         monkeypatch,
+        groups_header="Remote-Groups",
+        group_map={"hermes_devops": "devops"},
         logout_url="https://auth.example.com/logout",
     )
     cookie = auth.create_session(
@@ -393,7 +575,7 @@ def test_logout_clears_auth_and_profile_cookies(monkeypatch):
         username="alice",
         bound_profile="devops",
     )
-    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}", "Remote-User": "alice", "Remote-Groups": "hermes_devops"})
     handler.command = "POST"
     monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "devops")
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
@@ -499,10 +681,41 @@ def test_consumers_route_through_auth_owner(monkeypatch):
     monkeypatch.setattr("api.gateway_watcher.restart_watcher_for_profile", lambda _name: None)
 
     routes.handle_get(handler, SimpleNamespace(path="/api/auth/status", query=""))
-    assert calls and calls[0][0] == "get_session_info"
+    assert calls and calls[0][0] == "ensure"
     assert handler.json_body()["bound_profile"] == "devops"
 
     calls.clear()
     routes.handle_post(handler, SimpleNamespace(path="/api/profile/switch", query=""))
     assert calls and calls[0][0] == "ensure"
     assert handler.status == 200
+
+
+def test_sign_out_uses_trusted_logout_url_with_login_fallback():
+    sign_out = extract_function(PANELS_JS, "signOut", prefix="async function")
+
+    assert "const response=await api('/api/auth/logout',{method:'POST',body:'{}'});" in sign_out
+    assert "window.location.href=response.trusted_logout_url||'login';" in sign_out
+    assert NODE is not None
+
+    def run_sign_out(logout_url):
+        script = f"""
+const signOut = (0, eval)("(" + {json.dumps(sign_out)} + ")");
+globalThis.api = async () => ({{trusted_logout_url: {json.dumps(logout_url)}}});
+globalThis.window = {{location: {{href: null}}}};
+globalThis.showToast = () => {{}};
+globalThis.t = (key) => key;
+signOut().then(() => process.stdout.write(JSON.stringify(window.location.href)));
+"""
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            [NODE, "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=creationflags,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    assert run_sign_out("https://auth.example.com/logout") == "https://auth.example.com/logout"
+    assert run_sign_out(None) == "login"
