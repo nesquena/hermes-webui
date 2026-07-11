@@ -55,6 +55,7 @@ from api.models import (
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
+    load_projects,
     record_process_wakeup_provider_unavailable_pause,
     reconciled_state_db_messages_for_session,
 )
@@ -667,6 +668,8 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         ("session_id", "Session ID"),
         ("profile", "Profile"),
         ("workspace", "Workspace"),
+        ("project_id", "Project ID"),
+        ("project_name", "Project name"),
     )
     for key, label in fields:
         raw = surface_context.get(key)
@@ -674,6 +677,30 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         if value:
             lines.append(f"- {label}: {value}")
     return "\n".join(lines)
+
+
+def _webui_project_surface_context(session) -> dict:
+    """Return passive project metadata for a WebUI session.
+
+    Project context is model-facing runtime metadata only. It deliberately
+    carries no instructions to create files, maintain dossiers, or suggest a
+    project assignment.
+    """
+    project_id = getattr(session, "project_id", None) or None
+    if not project_id:
+        return {}
+    project_name = None
+    try:
+        for project in load_projects():
+            if str(project.get("project_id") or "") == str(project_id):
+                project_name = str(project.get("name") or "").strip() or None
+                break
+    except Exception:
+        logger.debug("Failed to resolve WebUI project metadata for %s", project_id, exc_info=True)
+    context = {"project_id": str(project_id)}
+    if project_name:
+        context["project_name"] = project_name
+    return context
 
 
 def _webui_ephemeral_system_prompt(
@@ -8282,6 +8309,7 @@ def _run_agent_streaming(
                     'session_id': session_id,
                     'profile': getattr(s, 'profile', None),
                     'workspace': s.workspace,
+                    **_webui_project_surface_context(s),
                 },
                 config_data=_cfg,
             )
