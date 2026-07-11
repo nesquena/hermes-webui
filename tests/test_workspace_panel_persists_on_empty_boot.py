@@ -30,6 +30,18 @@ import pathlib
 
 REPO = pathlib.Path(__file__).parent.parent
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
+I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+
+
+def _html_tag_by_id(element_id: str) -> str:
+    marker = f'id="{element_id}"'
+    idx = INDEX_HTML.find(marker)
+    assert idx > 0, f"{element_id} not found in index.html"
+    start = INDEX_HTML.rfind("<button", 0, idx)
+    end = INDEX_HTML.find(">", idx)
+    assert start >= 0 and end > idx, f"{element_id} button tag not found"
+    return INDEX_HTML[start : end + 1]
 
 
 # ── 1. syncWorkspacePanelState preserves browse mode without a session ──────
@@ -136,3 +148,35 @@ class TestToggleStaysEnabledWithProfileWorkspace:
             "early-return guard so users can open the panel via the toggle "
             "button when a profile workspace is configured"
         )
+
+
+class TestWorkspacePanelStatefulLocalization:
+    def test_locale_pass_resyncs_stateful_panel_tooltips(self):
+        """Locale re-stamping must finish by restoring open/closed panel labels."""
+        assert "if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();" in I18N_JS
+
+    def test_stateful_toggle_buttons_do_not_carry_static_title_keys(self):
+        """The show/hide tooltip belongs to syncWorkspacePanelUI(), not static DOM i18n."""
+        for element_id in ("btnWorkspacePanelToggle", "btnWorkspacePanelEdgeToggle"):
+            tag = _html_tag_by_id(element_id)
+            assert 'data-i18n-title="workspace_panel_show"' not in tag
+            assert 'data-i18n-title="workspace_panel_hide"' not in tag
+
+    def test_stateful_toggle_buttons_do_not_carry_static_aria_keys(self):
+        """The final accessible label should match the current show/hide action."""
+        for element_id in ("btnWorkspacePanelToggle", "btnWorkspacePanelEdgeToggle"):
+            tag = _html_tag_by_id(element_id)
+            assert 'data-i18n-aria-label="workspace_panel_toggle"' not in tag
+            assert 'data-i18n-aria-label="workspace_panel_show"' not in tag
+            assert 'data-i18n-aria-label="workspace_panel_hide"' not in tag
+        assert "toggleBtn.setAttribute('aria-label', label);" in BOOT_JS
+        assert "edgeToggleBtn.setAttribute('aria-label', label);" in BOOT_JS
+
+    def test_clear_preview_accessible_label_matches_stateful_tooltip(self):
+        """The close/preview action should expose the same localized label everywhere."""
+        idx = BOOT_JS.find("const clearBtn=$('btnClearPreview');")
+        assert idx > 0, "btnClearPreview sync block not found"
+        body = BOOT_JS[idx:idx + 600]
+        assert "const label=hasPreview?" in body
+        assert "_setButtonTooltip(clearBtn, label);" in body
+        assert "clearBtn.setAttribute('aria-label', label);" in body

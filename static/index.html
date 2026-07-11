@@ -412,10 +412,10 @@
         <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word"></div>
       </div>
       <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
-        <button class="update-btn" onclick="dismissUpdate()">Later</button>
-        <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>
-        <button class="update-btn" id="btnForceUpdate" style="display:none;background:var(--error,#e05);color:#fff;border-color:var(--error,#e05)" onclick="forceUpdate(this)">Force update</button>
-        <button class="update-btn" id="btnClearUpdateLock" style="display:none" onclick="applyClearUpdateLock(this)">Clear lock and retry update</button>
+        <button class="update-btn" onclick="dismissUpdate()" data-i18n="update_later">Later</button>
+        <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()" data-i18n="update_now">Update Now</button>
+        <button class="update-btn" id="btnForceUpdate" style="display:none;background:var(--error,#e05);color:#fff;border-color:var(--error,#e05)" onclick="forceUpdate(this)" data-i18n="update_force">Force update</button>
+        <button class="update-btn" id="btnClearUpdateLock" style="display:none" onclick="applyClearUpdateLock(this)" data-i18n="update_clear_lock_retry">Clear lock and retry update</button>
       </div>
     </div>
     <div class="update-banner" id="staleClientBanner">
@@ -424,7 +424,7 @@
         <span id="staleClientVersions" style="font-size:11px;margin-top:4px;color:var(--muted)"></span>
       </div>
       <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
-        <button class="update-btn update-primary" id="btnStaleClientRefresh" type="button" onclick="hardRefreshWebUIClient()">Hard refresh now</button>
+        <button class="update-btn update-primary" id="btnStaleClientRefresh" type="button" onclick="hardRefreshWebUIClient()" data-i18n="update_hard_refresh_now">Hard refresh now</button>
       </div>
     </div>
     <div id="mainChat" class="main-view">
@@ -586,7 +586,7 @@
           <span id="dropHintText">Drop files to attach</span>
         </div>
         <div class="attach-tray" id="attachTray"></div>
-        <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span> Listening…</div>
+        <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span> <span data-i18n="voice_listening">Listening…</span></div>
         <div class="voice-mode-bar" id="voiceModeBar" style="display:none">
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
@@ -596,10 +596,10 @@
         <div class="composer-footer">
           <div class="composer-left">
             <input type="file" id="fileInput" class="file-input-visually-hidden" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env,.xls,.xlsx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz">
-            <button type="button" class="icon-btn has-tooltip" id="btnAttach" data-tooltip="Attach files">
+            <button type="button" class="icon-btn has-tooltip" id="btnAttach" data-tooltip="Attach files" data-i18n-title="composer_control_attach" data-i18n-aria-label="composer_control_attach" aria-label="Attach files">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
-            <button type="button" class="icon-btn has-tooltip" id="btnSavedPrompts" data-tooltip="Saved prompts" onclick="toggleSavedPromptsPopup()" aria-haspopup="menu" aria-expanded="false" aria-controls="savedPromptsPopup">
+            <button type="button" class="icon-btn has-tooltip" id="btnSavedPrompts" data-tooltip="Saved prompts" data-i18n-title="composer_control_saved_prompts" data-i18n-aria-label="composer_control_saved_prompts" onclick="toggleSavedPromptsPopup()" aria-haspopup="menu" aria-expanded="false" aria-controls="savedPromptsPopup" aria-label="Saved prompts">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
             </button>
             <button class="icon-btn mic-btn has-tooltip" id="btnMic" data-tooltip="Dictate" data-i18n-title="voice_dictate" style="display:none">
@@ -635,7 +635,7 @@
             </div>
             <div class="composer-ws-wrap">
               <div class="composer-workspace-group ws-chip" id="composerWorkspaceGroup" role="group" aria-label="Workspace controls">
-                <button class="composer-workspace-files-btn" id="btnWorkspacePanelToggle" type="button" onclick="toggleWorkspacePanel()" title="Show workspace panel" aria-pressed="false" aria-label="Toggle workspace files panel">
+                <button class="composer-workspace-files-btn" id="btnWorkspacePanelToggle" type="button" onclick="toggleWorkspacePanel()" title="Show workspace panel" aria-pressed="false" aria-label="Show workspace panel">
                   <span class="composer-workspace-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
                 </button>
                 <button class="composer-workspace-chip" id="composerWorkspaceChip" type="button" onclick="toggleComposerWsDropdown()" title="Switch workspace" aria-label="Switch workspace" aria-haspopup="true" aria-expanded="false" aria-controls="composerWsDropdown" disabled>
@@ -694,7 +694,7 @@
               </button>
             </div>
           </div>
-          <div id="savedPromptsPopup" class="saved-prompts-popup" style="display:none" role="menu" aria-label="Saved prompts"></div>
+          <div id="savedPromptsPopup" class="saved-prompts-popup" style="display:none" role="menu" aria-label="Saved prompts" data-i18n-aria-label="composer_control_saved_prompts"></div>
           <div class="composer-right">
             <span class="composer-status" id="composerStatus" style="display:none"></span>
             <div class="ctx-indicator-wrap" id="ctxIndicatorWrap" style="display:none">
@@ -719,7 +719,7 @@
               </div>
             </div>
             <span class="bg-badge" id="bgBadge" style="display:none" title="Background tasks running">0</span>
-            <button class="send-btn has-tooltip has-tooltip--left" id="btnSend" data-tooltip="Send message" disabled>
+            <button class="send-btn has-tooltip has-tooltip--left" id="btnSend" data-tooltip="Send message" data-i18n-title="composer_send" data-i18n-aria-label="composer_send" disabled>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
             </button>
           </div>
@@ -1648,19 +1648,19 @@
       <div class="workspace-panel-title-group"><span id="workspacePanelHeading" class="workspace-panel-heading" title="Workspace">Workspace</span><span id="workspaceHiddenIndicator" class="workspace-hidden-indicator" data-i18n-title="workspace_hidden_files_visible_title" title="Hidden files are visible — click for options" hidden onclick="toggleWorkspacePrefsMenu(event)"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span data-i18n="workspace_hidden_files_visible">hidden visible</span></span></div>
       <span class="git-badge" id="gitBadge" style="display:none"></span>
       <div class="panel-actions">
-        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUpDir" data-tooltip="Parent directory" onclick="navigateUp()" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
-        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFile" data-tooltip="New file" onclick="promptNewFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFolder" data-tooltip="New folder" onclick="promptNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
-        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnRefreshPanel" data-tooltip="Refresh" onclick="if(S.session)refreshWorkspacePanel()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg></button>
-        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUploadWorkspace" data-tooltip="Upload file" onclick="triggerWorkspaceUpload()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUpDir" data-tooltip="Parent directory" data-i18n-title="workspace_parent_directory" data-i18n-aria-label="workspace_parent_directory" aria-label="Parent directory" onclick="navigateUp()" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFile" data-tooltip="New file" data-i18n-title="new_file" data-i18n-aria-label="new_file" aria-label="New file" onclick="promptNewFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFolder" data-tooltip="New folder" data-i18n-title="new_folder" data-i18n-aria-label="new_folder" aria-label="New folder" onclick="promptNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnRefreshPanel" data-tooltip="Refresh" data-i18n-title="kanban_refresh" data-i18n-aria-label="kanban_refresh" aria-label="Refresh" onclick="if(S.session)refreshWorkspacePanel()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUploadWorkspace" data-tooltip="Upload file" data-i18n-title="workspace_upload_file" data-i18n-aria-label="workspace_upload_file" aria-label="Upload file" onclick="triggerWorkspaceUpload()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnWorkspacePrefs" data-tooltip="Workspace options" data-i18n-title="workspace_options" aria-haspopup="true" aria-expanded="false" onclick="toggleWorkspacePrefsMenu(event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg><span class="workspace-prefs-dot" id="workspacePrefsDot" hidden></span></button>
-        <button class="panel-icon-btn close-preview has-tooltip has-tooltip--bottom" id="btnClearPreview" data-tooltip="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        <button class="panel-icon-btn close-preview has-tooltip has-tooltip--bottom" id="btnClearPreview" data-tooltip="Close preview" data-i18n-title="workspace_close_preview" data-i18n-aria-label="workspace_close_preview" aria-label="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
     </div>
     <input type="file" id="workspaceFileInput" class="file-input-visually-hidden" multiple accept="image/*,text/*,.pdf,.json,.csv,.md,.py,.js,.ts,.yaml,.yml,.toml,.zip,.tar,.gz,.tgz,.bz2,.xz">
-    <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views">
-      <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true">Files</button>
-      <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false">Artifacts <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
+    <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views" data-i18n-aria-label="workspace_panel_views">
+      <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true" data-i18n="workspace_files_tab">Files</button>
+      <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false"><span data-i18n="workspace_artifacts_tab">Artifacts</span> <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
       <button class="workspace-panel-tab" id="workspaceTodosTab" type="button" onclick="switchWorkspacePanelTab('todos')" role="tab" aria-selected="false" hidden data-i18n="tab_todos">Todos</button>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
