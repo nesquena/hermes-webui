@@ -397,3 +397,17 @@ class TestFilterBehavior:
         ]
         out = _run_filter(entries, {"ext": [{"type": "file", "name": "secret", "path": "ext/secret"}]}, "secret")
         assert out == []
+
+
+def test_filter_timer_pins_workspace_identity():
+    # #5911 gate (round 3): the debounced filter render must also pin the
+    # workspace it was scheduled for — not every workspace-changing path bumps
+    # _wsTreeGen (plain session load / new-chat nav), so the callback must no-op
+    # when S.session.workspace changed while the debounce was pending.
+    ui = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    assert "const scheduledWs=(S.session&&S.session.workspace)||'';" in ui, (
+        "filter render must capture the scheduled workspace identity"
+    )
+    assert "if(((S.session&&S.session.workspace)||'')!==scheduledWs) return;" in ui, (
+        "filter render timer callback must no-op when the workspace changed while pending"
+    )

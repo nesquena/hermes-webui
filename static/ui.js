@@ -18398,6 +18398,12 @@ function setWorkspaceTreeFilter(value){
   _syncWorkspaceTreeFilterUI();
   if(_workspaceFilterRenderTimer){clearTimeout(_workspaceFilterRenderTimer);}
   const scheduledGen=_wsTreeGenSnapshot();
+  // Capture the workspace this filter render was scheduled FOR. Not every path
+  // that changes the active workspace bumps _wsTreeGen (a plain session load /
+  // new-chat navigation that lands on a different workspace does not), so also
+  // pin the workspace identity: if it changed while the debounce was pending, the
+  // needle belongs to the workspace we just left and must not paint here.
+  const scheduledWs=(S.session&&S.session.workspace)||'';
   // #5911: if a workspace/profile switch bumps the tree generation while this
   // debounce is pending, the switch has shown a loading skeleton and is awaiting
   // a fresh /api/list. Repainting then would replace that skeleton with the
@@ -18405,6 +18411,7 @@ function setWorkspaceTreeFilter(value){
   _workspaceFilterRenderTimer=setTimeout(()=>{
     _workspaceFilterRenderTimer=null;
     if(_wsTreeGenSnapshot()!==scheduledGen) return;
+    if(((S.session&&S.session.workspace)||'')!==scheduledWs) return;
     renderFileTree();
   },150);
 }
