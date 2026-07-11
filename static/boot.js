@@ -1568,12 +1568,7 @@ window._hermesTtsSynth=function(id, text, opts){
 
       // Auto-send on silence after final result
       if(_finalText){
-        const _silenceMs=_voiceSilenceMs();
-        _clearVoiceModeSilenceTimer();
-        _silenceDeadlineAt=Date.now()+_silenceMs;
-        _silenceTimer=setTimeout(()=>{
-          _voiceModeSend();
-        },_voiceSilenceMs());
+        _armVoiceModeSilenceTimer(_voiceSilenceMs());
       }
     };
 
