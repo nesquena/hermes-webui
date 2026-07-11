@@ -56,6 +56,8 @@ from api.models import (
     clear_process_wakeup_pause,
     get_state_db_session_messages,
     record_process_wakeup_provider_unavailable_pause,
+    merge_session_messages_append_only,
+    _compression_child_messages_digest,
     reconciled_state_db_messages_for_session,
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
@@ -3620,16 +3622,41 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+def _disjoint_compression_parent_message_count(parent_messages, child_messages) -> int | None:
+    """Return the parent length only when the child is provably disjoint.
+
+    This check runs once at compression rotation, where both arrays are already
+    available. Persisting its result lets bounded reads avoid reparsing the
+    parent later without guessing from timestamps or relative lengths.
+    """
+    parent_messages = list(parent_messages or [])
+    child_messages = list(child_messages or [])
+    if not parent_messages or not child_messages:
+        return None
+    merged = merge_session_messages_append_only(
+        parent_messages,
+        child_messages,
+        truncation_watermark=None,
+    )
+    if len(merged) != len(parent_messages) + len(child_messages):
+        return None
+    return len(parent_messages)
+
+
+def _preserve_pre_compression_snapshot(s, old_sid: str) -> dict | None:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
+
+    Returns a durable parent-count marker only when the persisted parent and the
+    continuation sidecar merge without any deduplication. Ambiguous/cumulative
+    children return None and must use the full lineage read path.
     """
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
-        return
+        return None
     try:
         existing_text = old_path.read_text(encoding='utf-8')
         try:
@@ -3686,7 +3713,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
                 s.pending_user_source = saved_pending_user_source
-            return
+            return None
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
         # rewriting a shorter messages array over a fuller transcript.
@@ -3712,10 +3739,28 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
                 old_sid,
             )
+            parent_count = _disjoint_compression_parent_message_count(
+                snapshot.messages,
+                s.messages,
+            )
+            try:
+                parent_updated_at = float(getattr(snapshot, 'updated_at', 0) or 0)
+            except (TypeError, ValueError):
+                parent_updated_at = 0.0
+            if parent_count is None or parent_updated_at <= 0:
+                return None
+            return {
+                'parent_session_id': old_sid,
+                'message_count': parent_count,
+                'parent_updated_at': parent_updated_at,
+                'child_message_count': len(s.messages or []),
+                'child_messages_digest': _compression_child_messages_digest(s.messages),
+            }
     except OSError:
         logger.debug("Could not read old session file before preservation")
     except Exception:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+    return None
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -8674,7 +8719,7 @@ def _run_agent_streaming(
                     # compression removes messages from the model's context. Skip
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
-                    _preserve_pre_compression_snapshot(s, old_sid)
+                    _disjoint_parent_boundary = _preserve_pre_compression_snapshot(s, old_sid)
                     # The continuation is the live/tip session, not another archived
                     # snapshot. If the in-memory object was itself loaded from a
                     # pre-compression snapshot (possible on repeated compression chains
@@ -8683,6 +8728,11 @@ def _run_agent_streaming(
                     # new continuation so sidebar/discoverability code does not hide the
                     # session that owns the completed turn.
                     s.pre_compression_snapshot = False
+                    # This marker is the only read-side authority for adding a
+                    # metadata-only parent offset. Legacy, cumulative, and
+                    # partial-replay children keep None and fail closed to the
+                    # established full-lineage stitch.
+                    s.compression_disjoint_parent_boundary = _disjoint_parent_boundary
                     # Always link the continuation session to its immediate predecessor
                     # (the preserved snapshot). This OVERRIDES any prior
                     # parent_session_id because the new continuation IS the next link

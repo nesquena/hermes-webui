@@ -1179,9 +1179,10 @@ class Session:
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
-                parent_session_id: str=None,
-                worktree_path=None,
-                worktree_branch=None,
+                 parent_session_id: str=None,
+                 compression_disjoint_parent_boundary=None,
+                 worktree_path=None,
+                 worktree_branch=None,
                  worktree_repo_root=None,
                  worktree_created_at=None,
                  enabled_toolsets=None,
@@ -1252,6 +1253,11 @@ class Session:
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
         self.parent_session_id = parent_session_id
+        self.compression_disjoint_parent_boundary = (
+            copy.deepcopy(compression_disjoint_parent_boundary)
+            if isinstance(compression_disjoint_parent_boundary, dict)
+            else None
+        )
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
@@ -1341,7 +1347,7 @@ class Session:
             'truncation_boundary',
             'clear_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
-            'parent_session_id',
+            'parent_session_id', 'compression_disjoint_parent_boundary',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
@@ -7505,6 +7511,18 @@ def _session_message_merge_key(msg: dict):
         str(msg.get("tool_name") or msg.get("name") or ""),
         _tc_key,
     )
+
+
+def _compression_child_messages_digest(messages) -> str:
+    """Return a stable digest binding a disjoint-parent proof to one child array."""
+    merge_keys = [_session_message_merge_key(msg) for msg in list(messages or [])]
+    encoded = json.dumps(
+        merge_keys,
+        ensure_ascii=False,
+        separators=(',', ':'),
+        default=str,
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _session_messages_have_prefix(messages, prefix) -> bool:

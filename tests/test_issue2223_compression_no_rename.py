@@ -125,6 +125,63 @@ class TestNoRenameDuringCompression:
         assert continuation.parent_session_id == "fork_parent"
         assert not continuation.pre_compression_snapshot
 
+    def test_preservation_helper_marks_only_disjoint_continuations(self, tmp_path, monkeypatch):
+        """Persist a parent offset only when the full merge adds every child row."""
+        import api.models as models
+        import api.streaming as streaming
+        from api.models import Session
+
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+        monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+        monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+        models.SESSIONS.clear()
+
+        parent_messages = [
+            {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+            for idx in range(1000)
+        ]
+        parent = Session(session_id="disjoint_parent", messages=parent_messages)
+        parent.save(touch_updated_at=False)
+        disjoint_child = Session(
+            session_id="disjoint_child",
+            messages=[
+                {"role": "assistant", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+                for idx in range(500)
+            ],
+        )
+
+        boundary = streaming._preserve_pre_compression_snapshot(
+            disjoint_child,
+            "disjoint_parent",
+        )
+        assert boundary == {
+            "parent_session_id": "disjoint_parent",
+            "message_count": len(parent_messages),
+            "parent_updated_at": parent.updated_at,
+            "child_message_count": len(disjoint_child.messages),
+            "child_messages_digest": models._compression_child_messages_digest(
+                disjoint_child.messages
+            ),
+        }
+
+        replay_parent = Session(session_id="replay_parent", messages=parent_messages)
+        replay_parent.save(touch_updated_at=False)
+        suffix_replay_child = Session(
+            session_id="suffix_replay_child",
+            messages=parent_messages[-100:]
+            + [
+                {"role": "assistant", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+                for idx in range(400)
+            ],
+        )
+
+        assert streaming._preserve_pre_compression_snapshot(
+            suffix_replay_child,
+            "replay_parent",
+        ) is None
+
 
 class TestMergePreservesHistory:
     """_merge_display_messages_after_agent_result must preserve all previous

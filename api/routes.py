@@ -8616,12 +8616,14 @@ def _state_db_has_no_timestamped_rows_before_sidecar(session, direct_sidecar_mes
     return state_boundary_keys == sidecar_boundary_keys[: len(state_boundary_keys)]
 
 
-def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages, *, limit: int) -> int | None:
-    """Classify a direct compression child sidecar for initial limited loads.
+def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages) -> int | None:
+    """Return a persisted, proven-disjoint compression parent offset.
 
-    Returns the omitted immediate parent row count when the child is safely
-    classified as a single-hop continuation segment, or None when classification
-    is uncertain and the caller must stitch lineage.
+    Timestamp and relative-length heuristics cannot distinguish a disjoint child
+    from one that replays only a suffix of its parent. New compression rotations
+    therefore persist the parent count only after the write path proves the full
+    parent/child merge contains every row. Legacy or ambiguous children fail
+    closed to the established full-lineage stitch.
     """
     parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
     if not parent_id or not is_safe_session_id(parent_id):
@@ -8634,23 +8636,28 @@ def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages
     ):
         return None
     parent_count = _metadata_message_count_for_display(parent)
-    if parent_count is None:
+    boundary = getattr(session, "compression_disjoint_parent_boundary", None)
+    if not isinstance(boundary, dict):
         return None
-
-    first_ts = None
-    for msg in direct_sidecar_messages:
-        first_ts = _message_timestamp_as_float(msg)
-        if first_ts is not None:
-            break
     try:
+        marker_count = int(boundary.get("message_count"))
+        marker_updated_at = float(boundary.get("parent_updated_at"))
         parent_updated_at = float(getattr(parent, "updated_at", 0) or 0)
+        marker_child_count = int(boundary.get("child_message_count"))
     except (TypeError, ValueError):
-        parent_updated_at = 0.0
-    if parent_updated_at > 0 and first_ts is not None and first_ts >= parent_updated_at:
-        return _compression_parent_lineage_metadata_count(session)
-    if first_ts is not None and len(direct_sidecar_messages) < parent_count:
-        return _compression_parent_lineage_metadata_count(session)
-    return None
+        return None
+    if (
+        str(boundary.get("parent_session_id") or "") != parent_id
+        or parent_count is None
+        or marker_count != parent_count
+        or marker_updated_at <= 0
+        or marker_updated_at != parent_updated_at
+        or marker_child_count != len(direct_sidecar_messages)
+        or str(boundary.get("child_messages_digest") or "")
+        != _compression_child_messages_digest(direct_sidecar_messages)
+    ):
+        return None
+    return _compression_parent_lineage_metadata_count(session)
 
 
 def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
@@ -8693,7 +8700,6 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
             base_offset = _direct_sidecar_limited_display_base_offset(
                 session,
                 direct_sidecar_messages,
-                limit=limit,
             )
             if (
                 base_offset is not None
@@ -9336,6 +9342,7 @@ from api.models import (
     _evict_sessions_over_cap,
     _merge_session_display_metadata,
     _session_message_merge_key,
+    _compression_child_messages_digest,
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,

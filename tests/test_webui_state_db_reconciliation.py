@@ -94,6 +94,18 @@ def _append_state_db_rows(path: Path, sid: str, rows):
         conn.close()
 
 
+def _disjoint_parent_boundary(parent, child_messages):
+    from api.models import _compression_child_messages_digest
+
+    return {
+        "parent_session_id": parent.session_id,
+        "message_count": len(parent.messages),
+        "parent_updated_at": parent.updated_at,
+        "child_message_count": len(child_messages),
+        "child_messages_digest": _compression_child_messages_digest(child_messages),
+    }
+
+
 def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages):
     import api.config as config
     import api.models as models
@@ -613,6 +625,7 @@ def test_msg_limit_compression_child_fast_path_preserves_pagination_cursor(
         model="test-model",
         messages=child_messages,
         parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
         created_at=300.0,
         updated_at=900.0,
     )
@@ -655,6 +668,97 @@ def test_msg_limit_compression_child_fast_path_preserves_pagination_cursor(
     assert second_payload["_messages_offset"] == len(parent_messages) + 440
     assert [msg["content"] for msg in second_payload["messages"]] == [
         f"child {idx}" for idx in range(440, 470)
+    ]
+
+
+def test_msg_limit_partial_parent_suffix_replay_falls_back_with_contiguous_pagination(
+    monkeypatch,
+    tmp_path,
+):
+    """A stale disjoint marker must not authorize a child rewritten with a parent suffix."""
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_suffix_replay"
+    child_sid = "continuation_child_suffix_replay"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(1000)
+    ]
+    new_child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+        for idx in range(400)
+    ]
+    child_messages = parent_messages[-100:] + new_child_messages
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 800.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=new_child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(
+            parent,
+            new_child_messages,
+        ),
+        created_at=900.0,
+        updated_at=1500.0,
+    )
+    child.save(touch_updated_at=False)
+    # Simulate a later recovery rewrite that replays part of the parent while
+    # retaining the once-valid marker. The marker's child digest/count must make
+    # this fail closed instead of restoring the 1,500-row metadata overcount.
+    child.messages = child_messages
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    real_session_load = models.Session.load.__func__
+    captured = {"lineage_loads": 0, "parent_full_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    def wrapped_session_load(cls, sid):
+        if sid == parent_sid:
+            captured["parent_full_loads"] += 1
+        return real_session_load(cls, sid)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+    monkeypatch.setattr(models.Session, "load", classmethod(wrapped_session_load))
+
+    first = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(first, urlparse(first.path))
+
+    assert first.status == 200
+    assert captured["lineage_loads"] >= 1
+    assert captured["parent_full_loads"] >= 1
+    first_payload = first.response_json["session"]
+    assert first_payload["message_count"] == 1400
+    assert first_payload["_messages_offset"] == 1370
+    assert [msg["content"] for msg in first_payload["messages"]] == [
+        f"child {idx}" for idx in range(370, 400)
+    ]
+
+    second = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0"
+        f"&msg_limit=30&msg_before={first_payload['_messages_offset']}"
+    )
+    routes.handle_get(second, urlparse(second.path))
+
+    assert second.status == 200
+    second_payload = second.response_json["session"]
+    assert second_payload["message_count"] == 1400
+    assert second_payload["_messages_offset"] == 1340
+    assert [msg["content"] for msg in second_payload["messages"]] == [
+        f"child {idx}" for idx in range(340, 370)
     ]
 
 
@@ -726,6 +830,7 @@ def test_msg_limit_compression_child_fast_path_preserves_parent_todo_state_witho
         model="test-model",
         messages=child_messages,
         parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
         created_at=300.0,
         updated_at=900.0,
     )
@@ -804,6 +909,7 @@ def test_msg_limit_compression_child_legacy_parent_todo_falls_back_to_lineage(
         model="test-model",
         messages=child_messages,
         parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
         created_at=300.0,
         updated_at=900.0,
     )
@@ -860,6 +966,7 @@ def test_msg_limit_single_hop_fast_path_falls_back_for_state_db_only_prefix_row(
         model="test-model",
         messages=child_messages,
         parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
         created_at=300.0,
         updated_at=900.0,
     )
@@ -935,6 +1042,7 @@ def test_msg_limit_single_hop_fast_path_falls_back_for_equal_timestamp_state_db_
         model="test-model",
         messages=child_messages,
         parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
         created_at=300.0,
         updated_at=900.0,
     )
@@ -1010,6 +1118,13 @@ def test_msg_limit_mutable_parent_timestamp_boundary_falls_back_to_lineage(
         model="test-model",
         messages=child_messages,
         parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary={
+            "parent_session_id": parent_sid,
+            "message_count": len(parent_messages),
+            "parent_updated_at": 200.0,
+            "child_message_count": len(child_messages),
+            "child_messages_digest": models._compression_child_messages_digest(child_messages),
+        },
         created_at=300.0,
         updated_at=900.0,
     )
@@ -1086,6 +1201,7 @@ def test_msg_limit_multi_hop_cumulative_parent_falls_back_to_full_lineage_pagina
         model="test-model",
         messages=child_messages,
         parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
         created_at=300.0,
         updated_at=900.0,
     )
