@@ -853,11 +853,23 @@ function renderMarkdownPreviewContent(data){
   // images referenced in the markdown (e.g. ![alt](./img.png)) render inline
   // in the workspace preview rather than showing broken links.
   let content = data.content;
-  if (_previewCurrentPath && S.session) {
-    const dirPath = _previewCurrentPath.includes('/')
-      ? _previewCurrentPath.substring(0, _previewCurrentPath.lastIndexOf('/') + 1)
+  // basePath: the directory to resolve relative image paths against. Prefer
+  // an explicit data.baseDir (e.g. from the wiki browser, which has no
+  // _previewCurrentPath context) and fall back to _previewCurrentPath.
+  // Using a stale _previewCurrentPath for non-previewMd targets would resolve
+  // images against the wrong directory (#5933 F2).
+  const basePathSrc = (data && data.baseDir) ? data.baseDir : _previewCurrentPath;
+  if (basePathSrc && S.session) {
+    const dirPath = basePathSrc.includes('/')
+      ? basePathSrc.substring(0, basePathSrc.lastIndexOf('/') + 1)
       : '';
-    content = content.replace(
+    // Stash fenced code blocks and inline-code spans BEFORE the image rewrite
+    // so ![alt](./img.png) inside `code` or ```fences``` is NOT rewritten —
+    // renderMd would otherwise render an <img> inside <code> (#5933 F1).
+    const _codeStash=[];
+    let work=content.replace(/```[^\n`]*\n[\s\S]*?\n```/g,m=>{_codeStash.push(m);return '\x00K'+(_codeStash.length-1)+'\x00';});
+    work=work.replace(/`[^`\n]+`/g,m=>{_codeStash.push(m);return '\x00K'+(_codeStash.length-1)+'\x00';});
+    work=work.replace(
       /!\[([^\]]*)\]\((?!https?:\/\/|\/api\/|file:\/\/)([^\)]+)\)/g,
       (_, alt, relPath) => {
         const resolvedPath = _normalizeWorkspaceRelPath(dirPath + relPath);
@@ -866,6 +878,7 @@ function renderMarkdownPreviewContent(data){
         return `![${alt}](${apiUrl})`;
       }
     );
+    content=work.replace(/\x00K(\d+)\x00/g,(_,i)=>_codeStash[+i]);
   }
   const target=data&&data.el?data.el:$('previewMd');
   if(!data||!data.el) showPreview('md');

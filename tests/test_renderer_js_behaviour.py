@@ -813,12 +813,22 @@ class TestMarkdownImageSchemeCoverage:
         assert 'alt="chart"' in out
 
     def test_file_scheme_url_renders_as_img(self, driver_path):
+        """![alt](file:///path) must route through /api/media (like file:// links)
+        because the CSP img-src directive has no file: scheme — a raw file:// src
+        would be blocked by the browser.  The established _markdownHref rewrite
+        for file:// links uses api/media?path=…&inline=1; images must do the same.
+        """
         out = _render(driver_path, "![screenshot](file:///tmp/shot.png)")
         assert "<img" in out and "msg-media-img" in out, (
             f"file:// image must render as <img>: {out!r}"
         )
-        assert 'src="file:///tmp/shot.png"' in out
-        assert 'alt="screenshot"' in out
+        assert "api/media?path=" in out, (
+            f"file:// image src must be rewritten to /api/media (CSP-safe): {out!r}"
+        )
+        assert "file://" not in out, (
+            f"file:// must not appear in rendered img src (blocked by CSP): {out!r}"
+        )
+        assert "alt=\"screenshot\"" in out
 
     def test_https_url_still_renders_as_img(self, driver_path):
         """Regression guard: the existing https?:// match must still work."""

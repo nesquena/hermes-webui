@@ -4548,7 +4548,7 @@ async function _openWikiBrowser() {
       const data = await api('/api/wiki/page?path=' + encodeURIComponent(path));
       if (typeof renderMarkdownPreviewContent === 'function') {
         contentEl.innerHTML = '<button onclick="window._wikiBrowserBack()" style="margin-bottom:10px;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--text);">&#8592; Back</button><div id="wikiBrowserMd"></div>';
-        renderMarkdownPreviewContent({content: data.content, el: document.getElementById('wikiBrowserMd')});
+        renderMarkdownPreviewContent({content: data.content, el: document.getElementById('wikiBrowserMd'), baseDir: path});
       } else {
         contentEl.innerHTML = '<button onclick="window._wikiBrowserBack()" style="margin-bottom:10px;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--text);">&#8592; Back</button><pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0;">' + esc(data.content) + '</pre>';
       }

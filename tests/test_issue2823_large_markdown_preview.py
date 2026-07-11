@@ -55,7 +55,7 @@ def test_markdown_render_helper_runs_render_md_and_katex():
     helper = WORKSPACE_JS[start:end]
 
     target_pos = helper.find("const target=data&&data.el?data.el:$('previewMd')")
-    render_pos = helper.find("target.innerHTML=renderMd(data.content)")
+    render_pos = helper.find("target.innerHTML=renderMd(content)")
     katex_pos = helper.rfind("renderKatexBlocks")
     assert target_pos != -1, "Helper must honor an explicit markdown render target"
     assert "if(!data||!data.el) showPreview('md')" in helper
