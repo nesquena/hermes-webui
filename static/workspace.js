@@ -649,6 +649,12 @@ const _WS_SKELETON_ROWS = [
 // UNCONDITIONALLY at switch start (even when the workspace panel is closed, since
 // loadDir('.') still runs then), so the stale response is rejected.
 let _wsTreeGen = 0;
+// #5911: the workspace path the loaded-tree filter was last associated with.
+// loadDir('.') / refreshExpanded resets S._dirCache, but the filter should only
+// be cleared when the workspace IDENTITY actually changes — an ordinary
+// same-workspace root nav or refresh must PRESERVE an active filter. Compared
+// against the current workspace on each root load below. null until first load.
+let _lastFilteredWorkspacePath = null;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
   return _wsTreeGen;
@@ -710,13 +716,25 @@ async function loadDir(path, opts={}){
   try{
     if(!path||path==='.'||refreshExpanded){
       S._dirCache={};
-      // Clear the loaded-tree filter on a root load / workspace switch so a
-      // stale needle doesn't paint a misleading "no matches" empty-state over a
-      // freshly loaded workspace (#4674 review: filter leaked across switches).
-      if(typeof S.workspaceTreeFilter==='string' && S.workspaceTreeFilter){
-        S.workspaceTreeFilter='';
-        if(typeof _syncWorkspaceTreeFilterUI==='function') _syncWorkspaceTreeFilterUI();
+      // Clear the loaded-tree filter ONLY when the workspace IDENTITY changes.
+      // A root load / refresh of the SAME workspace must PRESERVE the filter —
+      // #5911: previously every loadDir('.')/refreshExpanded blanked the filter,
+      // silently erasing a "keep-me" needle on ordinary root nav or refresh.
+      // The cross-switch leak the original clear guarded against (#4674 review:
+      // a stale needle painting a misleading "no matches" over a freshly loaded
+      // OTHER workspace) is still covered, because that is exactly an identity
+      // change. Compare the current workspace against the last one the filter
+      // was associated with; clear + reset filter-local collapse only when they
+      // differ.
+      const _curWs=(S.session&&S.session.workspace)||null;
+      if(_lastFilteredWorkspacePath!==null && _curWs!==_lastFilteredWorkspacePath){
+        if(typeof S.workspaceTreeFilter==='string' && S.workspaceTreeFilter){
+          S.workspaceTreeFilter='';
+          if(typeof _syncWorkspaceTreeFilterUI==='function') _syncWorkspaceTreeFilterUI();
+        }
+        if(S._filterCollapsedDirs instanceof Set) S._filterCollapsedDirs.clear();
       }
+      _lastFilteredWorkspacePath=_curWs;
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
     S.currentDir=path||'.';

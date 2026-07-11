@@ -18344,6 +18344,12 @@ if(!S._dirCache) S._dirCache={};
 // S._dirCache by name / relative path; does NOT hit the backend (deeper
 // backend-backed recursive search is follow-up work).
 if(typeof S.workspaceTreeFilter!=='string') S.workspaceTreeFilter='';
+// #5911: paths the user explicitly collapsed while the filter had force-opened
+// them. A force-opened folder still matches the filter, so without this set the
+// next render recomputes forcedExpanded and immediately re-opens it (the click
+// appears dead). Cleared whenever the filter value changes/clears or the
+// workspace identity changes (see loadDir()).
+if(!(S._filterCollapsedDirs instanceof Set)) S._filterCollapsedDirs=new Set();
 
 function _workspaceTreeFilterNeedle(){
   return String(S.workspaceTreeFilter||'').trim().toLowerCase();
@@ -18368,18 +18374,45 @@ function _syncWorkspaceTreeFilterUI(){
 // recursive search (#4673) won't fire one request per keystroke. State + UI
 // sync stay synchronous so the input value / clear button update instantly.
 let _workspaceFilterRenderTimer=null;
+// #5911: snapshot of the workspace-tree render generation (declared in
+// workspace.js; bumped on every workspace/profile switch). typeof-guarded so
+// this is safe even if workspace.js hasn't loaded (returns 0). A pending filter
+// debounce compares this against the live value inside its callback and no-ops
+// if a switch happened while it was queued.
+function _wsTreeGenSnapshot(){
+  return (typeof _wsTreeGen==='number') ? _wsTreeGen : 0;
+}
+// #5911: cancel any pending filter re-render. Called at workspace/profile switch
+// (before the loading skeleton is shown) so a queued renderFileTree() cannot
+// replace the skeleton with the PREVIOUS workspace's interactive tree.
+function _cancelWorkspaceFilterRenderTimer(){
+  if(_workspaceFilterRenderTimer){clearTimeout(_workspaceFilterRenderTimer);_workspaceFilterRenderTimer=null;}
+}
+if(typeof window!=='undefined') window._cancelWorkspaceFilterRenderTimer=_cancelWorkspaceFilterRenderTimer;
 function setWorkspaceTreeFilter(value){
+  const prevFilter=typeof S.workspaceTreeFilter==='string'?S.workspaceTreeFilter:'';
   S.workspaceTreeFilter=String(value||'');
+  // #5911: a changed filter value invalidates any filter-local collapse state —
+  // the surfaced tree changes, so previously-collapsed force-open paths reset.
+  if(S._filterCollapsedDirs && S.workspaceTreeFilter!==prevFilter) S._filterCollapsedDirs.clear();
   _syncWorkspaceTreeFilterUI();
   if(_workspaceFilterRenderTimer){clearTimeout(_workspaceFilterRenderTimer);}
+  const scheduledGen=_wsTreeGenSnapshot();
+  // #5911: if a workspace/profile switch bumps the tree generation while this
+  // debounce is pending, the switch has shown a loading skeleton and is awaiting
+  // a fresh /api/list. Repainting then would replace that skeleton with the
+  // PREVIOUS workspace's interactive tree — the callback no-ops in that case.
   _workspaceFilterRenderTimer=setTimeout(()=>{
     _workspaceFilterRenderTimer=null;
+    if(_wsTreeGenSnapshot()!==scheduledGen) return;
     renderFileTree();
   },150);
 }
 function clearWorkspaceTreeFilter(){
   if(_workspaceFilterRenderTimer){clearTimeout(_workspaceFilterRenderTimer);_workspaceFilterRenderTimer=null;}
   S.workspaceTreeFilter='';
+  // #5911: clearing the filter drops all filter-local collapse state.
+  if(S._filterCollapsedDirs) S._filterCollapsedDirs.clear();
   _syncWorkspaceTreeFilterUI();
   renderFileTree();
   const input=$('workspaceFilterInput');
@@ -18642,7 +18675,11 @@ function _renderTreeItems(container, entries, depth, opts={}){
     // force-opened (see arrow + children render below). Compute once so the
     // click handler can treat it as expanded — a first click then COLLAPSES it
     // instead of re-adding it to _expandedDirs (the #4674 "dead first click").
-    const forcedExpanded=filterActive&&isDirLike&&Array.isArray(item._filteredChildren)&&!!item._filteredChildren.length;
+    // #5911: a folder the user explicitly collapsed under the filter is recorded
+    // in _filterCollapsedDirs; it must NOT be force-opened again even though it
+    // still matches the filter (otherwise the collapse click looks dead).
+    const _filterCollapsed=filterActive&&isDirLike&&!!(S._filterCollapsedDirs&&S._filterCollapsedDirs.has(item.path));
+    const forcedExpanded=filterActive&&isDirLike&&!_filterCollapsed&&Array.isArray(item._filteredChildren)&&!!item._filteredChildren.length;
     el.dataset.wsIsDir = String(isDirLike);
     if(isExternalLink || isReadOnlyEscape){el.removeAttribute('draggable');el.ondragstart=null;}
 
@@ -18805,10 +18842,18 @@ function _renderTreeItems(container, entries, depth, opts={}){
         // filter was cleared). Collapsing here clears that manual-expand state.
         if(S._expandedDirs.has(item.path)||forcedExpanded){
           S._expandedDirs.delete(item.path);
+          // #5911: a force-opened folder still MATCHES the active filter, so the
+          // next render would recompute forcedExpanded and immediately re-open it
+          // (a silent "dead collapse"). Record the user's explicit collapse so
+          // forcedExpanded AND showFilteredChildren stay off for this path until
+          // the filter changes/clears.
+          if(filterActive&&S._filterCollapsedDirs) S._filterCollapsedDirs.add(item.path);
           if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
           renderFileTree();
         }else{
           S._expandedDirs.add(item.path);
+          // #5911: an explicit expand overrides any filter-local collapse marker.
+          if(S._filterCollapsedDirs) S._filterCollapsedDirs.delete(item.path);
           if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
           // Fetch children if not cached
           if(!S._dirCache[item.path]){
@@ -18851,7 +18896,7 @@ function _renderTreeItems(container, entries, depth, opts={}){
     // Render children if directory is expanded. During filter mode, show matching
     // loaded descendants even if the directory is currently collapsed, so the
     // filter surfaces cached tree results rather than only visible rows.
-    const showFilteredChildren=filterActive&&Array.isArray(item._filteredChildren)&&!!item._filteredChildren.length;
+    const showFilteredChildren=filterActive&&!_filterCollapsed&&Array.isArray(item._filteredChildren)&&!!item._filteredChildren.length;
     if(isDirLike&&(S._expandedDirs.has(item.path)||showFilteredChildren)){
       const children=showFilteredChildren
         ? item._filteredChildren

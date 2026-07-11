@@ -121,6 +121,170 @@ class TestFixSpec:
         assert "preventDefault" in handler
 
 
+# ── #5911 gate fix-spec locks (state-management bugs) ─────────────────────────
+
+
+PANELS_JS_PATH = REPO_ROOT / "static" / "panels.js"
+WORKSPACE_JS_PATH = REPO_ROOT / "static" / "workspace.js"
+PANELS_JS = PANELS_JS_PATH.read_text(encoding="utf-8")
+WORKSPACE_JS = WORKSPACE_JS_PATH.read_text(encoding="utf-8")
+
+
+class TestGateFix5911:
+    # Finding 1 — pending filter debounce cancelled/invalidated on switch.
+    def test_switch_cancels_pending_filter_timer_before_skeleton(self):
+        """A workspace/profile switch must cancel any queued filter re-render
+        BEFORE showing the loading skeleton, so the debounce can't repaint the
+        previous workspace's interactive tree over the skeleton."""
+        assert "function _cancelWorkspaceFilterRenderTimer(" in UI_JS
+        # The cancel must run at the switch point, before the skeleton render.
+        m = re.search(
+            r"_cancelWorkspaceFilterRenderTimer\(\);\s*\n\s*if \(_workspaceVisibleAtStart"
+            r".*?showWorkspaceTreeSkeleton",
+            PANELS_JS,
+            re.DOTALL,
+        )
+        assert m, (
+            "switch path must call _cancelWorkspaceFilterRenderTimer() immediately "
+            "before showWorkspaceTreeSkeleton()"
+        )
+
+    def test_filter_timer_callback_is_tree_gen_guarded(self):
+        """The debounce callback must capture the tree generation when scheduled
+        and no-op if a switch bumped it while the timer was pending."""
+        m = re.search(
+            r"function setWorkspaceTreeFilter\(value\)\{(.*?)\n\}",
+            UI_JS,
+            re.DOTALL,
+        )
+        assert m, "setWorkspaceTreeFilter body not found"
+        body = m.group(1)
+        assert "_wsTreeGenSnapshot()" in body, (
+            "setWorkspaceTreeFilter must capture the tree generation when scheduling"
+        )
+        # The comparison must live INSIDE the setTimeout callback (after scheduling)
+        # and short-circuit the render.
+        cb = re.search(r"setTimeout\(\(\)=>\{(.*?)\},\s*\d+\)", body, re.DOTALL)
+        assert cb, "debounce setTimeout callback not found"
+        cb_body = cb.group(1)
+        assert "_wsTreeGenSnapshot()!==scheduledGen" in cb_body and "return" in cb_body, (
+            "timer callback must no-op when the tree generation changed while pending"
+        )
+
+    # Finding 2 — force-opened folder stays collapsed after an explicit click.
+    def test_filter_local_collapse_set_declared(self):
+        assert "S._filterCollapsedDirs=new Set()" in UI_JS, (
+            "must track filter-local collapsed paths in a Set"
+        )
+
+    def test_forced_expand_and_children_gated_on_filter_collapse(self):
+        """Both forcedExpanded and showFilteredChildren must be suppressed for a
+        path in _filterCollapsedDirs, so a collapse click sticks despite the
+        filter still matching descendants."""
+        assert "!_filterCollapsed&&Array.isArray(item._filteredChildren)" in UI_JS.replace(
+            " ", ""
+        ) or "!_filterCollapsed&&Array.isArray(item._filteredChildren)" in UI_JS
+        # forcedExpanded gated
+        assert re.search(
+            r"const forcedExpanded=filterActive&&isDirLike&&!_filterCollapsed",
+            UI_JS,
+        ), "forcedExpanded must be gated on !_filterCollapsed"
+        # showFilteredChildren gated
+        assert re.search(
+            r"const showFilteredChildren=filterActive&&!_filterCollapsed",
+            UI_JS,
+        ), "showFilteredChildren must be gated on !_filterCollapsed"
+        # click handler records the collapse
+        assert "S._filterCollapsedDirs.add(item.path)" in UI_JS, (
+            "collapse click must record the path in _filterCollapsedDirs"
+        )
+
+    def test_filter_collapse_cleared_when_filter_changes(self):
+        """Changing or clearing the filter value must reset filter-local
+        collapse state."""
+        # setWorkspaceTreeFilter clears on value change
+        m = re.search(
+            r"function setWorkspaceTreeFilter\(value\)\{(.*?)\n\}", UI_JS, re.DOTALL
+        )
+        assert m and "S._filterCollapsedDirs.clear()" in m.group(1)
+        # clearWorkspaceTreeFilter clears too
+        m2 = re.search(
+            r"function clearWorkspaceTreeFilter\(\)\{(.*?)\n\}", UI_JS, re.DOTALL
+        )
+        assert m2 and "S._filterCollapsedDirs.clear()" in m2.group(1)
+
+    def test_collapse_behavior_via_node(self):
+        """End-to-end: reproduce the render decision. A force-opened folder that
+        the user collapsed (path in _filterCollapsedDirs) must resolve to NOT
+        force-expanded and NOT showing filtered children; the same folder with
+        an empty collapse set stays force-open."""
+        js = r"""
+function decide(filterActive, item, filterCollapsedDirs){
+  const has = (p) => filterCollapsedDirs.has(p);
+  const _filterCollapsed = filterActive && has(item.path);
+  const forcedExpanded = filterActive && !_filterCollapsed
+    && Array.isArray(item._filteredChildren) && !!item._filteredChildren.length;
+  const showFilteredChildren = filterActive && !_filterCollapsed
+    && Array.isArray(item._filteredChildren) && !!item._filteredChildren.length;
+  return {forcedExpanded, showFilteredChildren};
+}
+const item = {path:'src', _filteredChildren:[{name:'a'},{name:'b'}]};
+const open = decide(true, item, new Set());
+const collapsed = decide(true, item, new Set(['src']));
+console.log(JSON.stringify({open, collapsed}));
+"""
+        r = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        assert out["open"]["forcedExpanded"] is True
+        assert out["open"]["showFilteredChildren"] is True
+        assert out["collapsed"]["forcedExpanded"] is False
+        assert out["collapsed"]["showFilteredChildren"] is False
+
+    # Finding 3 — same-workspace root nav / refresh preserves the filter.
+    def test_loaddir_clears_filter_only_on_workspace_identity_change(self):
+        """loadDir root/refresh must clear the filter ONLY when the workspace
+        path differs from the last-filtered one; a same-workspace load must
+        preserve S.workspaceTreeFilter."""
+        assert "let _lastFilteredWorkspacePath" in WORKSPACE_JS, (
+            "must track the last-filtered workspace path"
+        )
+        # The clear must be gated on an identity difference.
+        assert re.search(
+            r"_lastFilteredWorkspacePath!==null && _curWs!==_lastFilteredWorkspacePath",
+            WORKSPACE_JS,
+        ), "filter clear must be gated on a workspace identity change"
+
+    def test_workspace_identity_gate_via_node(self):
+        """Reproduce the loadDir root-load filter-clear decision: same workspace
+        preserves the filter; a workspace change clears it."""
+        js = r"""
+// Mirror the loadDir('.') gate: clear the filter only on identity change.
+function rootLoad(state){
+  const _curWs = state.session && state.session.workspace || null;
+  if(state._lastFilteredWorkspacePath!==null && _curWs!==state._lastFilteredWorkspacePath){
+    if(typeof state.workspaceTreeFilter==='string' && state.workspaceTreeFilter){
+      state.workspaceTreeFilter='';
+    }
+  }
+  state._lastFilteredWorkspacePath = _curWs;
+  return state;
+}
+// same-workspace refresh: filter preserved
+let s1 = {session:{workspace:'/ws/a'}, workspaceTreeFilter:'keep-me', _lastFilteredWorkspacePath:'/ws/a'};
+rootLoad(s1);
+// workspace change: filter cleared
+let s2 = {session:{workspace:'/ws/b'}, workspaceTreeFilter:'keep-me', _lastFilteredWorkspacePath:'/ws/a'};
+rootLoad(s2);
+console.log(JSON.stringify({same:s1.workspaceTreeFilter, changed:s2.workspaceTreeFilter}));
+"""
+        r = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        assert out["same"] == "keep-me", "same-workspace load must preserve the filter"
+        assert out["changed"] == "", "workspace-change load must clear the filter"
+
+
 # ── Behavioral tests (Node VM) ────────────────────────────────────────────────
 
 

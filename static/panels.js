@@ -6964,6 +6964,12 @@ async function switchToProfile(name) {
     // previous-workspace /api/list. Bump here (not only inside the panel-gated
     // showWorkspaceTreeSkeleton) to close the closed-panel race.
     if (typeof bumpWorkspaceTreeGen === 'function') bumpWorkspaceTreeGen();
+    // #5911: cancel any pending filter-render debounce BEFORE the skeleton shows.
+    // A queued renderFileTree() from the previous workspace's filter would
+    // otherwise fire ~150ms later and replace the loading skeleton with the OLD
+    // workspace's interactive tree while the new /api/list is still in flight.
+    // (The timer callback is also tree-gen guarded as a belt-and-braces backstop.)
+    if (typeof _cancelWorkspaceFilterRenderTimer === 'function') _cancelWorkspaceFilterRenderTimer();
     if (_workspaceVisibleAtStart && typeof showWorkspaceTreeSkeleton === 'function') showWorkspaceTreeSkeleton();
     // timeoutToast:false — suppress api()'s generic "Request timed out" toast so a
     // superseded or transient-but-eventually-successful switch can't pop a spurious
