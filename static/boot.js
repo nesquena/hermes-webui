@@ -1535,6 +1535,7 @@ window._hermesTtsSynth=function(id, text, opts){
 
   function _startListening(){
     if(!_voiceModeActive) return;
+    if(_voiceModeState==='listening'&&_silenceTimer) return;
     if(_micOriginNeedsSecureContext()){
       _deactivate();
       showToast(t('mic_insecure_origin'));
