@@ -1,13 +1,16 @@
-"""Content-Length header present on successful TTS responses (#3582).
+"""TTS response is valid JSON with base64 audio data URL.
 
-The HTTP/1.0 server cannot signal end-of-body via connection close without
-triggering a ~31 s client timeout.  Buffering all chunks before writing lets
-us include a Content-Length header so the browser can play the audio blob.
+After the TTS delegation refactor, all providers (edge, mistral, etc.)
+go through the agent's text_to_speech_tool and return JSON in the
+same shape:
+
+    {"audio": "data:audio/mpeg;base64,...", "content_type": "audio/mpeg", "size": N}
 """
+import base64
 import io
 import json
 import sys
-import types
+from types import SimpleNamespace
 
 import pytest
 
@@ -56,7 +59,7 @@ def _reset_limiter():
 
 @pytest.fixture(autouse=True)
 def _setup(monkeypatch):
-    # Disable auth and reset limiter so guard-rail tests are deterministic.
+    """Disable auth, reset limiter, and mock the agent's text_to_speech_tool."""
     import api.auth as _auth
     monkeypatch.setattr(_auth, "is_auth_enabled", lambda: False)
     monkeypatch.setattr(routes, "is_auth_enabled", lambda: False, raising=False)
@@ -65,94 +68,98 @@ def _setup(monkeypatch):
     _reset_limiter()
 
 
-def _make_edge_tts_mock(audio_chunks):
-    """Return a fake edge_tts module whose Communicate.stream_sync yields chunks."""
-    fake_module = types.ModuleType("edge_tts")
+def _mock_tool_returning(monkeypatch, audio_bytes):
+    """Mock text_to_speech_tool to write audio_bytes and return success."""
+    def fake_tool(text, output_path):
+        with open(output_path, "wb") as f:
+            f.write(audio_bytes)
+        return json.dumps({"success": True, "file_path": output_path})
 
-    class FakeCommunicate:
-        def __init__(self, text, voice, **kwargs):
-            pass
-
-        def stream_sync(self):
-            for data in audio_chunks:
-                yield {"type": "audio", "data": data}
-
-    fake_module.Communicate = FakeCommunicate
-    return fake_module
+    tool = SimpleNamespace(text_to_speech_tool=fake_tool)
+    monkeypatch.setitem(sys.modules, "tools.tts_tool", tool)
 
 
-def test_content_length_present_and_correct(monkeypatch):
-    """Content-Length header matches the actual body written."""
-    chunk1 = b"\xff\xfb\x90" * 100
-    chunk2 = b"\xff\xfb\x90" * 50
-    expected_body = chunk1 + chunk2
+def _decode_audio_data_url(payload):
+    """Extract and base64-decode the audio data URL from a TTS response payload."""
+    assert payload is not None, "response is not valid JSON"
+    audio_url = payload.get("audio")
+    assert audio_url is not None
+    assert audio_url.startswith("data:audio/mpeg;base64,")
+    b64 = audio_url.split(",", 1)[1]
+    return base64.b64decode(b64)
 
-    monkeypatch.setitem(sys.modules, "edge_tts", _make_edge_tts_mock([chunk1, chunk2]))
 
-    h = _post({"text": "hello", "voice": "en-US-AriaNeural"}, client="3.0.0.1")
-    result = routes._handle_tts(h, None)
+def test_response_is_json_with_audio_data_url(monkeypatch):
+    """TTS returns JSON with a base64 data URL for all providers."""
+    expected = b"\xff\xfb\x90" * 100 + b"\xff\xfb\x90" * 50
+    _mock_tool_returning(monkeypatch, expected)
 
-    assert result is True
+    h = _post({"text": "hello"}, client="3.0.0.1")
+    routes._handle_tts(h, None)
+
     assert h.status == 200
-    assert h.sent_headers.get("Content-Length") == str(len(expected_body))
-    assert h.body() == expected_body
+    payload = h.payload()
+    assert payload is not None
+    assert payload.get("content_type") == "audio/mpeg"
+    assert payload.get("size") == len(expected)
+    assert _decode_audio_data_url(payload) == expected
 
 
 def test_content_type_is_audio_mpeg(monkeypatch):
-    """Content-Type header must be audio/mpeg."""
-    monkeypatch.setitem(sys.modules, "edge_tts", _make_edge_tts_mock([b"\xff\xfb" * 10]))
+    """Content-Type field in the JSON response is always audio/mpeg."""
+    _mock_tool_returning(monkeypatch, b"\xff\xfb" * 10)
 
-    h = _post({"text": "world", "voice": "en-US-GuyNeural"}, client="3.0.0.2")
+    h = _post({"text": "world"}, client="3.0.0.2")
     routes._handle_tts(h, None)
 
-    assert h.sent_headers.get("Content-Type") == "audio/mpeg"
+    payload = h.payload()
+    assert payload is not None
+    assert payload.get("content_type") == "audio/mpeg"
 
 
 def test_empty_audio_returns_500(monkeypatch):
-    """When TTS produces no audio chunks, return 500 before touching the response."""
-    monkeypatch.setitem(sys.modules, "edge_tts", _make_edge_tts_mock([]))
+    """When text_to_speech_tool reports success=False, return 500."""
+    tool = SimpleNamespace(text_to_speech_tool=lambda **kw: json.dumps({
+        "success": False, "error": "TTS produced no audio"
+    }))
+    monkeypatch.setitem(sys.modules, "tools.tts_tool", tool)
 
-    h = _post({"text": "silent", "voice": "en-US-AriaNeural"}, client="3.0.0.3")
+    h = _post({"text": "silent"}, client="3.0.0.3")
     routes._handle_tts(h, None)
 
     assert h.status == 500
     assert "no audio" in (h.payload() or {}).get("error", "")
 
 
-def test_content_length_single_chunk(monkeypatch):
-    """Single chunk path: Content-Length equals that chunk's length."""
+def test_size_matches_audio_data(monkeypatch):
+    """The reported size equals the actual decoded audio length."""
     data = b"A" * 1024
-    monkeypatch.setitem(sys.modules, "edge_tts", _make_edge_tts_mock([data]))
+    _mock_tool_returning(monkeypatch, data)
 
-    h = _post({"text": "one chunk", "voice": "zh-CN-XiaoxiaoNeural"}, client="3.0.0.4")
+    h = _post({"text": "one chunk"}, client="3.0.0.4")
     routes._handle_tts(h, None)
 
     assert h.status == 200
-    assert h.sent_headers.get("Content-Length") == "1024"
-    assert h.body() == data
+    payload = h.payload()
+    assert payload is not None
+    assert payload.get("size") == 1024
+    assert _decode_audio_data_url(payload) == data
 
 
-def test_non_audio_chunks_ignored(monkeypatch):
-    """Metadata/WordBoundary chunks must not contribute to the audio buffer."""
+def test_non_audio_chunks_not_applicable(monkeypatch):
+    """After delegation, the agent handles chunking — we just return its file.
+
+    This test verifies the data URL is the complete file the agent produced,
+    not partial chunks (chunking is the agent's concern, not ours).
+    """
     audio_data = b"\xff\xfb" * 20
+    _mock_tool_returning(monkeypatch, audio_data)
 
-    fake_module = types.ModuleType("edge_tts")
-
-    class FakeCommunicate:
-        def __init__(self, text, voice, **kwargs):
-            pass
-
-        def stream_sync(self):
-            yield {"type": "WordBoundary", "data": b"ignored"}
-            yield {"type": "audio", "data": audio_data}
-            yield {"type": "SessionEnd", "data": None}
-
-    fake_module.Communicate = FakeCommunicate
-    monkeypatch.setitem(sys.modules, "edge_tts", fake_module)
-
-    h = _post({"text": "mixed chunks", "voice": "en-US-AriaNeural"}, client="3.0.0.5")
+    h = _post({"text": "complete audio"}, client="3.0.0.5")
     routes._handle_tts(h, None)
 
     assert h.status == 200
-    assert h.body() == audio_data
-    assert h.sent_headers.get("Content-Length") == str(len(audio_data))
+    payload = h.payload()
+    assert payload is not None
+    assert _decode_audio_data_url(payload) == audio_data
+    assert payload.get("size") == len(audio_data)

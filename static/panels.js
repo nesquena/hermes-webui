@@ -8683,9 +8683,15 @@ function _speechPreferencesPayloadFromUi(){
   const ttsAutoReadCb=$('settingsTtsAutoRead');
   if(ttsAutoReadCb) _setOwnedSpeechPayload(payload,'tts_auto_read',ttsAutoReadCb.checked);
   const ttsEngineSel=$('settingsTtsEngine');
-  if(ttsEngineSel) _setOwnedSpeechPayload(payload,'tts_engine',ttsEngineSel.value||'browser');
+  if(ttsEngineSel){
+    const engineValue=ttsEngineSel.value||'browser';
+    _setOwnedSpeechPayload(payload,'tts_engine',engineValue==='browser'?'browser':'server');
+  }
   const ttsVoiceSel=$('settingsTtsVoice');
-  if(ttsVoiceSel) _setOwnedSpeechPayload(payload,'tts_voice',ttsVoiceSel.value||'');
+  if(ttsVoiceSel){
+    const engineValue=localStorage.getItem('hermes-tts-engine')||'browser';
+    if(engineValue==='browser') _setOwnedSpeechPayload(payload,'tts_voice',ttsVoiceSel.value||'');
+  }
   const ttsRateSlider=$('settingsTtsRate');
   if(ttsRateSlider) _setOwnedSpeechPayload(payload,'tts_rate',parseFloat(ttsRateSlider.value));
   const ttsPitchSlider=$('settingsTtsPitch');
@@ -8698,6 +8704,233 @@ function _speechPreferencesPayloadFromUi(){
   const voiceSilence=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
   _setOwnedSpeechPayload(payload,'voice_silence_ms',(Number.isFinite(voiceSilence)&&voiceSilence>=200)?voiceSilence:1800);
   return payload;
+}
+
+
+function _ttsProviderLabel(provider){
+  const safe=String(provider||'').toLowerCase().replace(/[^a-z0-9_]/g,'_');
+  const key='tts_provider_'+safe;
+  const translated=t(key);
+  if(translated&&translated!==key) return translated;
+  return String(provider||'');
+}
+
+function _normalizeTtsEngineValue(value){
+  const raw=String(value||'').trim();
+  if(!raw) return 'browser';
+  if(raw==='browser'||raw==='server'||raw.startsWith('server:')) return raw;
+  // Migrate legacy direct provider ids (edge/openai/elevenlabs/etc.) to the
+  // delegated server-provider shape without losing the user's selection.
+  return 'server:'+raw;
+}
+
+function _setTtsProviderSelectFromCapability(ttsEngineSel,cap){
+  if(!ttsEngineSel) return cap;
+  window._ttsCapabilityData=cap;
+  const providers=Array.isArray(cap&&cap.available_providers)?cap.available_providers:[];
+  const serverAvailable=providers.length>0 || !!(cap&&cap.available===true);
+  ttsEngineSel.querySelectorAll('option[value^="server"], option[value^="browser:"]').forEach(o=>o.remove());
+  providers.forEach(p=>{
+    const provider=String(p||'').trim();
+    if(!provider) return;
+    const opt=document.createElement('option');
+    opt.value='server:'+provider;
+    opt.textContent=_ttsProviderLabel(provider)+' (server)';
+    ttsEngineSel.appendChild(opt);
+  });
+  // Inject the config provider as a synthetic option if it's not in the
+  // allowlist (handles custom command and plugin providers), but only when the
+  // agent reports server TTS capability. With no capability, Browser must remain
+  // selected so Listen does not route to a guaranteed 500.
+  const configProvider=String((cap&&cap.provider)||'browser').trim()||'browser';
+  const allowlistHasProvider=v=>providers.indexOf(v)!==-1;
+  if(serverAvailable&&configProvider!=='browser'&&!allowlistHasProvider(configProvider)){
+    const opt=document.createElement('option');
+    opt.value='server:' + configProvider;
+    opt.textContent=configProvider+' (from config.yaml)';
+    ttsEngineSel.appendChild(opt);
+  }
+  if(!serverAvailable){
+    const opt=document.createElement('option');
+    opt.value='server:unavailable';
+    opt.textContent='Server TTS unavailable on agent';
+    opt.disabled=true;
+    ttsEngineSel.appendChild(opt);
+    ttsEngineSel.value='browser';
+    localStorage.setItem('hermes-tts-engine','browser');
+    return cap;
+  }
+  const optionForValue=value=>Array.from(ttsEngineSel.options||[]).find(o=>o.value===value);
+  const current=_normalizeTtsEngineValue(localStorage.getItem('hermes-tts-engine')||ttsEngineSel.value||'browser');
+  const configOption=configProvider==='browser'?'browser':'server:'+configProvider;
+  let desired=current==='server'?configOption:current;
+  if(!optionForValue(desired)){
+    desired=optionForValue(configOption)?configOption:'browser';
+  }
+  ttsEngineSel.value=desired;
+  localStorage.setItem('hermes-tts-engine',desired);
+  return cap;
+}
+
+function _fetchTtsCapability(ttsEngineSel,onSettled){
+  if(!window._ttsCapabilityPromise){
+    const capabilityUrl=new URL('api/tts/capability',document.baseURI||location.href).href;
+    window._ttsCapabilityPromise=fetch(capabilityUrl,{credentials:'same-origin'})
+      .then(r=>{
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        return r.json();
+      })
+      .then(cap=>_setTtsProviderSelectFromCapability(ttsEngineSel,cap))
+      .catch(err=>{
+        console.warn('TTS capability fetch failed:',err);
+        window._ttsCapabilityPromise=null;
+        if(ttsEngineSel){
+          ttsEngineSel.value='browser';
+          localStorage.setItem('hermes-tts-engine','browser');
+        }
+      });
+  }
+  if(typeof onSettled==='function'){
+    window._ttsCapabilityPromise.then(onSettled).catch(onSettled);
+  }
+  return window._ttsCapabilityPromise;
+}
+
+function _renderTtsVoiceOptions(ttsVoiceSel,speechSetting){
+  if(!ttsVoiceSel) return;
+  const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  const current=String(speechSetting('tts_voice','hermes-tts-voice','')||'');
+  if(engine==='server:edge'){
+    // Edge TTS: show the voice allowlist so the user can pick. Multilingual
+    // voices are excluded because edge-tts stream_sync() does not support them.
+    const edgeVoices=[
+      {value:'en-US-AriaNeural',label:'Aria (English US, Female, agent default)'},
+      {value:'en-US-GuyNeural',label:'Guy (English US, Male)'},
+      {value:'en-GB-RyanNeural',label:'Ryan (English UK, Male)'},
+      {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
+      {value:'zh-CN-YunxiNeural',label:'Yunxi (Chinese, Male)'},
+      {value:'es-ES-ElviraNeural',label:'Elvira (Spanish, Female)'},
+      {value:'fr-FR-DeniseNeural',label:'Denise (French, Female)'},
+      {value:'de-DE-KatjaNeural',label:'Katja (German, Female)'},
+      {value:'ja-JP-NanamiNeural',label:'Nanami (Japanese, Female)'},
+      {value:'ko-KR-SunHiNeural',label:'Sun-Hi (Korean, Female)'},
+      {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
+    ];
+    ttsVoiceSel.innerHTML='';
+    const cap=window._ttsCapabilityData;
+    const configVoice=cap&&typeof cap.config_voice==='string'?cap.config_voice.trim():'';
+    const allowlistHas=v=>edgeVoices.some(e=>e.value===v);
+    if(configVoice&&!allowlistHas(configVoice)){
+      const opt=document.createElement('option');
+      opt.value=configVoice;
+      opt.textContent=configVoice+' (from config.yaml)';
+      ttsVoiceSel.appendChild(opt);
+    }
+    edgeVoices.forEach(v=>{
+      const opt=document.createElement('option');
+      opt.value=v.value;
+      opt.textContent=v.label;
+      ttsVoiceSel.appendChild(opt);
+    });
+    ttsVoiceSel.value=configVoice||current||'en-US-AriaNeural';
+    return;
+  }
+  if(engine==='server'||engine.startsWith('server:')){
+    // Other server providers: agent handles its own voice config.
+    ttsVoiceSel.innerHTML='<option value="">Server-configured voice</option>';
+    return;
+  }
+  if(!('speechSynthesis' in window)){
+    ttsVoiceSel.innerHTML='<option value="">Speech synthesis not available</option>';
+    return;
+  }
+  const voices=speechSynthesis.getVoices();
+  ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
+  voices.forEach(v=>{
+    const opt=document.createElement('option');
+    opt.value=v.name;
+    opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
+    if(v.name===current) opt.selected=true;
+    ttsVoiceSel.appendChild(opt);
+  });
+}
+
+function _setAgentTtsProvider(provider){
+  const providerUrl=new URL('api/tts/provider',document.baseURI||location.href).href;
+  return fetch(providerUrl,{
+    method:'POST',
+    credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({provider:provider}),
+  })
+  .then(r=>r.json())
+  .then(data=>{
+    if(!data.ok){
+      console.warn('Failed to set TTS provider:',data.error);
+      return;
+    }
+    if(window._ttsCapabilityData) window._ttsCapabilityData.provider=provider;
+  })
+  .catch(err=>console.warn('TTS provider change failed:',err));
+}
+
+function _setAgentEdgeVoice(voice){
+  const voiceUrl=new URL('api/tts/edge/voice',document.baseURI||location.href).href;
+  return fetch(voiceUrl,{
+    method:'POST',
+    credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({voice:voice}),
+  })
+  .then(r=>r.json())
+  .then(data=>{
+    if(!data.ok){
+      console.warn('Failed to set Edge TTS voice:',data.error);
+      return;
+    }
+    if(window._ttsCapabilityData) window._ttsCapabilityData.config_voice=voice;
+  })
+  .catch(err=>console.warn('Edge TTS voice change failed:',err));
+}
+
+function _initTtsSettingsControls(speechSetting){
+  const ttsEngineSel=$('settingsTtsEngine');
+  const ttsVoiceSel=$('settingsTtsVoice');
+  const renderVoices=()=>_renderTtsVoiceOptions(ttsVoiceSel,speechSetting);
+  window._populateTtsVoices=renderVoices;
+  if(ttsEngineSel){
+    ttsEngineSel.onchange=function(){
+      const value=this.value||'browser';
+      localStorage.setItem('hermes-tts-engine',value);
+      renderVoices();
+      _markSpeechPreferenceChanged('tts_engine');
+      _schedulePreferencesAutosave();
+      if(value==='browser') return;
+      _setAgentTtsProvider(value.startsWith('server:')?value.slice(7):value);
+    };
+    _fetchTtsCapability(ttsEngineSel,renderVoices);
+  }
+  if(ttsVoiceSel){
+    if(window._ttsCapabilityPromise) window._ttsCapabilityPromise.then(renderVoices).catch(renderVoices);
+    else renderVoices();
+    if('speechSynthesis' in window){
+      speechSynthesis.addEventListener('voiceschanged',function(){
+        const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+        if(engine==='browser') renderVoices();
+      },{once:false});
+    }
+    ttsVoiceSel.onchange=function(){
+      const value=this.value||'';
+      localStorage.setItem('hermes-tts-voice',value);
+      const engine=localStorage.getItem('hermes-tts-engine')||'';
+      if(engine==='server:edge'&&value){
+        _setAgentEdgeVoice(value);
+        return;
+      }
+      _markSpeechPreferenceChanged('tts_voice');
+      _schedulePreferencesAutosave();
+    };
+  }
 }
 
 function _setPreferencesAutosaveStatus(state){
@@ -9345,88 +9578,11 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       };
     }
-    // TTS engine selector
-    const ttsEngineSel=$('settingsTtsEngine');
-    if(ttsEngineSel){
-      // Re-add any extension-registered TTS engines (window.registerHermesTtsEngine)
-      // as options — the <select> markup only hardcodes the built-ins, and this
-      // settings panel can render after an extension registered its engine.
-      if(typeof window._hermesTtsEngineOptions==='function'){
-        window._hermesTtsEngineOptions().forEach(function(e){
-          if(!ttsEngineSel.querySelector('option[value="'+e.id+'"]')){
-            var opt=document.createElement('option');
-            opt.value=e.id; opt.textContent=e.label;
-            ttsEngineSel.appendChild(opt);
-          }
-        });
-      }
-      const saved=String(_speechSetting('tts_engine','hermes-tts-engine','browser')||'browser');
-      if(!ttsEngineSel.querySelector('option[value="'+saved+'"]')){
-        var savedOpt=document.createElement('option');
-        savedOpt.value=saved; savedOpt.textContent=saved;
-        ttsEngineSel.appendChild(savedOpt);
-      }
-      ttsEngineSel.value=saved;
-      _syncSpeechPreferenceCache('tts_engine',saved);
-      ttsEngineSel.onchange=function(){
-        _markSpeechPreferenceChanged('tts_engine');
-        localStorage.setItem('hermes-tts-engine',this.value);
-        window._populateTtsVoices();
-        _schedulePreferencesAutosave();
-      };
-    }
-    // Populate voice selector based on engine
-    const ttsVoiceSel=$('settingsTtsVoice');
-    window._populateTtsVoices=function(){
-      if(!ttsVoiceSel) return;
-      const engine=localStorage.getItem('hermes-tts-engine')||'browser';
-      const current=String(_speechSetting('tts_voice','hermes-tts-voice','')||'');
-      _syncSpeechPreferenceCache('tts_voice',current);
-      if(engine==='elevenlabs'){
-        ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
-      } else if(engine==='openai'){
-        ttsVoiceSel.innerHTML='<option value="">OpenAI voice (server-configured)</option>';
-      } else if(engine==='edge'){
-        const edgeVoices=[
-          {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
-          {value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},
-          {value:'zh-CN-YunxiNeural',label:'Yunxi (Chinese, Male)'},
-          {value:'zh-CN-YunjianNeural',label:'Yunjian (Chinese, Male)'},
-          {value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},
-          {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
-          {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
-          {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
-        ];
-        ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
-        edgeVoices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.value;opt.textContent=v.label;
-          if(v.value===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
-        });
-      } else {
-        if(!('speechSynthesis' in window)){
-          ttsVoiceSel.innerHTML='<option value="">Speech synthesis not available</option>';
-          return;
-        }
-        const voices=speechSynthesis.getVoices();
-        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
-        voices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
-          if(v.name===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
-        });
-      }
-    };
-    if(ttsVoiceSel&&'speechSynthesis' in window){
-      window._populateTtsVoices();
-      speechSynthesis.addEventListener('voiceschanged',function(){
-        const engine=localStorage.getItem('hermes-tts-engine')||'browser';
-        if(engine==='browser') window._populateTtsVoices();
-      },{once:false});
-      ttsVoiceSel.onchange=function(){_markSpeechPreferenceChanged('tts_voice');localStorage.setItem('hermes-tts-voice',this.value);_schedulePreferencesAutosave();};
-    }
+    // TTS provider/voice controls: Browser speech is local; server providers
+    // are discovered from agent capability/config and delegated through /api/tts.
+    // _initTtsSettingsControls installs window._populateTtsVoices for runtime refreshes.
+    localStorage.setItem('hermes-tts-engine',String(_speechSetting('tts_engine','hermes-tts-engine','browser')||'browser'));
+    _initTtsSettingsControls(_speechSetting);
     // TTS rate/pitch sliders
     const ttsRateSlider=$('settingsTtsRate');
     const ttsRateValue=$('settingsTtsRateValue');

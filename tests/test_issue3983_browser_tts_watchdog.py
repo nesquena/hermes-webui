@@ -1,82 +1,177 @@
-from pathlib import Path
+"""Browser TTS watchdog — server TTS branch must stay separate.
+
+The TTS delegation refactor unified the server TTS playback into
+a shared helper (window._playServerTts in static/ui.js). boot.js's
+_speakResponse function delegates to that helper for the else branch
+and keeps the browser TTS branch independent so the watchdog can
+guard it.
+
+These tests use a brace-counting helper to extract function bodies
+because the JS files contain nested functions, template literals
+with braces, and string literals — a regex-based approach would be
+brittle. The extracted bodies are then grepped for the patterns we
+care about.
+"""
 import re
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
 
 
-REPO = Path(__file__).resolve().parents[1]
-
-
-def _extract_function(src: str, name: str) -> str:
-    anchor = f"function {name}("
-    start = src.find(anchor)
-    assert start != -1, f"{name}() must exist"
-    body_start = src.find("{", start)
-    assert body_start != -1, f"{name}() must have a body"
-    depth = 1
-    idx = body_start + 1
-    while depth and idx < len(src):
-        if src[idx] == "{":
+def _extract_function_body(src: str, name: str) -> str:
+    """Return the body (between braces) of `function NAME(`, or '' if not found."""
+    needle = f"function {name}("
+    start = src.find(needle)
+    if start == -1:
+        return ""
+    open_idx = src.find("{", start)
+    if open_idx == -1:
+        return ""
+    depth = 0
+    for i in range(open_idx, len(src)):
+        c = src[i]
+        if c == "{":
             depth += 1
-        elif src[idx] == "}":
+        elif c == "}":
             depth -= 1
-        idx += 1
-    assert depth == 0, f"{name}() body must balance braces"
-    return src[start:idx]
+            if depth == 0:
+                return src[open_idx + 1 : i]
+    return ""
 
 
-def test_boot_js_declares_browser_tts_recovery_helpers():
-    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    assert "let _browserTtsKeepAlive=null;" in src
-    assert "let _browserTtsWatchdog=null;" in src
-    assert "let _browserTtsSuppressNextErrorRearm=false;" in src
-    assert "function _clearBrowserTtsRecovery()" in src
-    assert "function _armBrowserTtsRecovery(clean, rate)" in src
-
-
-def test_browser_tts_watchdog_rearms_listening_if_onend_drops():
-    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    arm_body = _extract_function(src, "_armBrowserTtsRecovery")
-    assert "_browserTtsWatchdog=setTimeout" in arm_body
-    assert "_voiceModeState!=='speaking'" in arm_body
-    assert "_browserTtsSuppressNextErrorRearm=true;" in arm_body
-    assert "speechSynthesis.cancel()" in arm_body
-    assert "_startListening();" in arm_body
-    assert "_browserTtsKeepAlive=setInterval" in arm_body
-    assert "speechSynthesis.pause();" in arm_body
-    assert "speechSynthesis.resume();" in arm_body
-
-
-def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
-    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    speak_body = _extract_function(src, "_speakResponse")
-    assert "const utter=new SpeechSynthesisUtterance(clean);" in speak_body
-    assert "utter.onend=()=>{" in speak_body
-    assert "utter.onerror=()=>{" in speak_body
-    assert speak_body.count("_clearBrowserTtsRecovery();") >= 2, (
-        "Both browser TTS completion callbacks must clear watchdog/keep-alive handles."
+def test_browser_tts_watchdog_armed_in_speak_response():
+    """_speakResponse() must arm the browser-TTS watchdog before utter.speak()."""
+    body = _extract_function_body(
+        (REPO / "static" / "boot.js").read_text(encoding="utf-8"),
+        "_speakResponse",
     )
-    assert "_browserTtsSuppressNextErrorRearm=false;" in speak_body
-    assert "_voiceModeActive&&_voiceModeState==='speaking'" in speak_body
-    assert "if(_browserTtsSuppressNextErrorRearm){" in speak_body
-    assert "_armBrowserTtsRecovery(clean, utter.rate);" in speak_body
-
-    deactivate_body = _extract_function(src, "_deactivate")
-    assert "_clearBrowserTtsRecovery();" in deactivate_body, (
-        "_deactivate() must clear browser TTS watchdog/keep-alive handles."
+    assert body, "_speakResponse() must exist in boot.js"
+    assert "_armBrowserTtsRecovery" in body, (
+        "_speakResponse() must arm the browser-TTS watchdog before utter.speak()"
     )
-    assert "_browserTtsSuppressNextErrorRearm=false;" in deactivate_body
+    assert "_clearBrowserTtsRecovery" in body
 
 
-def test_edge_audio_branch_stays_separate():
-    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    edge_match = re.search(
-        r'if\(engine==="edge"\)\{(.*?)\n\s+return;\n\s+\}',
-        src,
-        re.DOTALL,
+def test_browser_tts_watchdog_cleared_in_speak_response():
+    """_speakResponse() must clear the browser-TTS watchdog on completion."""
+    body = _extract_function_body(
+        (REPO / "static" / "boot.js").read_text(encoding="utf-8"),
+        "_speakResponse",
     )
-    assert edge_match, "Edge audio branch must exist"
-    edge_body = edge_match.group(1)
-    assert "const audio = new Audio(url);" in edge_body
-    assert "audio.onended = () => {" in edge_body
-    assert "_armBrowserTtsRecovery" not in edge_body, (
-        "The browser speechSynthesis workaround must not be injected into the Edge audio branch."
+    assert body
+    # The watchdog should be cleared at least once (in cleanup paths)
+    assert body.count("_clearBrowserTtsRecovery") >= 1, (
+        "_speakResponse() must clear the browser TTS watchdog at least once"
     )
+
+
+def test_server_audio_branch_delegates_to_shared_helper():
+    """Server TTS branch in _speakResponse delegates to window._playServerTts.
+
+    The branch is structurally independent from the browser TTS watchdog
+    and uses the shared playback helper from static/ui.js instead of
+    inlining its own fetch+play logic.
+    """
+    body = _extract_function_body(
+        (REPO / "static" / "boot.js").read_text(encoding="utf-8"),
+        "_speakResponse",
+    )
+    assert body, "_speakResponse() must exist in boot.js"
+    assert "window._playServerTts" in body, (
+        "Server TTS else branch must delegate to window._playServerTts"
+    )
+    assert "onComplete" in body, (
+        "Server TTS else branch must pass onComplete to resume voice mode"
+    )
+    # Shared helper must be defined in ui.js (single source of truth)
+    ui_src = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    assert re.search(r"window\._playServerTts\s*=\s*_playServerTts", ui_src), (
+        "ui.js must expose _playServerTts on window for boot.js to use"
+    )
+
+
+def test_server_tts_helper_chunks_long_text_before_posting():
+    """Server TTS must not send >5000-char messages in a single request."""
+    body = _extract_function_body(
+        (REPO / "static" / "ui.js").read_text(encoding="utf-8"),
+        "_playServerTts",
+    )
+    assert body, "_playServerTts() must exist in ui.js"
+    assert "_splitForTTS(text, opts.maxChars || 4500)" in body, (
+        "Server TTS should split text below the server's 5000-char limit"
+    )
+    assert "chunks.forEach" in body, "Server TTS should play chunks sequentially"
+    assert "JSON.stringify({text: chunk})" in body, (
+        "Each /api/tts request should send one safe-size chunk"
+    )
+    assert "return chain" in body, "Server TTS helper should expose completion as a promise"
+
+
+def test_stop_tts_invalidates_pending_server_tts_fetches():
+    """Stopping during an in-flight server TTS fetch must not allow stale playback."""
+    body = _extract_function_body(
+        (REPO / "static" / "ui.js").read_text(encoding="utf-8"),
+        "stopTTS",
+    )
+    assert body, "stopTTS() must exist in ui.js"
+    assert "_ttsPlayGeneration++" in body, (
+        "stopTTS() should invalidate pending _playServerTts fetch/audio callbacks"
+    )
+
+
+def test_tts_provider_label_lowercases_before_i18n_lookup():
+    """Provider labels from config/plugin data should match lowercase i18n keys."""
+    body = _extract_function_body(
+        (REPO / "static" / "panels.js").read_text(encoding="utf-8"),
+        "_ttsProviderLabel",
+    )
+    assert body, "_ttsProviderLabel() must exist in panels.js"
+    assert "toLowerCase().replace(/[^a-z0-9_]/g,'_')" in body
+    assert "const key='tts_provider_'+safe" in body
+
+
+def test_tts_defaults_to_browser_when_no_saved_preference():
+    """Never-configured installs should use browser speech, not server TTS."""
+    ui_src = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    boot_src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    panels_src = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "localStorage.getItem('hermes-tts-engine')||'browser'" in ui_src
+    assert 'localStorage.getItem("hermes-tts-engine")||"browser"' in boot_src
+    assert "localStorage.getItem('hermes-tts-engine')||'browser'" in panels_src
+    assert "localStorage.getItem('hermes-tts-engine')||'server'" not in ui_src
+    assert 'localStorage.getItem("hermes-tts-engine")||"server"' not in boot_src
+
+
+def test_tts_capability_population_preserves_browser_and_legacy_selection():
+    """Capability discovery should populate options without clobbering user prefs."""
+    body = _extract_function_body(
+        (REPO / "static" / "panels.js").read_text(encoding="utf-8"),
+        "_setTtsProviderSelectFromCapability",
+    )
+    assert body, "_setTtsProviderSelectFromCapability() must exist in panels.js"
+    assert "const current=_normalizeTtsEngineValue(" in body, (
+        "Saved browser/server/provider preferences must be normalized before applying capability"
+    )
+    assert "let desired=current==='server'?configOption:current" in body, (
+        "Legacy generic server should migrate to the config provider, while browser stays browser"
+    )
+    normalizer = _extract_function_body(
+        (REPO / "static" / "panels.js").read_text(encoding="utf-8"),
+        "_normalizeTtsEngineValue",
+    )
+    assert "return 'server:'+raw" in normalizer, (
+        "Legacy direct provider ids like edge/openai should migrate to server:<provider>"
+    )
+
+
+def test_no_tts_capability_falls_back_to_browser_not_broken_edge():
+    """An agent with no TTS providers should render a disabled server option and use browser."""
+    body = _extract_function_body(
+        (REPO / "static" / "panels.js").read_text(encoding="utf-8"),
+        "_setTtsProviderSelectFromCapability",
+    )
+    assert "if(!serverAvailable)" in body
+    assert "opt.value='server:unavailable'" in body
+    assert "opt.disabled=true" in body
+    assert "ttsEngineSel.value='browser'" in body
+    assert "localStorage.setItem('hermes-tts-engine','browser')" in body

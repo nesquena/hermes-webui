@@ -8,10 +8,16 @@ import os
 import re
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), '..', 'static')
+REPO_DIR = os.path.join(os.path.dirname(__file__), '..')
 
 
 def _read(filename):
     return open(os.path.join(STATIC_DIR, filename), encoding='utf-8').read()
+
+
+def _read_repo(relative_path):
+    """Read a file from the repo root (e.g. 'api/routes.py')."""
+    return open(os.path.join(REPO_DIR, relative_path), encoding='utf-8').read()
 
 
 class TestTtsUtilityFunctions:
@@ -57,17 +63,24 @@ class TestTtsUtilityFunctions:
         assert 'speechSynthesis.speak' in src, \
             "speakMessage must call speechSynthesis.speak"
 
-    def test_speak_message_routes_openai(self):
+    def test_play_server_tts_exists(self):
+        """_playServerTts unified server TTS function exists."""
         src = _read('ui.js')
-        assert "if(engine==='openai')" in src, \
-            "speakMessage must branch for the OpenAI TTS engine"
-        assert '_playOpenaiTts(clean, btn);' in src, \
-            "speakMessage must route OpenAI TTS through _playOpenaiTts"
+        assert 'function _playServerTts(' in src, \
+            "_playServerTts function not found in ui.js"
 
-    def test_auto_read_routes_openai(self):
+    def test_no_elevenlabs_engine_dispatch(self):
+        """speakMessage no longer dispatches to elevenlabs engine."""
         src = _read('ui.js')
-        assert '_playOpenaiTts(clean, null);' in src, \
-            "autoReadLastAssistant must route OpenAI TTS through _playOpenaiTts"
+        # The old pattern: if(engine==='elevenlabs'){_playElevenLabsTts(...)
+        assert "engine==='elevenlabs'" not in src, \
+            "Old elevenlabs engine dispatch should be removed from speakMessage"
+
+    def test_no_edge_engine_dispatch(self):
+        """speakMessage no longer dispatches to edge engine."""
+        src = _read('ui.js')
+        assert "engine==='edge'" not in src, \
+            "Old edge engine dispatch should be removed from speakMessage"
 
 
 class TestTtsSpeakerButton:
@@ -121,10 +134,12 @@ class TestTtsSettings:
         assert 'settingsTtsVoice' in src, \
             "TTS voice selector not found in index.html"
 
-    def test_tts_engine_includes_openai_option(self):
+    def test_tts_engine_is_capability_driven(self):
         src = _read('index.html')
-        assert '<option value="openai">OpenAI TTS (server)</option>' in src, \
-            "settingsTtsEngine must expose the OpenAI server TTS option"
+        assert '<option value="browser">Browser speech synthesis</option>' in src, \
+            "settingsTtsEngine must keep the browser-local option"
+        assert '<option value="openai">OpenAI TTS (server)</option>' not in src, \
+            "Server TTS providers must be populated from /api/tts/capability, not hardcoded"
 
     def test_tts_rate_slider(self):
         src = _read('index.html')
@@ -150,12 +165,12 @@ class TestTtsSettings:
         assert 'function _applyTtsEnabled(' in src, \
             "_applyTtsEnabled function not found in panels.js"
 
-    def test_openai_voice_placeholder_in_panels(self):
+    def test_server_voice_placeholder_in_panels(self):
         src = _read('panels.js')
-        assert "engine==='openai'" in src, \
-            "panels.js must branch for the OpenAI TTS engine"
-        assert 'OpenAI voice (server-configured)' in src, \
-            "OpenAI TTS must present a server-configured voice placeholder"
+        assert "engine==='server'||engine.startsWith('server:')" in src, \
+            "panels.js must treat all server providers as agent-configured TTS"
+        assert 'Server-configured voice' in src, \
+            "Server TTS providers must present a server-configured voice placeholder"
 
 
 class TestTtsI18n:
@@ -270,4 +285,219 @@ class TestIssue1409TtsToggleBodyClass:
                re.search(r'\.msg-tts-btn\s*\{[^}]*display\s*:\s*none', src), (
             "Default `.msg-tts-btn{display:none;}` rule must remain so the "
             "icon is hidden by default (#1409)."
+        )
+
+
+class TestCustomProviderInjection:
+    """Custom command providers and plugin providers in config.yaml must
+    surface in the WebUI dropdown — not silently fall back to browser.
+    """
+
+    def test_synthetic_option_code_present(self):
+        """panels.js must inject a synthetic option for unknown config providers."""
+        src = _read('panels.js')
+        # The JS template is: configProvider + ' (from config.yaml)'
+        # so the literal string '(from config.yaml)' is in the source.
+        assert '(from config.yaml)' in src, (
+            "Missing synthetic option label for unknown TTS providers — "
+            "custom command and plugin providers would be hidden from the "
+            "user otherwise."
+        )
+
+    def test_synthetic_option_block_uses_cap_provider(self):
+        """The synthetic-option block must reference cap.provider (not a stale variable)."""
+        src = _read('panels.js')
+        # The block that injects the synthetic option should:
+        # 1. Read cap.provider
+        # 2. Check against the allowlist
+        # 3. Append a new <option> if not in the allowlist
+        assert "cap.provider" in src, (
+            "Synthetic option code must read cap.provider from the "
+            "capability response"
+        )
+        assert "allowlistHasProvider" in src, (
+            "Missing allowlist check for synthetic option injection"
+        )
+
+    def test_configProvider_declared_before_use(self):
+        """The configProvider variable must be declared before any reference to it.
+
+        Regression test for the ReferenceError bug where the synthetic
+        option block referenced configProvider before declaring it.
+        """
+        src = _read('panels.js')
+        # Find the synthetic option block
+        block_match = re.search(
+            r'// Inject the config provider.*?const configOption',
+            src, re.DOTALL
+        )
+        assert block_match, "Synthetic option block not found"
+        block = block_match.group(0)
+        decl_pos = block.find("const configProvider")
+        first_use_pos = block.find("configProvider", decl_pos + 1) if decl_pos >= 0 else -1
+        assert decl_pos >= 0, (
+            "const configProvider declaration missing in synthetic option block"
+        )
+        assert first_use_pos > decl_pos, (
+            f"configProvider used at offset {first_use_pos} before declaration "
+            f"at offset {decl_pos} — causes ReferenceError"
+        )
+
+    def test_synthetic_option_value_format(self):
+        """The synthetic option must use the 'server:<provider>' value format."""
+        src = _read('panels.js')
+        # The synthetic option should be added with value 'server:' + configProvider
+        assert "opt.value='server:' + configProvider" in src, (
+            "Synthetic option value must use 'server:<provider>' format to "
+            "match the existing dropdown values"
+        )
+
+
+class TestTtsEdgeCases:
+    """Edge cases for the TTS subsystem — bugs caught during testing."""
+
+    def test_tts_voice_public_wrapper_does_not_recurse(self):
+        """Regression: window._populateTtsVoices must not call itself forever."""
+        src = _read('panels.js')
+        assert 'function _renderTtsVoiceOptions(' in src
+        assert 'const renderVoices=()=>_renderTtsVoiceOptions(ttsVoiceSel,speechSetting);' in src
+        assert 'const renderVoices=()=>_populateTtsVoices(ttsVoiceSel,speechSetting);' not in src, (
+            "renderVoices calling _populateTtsVoices recurses after assigning "
+            "window._populateTtsVoices=renderVoices"
+        )
+
+    def test_server_voice_dropdown_not_gated_on_browser_speech_synthesis(self):
+        """Edge/server voice options must render even if browser speech synthesis is absent."""
+        src = _read('panels.js')
+        assert "if(ttsVoiceSel){" in src
+        assert "if(ttsVoiceSel&&'speechSynthesis' in window)" not in src, (
+            "The Edge/server voice dropdown must not be hidden behind the "
+            "browser speechSynthesis availability check"
+        )
+
+    def test_no_direct_edge_tts_communicate(self):
+        """No direct edge_tts.Communicate call — all providers must delegate to agent."""
+        src = _read('ui.js')  # also check ui.js in case
+        assert 'edge_tts.Communicate' not in src, (
+            "ui.js must not call edge_tts.Communicate directly — "
+            "Edge TTS should delegate to agent's text_to_speech_tool"
+        )
+        # Check boot.js too
+        boot_src = _read('boot.js')
+        assert 'edge_tts.Communicate' not in boot_src, (
+            "boot.js must not call edge_tts.Communicate directly"
+        )
+
+    def test_no_elevenlabs_urlopen(self):
+        """No direct ElevenLabs HTTP call — must delegate to agent."""
+        for filename in ('ui.js', 'boot.js', 'panels.js'):
+            src = _read(filename)
+            assert 'elevenlabs' not in src.lower() or 'label' in src.lower() or 'label:' in src.lower() or 'agent' in src.lower() or 'elevenlabs:' in src.lower(), (
+                f"{filename} must not have a direct ElevenLabs integration"
+            )
+
+    def test_no_normalize_tts_prosody(self):
+        """The _normalize_tts_prosody function must be removed (rate/pitch are client-side)."""
+        api_routes = _read_repo('api/routes.py')
+        assert '_normalize_tts_prosody' not in api_routes, (
+            "_normalize_tts_prosody is dead code — rate/pitch are applied "
+            "client-side via playbackRate. Remove it."
+        )
+
+    def test_capability_endpoint_requires_auth_when_auth_enabled(self):
+        """The /api/tts/capability endpoint must not bypass auth."""
+        auth_path = os.path.join(REPO_DIR, 'api', 'auth.py')
+        if not os.path.exists(auth_path):
+            return  # test skipped if auth.py not present
+        auth_src = open(auth_path).read()
+        public_idx = auth_src.find('PUBLIC_PATHS')
+        assert public_idx != -1, "auth.py must define PUBLIC_PATHS"
+        public_block = auth_src[public_idx:auth_src.find('})', public_idx)]
+        assert '/api/tts/capability' not in public_block, (
+            "/api/tts/capability leaks provider/config/credential availability "
+            "and must stay behind normal WebUI auth"
+        )
+
+    def test_no_multilingual_voices_in_dropdown(self):
+        """Multilingual voices must not be in the dropdown (they hang on edge_tts)."""
+        src = _read('panels.js')
+        # Find the edgeVoices array and check it doesn't contain
+        # Multilingual voices. The string may appear in comments — we
+        # only care about the actual voice entries.
+        import re
+        match = re.search(r"const edgeVoices=\[(.*?)\];", src, re.DOTALL)
+        assert match, "edgeVoices array not found"
+        block = match.group(1)
+        # Multilingual voices are named like en-US-JennyMultilingualNeural
+        assert 'MultilingualNeural' not in block, (
+            "Multilingual voices (e.g. en-US-JennyMultilingualNeural) hang the "
+            "edge_tts library indefinitely. They must not be in the dropdown."
+        )
+
+    def test_pitch_description_no_false_config_claim(self):
+        """Speech pitch description must not claim a config.yaml setting that doesn't exist."""
+        src = _read('index.html')
+        # The old description said "Server TTS pitch is configured in config.yaml"
+        # which is false — the agent has no general tts.pitch setting.
+        assert 'Server TTS pitch is configured in config.yaml' not in src, (
+            "Pitch description must not claim a non-existent config.yaml setting"
+        )
+
+    def test_aia_default_voice_in_dropdown(self):
+        """en-US-AriaNeural (the agent's DEFAULT_EDGE_VOICE) must be in the dropdown."""
+        src = _read('panels.js')
+        assert "'en-US-AriaNeural'" in src, (
+            "en-US-AriaNeural is the agent's DEFAULT_EDGE_VOICE — must be in "
+            "the dropdown so users with no tts.edge.voice configured still "
+            "see a recognizable name"
+        )
+
+    def test_idonesian_voice_preserved(self):
+        """The Indonesian voice (contributor's work) must be preserved in the dropdown."""
+        src = _read('panels.js')
+        assert "'id-ID-GadisNeural'" in src, (
+            "id-ID-GadisNeural was added 2 days ago by a contributor — must "
+            "be preserved in the dropdown."
+        )
+
+    def test_voice_count_in_range(self):
+        """Voice dropdown should have 8-13 voices (per design)."""
+        src = _read('panels.js')
+        # Count voice entries in the edgeVoices array
+        match = re.search(r"const edgeVoices=\[(.*?)\];", src, re.DOTALL)
+        assert match, "edgeVoices array not found"
+        block = match.group(1)
+        count = len(re.findall(r"\{value:'", block))
+        assert 8 <= count <= 15, (
+            f"Voice dropdown has {count} entries — expected 8-15 "
+            f"(current target is ~10-11)"
+        )
+
+
+class TestTtsSettingsDescriptions:
+    """Settings panel descriptions must be accurate and not reference non-existent config."""
+
+    def test_tts_engine_description_present(self):
+        """TTS Engine description must be set."""
+        src = _read('index.html')
+        assert 'settings_desc_tts_engine' in src, (
+            "TTS Engine description (settings_desc_tts_engine) missing"
+        )
+        # Must not contain the old "Edge TTS uses Microsoft neural voices" text
+        # (describes the OLD direct-Edge-TTS architecture, not the delegated one)
+        assert 'Edge TTS uses Microsoft neural voices' not in src, (
+            "Description references the old direct-Edge-TTS architecture"
+        )
+
+    def test_voice_description_present(self):
+        """Voice description must be set and accurate."""
+        src = _read('index.html')
+        assert 'settings_desc_tts_voice' in src
+
+    def test_no_pitch_in_config_claim(self):
+        """No setting description should claim pitch is in config.yaml."""
+        src = _read('index.html')
+        assert 'pitch is configured in config.yaml' not in src, (
+            "Pitch description still claims it's in config.yaml — false, "
+            "there's no general tts.pitch setting"
         )

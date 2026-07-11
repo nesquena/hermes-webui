@@ -8104,6 +8104,7 @@ let _ttsChunkQueue=[];
 let _ttsChunkIndex=0;
 let _ttsActiveBtn=null;
 let _playingEdgeAudio=null;
+let _ttsPlayGeneration=0;
 
 function _buildBrowserUtterance(text, btn){
   const utter=new SpeechSynthesisUtterance(text);
@@ -8139,68 +8140,93 @@ function _buildBrowserUtterance(text, btn){
   return utter;
 }
 
-function _playEdgeTtsChunked(text, btn){
-  _ttsSpeaking=true;
-  if(btn) btn.dataset.speaking='1';
-  const chunks=_splitForTTS(text);
-  const _playOne=function(idx){
-    if(idx>=chunks.length){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn) btn.dataset.speaking='0';
-      return;
-    }
-    const chunk=chunks[idx];
-    const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
-    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-    let rate='', pitch='';
-    if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
-    if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-    fetch(new URL('api/tts', document.baseURI || location.href).href, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
-    })
-    .then(function(r){
-      if(!r.ok){
+// Shared server TTS playback. Used by both ui.js (message-level)
+// and boot.js (voice-mode reply). Exposed on window so boot.js can call it.
+function _playServerTts(text, opts){
+  opts = opts || {};
+  var btn = opts.btn || null;
+  var onComplete = opts.onComplete || null;
+  var chunks = _splitForTTS(text, opts.maxChars || 4500);
+  if (!chunks.length) {
+    if (onComplete) onComplete();
+    return Promise.resolve();
+  }
+  _ttsChunkQueue = chunks;
+  _ttsChunkIndex = 0;
+  _ttsSpeaking = true;
+  if (btn) btn.dataset.speaking = '1';
+  var gen = ++_ttsPlayGeneration;
+  var savedRate = parseFloat(localStorage.getItem('hermes-tts-rate'));
+
+  function reset(){
+    _playingEdgeAudio = null;
+    _ttsSpeaking = false;
+    _ttsChunkQueue = [];
+    _ttsChunkIndex = 0;
+    if (btn) btn.dataset.speaking = '0';
+  }
+
+  function fetchChunk(chunk){
+    return fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: chunk})
+    }).then(function(r){
+      if (gen !== _ttsPlayGeneration) throw new Error('stale');
+      if (!r.ok) {
         return r.json().catch(function(){return {};}).then(function(j){
-          throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+          throw new Error((j && j.error) || ('TTS request failed: ' + r.status));
         });
       }
-      return r.blob();
-    })
-    .then(function(blob){
-      if(!_ttsSpeaking) return;
-      const url=URL.createObjectURL(blob);
-      const audio=new Audio(url);
-      _playingEdgeAudio=audio;
-      audio.onended=function(){
-        URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        if(_ttsSpeaking) _playOne(idx+1);
+      return r.json();
+    });
+  }
+
+  function playChunk(j){
+    if (gen !== _ttsPlayGeneration) throw new Error('stale');
+    if (!j.audio) throw new Error('TTS response missing audio');
+    return new Promise(function(resolve, reject){
+      var audio = new Audio(j.audio);
+      _playingEdgeAudio = audio;
+      // Apply saved rate preference via playbackRate (works for both
+      // browser and server TTS regardless of provider).
+      if (!isNaN(savedRate)) audio.playbackRate = Math.min(2, Math.max(0.5, savedRate));
+      audio.onended = function(){
+        if (_playingEdgeAudio === audio) _playingEdgeAudio = null;
+        _ttsChunkIndex++;
+        resolve();
       };
-      audio.onerror=function(){
-        URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        _ttsSpeaking=false;
-        if(btn) btn.dataset.speaking='0';
+      audio.onerror = function(){
+        if (_playingEdgeAudio === audio) _playingEdgeAudio = null;
+        reject(new Error('TTS playback error'));
       };
       audio.play().catch(function(e){
-        URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        _ttsSpeaking=false;
-        if(btn) btn.dataset.speaking='0';
-        if(typeof showToast==='function') showToast('Edge TTS error: '+(e&&e.message||e));
+        if (_playingEdgeAudio === audio) _playingEdgeAudio = null;
+        reject(e);
       });
-    })
-    .catch(function(e){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn) btn.dataset.speaking='0';
-      if(typeof showToast==='function') showToast('Edge TTS failed: '+(e&&e.message||e));
     });
-  };
-  _playOne(0);
+  }
+
+  var chain = Promise.resolve();
+  chunks.forEach(function(chunk){
+    chain = chain.then(function(){
+      if (gen !== _ttsPlayGeneration) throw new Error('stale');
+      return fetchChunk(chunk).then(playChunk);
+    });
+  });
+  chain = chain.then(function(){
+    if (gen !== _ttsPlayGeneration) return;
+    reset();
+    if (onComplete) onComplete();
+  }).catch(function(e){
+    if (gen !== _ttsPlayGeneration) return;
+    reset();
+    if (onComplete) onComplete();
+    if (typeof showToast === 'function') showToast('TTS failed: ' + (e && e.message || e));
+  });
+  return chain;
 }
+window._playServerTts = _playServerTts;
 
 function speakMessage(btn){
   if(btn&&btn.dataset.speaking==='1'){
@@ -8217,107 +8243,24 @@ function speakMessage(btn){
   if(!clean) return;
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
-  if(engine==='openai'){
-    _playOpenaiTts(clean, btn);
-    return;
-  }
-  if(engine==='elevenlabs'){
-    _playElevenLabsTts(clean, btn);
-    return;
-  }
-  if(engine==='edge'){
-    _playEdgeTtsChunked(clean, btn);
-    return;
-  }
-  // Extension-registered TTS engine (window.registerHermesTtsEngine). Synthesize
-  // via the extension, then play through the shared audio-buffer path.
-  if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-    if(btn) btn.dataset.speaking='1';
+  if(engine==='browser'){
+    if(!('speechSynthesis' in window)){
+      showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
+      return;
+    }
+    _ttsChunkQueue=_splitForTTS(clean);
+    _ttsChunkIndex=0;
+    _ttsActiveBtn=btn;
     _ttsSpeaking=true;
-    const _failReg=function(msg){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn)btn.dataset.speaking='0';
-      if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
-    };
-    const _opts={
-      voice: localStorage.getItem('hermes-tts-voice')||'',
-      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
-      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
-    };
-    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-      .then(function(buf){ return _playAudioBuf(buf, btn, 'TTS'); })
-      .catch(function(e){ _failReg((e&&e.message)||'TTS engine failed'); });
+    if(btn) btn.dataset.speaking='1';
+    const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn);
+    _ttsCurrentUtterance=utter;
+    speechSynthesis.speak(utter);
     return;
   }
 
-  if(!('speechSynthesis' in window)){
-    showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
-    return;
-  }
-
-  _ttsChunkQueue=_splitForTTS(clean);
-  _ttsChunkIndex=0;
-  _ttsActiveBtn=btn;
-  _ttsSpeaking=true;
-  if(btn) btn.dataset.speaking='1';
-
-  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn);
-  _ttsCurrentUtterance=utter;
-  speechSynthesis.speak(utter);
-}
-
-function _playElevenLabsTts(text, btn){
-  if(btn) btn.dataset.speaking='1';
-  _ttsSpeaking=true;
-  const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
-    if(btn)btn.dataset.speaking='0';
-    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
-  };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'elevenlabs'})
-  })
-  .then(function(r){
-    if(!r.ok){
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
-    }
-    return r.arrayBuffer();
-  })
-  .then(function(buf){
-    return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
-  })
-  .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
-}
-
-function _playOpenaiTts(text, btn){
-  if(btn) btn.dataset.speaking='1';
-  _ttsSpeaking=true;
-  const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
-    if(btn)btn.dataset.speaking='0';
-    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
-  };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'openai'})
-  })
-  .then(function(r){
-    if(!r.ok){
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
-    }
-    return r.arrayBuffer();
-  })
-  .then(function(buf){
-    return _playAudioBuf(buf, btn, 'OpenAI TTS');
-  })
-  .catch(function(e){ _fail((e&&e.message)||'OpenAI TTS failed'); });
+  // All server TTS (server, server:mistral, server:edge, etc.) → one path
+  _playServerTts(clean, {btn: btn});
 }
 
 // ── Shared AudioContext for TTS playback (no blob URLs needed) ──
@@ -8363,6 +8306,7 @@ function _playAudioBuf(arrayBuffer, btn, label){
   });
 }
 function stopTTS(){
+  _ttsPlayGeneration++;
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
@@ -8399,43 +8343,18 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
-  if(engine==='openai'){
-    _playOpenaiTts(clean, null);
-    return;
-  }
-  if(engine==='elevenlabs'){
-    _playElevenLabsTts(clean, null);
-    return;
-  }
-  if(engine==='edge'){
-    _playEdgeTtsChunked(clean, null);
-    return;
-  }
-  // Extension-registered TTS engine (window.registerHermesTtsEngine): synth via
-  // the extension, then play through the shared audio-buffer path. Mirrors the
-  // registered-engine branch in speakMessage() so auto-read honors the selection.
-  if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+  if(engine==='browser'){
+    // Use chunked playback for browser TTS
+    _ttsChunkQueue=_splitForTTS(clean);
+    _ttsChunkIndex=0;
     _ttsSpeaking=true;
-    const _opts={
-      voice: localStorage.getItem('hermes-tts-voice')||'',
-      rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
-      pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
-    };
-    Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-      .then(function(buf){ return _playAudioBuf(buf, null, 'TTS'); })
-      .catch(function(){ _ttsSpeaking=false; _playingEdgeAudio=null; });
+    const utter=_buildBrowserUtterance(_ttsChunkQueue[0], null);
+    _ttsCurrentUtterance=utter;
+    speechSynthesis.speak(utter);
     return;
   }
-  // Unknown/unregistered engine (e.g. an extension engine that's no longer
-  // registered) — fall back to browser TTS only if it's available.
-  if(!('speechSynthesis' in window)) return;
-  // Use chunked playback for browser TTS
-  _ttsChunkQueue=_splitForTTS(clean);
-  _ttsChunkIndex=0;
-  _ttsSpeaking=true;
-  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], null);
-  _ttsCurrentUtterance=utter;
-  speechSynthesis.speak(utter);
+  // All server TTS (server, server:mistral, etc.) → one path
+  _playServerTts(clean, {});
 }
 
 // ── Reconnect banner (B4/B5: reload resilience) ──

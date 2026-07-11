@@ -845,6 +845,7 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
         except Exception:
             logger.debug("Failed to read runtime env from %s", env_path)
 
+    env["HERMES_CONFIG_PATH"] = str(home / "config.yaml")
     return env
 
 

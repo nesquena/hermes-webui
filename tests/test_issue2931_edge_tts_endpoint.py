@@ -1,9 +1,9 @@
-"""Validation + security-path coverage for the Edge TTS endpoint (#2931).
+"""Validation + security-path coverage for the TTS endpoint (#2931).
 
-These exercise the guard rails of _handle_tts (method, input cap, voice
-allowlist, rate limiting) in-process via a fake handler — no network and no
-real edge-tts synthesis required, since every rejection happens before the
-edge_tts import / Communicate call.
+These exercise the guard rails of _handle_tts (method, input cap,
+rate limiting, agent delegation) in-process via a fake handler —
+no network and no real TTS synthesis required, since rejections
+happen before the agent's text_to_speech_tool is called.
 """
 import io
 import json
@@ -48,22 +48,21 @@ def _post(body_dict, **kw):
 
 
 def _reset_limiter():
-    # Drop any limiter state carried between tests so rate-limit assertions are
-    # deterministic regardless of run order.
     if hasattr(routes._handle_tts, "_tts_limiter"):
         del routes._handle_tts._tts_limiter
 
 
+def _mock_text_to_speech_tool(monkeypatch, *, side_effect=None, return_value=None):
+    """Thin wrapper around the shared TTS mock helper for backwards compat."""
+    from tests._tts_helpers import mock_text_to_speech_tool
+    return mock_text_to_speech_tool(
+        monkeypatch, side_effect=side_effect, return_value=return_value
+    )
+
+
 @pytest.fixture(autouse=True)
 def _fresh_tts_limiter(monkeypatch):
-    # The limiter is a function-attribute singleton that persists across the
-    # whole test session; reset it before AND after every test in this module so
-    # neither prior suite state nor these tests leak rate-limit state.
-    # Also force auth OFF: these tests exercise the method/length/voice/rate-limit
-    # guards, which sit before the auth check. Another test in the full suite can
-    # leave is_auth_enabled() True globally, which would 401 these requests before
-    # they reach the path under test. Pin it False so the assertions are
-    # deterministic regardless of suite order.
+    """Reset the rate limiter singleton and disable auth for every test."""
     import api.auth as _auth
     monkeypatch.setattr(_auth, "is_auth_enabled", lambda: False)
     monkeypatch.setattr(routes, "is_auth_enabled", lambda: False, raising=False)
@@ -90,109 +89,171 @@ def test_tts_rejects_overlong_text():
     h = _post({"text": "x" * 5001}, client="10.0.0.1")
     routes._handle_tts(h, None)
     assert h.status == 400
-    assert "too long" in (h.payload() or {}).get("error", "")
+    assert "text too long" in (h.payload() or {}).get("error", "")
 
 
-def test_tts_rejects_unknown_voice():
-    h = _post({"text": "hello", "voice": "evil-voice-injection"}, client="10.0.0.2")
+def test_tts_requires_auth_when_enabled(monkeypatch):
+    """When auth is enabled, unauthenticated requests are rejected."""
+    import api.auth as _auth
+    monkeypatch.setattr(_auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(routes, "is_auth_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(_auth, "parse_cookie", lambda h: None, raising=False)
+    monkeypatch.setattr(_auth, "verify_session", lambda c: False, raising=False)
+    h = _post({"text": "hello"}, client="10.0.0.99")
     routes._handle_tts(h, None)
-    assert h.status == 400
-    assert "invalid voice" in (h.payload() or {}).get("error", "")
+    assert h.status == 401
+    assert "unauthorized" in (h.payload() or {}).get("error", "")
 
 
-def test_tts_rejects_invalid_rate_before_engine():
-    h = _post({"text": "hello", "voice": "en-US-AriaNeural", "rate": "<break/>"}, client="10.0.0.6")
-    routes._handle_tts(h, None)
-    assert h.status == 400
-    assert "invalid rate" in (h.payload() or {}).get("error", "")
-
-
-def test_tts_rejects_invalid_pitch_before_engine():
-    h = _post({"text": "hello", "voice": "en-US-AriaNeural", "pitch": "+500Hz"}, client="10.0.0.7")
-    routes._handle_tts(h, None)
-    assert h.status == 400
-    assert "invalid pitch" in (h.payload() or {}).get("error", "")
-
-
-def test_tts_accepts_ui_prosody_shape(monkeypatch):
+def test_tts_delegates_to_agent(monkeypatch):
+    """Happy path: TTS calls text_to_speech_tool and returns base64 data URL."""
     captured = {}
 
-    class FakeCommunicate:
-        def __init__(self, text, voice, **kwargs):
-            captured["text"] = text
-            captured["voice"] = voice
-            captured["kwargs"] = kwargs
+    def fake_tool(text, output_path):
+        captured["text"] = text
+        captured["output_path"] = output_path
+        # Write some fake audio so the file is found
+        with open(output_path, "wb") as f:
+            f.write(b"\xff\xfb\x90" * 10)
+        return json.dumps({
+            "success": True,
+            "file_path": output_path,
+            "provider": "edge",
+        })
 
-        def stream_sync(self):
-            yield {"type": "audio", "data": b"abc"}
+    _mock_text_to_speech_tool(monkeypatch, side_effect=fake_tool)
 
-    monkeypatch.setitem(sys.modules, "edge_tts", SimpleNamespace(Communicate=FakeCommunicate))
-
-    h = _post(
-        {
-            "text": "hello",
-            "voice": "en-US-AriaNeural",
-            "rate": "+10%",
-            "pitch": "-5Hz",
-        },
-        client="10.0.0.8",
-    )
+    h = _post({"text": "hello world"}, client="10.0.0.10")
     routes._handle_tts(h, None)
-
     assert h.status == 200
-    assert captured["text"] == "hello"
-    assert captured["voice"] == "en-US-AriaNeural"
-    assert captured["kwargs"] == {"rate": "+10%", "pitch": "-5Hz"}
+    payload = h.payload()
+    assert payload is not None
+    assert payload["audio"].startswith("data:audio/mpeg;base64,")
+    assert captured["text"] == "hello world"
 
 
-def test_tts_rate_limits_second_immediate_request():
-    # The limiter runs (and records the client) BEFORE the voice allowlist and
-    # before any edge-tts synthesis. Use an invalid voice so the first request
-    # still registers with the limiter but returns at the allowlist (400) without
-    # making a real network call; the second immediate request from the SAME
-    # client is then throttled (429). Unique client IP avoids any cross-test key
-    # collision (the autouse fixture also resets the limiter each test).
-    h1 = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
+def test_tts_agent_failure_returns_500(monkeypatch):
+    """When text_to_speech_tool returns success=False, TTS returns 500."""
+    _mock_text_to_speech_tool(monkeypatch, return_value=json.dumps({
+        "success": False,
+        "error": "TTS engine unavailable",
+    }))
+    h = _post({"text": "hello"}, client="10.0.0.11")
+    routes._handle_tts(h, None)
+    assert h.status == 500
+    assert "TTS engine unavailable" in (h.payload() or {}).get("error", "")
+
+
+def test_tts_agent_non_json_response_returns_500(monkeypatch):
+    """When text_to_speech_tool returns non-JSON, TTS returns 500."""
+    _mock_text_to_speech_tool(monkeypatch, return_value="not json at all")
+    h = _post({"text": "hello"}, client="10.0.0.12")
+    routes._handle_tts(h, None)
+    assert h.status == 500
+    assert "non-JSON" in (h.payload() or {}).get("error", "")
+
+
+def test_tts_agent_missing_file_returns_500(monkeypatch):
+    """When text_to_speech_tool reports success but file doesn't exist."""
+    _mock_text_to_speech_tool(monkeypatch, return_value=json.dumps({
+        "success": True,
+        "file_path": "/tmp/does_not_exist_12345.mp3",
+    }))
+    h = _post({"text": "hello"}, client="10.0.0.13")
+    routes._handle_tts(h, None)
+    assert h.status == 500
+    assert "no audio file" in (h.payload() or {}).get("error", "")
+
+
+def test_tts_agent_missing_module_returns_503(monkeypatch):
+    """When text_to_speech_tool can't be imported, TTS returns 503."""
+    # Remove the module from sys.modules so the import fails
+    monkeypatch.delitem(sys.modules, "tools.tts_tool", raising=False)
+    # Make import raise
+    import builtins
+    real_import = builtins.__import__
+
+    def _mock_import(name, *args, **kwargs):
+        if name == "tools.tts_tool":
+            raise ImportError("no agent")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _mock_import)
+
+    h = _post({"text": "hello"}, client="10.0.0.14")
+    routes._handle_tts(h, None)
+    assert h.status == 503
+    assert "hermes-agent" in (h.payload() or {}).get("error", "")
+
+
+def test_tts_rate_limits_second_immediate_request(monkeypatch):
+    """Rate limiter records the client after the first request, blocks the second."""
+    _mock_text_to_speech_tool(monkeypatch)
+    h1 = _post({"text": "hello"}, client="10.0.0.3")
     routes._handle_tts(h1, None)
-    assert h1.status == 400  # rejected at allowlist, limiter recorded the client
-    h2 = _post({"text": "hello", "voice": "not-a-real-voice"}, client="10.0.0.3")
+    assert h1.status == 200  # first request succeeds
+    h2 = _post({"text": "hello"}, client="10.0.0.3")
     routes._handle_tts(h2, None)
     assert h2.status == 429
 
 
-def test_tts_rate_limit_ignores_spoofed_forwarded_for_by_default():
+def test_tts_rate_limit_ignores_spoofed_forwarded_for_by_default(monkeypatch):
+    """Without HERMES_WEBUI_TRUST_FORWARDED_FOR, X-Forwarded-For is ignored."""
+    _mock_text_to_speech_tool(monkeypatch)
     h1 = _post(
-        {"text": "hello", "voice": "not-a-real-voice"},
+        {"text": "hello"},
         headers={"X-Forwarded-For": "203.0.113.10"},
         client="10.0.0.4",
     )
     routes._handle_tts(h1, None)
-    assert h1.status == 400
+    assert h1.status == 200
 
     h2 = _post(
-        {"text": "hello", "voice": "not-a-real-voice"},
-        headers={"X-Forwarded-For": "203.0.113.11"},
-        client="10.0.0.4",
+        {"text": "hello"},
+        headers={"X-Forwarded-For": "203.0.113.11"},  # different forwarded-for
+        client="10.0.0.4",  # same actual client
     )
     routes._handle_tts(h2, None)
-    assert h2.status == 429
+    assert h2.status == 429  # same actual client, throttled
 
 
 def test_tts_rate_limit_can_trust_forwarded_for_when_opted_in(monkeypatch):
+    """With HERMES_WEBUI_TRUST_FORWARDED_FOR=1, different forwarded-for = different clients."""
     monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
-
+    _mock_text_to_speech_tool(monkeypatch)
     h1 = _post(
-        {"text": "hello", "voice": "not-a-real-voice"},
+        {"text": "hello"},
         headers={"X-Forwarded-For": "203.0.113.12"},
         client="10.0.0.5",
     )
     routes._handle_tts(h1, None)
-    assert h1.status == 400
+    assert h1.status == 200
 
     h2 = _post(
-        {"text": "hello", "voice": "not-a-real-voice"},
-        headers={"X-Forwarded-For": "203.0.113.13"},
+        {"text": "hello"},
+        headers={"X-Forwarded-For": "203.0.113.13"},  # different forwarded-for
         client="10.0.0.5",
     )
     routes._handle_tts(h2, None)
-    assert h2.status == 400
+    assert h2.status == 200  # different forwarded-for, not throttled
+
+
+def test_tts_includes_exception_details_on_failure(monkeypatch):
+    """When text_to_speech_tool raises, the error message includes exception type and details.
+
+    Provider libraries can fail at import time (missing CUDA, espeak data
+    paths, broken dependencies). The error must surface what actually broke
+    so the user can diagnose the problem.
+    """
+    def fake_tts_raises(text, output_path=None, **_):
+        raise OSError("libcudart.so.13: cannot open shared object file")
+
+    _mock_text_to_speech_tool(monkeypatch, side_effect=fake_tts_raises)
+
+    h = _post({"text": "hello"}, client="10.0.0.15")
+    routes._handle_tts(h, None)
+
+    assert h.status == 500
+    error = (h.payload() or {}).get("error", "")
+    assert "OSError" in error, f"Error must include exception type, got: {error}"
+    assert "libcudart" in error, f"Error must include exception details, got: {error}"

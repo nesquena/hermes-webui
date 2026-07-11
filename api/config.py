@@ -761,10 +761,50 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
+    payload = _yaml.safe_dump(
+        _config_for_yaml_save(config_data),
+        sort_keys=False,
+        allow_unicode=True,
     )
+    try:
+        existing_mode = config_path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        existing_mode = 0o600
+    import tempfile as _tempfile
+
+    fd, tmp_name = _tempfile.mkstemp(
+        prefix=f".{config_path.name}.",
+        suffix=".tmp",
+        dir=str(config_path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            fd = None
+            tmp_file.write(payload)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.chmod(tmp_name, existing_mode)
+        os.replace(tmp_name, config_path)
+        try:
+            dir_fd = os.open(str(config_path.parent), os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
     # Invalidate the memoized parse for this path so the next read re-parses the
     # bytes we just wrote. mtime_ns+size keying normally catches edits, but a
     # WebUI save that preserves size with a coarse/unchanged mtime could otherwise
@@ -4321,6 +4361,55 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # to the browser, causing a visible freeze on every Settings save (#895).
     invalidate_models_cache()
     return {"ok": True, "model": persisted_model, "provider": persisted_provider or None}
+
+
+def _set_tts_nested_value(path: tuple, value: str) -> None:
+    """Set or clear a nested key in the tts: section of config.yaml.
+
+    Used by set_hermes_tts_provider and set_hermes_edge_voice. Acquires
+    _cfg_lock for the read-modify-write; caller is responsible for
+    calling reload_config() AFTER this returns (outside the lock to
+    avoid deadlock — reload_config() acquires _cfg_lock internally).
+
+    Args:
+        path: tuple of nested keys, e.g. () for tts.provider or
+            ("edge",) for tts.edge.voice. The last key is set on the
+            final dict.
+        value: value to set. If empty string, the key is popped instead
+            (falls back to default).
+    """
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        # Walk/create the nested dict structure
+        target = config_data
+        for key in path[:-1]:
+            if not isinstance(target.get(key), dict):
+                target[key] = {}
+            target = target[key]
+        # Set or clear the leaf value
+        leaf_key = path[-1]
+        if value:
+            target[leaf_key] = value
+        else:
+            target.pop(leaf_key, None)
+        _save_yaml_config_file(config_path, config_data)
+
+
+def set_hermes_tts_provider(provider: str | None) -> dict:
+    """Persist the TTS provider in config.yaml and reload runtime config."""
+    provider_str = str(provider or "").strip().lower()
+    _set_tts_nested_value(("tts", "provider"), provider_str)
+    reload_config()
+    return {"ok": True, "provider": provider_str or None}
+
+
+def set_hermes_edge_voice(voice: str | None) -> dict:
+    """Persist the Edge TTS voice in config.yaml and reload runtime config."""
+    voice_str = str(voice or "").strip()
+    _set_tts_nested_value(("tts", "edge", "voice"), voice_str)
+    reload_config()
+    return {"ok": True, "voice": voice_str or None}
 
 
 # ── Auxiliary model configuration ──────────────────────────────────────────
