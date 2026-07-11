@@ -1552,9 +1552,41 @@ async function send(){
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
 
-  setComposerStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'');
+  // Salvage of #4750 (@harryazj): capture the composer text and clear the
+  // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
+  // / forced-skill-directive awaits below. send() re-reads the LIVE composer when
+  // it is re-entered while a send is in flight (the _sendInProgress guard at the
+  // top of this function reads _composerTextWithPendingSelections()). If we
+  // cleared only after the async work — as the pre-fix code did, down at the
+  // _clearComposerDraft site — a re-entrant/interrupt-mode send during the upload
+  // window would read the still-populated DOM and double-submit the same message.
+  // _submittedDraftTextForClear is the sole authority for the send-time draft
+  // signature from here down; no code path below re-reads $('msg').value on the
+  // happy path.
+  const _submittedDraftTextForClear=$('msg').value||'';
+  $('msg').value='';autoResize();
+
+  // #5912 gate CORE fix: snapshot the pending files that belong to THIS send
+  // BEFORE the await, and upload exactly that snapshot. Otherwise a re-entrant /
+  // interrupt-mode send during the upload window inherits the still-live
+  // S.pendingFiles and later re-uploads the first send's attachment. Detach the
+  // snapshot from S.pendingFiles now so files staged AFTER this point belong to
+  // the next send only.
+  const _submittedFiles=[...(S.pendingFiles||[])];
+  const _submittedDraftFilesForClear=[..._submittedFiles];
+  S.pendingFiles=[];
+  if(typeof renderTray==='function')renderTray();
+
+  // #5912 gate SILENT fix: clear the PERSISTED draft here — alongside the
+  // textarea clear, BEFORE any await — so a new draft typed during the upload
+  // window is not clobbered by a delayed text:'' post. Keep the promise so the
+  // #5472 failed-send restore can chain its re-persist after this clear resolves.
+  let _composerDraftClearPromise=null;
+  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+
+  setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
-  try{uploaded=await uploadPendingFiles();}
+  try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
   catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
@@ -1589,16 +1621,11 @@ async function send(){
     }
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
-  const _submittedDraftTextForClear=$('msg').value||'';
-  const _submittedDraftFilesForClear=Array.isArray(_failedSendFilesSnapshot)?[..._failedSendFilesSnapshot]:[];
-  $('msg').value='';autoResize();
-  // Clear persisted composer draft since message was sent. Capture the promise
-  // so the #5472 failed-send restore can chain its re-persist AFTER this clear
-  // resolves — otherwise the two same-origin POSTs (clear text:'' then restore
-  // text:<draft>) can be reordered under HTTP/2 multiplexing and leave the
-  // server draft empty after a reload. (Opus #5484 NIT.)
-  let _composerDraftClearPromise=null;
-  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  // Composer textarea + persisted draft were already captured and cleared
+  // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
+  // the re-entrant double-send race AND avoid clobbering a draft typed during the
+  // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
+  // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
@@ -2603,6 +2630,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const sourceEvent={
       ...raw,
       source_event_type:sourceEventType,
+      // Persist a creation timestamp the FIRST time we see this source event, so
+      // the worklog event timestamp (#5700/#5739) survives settlement. Reasoning
+      // events carry no server timestamp; without this, the live DOM shows a
+      // fallback time but the settled scene row rebuilds with created_at:null and
+      // the timestamp disappears. Prefer any real server-supplied stamp; fall back
+      // to now only when none exists. (#5739 gate finding.)
+      created_at:raw.created_at??raw.timestamp??raw.ts??(Date.now()/1000),
       activitySegmentSeq:raw.activitySegmentSeq??raw.activity_segment_seq??_assistantSegmentSeq,
       activityBurstId:raw.activityBurstId??raw.activity_burst_id??_currentActivityBurstId,
     };
@@ -2710,7 +2744,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return Number.isFinite(seq)&&seq>0?seq:1;
   }
   function _anchorSceneActiveMode(){
-    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'?value:'';
+    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'||value==='hide_all_activity'?value:'';
     if(typeof window!=='undefined'){
       if(typeof window.chatActivityMode==='function'){
         try{
@@ -2730,6 +2764,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       : null;
     if(sceneMode==='transparent_stream') return (hints&&hints.transparent_stream)||'chronological_activity';
     if(sceneMode==='compact_worklog') return (hints&&hints.compact_worklog)||row.display_hint||'activity_row';
+    if(sceneMode==='hide_all_activity') return (hints&&hints.hidden_activity)||'hidden_activity';
     return row&&row.display_hint||'activity_row';
   }
   function _renderAnchorLiveScene(){
@@ -3484,7 +3519,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
-    const sceneMode=base.mode==='transparent_stream'?'transparent_stream':_anchorSceneActiveMode();
+    const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
     const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
       ? messageFinalAnswer
@@ -3593,6 +3628,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
   }
   function _anchorSceneHasWorklogWorthyRows(scene){
+    if(scene&&scene.mode==='hide_all_activity') return false;
+    if(typeof window!=='undefined'&&typeof window.isFinalAnswerOnlyMode==='function'&&window.isFinalAnswerOnlyMode()) return false;
     // A worklog (the collapsible "已处理 …" rail) is only meaningful when the turn
     // actually DID worklog-worthy work — a tool call, a thinking/reasoning pass, or
     // a compression lifecycle card. A turn that only streamed prose (e.g. a long
@@ -3630,12 +3667,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
     const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
-    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length
-        &&_anchorSceneHasWorklogWorthyRows(scene)){
+    if(scene&&Array.isArray(scene.activity_rows)&&scene.activity_rows.length){
+      const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
+      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity';
+      if(!shouldPersistScene) return false;
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
       _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);
-      return true;
+      return hasWorklogRows;
     }
     return false;
   }
@@ -3897,6 +3936,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         status:row.status||undefined,
         stream_id:row.stream_id||streamId,
         run_id:row.run_id||streamId,
+        // Carry the row's persisted creation timestamp through hydration so the
+        // worklog event timestamp (#5700/#5739) survives a settled-snapshot rebuild
+        // (payload may not carry created_at even when the row does). (#5739 gate.)
+        created_at:payload.created_at??row.created_at??undefined,
       };
       try{
         _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:streamId,run_id:streamId});

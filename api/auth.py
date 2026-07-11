@@ -53,6 +53,7 @@ PUBLIC_PATHS = frozenset({
     '/api/auth/login', '/api/auth/status',
     '/api/auth/oidc/start', '/api/auth/oidc/callback',
     '/api/auth/passkey/options', '/api/auth/passkey/login',
+    '/share',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
 })
@@ -731,7 +732,16 @@ def check_auth(handler, parsed) -> bool:
     if not is_auth_enabled():
         return True
     # Public paths don't require auth
-    if parsed.path in PUBLIC_PATHS or parsed.path.startswith('/static/') or parsed.path.startswith('/session/static/'):
+    if (
+        parsed.path in PUBLIC_PATHS
+        or parsed.path.startswith('/share/')
+        or (
+            parsed.path.startswith('/api/share/')
+            and parsed.path not in {'/api/share/create', '/api/share/revoke'}
+        )
+        or parsed.path.startswith('/static/')
+        or parsed.path.startswith('/session/static/')
+    ):
         return True
     # Check session cookie
     cookie_val = parse_cookie(handler)

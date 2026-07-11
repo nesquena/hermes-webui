@@ -435,7 +435,7 @@ def test_frontend_drops_inflight_cache_when_server_session_is_idle():
     # (preserved) cache-drop behavior in the now-nested form.
     marker = "If the server says the session is idle, reset browser-side streaming flags"
     marker_pos = SESSIONS_SRC.index(marker)
-    window = SESSIONS_SRC[marker_pos:marker_pos + 900]
+    window = SESSIONS_SRC[marker_pos:marker_pos + 1400]
     assert "if(!activeStreamId){" in window
     assert "S.busy=false" in window
     assert "S.activeStreamId=null" in window

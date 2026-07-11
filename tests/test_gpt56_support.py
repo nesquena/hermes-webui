@@ -193,7 +193,7 @@ def test_max_and_ultra_are_not_advertised_for_older_reasoning_models():
         "openai/gpt-5.5", "openrouter"
     )
 
-    assert efforts == list(config._DEFAULT_REASONING_EFFORTS)
+    assert efforts == ["minimal", "low", "medium", "high", "xhigh"]
     assert "max" not in efforts
     assert "ultra" not in efforts
 

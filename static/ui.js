@@ -4481,6 +4481,7 @@ function _formatReasoningEffortLabel(effort){
   if(effort==='medium') return 'Medium';
   if(effort==='high') return 'High';
   if(effort==='xhigh') return 'XHigh';
+  if(effort==='max') return 'Max';
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
@@ -5692,6 +5693,131 @@ function _activityClockLabel(ts){
   const stamp=Number(ts||_activityNowSeconds());
   if(!Number.isFinite(stamp)||stamp<=0)return'';
   try{return new Date(stamp*1000).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});}catch(_){return'';}
+}
+// Full date+time label for the worklog event-time tooltip (title attr). Guards the
+// same valid-Date range as _timestampSeconds so a bad epoch never yields "Invalid
+// Date" in the tooltip. (#5739)
+function _activityFullClockLabel(ts){
+  const stamp=Number(ts);
+  if(!Number.isFinite(stamp)||stamp<=0||stamp>8.64e12)return'';
+  try{
+    const d=new Date(stamp*1000);
+    if(isNaN(d.getTime()))return'';
+    return d.toLocaleString([], {year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+  }catch(_){return'';}
+}
+function _timestampSeconds(value){
+  if(value===undefined||value===null||value==='') return null;
+  if(value instanceof Date){
+    const stamp=value.getTime()/1000;
+    return (Number.isFinite(stamp)&&stamp>0&&Math.abs(stamp)<=8.64e12)?stamp:null;
+  }
+  const numeric=Number(value);
+  if(Number.isFinite(numeric)&&numeric>0){
+    const stamp=numeric>1e12?numeric/1000:numeric;
+    // Reject epochs outside JavaScript's valid Date range (±8.64e15 ms = ±8.64e12 s);
+    // otherwise new Date(stamp*1000) yields "Invalid Date" and renders literally
+    // (e.g. a garbage numeric timestamp like 1e20 passes finite/>0). (#5739 gate.)
+    return (Number.isFinite(stamp)&&stamp>0&&stamp<=8.64e12)?stamp:null;
+  }
+  if(typeof value==='string'){
+    const text=value.trim();
+    if(!text||/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(text)) return null;
+    const parsed=Date.parse(text);
+    if(Number.isFinite(parsed)&&parsed>0){
+      const stamp=parsed/1000;
+      return stamp<=8.64e12?stamp:null;
+    }
+  }
+  return null;
+}
+function _firstValidTimestampSeconds(...values){
+  for(const value of values){
+    const stamp=_timestampSeconds(value);
+    if(stamp) return stamp;
+  }
+  return null;
+}
+function _transparentEventTimestampSeconds(row, opts){
+  opts=opts||{};
+  for(const key of ['ts','timestamp','created_at']){
+    const stamp=_timestampSeconds(opts[key]);
+    if(stamp) return stamp;
+  }
+  const toolCall=opts.toolCall||row&&row._tcData||null;
+  if(toolCall&&typeof toolCall==='object'){
+    for(const key of ['ts','timestamp','created_at','started_at','completed_at']){
+      const stamp=_timestampSeconds(toolCall[key]);
+      if(stamp) return stamp;
+    }
+  }
+  if(row&&typeof row.getAttribute==='function'){
+    for(const key of ['data-event-at','data-activity-at']){
+      const stamp=_timestampSeconds(row.getAttribute(key));
+      if(stamp) return stamp;
+    }
+  }
+  if(opts.live===true) return _activityNowSeconds();
+  return null;
+}
+function _syncTransparentEventTimestamp(row, header, opts){
+  if(!row||!header) return null;
+  opts=opts||{};
+  const live=opts.live===true||row.getAttribute&&(
+    row.getAttribute('data-live-tid')==='1'||
+    row.getAttribute('data-live-thinking')==='1'||
+    row.getAttribute('data-live-assistant')==='1'||
+    row.getAttribute('data-live-stream-owned')==='1'
+  );
+  const explicitTs=_firstValidTimestampSeconds(opts.ts, opts.timestamp, opts.created_at);
+  const toolCall=opts.toolCall||row&&row._tcData||null;
+  const toolTs=toolCall&&typeof toolCall==='object'
+    ? _firstValidTimestampSeconds(
+      toolCall.ts,
+      toolCall.timestamp,
+      toolCall.created_at,
+      toolCall.started_at,
+      toolCall.completed_at
+    )
+    : null;
+  const attrTs=row&&typeof row.getAttribute==='function'
+    ? _firstValidTimestampSeconds(
+      row.getAttribute('data-event-at'),
+      row.getAttribute('data-activity-at')
+    )
+    : null;
+  const ts=explicitTs||toolTs||attrTs||(live?_activityNowSeconds():null);
+  const label=ts?_activityClockLabel(ts):'';
+  let timeEl=header.querySelector('.transparent-event-time');
+  if(!label){
+    if(timeEl) timeEl.remove();
+    row.removeAttribute('data-event-at');
+    row.removeAttribute('data-event-at-source');
+    return null;
+  }
+  const source=explicitTs||toolTs||attrTs?'event':'live';
+  if(!timeEl){
+    timeEl=document.createElement('span');
+    timeEl.className='transparent-event-time';
+  }
+  timeEl.textContent=label;
+  // Full date+time tooltip: the bare clock label is date-ambiguous when a settled
+  // session is reviewed days later (or a run crosses midnight), and timing is the
+  // whole point of this label. (#5739 Fable UX fix.)
+  const fullLabel=_activityFullClockLabel(ts);
+  if(fullLabel) timeEl.setAttribute('title',fullLabel); else timeEl.removeAttribute('title');
+  timeEl.setAttribute('data-event-at',String(ts));
+  timeEl.setAttribute('data-event-at-source',source);
+  row.setAttribute('data-event-at',String(ts));
+  row.setAttribute('data-event-at-source',source);
+  const anchor=header.querySelector('.transparent-event-status,.thinking-card-btn-row,.tool-card-toggle,.thinking-card-toggle');
+  if(timeEl.parentNode!==header){
+    if(anchor&&anchor.parentNode===header) header.insertBefore(timeEl,anchor);
+    else header.appendChild(timeEl);
+  }else if(anchor&&timeEl.nextSibling!==anchor){
+    header.insertBefore(timeEl,anchor);
+  }
+  return timeEl;
 }
 function _activityStatusNode({kind='info',label='',detail='',status='done',ts=null,id=''}){
   const row=document.createElement('div');
@@ -10373,17 +10499,23 @@ function _thinkingActivityNode(text, open, disclosureKey){
 }
 function chatActivityMode(){
   if(typeof window==='undefined') return 'compact_worklog';
-  return window._chatActivityDisplayMode || (window._transparentStream ? 'transparent_stream' : 'compact_worklog') || 'compact_worklog';
+  const mode=window._chatActivityDisplayMode;
+  if(mode==='compact_worklog'||mode==='transparent_stream'||mode==='hide_all_activity') return mode;
+  return window._transparentStream ? 'transparent_stream' : 'compact_worklog';
 }
 function isTransparentStream(){
   return chatActivityMode()==='transparent_stream';
 }
+function isFinalAnswerOnlyMode(){
+  return chatActivityMode()==='hide_all_activity';
+}
 function isCompactWorklogMode(){
-  return isSimplifiedToolCalling()&&!isTransparentStream();
+  return isSimplifiedToolCalling()&&chatActivityMode()==='compact_worklog';
 }
 if(typeof window!=='undefined'){
   window.chatActivityMode=chatActivityMode;
   window.isTransparentStream=isTransparentStream;
+  window.isFinalAnswerOnlyMode=isFinalAnswerOnlyMode;
   window.isCompactWorklogMode=isCompactWorklogMode;
 }
 function _toolShortName(name){
@@ -10784,6 +10916,7 @@ function _decorateTransparentEventRow(row, opts){
         else detail.appendChild(modes);
         detail.setAttribute('data-transparent-detail-mode','full');
       }
+      if(typeof _syncTransparentEventTimestamp==='function') _syncTransparentEventTimestamp(row, header, {toolCall:tc, ts:opts.ts, live:opts.live===true});
       _wireTransparentHeaderToggle(header);
       _attachCopyButton(header);
     }
@@ -10824,6 +10957,7 @@ function _decorateTransparentEventRow(row, opts){
       }else if(preview){
         preview.remove();
       }
+      if(typeof _syncTransparentEventTimestamp==='function') _syncTransparentEventTimestamp(row, header, {ts:opts.ts, live:opts.live===true});
       _wireTransparentHeaderToggle(header);
       _attachCopyButton(header);
     }
@@ -11475,6 +11609,22 @@ function _anchorSceneIsSettledSuccessfulCompression(row, settled){
 function _anchorSceneToolCallFromRow(row, opts){
   const tool=(row&&row.tool&&typeof row.tool==='object')?row.tool:{};
   const payload=(row&&row.payload&&typeof row.payload==='object')?row.payload:{};
+  const timestampSeconds=typeof _timestampSeconds==='function'?_timestampSeconds:function(value){
+    const stamp=Number(value);
+    return Number.isFinite(stamp)&&stamp>0?(stamp>1e12?stamp/1000:stamp):null;
+  };
+  const firstValidTimestampSeconds=typeof _firstValidTimestampSeconds==='function'
+    ? _firstValidTimestampSeconds
+    : function(...values){
+        for(const value of values){
+          const stamp=timestampSeconds(value);
+          if(stamp) return stamp;
+        }
+        return null;
+      };
+  const rowTs=typeof _anchorSceneRowTimestampSeconds==='function'
+    ? _anchorSceneRowTimestampSeconds(row)
+    : firstValidTimestampSeconds(row&&row.created_at, row&&row.timestamp, row&&row.ts, row&&row.started_at, row&&row.completed_at);
   const id=tool.id||row.tool_call_id||payload.tid||payload.id||payload.tool_call_id||payload.tool_use_id||payload.call_id||'';
   const settled=!!(opts&&opts.settled);
   return {
@@ -11489,10 +11639,33 @@ function _anchorSceneToolCallFromRow(row, opts){
     done:settled?true:(tool.done!==null&&tool.done!==undefined?tool.done:(row.status!=='running'&&row.status!=='pending')),
     is_error:!!(tool.is_error||payload.is_error||row.status==='error'||row.status==='failed'),
     duration:tool.duration||payload.duration||payload.duration_seconds,
-    started_at:tool.started_at||payload.started_at,
+    started_at:firstValidTimestampSeconds(tool.started_at, payload.started_at, rowTs),
+    created_at:firstValidTimestampSeconds(tool.created_at, payload.created_at, rowTs),
+    timestamp:firstValidTimestampSeconds(tool.timestamp, payload.timestamp, rowTs),
+    ts:firstValidTimestampSeconds(
+      tool.ts,
+      payload.ts,
+      tool.timestamp,
+      payload.timestamp,
+      tool.created_at,
+      payload.created_at,
+      rowTs
+    ),
     tid:id,
     id,
   };
+}
+function _anchorSceneRowTimestampSeconds(row){
+  if(!row) return null;
+  const timestampSeconds=typeof _timestampSeconds==='function'?_timestampSeconds:function(value){
+    const stamp=Number(value);
+    return Number.isFinite(stamp)&&stamp>0?(stamp>1e12?stamp/1000:stamp):null;
+  };
+  for(const key of ['created_at','timestamp','ts','started_at','completed_at']){
+    const stamp=timestampSeconds(row[key]);
+    if(stamp) return stamp;
+  }
+  return null;
 }
 function _anchorSceneNodeForRow(row, opts){
   const settled=!!(opts&&opts.settled);
@@ -11572,6 +11745,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   const live=!!(opts&&opts.live);
   if(!row) return null;
   let node=null;
+  const eventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
   const meta={
     segmentSeq:row.segment_seq||row.segmentSeq||'',
     burstId:row.activity_burst_id||row.burst_id||row.burstId||'',
@@ -11602,7 +11776,9 @@ function _anchorSceneTransparentNodeForRow(row, opts){
       type:'thinking',
       text,
       preview:text,
+      ts:eventTs,
       ...meta,
+      live,
     });
   }else if(row.role==='tool'){
     const toolCall=_anchorSceneToolCallFromRow(row,{settled});
@@ -11611,13 +11787,16 @@ function _anchorSceneTransparentNodeForRow(row, opts){
       name:toolCall&&toolCall.name,
       status:_transparentToolStatus(toolCall,settled),
       toolCall,
+      ts:eventTs,
       ...meta,
+      live,
     });
   }else{
     node=_anchorSceneNodeForRow(row,{settled});
     node=_decorateTransparentEventRow(node,{
       type:String(row.role||'activity'),
       ...meta,
+      live,
     });
   }
   if(!node) return null;
@@ -11818,10 +11997,19 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
 }
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
-  if(typeof isTransparentStream==='function'&&isTransparentStream()){
+  const requestedMode=opts.mode;
+  const activeMode=chatActivityMode();
+  const sceneMode=activeMode==='hide_all_activity'
+    ? 'hide_all_activity'
+    : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='hide_all_activity'
+    ? requestedMode
+    : activeMode);
+  if(sceneMode==='hide_all_activity') return false;
+  if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
-  if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
+  if(typeof isSimplifiedToolCalling==='function'&&!isSimplifiedToolCalling()) return false;
+  if(sceneMode!=='compact_worklog') return false;
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
   if(streamId&&S.activeStreamId!==streamId) return false;
@@ -11944,6 +12132,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const liveFooter=blocks.querySelector('#liveRunStatus');
   const renderedRows=[];
   for(const row of rows){
+    const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
     const node=_anchorSceneTransparentNodeForRow(row,{
       live:true,
       settled:false,
@@ -11954,7 +12143,9 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     const key = _transparentLiveRowKey(node, activeStreamId);
     const existing = key ? preserveByKey.get(key) : null;
     const renderedNode = existing && _transparentLiveRowsCompatible(existing, node)
-      ? _refreshTransparentLiveRow(existing, node)
+      ? _refreshTransparentLiveRow(existing, node, {
+        preserveEventAt:!rowEventTs&&existing.getAttribute?existing.getAttribute('data-event-at'):null,
+      })
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
@@ -12077,7 +12268,19 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   const nodePreview = node.querySelector('.transparent-event-thinking-preview');
   const previewText = nodePreview ? String(nodePreview.textContent || '') : nextText;
   if(typeof _decorateTransparentEventRow === 'function'){
-    _decorateTransparentEventRow(existing,{type:'thinking',text:nextText,preview:previewText});
+    const nodeStampSource = node.getAttribute ? String(node.getAttribute('data-event-at-source') || '') : '';
+    const existingStamp = existing.getAttribute ? existing.getAttribute('data-event-at') : null;
+    const nodeStamp = node.getAttribute ? node.getAttribute('data-event-at') : null;
+    const nextStamp = nodeStampSource === 'event'
+      ? (nodeStamp || existingStamp)
+      : (existingStamp || nodeStamp);
+    _decorateTransparentEventRow(existing,{
+      type:'thinking',
+      text:nextText,
+      preview:previewText,
+      ts:nextStamp||undefined,
+      live:true,
+    });
   }
   return true;
 }
@@ -12156,7 +12359,8 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
   return existing;
 }
 
-function _refreshTransparentLiveRow(existing, node){
+function _refreshTransparentLiveRow(existing, node, opts){
+  opts=opts||{};
   if(!existing || !node || !existing.getAttribute) return node;
   if(existing===node) return existing;
   const preservedState = _transparentLiveRowInteractiveState(existing);
@@ -12188,12 +12392,20 @@ function _refreshTransparentLiveRow(existing, node){
   const htmlChanged = existing.innerHTML !== newHtml;
   if(htmlChanged) existing.innerHTML = newHtml;
   _rehydrateTransparentLiveRow(existing, node, preservedState);
+  if(opts.preserveEventAt){
+    const header = existing.querySelector ? existing.querySelector('.tool-card-header,.thinking-card-header') : null;
+    if(header) _syncTransparentEventTimestamp(existing, header, {ts:opts.preserveEventAt, live:false});
+  }
   return existing;
 }
 function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
-  const mode=(typeof isTransparentStream==='function'&&isTransparentStream())
-    ? 'transparent_stream'
-    : ((opts&&opts.mode)||'compact_worklog');
+  const requestedMode=opts&&opts.mode;
+  const activeMode=chatActivityMode();
+  const mode=activeMode==='hide_all_activity'
+    ? 'hide_all_activity'
+    : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='hide_all_activity'
+    ? requestedMode
+    : activeMode);
   const scene=_projectLiveAnchorActivitySceneForStream(streamId,mode);
   if(!scene) return false;
   return renderLiveAnchorActivityScene(streamId,scene,{...(opts||{}),sessionId});
@@ -13913,6 +14125,9 @@ function _transparentStreamOrderedParts(message){
   if(!message||message.role!=='assistant'||message._live||!Array.isArray(message.content)) return null;
   if(message._anchor_activity_scene) return null;
   const ordered=[];
+  const messageTs=typeof _firstValidTimestampSeconds==='function'
+    ? _firstValidTimestampSeconds(message._ts, message.timestamp, message.created_at)
+    : (message._ts||message.timestamp||message.created_at);
   let hasText=false;
   let hasTool=false;
   for(const part of message.content){
@@ -13932,6 +14147,10 @@ function _transparentStreamOrderedParts(message){
         toolUseId,
         name:part.name||'tool',
         input:(part.input&&typeof part.input==='object')?part.input:{},
+        ts:part.ts,
+        timestamp:part.timestamp,
+        created_at:part.created_at,
+        message_ts:messageTs,
       });
       hasTool=true;
     }
@@ -13977,11 +14196,29 @@ function _collectToolResultSnippetsByTid(messages){
   }
   return resultsByTid;
 }
-function _transparentOrderedToolCall(part, rawIdx, toolCallsByTid, resultsByTid, persistedByTid){
+function _transparentOrderedToolCall(part, rawIdx, toolCallsByTid, resultsByTid, persistedByTid, messageTs){
   const tid=String(part&&part.toolUseId||'').trim();
+  const firstValidTimestampSeconds=typeof _firstValidTimestampSeconds==='function'
+    ? _firstValidTimestampSeconds
+    : function(...values){
+        for(const value of values){
+          const stamp=Number(value);
+          if(Number.isFinite(stamp)&&stamp>0) return stamp>1e12?stamp/1000:stamp;
+        }
+        return null;
+      };
+  const messageStamp=firstValidTimestampSeconds(messageTs, part&&part.message_ts);
+  const partStamp=firstValidTimestampSeconds(part&&part.ts, part&&part.timestamp, part&&part.created_at);
   const liveTool=tid&&toolCallsByTid&&toolCallsByTid.get(tid);
   if(liveTool){
     const next={...liveTool};
+    const hasEventStamp=firstValidTimestampSeconds(next.ts, next.timestamp, next.created_at, next.started_at, next.completed_at);
+    const fallbackStamp=partStamp||messageStamp;
+    if(!hasEventStamp&&fallbackStamp){
+      next.ts=fallbackStamp;
+      next.timestamp=fallbackStamp;
+      next.created_at=fallbackStamp;
+    }
     const liveSnip=(resultsByTid&&resultsByTid[tid])||(persistedByTid&&persistedByTid[tid])||'';
     if(liveSnip){
       const patchSnippet=_cliPatchSnippetFromArgs(next.name||part.name||'tool', next.args||part.input||{});
@@ -13995,6 +14232,8 @@ function _transparentOrderedToolCall(part, rawIdx, toolCallsByTid, resultsByTid,
   const args=(part&&part.input&&typeof part.input==='object')?part.input:{};
   const patchSnippet=_cliPatchSnippetFromArgs(name,args);
   const resultSnippet=(resultsByTid&&tid&&resultsByTid[tid])||(persistedByTid&&tid&&persistedByTid[tid])||'';
+  const fallbackStamp=partStamp||messageStamp;
+  const primaryStamp=firstValidTimestampSeconds(part&&part.ts, part&&part.timestamp, part&&part.created_at, fallbackStamp);
   return {
     name,
     tid,
@@ -14004,6 +14243,9 @@ function _transparentOrderedToolCall(part, rawIdx, toolCallsByTid, resultsByTid,
     snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
     is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
     done:true,
+    ts:primaryStamp||undefined,
+    timestamp:primaryStamp||undefined,
+    created_at:primaryStamp||undefined,
   };
 }
 function _assistantTurnAnchorSettledFinalAnswer(message, content, context){
@@ -14741,7 +14983,7 @@ function renderMessages(options){
       orderedTransparentParts.forEach((part, partIdx)=>{
         if(!part) return;
         if(part.kind==='tool'){
-          const toolCall=_transparentOrderedToolCall(part, rawIdx, transparentOrderedToolCallsByTid, transparentToolResultsByTid, transparentPersistedSnippetByTid);
+        const toolCall=_transparentOrderedToolCall(part, rawIdx, transparentOrderedToolCallsByTid, transparentToolResultsByTid, transparentPersistedSnippetByTid);
           const toolRow=_decorateTransparentEventRow(buildToolCard(toolCall),{
             type:'tool',
             name:toolCall&&toolCall.name,
@@ -15281,11 +15523,13 @@ function renderMessages(options){
       // position). Keyed by the assistant turn element. (Trifecta finding O-Bug1.)
       const transparentSeenThinking=new Map();
       for(const entry of activityOrder){
+        const {aIdx,segmentSeq,burstId,cards,thinkingIdx,includeAnchorReason}=entry;
+        const sourceMsg=aIdx>=0?S.messages[aIdx]:null;
         const event={
           ...entry,
-          thinkingText:entry.thinkingIdx!==null?assistantThinking.get(entry.thinkingIdx):'',
+          ts:sourceMsg&&((sourceMsg._ts!==undefined&&sourceMsg._ts!==null)?sourceMsg._ts:sourceMsg.timestamp),
+          thinkingText:thinkingIdx!==null?assistantThinking.get(thinkingIdx):'',
         };
-        const {aIdx,segmentSeq,burstId,cards}=event;
         if(aIdx<assistantIdxs[0]) continue;
         const anchorRow=_assistantAnchorForActivity(aIdx,segmentSeq,burstId);
         if(!anchorRow) continue;
@@ -15319,6 +15563,7 @@ function renderMessages(options){
               type:'thinking',
               text:event.thinkingText,
               preview:event.thinkingText,
+              ts:event.ts,
               segmentSeq,
               burstId,
             });
@@ -15333,6 +15578,7 @@ function renderMessages(options){
             name:event.toolCall&&event.toolCall.name,
             status:_transparentToolStatus(event.toolCall,true),
             toolCall:event.toolCall,
+            ts:event.ts,
             segmentSeq,
             burstId,
           });
@@ -16448,6 +16694,7 @@ function appendLiveToolCard(tc){
   const opts=arguments[1]||{};
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return;
   if(opts.streamId&&S.activeStreamId!==opts.streamId) return;
+  if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(isLiveAnchorActivitySceneOwner(opts.streamId||S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(opts.streamId||S.activeStreamId, opts.sessionId||S.session.session_id, {mode:'compact_worklog'});
     return;
@@ -16481,11 +16728,14 @@ function appendLiveToolCard(tc){
     if(tid){
       const existing=inner.querySelector(`.transparent-event-row[data-live-tid="${CSS.escape(tid)}"],.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
       if(existing){
+        const replacementTs=_transparentEventTimestampSeconds(existing,{toolCall:tc});
         const replacement=_decorateTransparentEventRow(buildToolCard(tc),{
           type:'tool',
           name:tc&&tc.name,
           status:_transparentToolStatus(tc),
           toolCall:tc,
+          ts:replacementTs,
+          live:true,
           segmentSeq:effectiveSegmentSeq,
           burstId,
         });
@@ -16521,6 +16771,7 @@ function appendLiveToolCard(tc){
       name:tc&&tc.name,
       status:_transparentToolStatus(tc),
       toolCall:tc,
+      live:true,
       segmentSeq:effectiveSegmentSeq,
       burstId,
     });
@@ -16619,6 +16870,19 @@ function clearLiveToolCards(){
   const container=$('liveToolCards');
   if(container){container.innerHTML='';container.style.display='none';}
 }
+function _hideLiveActivityForFinalAnswerOnly(){
+  clearLiveToolCards();
+  if(typeof removeThinking==='function') removeThinking();
+  const turn=$('liveAssistantTurn');
+  const inner=_assistantTurnBlocks(turn);
+  if(inner){
+    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+  }
+  const legacyThinking=$('thinkingRow');
+  if(legacyThinking) legacyThinking.remove();
+  if(turn&&inner&&!inner.children.length) turn.remove();
+}
+if(typeof window!=='undefined') window._hideLiveActivityForFinalAnswerOnly=_hideLiveActivityForFinalAnswerOnly;
 function _removeEmptyLiveWorklogShells(inner){
   if(!inner) return;
   inner.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-worklog-shell="1"],.tool-call-group[data-live-worklog-shell="1"]').forEach(group=>{
@@ -16644,6 +16908,7 @@ function _setLiveWorklogThinkingPlaceholder(group){
 }
 function ensureLiveWorklogShell(){
   if(!S.session) return null;
+  if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return null;
   const activeStreamId=S.activeStreamId||'';
   if(activeStreamId&&typeof _renderLiveAnchorActivitySceneForStream==='function'&&_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'})){
     _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
@@ -17089,7 +17354,18 @@ function loadDiffInline(container){
 
 const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
 
-function buildCsvTablePreview(path, text){
+function _mediaSessionQuery(){
+  const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+  return mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'';
+}
+
+function _csvMediaUrl(path, opts={}){
+  let url='api/media?path='+encodeURIComponent(path)+_mediaSessionQuery();
+  if(opts.download) url+='&download=1';
+  return url;
+}
+
+function buildCsvTablePreview(path, text, downloadUrl=''){
   if(typeof text!=='string') return {errorKey:'csv_error'};
   if(text.length>CSV_MAX_SIZE) return {errorKey:'csv_too_large'};
   const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
@@ -17104,13 +17380,19 @@ function buildCsvTablePreview(path, text){
   const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
   const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
   const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
+  const fname=path.split('/').pop()||path;
+  const downloadLink=downloadUrl
+    ? `<a class="csv-download-link msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+    : '';
   return {
-    html:`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`,
+    html:`<div class="csv-table-wrap"><div class="pre-header csv-preview-header"><span class="csv-preview-title">${esc(fname)} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></span>${downloadLink}</div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`,
   };
 }
 
 function _csvPreviewErrorHtml(path, errorKey){
-  return `<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
+  const fname=path.split('/').pop()||path;
+  const downloadUrl=_csvMediaUrl(path,{download:true});
+  return `<div class="diff-inline-error">${esc(fname)}<br><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
 }
 
 function loadCsvInline(container){
@@ -17118,10 +17400,12 @@ function loadCsvInline(container){
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const mediaUrl=_csvMediaUrl(path);
+    const downloadUrl=_csvMediaUrl(path,{download:true});
+    fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
-        const preview=buildCsvTablePreview(path, text);
+        const preview=buildCsvTablePreview(path, text, downloadUrl);
         el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error');
       })
       .catch(()=>{
@@ -17572,6 +17856,7 @@ function appendThinking(text='', options){
   // without this check they would pollute the new session's DOM.
   options=options||{};
   const allowPendingPlaceholder=!!(options&&options.pending===true);
+  if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
   if(!allowPendingPlaceholder&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id, {mode:'compact_worklog'});
@@ -17637,10 +17922,19 @@ function appendThinking(text='', options){
       }
       row.id='thinkingRow';
       row.setAttribute('data-thinking-active','1');
+      const existingEventAt=row.getAttribute('data-event-at');
+      const nextTs=_firstValidTimestampSeconds(
+        options.ts,
+        options.timestamp,
+        options.created_at,
+        existingEventAt
+      );
       _decorateTransparentEventRow(row,{
         type:'thinking',
         text:clean,
         preview:clean,
+        ts:nextTs||undefined,
+        live:true,
         segmentSeq,
         burstId,
       });

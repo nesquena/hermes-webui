@@ -1305,6 +1305,110 @@ def _get_provider_api_key(provider_id: str) -> str | None:
     return None
 
 
+def provider_has_usable_credential(provider_id: str, *, refresh: bool = False) -> bool:
+    """Return True when a provider has a currently usable configured credential."""
+    provider = str(provider_id or "").strip().lower()
+    if not provider:
+        return False
+    if refresh:
+        try:
+            from api.config import invalidate_credential_pool_cache
+
+            invalidate_credential_pool_cache(provider)
+        except Exception:
+            logger.debug("Failed to refresh credential pool before provider availability check", exc_info=True)
+    return _get_provider_api_key(provider) is not None
+
+
+def provider_has_usable_pool_credential(provider_id: str, *, refresh: bool = False) -> bool:
+    """Return True only when the provider's credential-pool lane has a usable entry."""
+    provider = str(provider_id or "").strip().lower()
+    if not provider:
+        return False
+    if refresh:
+        try:
+            from api.config import invalidate_credential_pool_cache
+
+            invalidate_credential_pool_cache(provider)
+        except Exception:
+            logger.debug("Failed to refresh credential pool before pool availability check", exc_info=True)
+    for entry in _pool_entry_payloads(provider):
+        status = str(entry.get("last_status") or "").strip().lower()
+        if status == "dead":
+            continue
+        if status == "exhausted":
+            ns = SimpleNamespace(**entry)
+            if _entry_is_pool_exhausted(ns):
+                continue
+        key = str(
+            entry.get("runtime_api_key")
+            or entry.get("agent_key")
+            or entry.get("access_token")
+            or ""
+        ).strip()
+        if key:
+            return True
+    return False
+
+
+def _credential_secret_fingerprint(secret: str) -> str:
+    value = str(secret or "").strip()
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _entry_secret_fingerprint(entry: dict) -> str:
+    value = str(entry.get("secret_fingerprint") or "").strip().lower()
+    if value.startswith("sha256:"):
+        value = value[len("sha256:"):]
+    if not value:
+        return ""
+    if all(ch in "0123456789abcdef" for ch in value):
+        return value[:16]
+    return ""
+
+
+def _pool_entry_currently_unusable(entry: dict) -> bool:
+    status = str(entry.get("last_status") or "").strip().lower()
+    if status == "dead":
+        return True
+    if status == "exhausted":
+        ns = SimpleNamespace(**entry)
+        return _entry_is_pool_exhausted(ns)
+    return False
+
+
+def provider_has_process_wakeup_recovery_credential(provider_id: str, *, refresh: bool = False) -> bool:
+    """Return True when a paused credential-pool wakeup lane can safely retry."""
+    provider = str(provider_id or "").strip().lower()
+    if not provider:
+        return False
+    if provider_has_usable_pool_credential(provider, refresh=refresh):
+        return True
+    configured_key = _get_provider_api_key(provider)
+    if not configured_key:
+        return False
+    configured_fingerprint = _credential_secret_fingerprint(configured_key)
+    if not configured_fingerprint:
+        return False
+    has_unusable_pool_entry = False
+    has_unknown_unusable_pool_entry = False
+    for entry in _pool_entry_payloads(provider):
+        entry_fingerprint = _entry_secret_fingerprint(entry)
+        if not _pool_entry_currently_unusable(entry):
+            if entry_fingerprint and entry_fingerprint == configured_fingerprint:
+                return True
+            continue
+        has_unusable_pool_entry = True
+        if not entry_fingerprint:
+            has_unknown_unusable_pool_entry = True
+            continue
+        if entry_fingerprint == configured_fingerprint:
+            return False
+    return has_unusable_pool_entry and not has_unknown_unusable_pool_entry
+
+
 def _active_provider_id() -> str | None:
     cfg = get_config()
     model_cfg = cfg.get("model", {})

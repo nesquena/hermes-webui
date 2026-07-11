@@ -170,6 +170,69 @@ def test_live_openrouter_catalog_is_augmented_with_gpt56(monkeypatch):
 
     assert expected <= model_ids
 
+@pytest.mark.parametrize(
+    ("pricing", "case_name"),
+    [
+        ({}, "missing"),
+        ({"prompt": "0"}, "completion missing"),
+        ({"completion": "0"}, "prompt missing"),
+        ({"prompt": None, "completion": None}, "null"),
+        ({"prompt": "n/a", "completion": "0"}, "malformed"),
+    ],
+)
+def test_openrouter_free_tier_pricing_fails_closed(
+    monkeypatch,
+    pricing,
+    case_name,
+):
+    """Unknown pricing must not be presented as free without a :free ID."""
+    candidate_id = f"vendor/{case_name.replace(' ', '-')}-pricing"
+    explicit_free_id = "vendor/explicit-free:free"
+    fake_payload = _make_or_payload(
+        {"id": candidate_id, "name": case_name, "pricing": pricing},
+        {"id": explicit_free_id, "name": "Explicit Free", "pricing": pricing},
+    )
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeResponse(fake_payload),
+    )
+
+    # hermes_cli (the agent package) is an optional dependency and is not
+    # installed in the WebUI CI test environment. Force its live-fetch to
+    # return empty when present so the fail-closed static path is exercised;
+    # when absent, that static path is already the only one — mirror the
+    # try/except guard the sibling tests in this file use.
+    try:
+        from hermes_cli import models as hermes_models
+        monkeypatch.setattr(hermes_models, "fetch_openrouter_models", lambda **_kwargs: [])
+        monkeypatch.setattr(hermes_models, "provider_model_ids", lambda *_args, **_kwargs: [])
+    except Exception:
+        pass
+
+    grouped = _get_grouped_models()
+    openrouter_group = next(
+        (group for group in grouped if group.get("provider_id") == "openrouter"),
+        None,
+    )
+    if openrouter_group is None:
+        # Test-isolation pollution: when a sibling test (in this file or another
+        # shard-adjacent module) mutates config.cfg away from the openrouter
+        # active provider, get_available_models() omits the openrouter group
+        # entirely. Skip rather than fail — same guard the sibling live-fetch
+        # tests use — since the fail-closed contract under test only applies
+        # when that branch actually runs.
+        pytest.skip("openrouter group absent (likely test-isolation pollution from a sibling test)")
+    model_ids = {
+        model["id"]
+        for bucket_name in ("models", "extra_models")
+        for model in openrouter_group.get(bucket_name, [])
+    }
+
+    assert candidate_id not in model_ids
+    assert explicit_free_id in model_ids
+
 
 def test_openrouter_falls_back_to_static_when_live_fails(monkeypatch):
     """If both hermes_cli.fetch and the direct urlopen raise, the picker
