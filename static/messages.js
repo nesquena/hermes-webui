@@ -5849,6 +5849,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         } else {
           _markSessionViewed((S.session&&S.session.session_id)||activeSid, S.messages.length);
           renderMessages({preserveScroll:true});
+          if(typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({errorOnly:true});
         }
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
@@ -6300,6 +6301,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // false for them).
       if(_wasFollowingAtDisconnect && typeof scrollToBottom==='function') scrollToBottom();
       _markSessionViewed(activeSid, S.messages.length);
+      if(typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({errorOnly:true});
     }else{
       if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;

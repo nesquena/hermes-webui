@@ -1451,6 +1451,7 @@ window._hermesTtsSynth=function(id, text, opts){
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
+  let _silenceDeadlineAt=0;
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
@@ -1464,6 +1465,25 @@ window._hermesTtsSynth=function(id, text, opts){
   function _voiceSilenceMs(){
     const _silenceMsRaw=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
     return (Number.isFinite(_silenceMsRaw)&&_silenceMsRaw>0)?Math.max(200,_silenceMsRaw):1800;
+  }
+
+  function _clearVoiceModeSilenceTimer(){
+    if(_silenceTimer){
+      clearTimeout(_silenceTimer);
+      _silenceTimer=null;
+    }
+    _silenceDeadlineAt=0;
+  }
+
+  function _armVoiceModeSilenceTimer(delayMs){
+    _clearVoiceModeSilenceTimer();
+    const _safeDelay=Math.max(0,Math.round(Number(delayMs)||0));
+    _silenceDeadlineAt=Date.now()+_safeDelay;
+    _silenceTimer=setTimeout(()=>{
+      _silenceTimer=null;
+      _silenceDeadlineAt=0;
+      _voiceModeSend();
+    },_safeDelay);
   }
 
   function _clearBrowserTtsRecovery(){
@@ -1520,6 +1540,7 @@ window._hermesTtsSynth=function(id, text, opts){
       showToast(t('mic_insecure_origin'));
       return;
     }
+    _clearVoiceModeSilenceTimer();
     _clearBrowserTtsRecovery();
     _setState('listening');
 
@@ -1534,7 +1555,7 @@ window._hermesTtsSynth=function(id, text, opts){
 
     _recognition.onresult=(event)=>{
       // Reset silence timer on any result
-      clearTimeout(_silenceTimer);
+      _clearVoiceModeSilenceTimer();
       let interim='';
       let final=_finalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
@@ -1547,6 +1568,9 @@ window._hermesTtsSynth=function(id, text, opts){
 
       // Auto-send on silence after final result
       if(_finalText){
+        const _silenceMs=_voiceSilenceMs();
+        _clearVoiceModeSilenceTimer();
+        _silenceDeadlineAt=Date.now()+_silenceMs;
         _silenceTimer=setTimeout(()=>{
           _voiceModeSend();
         },_voiceSilenceMs());
@@ -1554,18 +1578,26 @@ window._hermesTtsSynth=function(id, text, opts){
     };
 
     _recognition.onend=()=>{
-      clearTimeout(_silenceTimer);
       // If we have text and haven't sent yet, send it
       if(_finalText&&_voiceModeActive&&_voiceModeState==='listening'){
+        const _remainingSilenceMs=_silenceDeadlineAt-Date.now();
+        if(_remainingSilenceMs>0){
+          _armVoiceModeSilenceTimer(_remainingSilenceMs);
+          return;
+        }
+        _clearVoiceModeSilenceTimer();
         _voiceModeSend();
       } else if(_voiceModeActive&&_voiceModeState==='listening'){
+        _clearVoiceModeSilenceTimer();
         // No speech detected — restart listening
         setTimeout(()=>{ if(_voiceModeActive) _startListening(); },500);
+      } else {
+        _clearVoiceModeSilenceTimer();
       }
     };
 
     _recognition.onerror=(event)=>{
-      clearTimeout(_silenceTimer);
+      _clearVoiceModeSilenceTimer();
       if(event.error==='no-speech'||event.error==='aborted'){
         // Restart if still active
         if(_voiceModeActive){
@@ -1593,6 +1625,7 @@ window._hermesTtsSynth=function(id, text, opts){
 
   function _voiceModeSend(){
     if(!_voiceModeActive) return;
+    _clearVoiceModeSilenceTimer();
     const text=(ta.value||'').trim();
     if(!text){
       ta.value='';
@@ -1859,11 +1892,16 @@ window._hermesTtsSynth=function(id, text, opts){
   // We patch setComposerStatus to detect when a response completes
   const _origSetComposerStatus=(typeof setComposerStatus==='function')?setComposerStatus.bind(window):null;
 
-  window._voiceModeOnResponseComplete=function(){
+  window._voiceModeOnResponseComplete=function(opts){
     if(_voiceModeActive&&_voiceModeState==='thinking'){
+      const _errorOnly=!!(opts&&opts.errorOnly);
       // Small delay to let DOM render the final message
       setTimeout(()=>{
         if(_voiceModeActive&&_voiceModeState==='thinking'){
+          if(_errorOnly){
+            _startListening();
+            return;
+          }
           _speakResponse();
         }
       },400);
@@ -1917,7 +1955,7 @@ window._hermesTtsSynth=function(id, text, opts){
     modeBtn.classList.remove('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
-    clearTimeout(_silenceTimer);
+    _clearVoiceModeSilenceTimer();
     _clearBrowserTtsRecovery();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
