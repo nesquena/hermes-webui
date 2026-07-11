@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Reverse-proxy SSO via trusted identity headers (opt-in, off by default).** You can now put the WebUI behind a reverse proxy you run (Authelia, oauth2-proxy, corporate SSO, …) that authenticates the user and forwards their identity in a header. Set `HERMES_WEBUI_TRUSTED_AUTH_HEADER` (e.g. `Remote-User`) plus `HERMES_WEBUI_TRUSTED_PROXY_CIDRS` with the **exact** IP(s) of your proxy — the header is honored *only* when the request's un-spoofable socket peer is an allowlisted proxy, so a direct client can't forge it. Optional group→profile mapping (`HERMES_WEBUI_GROUP_PROFILE_MAP`, JSON) and SSO single-logout URL are supported. Fails closed on empty/malformed config; existing password/passkey auth is unchanged when this is not configured. See `.env.example` for the full setup and the security warning. Thanks @rodboev. (#5568, #3351)
+
 - **Deep-link straight to a profile with `?profile=<name>`.** Opening the WebUI with a `?profile=NAME` query parameter now switches to that profile on boot. The name is validated against the existing profile allowlist (a nonexistent profile boots normally, path-traversal / cross-profile attempts are rejected), the switch goes through the same access-enforced `switchToProfile`, and boot fails safe on anything invalid. Thanks @rodboev. (#5730, #5682)
 
 ### Fixed
