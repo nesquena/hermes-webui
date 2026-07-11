@@ -235,6 +235,16 @@ function _providerStatusLabel(system){
   return t('onboarding_check_provider_pending');
 }
 
+function _localizedOnboardingProviderNote(system){
+  const key=system&&system.provider_note_key;
+  if(key){
+    const args=Array.isArray(system&&system.provider_note_args)?system.provider_note_args:[];
+    const localized=t(key,...args);
+    if(localized&&localized!==key&&!/\{\d+\}/.test(localized))return localized;
+  }
+  return (system&&system.provider_note)||'';
+}
+
 function _renderOnboardingBody(){
   const body=$('onboardingBody');
   if(!body||!ONBOARDING.status)return;
@@ -250,7 +260,8 @@ function _renderOnboardingBody(){
   if(key==='system'){
     const hermesOk=system.hermes_found&&system.imports_ok;
     const setupOk=!!system.chat_ready;
-    _setOnboardingNotice(system.provider_note|| (setupOk?t('onboarding_notice_system_ready'):t('onboarding_notice_system_unavailable')),setupOk?'success':(hermesOk?'info':'warn'));
+    const providerNote=_localizedOnboardingProviderNote(system);
+    _setOnboardingNotice(providerNote|| (setupOk?t('onboarding_notice_system_ready'):t('onboarding_notice_system_unavailable')),setupOk?'success':(hermesOk?'info':'warn'));
     body.innerHTML=`
       <div class="onboarding-panel-grid">
         <div class="onboarding-check ${hermesOk?'ok':'warn'}"><strong>${t('onboarding_check_agent')}</strong><span>${hermesOk?t('onboarding_check_agent_ready'):t('onboarding_check_agent_missing')}</span></div>
@@ -260,7 +271,7 @@ function _renderOnboardingBody(){
       <div class="onboarding-copy">
         <p><strong>${t('onboarding_config_file')}</strong> ${esc(system.config_path||t('onboarding_unknown'))}</p>
         <p><strong>${t('onboarding_env_file')}</strong> ${esc(system.env_path||t('onboarding_unknown'))}</p>
-        <p>${esc(system.provider_note||'')}</p>
+        ${providerNote?`<p>${esc(providerNote)}</p>`:''}
         ${system.current_provider?`<p><strong>${t('onboarding_current_provider')}</strong> ${esc(system.current_provider)}${system.current_model?` — ${esc(system.current_model)}`:''}</p>`:''}
         ${system.current_base_url?`<p><strong>${t('onboarding_base_url_label')}</strong> ${esc(system.current_base_url)}</p>`:''}
         ${system.missing_modules&&system.missing_modules.length?`<p><strong>${t('onboarding_missing_imports')}</strong> ${esc(system.missing_modules.join(', '))}</p>`:''}
