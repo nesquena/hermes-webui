@@ -2654,8 +2654,33 @@ function _getOptionProviderId(opt){
 }
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
-  if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
-  return '';
+  if(!value.startsWith('@')||!value.includes(':')) return '';
+  // Strip the leading @, then try to find the provider boundary.
+  // For non-custom providers (e.g. @openrouter:model), split on the first colon.
+  // For custom providers (custom:slug), the slug may contain colons (e.g.
+  // custom:litellm-proxy or custom:10.8.71.41:8080), so we can't use
+  // lastIndexOf(':') — that would eat part of the model name when the model
+  // itself contains colons (e.g. qwen3.6:27b-vision).
+  // Strategy: try known custom provider slugs from the global model catalog
+  // first (window._customProviderSlugs), then fall back to lastIndexOf.
+  const inner=value.slice(1);
+  // Check if we have known custom provider slugs available
+  if(typeof window!=='undefined'&&Array.isArray(window._customProviderSlugs)){
+    for(const slug of window._customProviderSlugs){
+      if(inner.startsWith(slug+':')){
+        return slug;
+      }
+    }
+  }
+  // Non-custom providers: split on first colon
+  if(!inner.startsWith('custom:')){
+    return inner.slice(0,inner.indexOf(':'));
+  }
+  // Custom provider without slug list: fall back to lastIndexOf.
+  // This is the imperfect legacy path — it works when the model name
+  // has no colons, but may mis-split when it does. The option-based
+  // lookup in _modelStateForSelect should be preferred.
+  return inner.slice(0,inner.lastIndexOf(':'));
 }
 function _providerSkipsModelMismatchWarning(providerId){
   const p=String(providerId||'').toLowerCase();
@@ -2672,28 +2697,36 @@ function _providerDefersMissingModelFallback(providerId){
 function _modelStateForSelect(sel, modelId){
   const value=String(modelId||'').trim();
   if(!value) return {model:'',model_provider:null};
+  // When the select element is available, resolve the provider from the
+  // option's data-provider attribute FIRST. This avoids the colon-parsing
+  // ambiguity in _providerFromModelValue (which uses lastIndexOf(':')) that
+  // corrupts custom provider IDs when the model name itself contains colons
+  // (e.g. @custom:litellm-proxy:qwen3.6:27b-vision was split into
+  // provider="custom:litellm-proxy:qwen3.6" and model="27b-vision").
+  // The data-provider attribute carries the exact provider ID set by the
+  // backend during dropdown population, so it is authoritative.
+  if(sel&&sel.options){
+    let opt=null;
+    const selected=sel&&sel.selectedOptions&&sel.selectedOptions[0];
+    if(selected&&String(selected.value||'')===value){
+      opt=selected;
+    }else{
+      opt=Array.from(sel.options).find(o=>String(o.value||'')===value)||null;
+    }
+    if(opt){
+      const provider=String(_getOptionProviderId(opt)||'').trim();
+      if(provider&&provider!=='default'){
+        return {model:value,model_provider:provider};
+      }
+    }
+  }
+  // Fallback: parse the @provider:model prefix from the value string.
+  // This is less reliable when the model name contains colons, but is
+  // needed when the select element is not available (e.g. programmatic
+  // callers without a live DOM element).
   const explicitProvider=_providerFromModelValue(value);
   if(explicitProvider) return {model:value,model_provider:explicitProvider};
-  // Resolve the provider from the option whose VALUE matches the requested
-  // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
-  // /tab switch or a model-list rebuild the dropdown transiently still has the
-  // PREVIOUS profile's default option selected (e.g. an ollama model), so reading
-  // selectedOptions[0] would stamp that foreign provider onto a model it doesn't
-  // own — which is then persisted into the session's model_provider and re-sent
-  // on every turn, bricking it with a "Provider 'X'…no API key" error for a
-  // provider the session never used.
-  let opt=null;
-  const selected=sel&&sel.selectedOptions&&sel.selectedOptions[0];
-  // Prefer the currently-selected option ONLY when it actually is the requested
-  // model — this preserves the user's exact pick in the same-value/different-
-  // provider collision case (two providers offering the same model id).
-  if(selected&&String(selected.value||'')===value){
-    opt=selected;
-  }else if(sel&&sel.options){
-    opt=Array.from(sel.options).find(o=>String(o.value||'')===value)||null;
-  }
-  const provider=String(_getOptionProviderId(opt)||'').trim();
-  return {model:value,model_provider:(provider&&provider!=='default')?provider:null};
+  return {model:value,model_provider:null};
 }
 function _captureModelDropdownSelection(sel){
   if(!sel||!sel.value) return null;
@@ -3071,6 +3104,17 @@ async function populateModelDropdown(opts={}){
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
+    // Collect known custom provider slugs from the model groups so
+    // _providerFromModelValue can match them without ambiguous colon-splitting.
+    const _slugs=[];
+    if(Array.isArray(data.groups)){
+      for(const g of data.groups){
+        if(g&&g.provider_id&&String(g.provider_id).startsWith('custom:')){
+          _slugs.push(String(g.provider_id));
+        }
+      }
+    }
+    window._customProviderSlugs=_slugs;
     window._modelEndpointErrors={};
     // Keep g.extra_models label hydration in this function for /model and tail selections.
 
