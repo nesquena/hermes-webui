@@ -14069,45 +14069,24 @@ function _compressionCardsNode(state){
   return wrap;
 }
 /**
- * Insert a persistent fallback notice into the chat stream at the current
- * assistant turn position.  Unlike the 4-second composer status flash, this
- * stays visible so the user can see that a model fallback occurred and which
- * model is now serving the response.
- * @param {Object} data - SSE 'warning' event payload with type='fallback'
+ * Build HTML for a session-persisted fallback notice.  The notice is stored
+ * as `_fallbackNotice` on the assistant message and rendered inside
+ * renderMessages(), so it survives DOM rebuilds, session switches, and page
+ * reloads — unlike an ad-hoc live-turn DOM node which is wiped on the next
+ * renderMessages() call.
+ * @param {Object} notice - `{message, to_model, to_provider}`
  */
-function appendFallbackNotice(data){
-  if(!S.session) return;
-  const msgInner=$('msgInner');
-  if(!msgInner) return;
-  const toModel=data.to_model||'';
-  const toProvider=data.to_provider||'';
-  const message=data.message||'Fallback activated';
-  // Build the notice element
-  const notice=document.createElement('div');
-  notice.className='fallback-notice';
-  notice.setAttribute('data-fallback-notice','1');
+function _fallbackNoticeHtml(notice){
+  if(!notice) return '';
+  const message=String(notice.message||'Fallback activated');
+  const toModel=String(notice.to_model||'');
+  const toProvider=String(notice.to_provider||'');
   const modelLabel=toModel?(toProvider?`${toModel} (${toProvider})`:toModel):'';
-  notice.innerHTML=
+  return `<div class="fallback-notice" data-fallback-notice="1">`+
     `<span class="fallback-notice-icon">⚠️</span>`+
     `<span class="fallback-notice-text">${esc(message)}</span>`+
-    (modelLabel?`<span class="fallback-notice-model">${esc(modelLabel)}</span>`:'');
-  // Find or create the current assistant turn and insert the notice
-  // at the top of its blocks container so it appears before the response.
-  let turn=$('liveAssistantTurn');
-  if(!turn){
-    turn=_createAssistantTurn();
-    turn.id='liveAssistantTurn';
-    if(S.session) turn.dataset.sessionId=S.session.session_id;
-    msgInner.appendChild(turn);
-  }
-  const inner=_assistantTurnBlocks(turn);
-  if(inner){
-    // Avoid duplicate notices for the same fallback (same model/provider)
-    const existing=inner.querySelector('[data-fallback-notice="1"]');
-    if(existing) existing.remove();
-    inner.insertBefore(notice, inner.firstChild);
-  }
-  if(typeof scrollIfPinned==='function') scrollIfPinned();
+    (modelLabel?`<span class="fallback-notice-model">${esc(modelLabel)}</span>`:'')+
+    `</div>`;
 }
 
 function appendLiveCompressionCard(state){
@@ -14564,7 +14543,7 @@ function _messageRenderCacheSignature(){
   add(messages.length);
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
-    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
+    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);add(m._fallbackNotice?JSON.stringify(m._fallbackNotice):'');
     add(msgContent(m));
     if(Array.isArray(m.content)){
       add('content-array');
@@ -15842,6 +15821,7 @@ function renderMessages(options){
     const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
+    const fallbackNoticeHtml = (!isUser&&m._fallbackNotice) ? _fallbackNoticeHtml(m._fallbackNotice) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
@@ -16026,6 +16006,9 @@ function renderMessages(options){
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
+        if(isLastTextPart&&fallbackNoticeHtml){
+          orderedSeg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
+        }
         orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
@@ -16083,7 +16066,10 @@ function renderMessages(options){
       if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml||fallbackNoticeHtml);
+    if(fallbackNoticeHtml){
+      seg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
+    }
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
     }else if(hasVisibleBody){

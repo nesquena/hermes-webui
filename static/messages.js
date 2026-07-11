@@ -6249,12 +6249,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return;
         }
         if(d.type==='fallback'){
-          // Show a persistent inline fallback notice in the chat stream
-          // instead of a 4-second composer status flash that disappears.
-          if(typeof appendFallbackNotice==='function'){
-            appendFallbackNotice(d);
-          }
-          // Also show the brief status bar message for immediate feedback
+          // The persistent notice is rendered from session-persisted metadata
+          // (_fallbackNotice on the assistant message) inside renderMessages().
+          // Here we just show a brief composer status flash for immediate feedback.
           setComposerStatus(d.message||'Fallback activated');
           setTimeout(()=>setComposerStatus(''),4000);
           return;

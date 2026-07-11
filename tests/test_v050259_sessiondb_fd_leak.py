@@ -109,6 +109,54 @@ def test_cached_agent_reuse_sets_current_agent_for_fallback_warning_metadata():
     )
 
 
+def test_fallback_notice_persisted_on_assistant_message_before_save():
+    """Fallback notices must be session-persisted as structured metadata on
+    the turn's final assistant message, not inserted as an orphan DOM node.
+
+    The gate certification on PR #5755 found that `appendFallbackNotice()`
+    inserted a DOM node that was wiped by the next `renderMessages()` /
+    session-switch / stream-completion — so the "persistent" notice was not
+    actually persistent. The fix stores `_fallbackNotice` on the message
+    before `s.save()`, and `renderMessages()` renders it from `S.messages`
+    like `provider_details` / `_statusCard`.
+    """
+    src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+
+    # 1. _pending_fallback_notices holder is declared alongside _current_agent
+    assert "_pending_fallback_notices = []" in src, (
+        "_pending_fallback_notices holder must be initialised so the status "
+        "callback can accumulate fallback data for session persistence."
+    )
+
+    # 2. The callback captures fallback data into the holder
+    capture_idx = src.find("_pending_fallback_notices.append(")
+    assert capture_idx != -1, (
+        "_agent_status_callback must append to _pending_fallback_notices so "
+        "the fallback metadata is available for persistence before s.save()."
+    )
+
+    # 3. The metadata is stamped on the last assistant message before s.save()
+    stamp_idx = src.find("_dm['_fallbackNotice']")
+    assert stamp_idx != -1, (
+        "The turn's final assistant message must receive _fallbackNotice "
+        "metadata before s.save() so it survives renderMessages() rebuilds."
+    )
+
+    # 4. The stamping must happen in the pre-save metadata block (near _turnDuration)
+    turn_duration_idx = src.find("_dm['_turnDuration']")
+    assert turn_duration_idx != -1, "_turnDuration stamping block not found"
+    assert stamp_idx > turn_duration_idx and stamp_idx < turn_duration_idx + 800, (
+        "_fallbackNotice must be stamped in the same pre-save metadata block "
+        "as _turnDuration/_turnTps, before s.save()."
+    )
+
+    # 5. The orphan DOM insertion function must not exist
+    assert "function appendFallbackNotice(" not in src, (
+        "appendFallbackNotice() was the orphan-DOM approach that failed "
+        "persistence — it should be removed from the codebase."
+    )
+
+
 # ── 2: source-level pin: LRU eviction path also closes _session_db ──────────
 
 
