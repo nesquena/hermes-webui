@@ -17094,6 +17094,19 @@ async function submitEdit(msgIdx, newText) {
     S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = newText;
+    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. The
+    // onchange explicit-pick marker is single-shot and was already consumed by
+    // an earlier send(), so re-arm it from the CURRENT selector state before
+    // this send. Otherwise explicit_model_pick goes out false and the server's
+    // compatible-model resolution re-reverts a freshly-picked cross-family
+    // model back to the failed/stale value (mirrors a fresh onchange→send).
+    // Re-arming every recovery send also lets a SECOND consecutive edit honor
+    // its pick even though send() consumes the marker each time.
+    if(typeof _rememberPendingSessionModel==='function' && typeof _chatPayloadModel==='function' && S.session){
+      const _recoveryModel=_chatPayloadModel();
+      const _recoveryProvider=(typeof _chatPayloadModelProvider==='function')?_chatPayloadModelProvider(_recoveryModel):null;
+      _rememberPendingSessionModel(S.session.session_id, _recoveryModel, _recoveryProvider);
+    }
     await send();
   } catch(e) { setStatus(t('edit_failed') + e.message); }
 }

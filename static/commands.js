@@ -1686,7 +1686,20 @@ async function cmdRetry(){
     if(!S.session||S.session.session_id!==activeSid)return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
     if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
-    $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();await send();
+    $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
+    // #5924 (Facet 1 + Facet 4): /retry is a recovery send. The onchange
+    // explicit-pick marker is single-shot and was already consumed by an
+    // earlier send(), so re-arm it from the CURRENT selector state before this
+    // send. Otherwise explicit_model_pick goes out false and the server's
+    // compatible-model resolution re-reverts a freshly-picked cross-family
+    // model back to the failed/stale value. Re-arming every recovery send also
+    // lets a SECOND consecutive retry honor its pick (send() consumes it each time).
+    if(typeof _rememberPendingSessionModel==='function' && typeof _chatPayloadModel==='function' && S.session){
+      const _recoveryModel=_chatPayloadModel();
+      const _recoveryProvider=(typeof _chatPayloadModelProvider==='function')?_chatPayloadModelProvider(_recoveryModel):null;
+      _rememberPendingSessionModel(activeSid, _recoveryModel, _recoveryProvider);
+    }
+    await send();
   }catch(e){showToast(t('retry_failed')+e.message);}
 }
 async function cmdUndo(){
