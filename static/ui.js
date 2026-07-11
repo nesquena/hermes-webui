@@ -9140,12 +9140,17 @@ async function refreshSession() {
 }
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){
-  if(!info||info.no_git||!(info.behind>0)) return null;
+  const manualNoGit=!!(info&&info.no_git&&info.manual_update&&info.behind>0);
+  if(!info||(info.no_git&&!manualNoGit)||!(info.behind>0)) return null;
   const release=(info.release_based&&info.latest_version)
     ?` (${info.current_version||'unknown'} -> ${info.latest_version})`
     :(info.branch?` (${info.branch})`:'');
   const noun=info.release_based?'release':'update';
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
+}
+function _formatManualUpdateInstruction(info){
+  if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
+  return 'Manual update required: run docker pull ghcr.io/nesquena/hermes-webui:latest, then recreate the container.';
 }
 function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;
@@ -9453,6 +9458,21 @@ function _showUpdateBanner(data){
   if(webuiPart) parts.push(webuiPart);
   if(agentPart) parts.push(agentPart);
   window._updateData=data;
+  const btnApply=$('btnApplyUpdate');
+  if(btnApply){
+    const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
+    const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
+    const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
+    const hasApplyTargets=webuiUpdatable||agentUpdatable;
+    btnApply.disabled=!hasApplyTargets;
+    btnApply.style.display=hasApplyTargets?'':'none';
+    if(webuiManual){
+      const forceBtn=$('btnForceUpdate');
+      if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
+      const clearLockBtn=$('btnClearUpdateLock');
+      if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+    }
+  }
   if(!parts.length){
     _renderUpdateWhatsNewLinks(data);
     const staleBanner=$('updateBanner');
@@ -9460,7 +9480,10 @@ function _showUpdateBanner(data){
     return;
   }
   const msg=$('updateMsg');
-  if(msg) msg.textContent='\u2B06 '+parts.join(', ')+' available';
+  if(msg){
+    const manualInstruction=_formatManualUpdateInstruction(data&&data.webui);
+    msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'');
+  }
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
   const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
@@ -9511,7 +9534,7 @@ async function applyUpdates(){
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
   const targets=[];
   if(window._updateData?.agent?.behind>0) targets.push('agent');
-  if(window._updateData?.webui?.behind>0) targets.push('webui');
+  if(window._updateData?.webui?.behind>0&&!window._updateData?.webui?.manual_update) targets.push('webui');
   if(!targets.length){
     const msg=updateText('update_no_target','No update target selected. Refresh update status and retry.');
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}

@@ -1776,6 +1776,130 @@ class TestUpdateBannerUx:
         assert '_formatUpdateTargetStatus' in fn
         assert "formatUpdatePart('WebUI',data.webui)" in fn
         assert "formatUpdatePart('Agent',data.agent)" in fn
+        assert "data.webui&&data.webui.no_git&&!data.webui.manual_update" in fn
+
+    def test_manual_webui_no_git_updates_are_bannerable_but_plain_no_git_stays_hidden(self):
+        src = read('static/ui.js')
+        format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
+        instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
+        script = f"""
+{format_fn}
+{instruction_fn}
+const manual=_formatUpdateTargetStatus('WebUI', {{
+  no_git: true,
+  manual_update: true,
+  behind: 1,
+  release_based: true,
+  current_version: 'v0.51.833',
+  latest_version: 'v0.51.913',
+}});
+if(manual !== 'WebUI (v0.51.833 -> v0.51.913): 1 release') throw new Error('manual webui update must be bannerable: '+manual);
+const instruction=_formatManualUpdateInstruction({{ no_git: true, manual_update: true, behind: 1 }});
+if(!instruction || instruction.indexOf('docker pull ghcr.io/nesquena/hermes-webui:latest') === -1) throw new Error('manual webui update must include pull guidance: '+instruction);
+if(_formatManualUpdateInstruction({{ no_git: true, behind: 1 }}) !== null) throw new Error('plain no-git webui must not show manual guidance');
+if(_formatUpdateTargetStatus('WebUI', {{ no_git: true, behind: 1 }}) !== null) throw new Error('plain no-git webui must stay hidden');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_manual_webui_banner_hides_apply_button(self):
+        src = read('static/ui.js')
+        format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
+        instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
+        show_fn = extract_js_function(src, '_showUpdateBanner')
+        script = f"""
+const state = {{
+  updateBanner: {{ classList: {{ added: false, add() {{ this.added = true; }}, remove() {{ this.removed = true; }} }} }},
+  updateMsg: {{ textContent: '' }},
+  btnApplyUpdate: {{ disabled: false, style: {{ display: '' }} }},
+  btnForceUpdate: {{ disabled: false, style: {{ display: 'inline-block' }}, dataset: {{ target: 'agent' }} }},
+  btnClearUpdateLock: {{ disabled: false, style: {{ display: 'inline-block' }}, dataset: {{ target: 'agent' }} }},
+  updateWhatsNewLinks: {{ style: {{ display: 'none' }}, replaceChildren() {{ this.cleared = true; }} }},
+}};
+global.window = {{}};
+global.$ = (id) => state[id] || null;
+global._renderUpdateWhatsNewLinks = () => {{}};
+{format_fn}
+{instruction_fn}
+{show_fn}
+_showUpdateBanner({{
+  webui: {{
+    no_git: true,
+    manual_update: true,
+    behind: 1,
+    release_based: true,
+    current_version: 'v0.51.833',
+    latest_version: 'v0.51.913',
+    compare_url: 'https://github.com/nesquena/hermes-webui/compare/current-sha...latest-sha',
+  }},
+  agent: null,
+}});
+if(state.updateMsg.textContent.indexOf('WebUI') === -1) throw new Error('manual update must still render banner text');
+if(state.updateMsg.textContent.indexOf('docker pull ghcr.io/nesquena/hermes-webui:latest') === -1) throw new Error('manual update must render pull guidance');
+if(state.btnApplyUpdate.style.display !== 'none') throw new Error('manual webui update must hide the apply button');
+if(state.btnApplyUpdate.disabled !== true) throw new Error('manual webui update must disable the apply button');
+if(state.btnForceUpdate.style.display !== 'none') throw new Error('manual webui update must hide the force button');
+if(state.btnForceUpdate.disabled !== true) throw new Error('manual webui update must disable the force button');
+if(state.btnClearUpdateLock.style.display !== 'none') throw new Error('manual webui update must hide the clear lock button');
+if(state.btnClearUpdateLock.disabled !== true) throw new Error('manual webui update must disable the clear lock button');
+if(state.updateBanner.classList.added !== true) throw new Error('manual update must show the banner');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_settings_manual_webui_update_includes_pull_guidance(self):
+        ui_src = read('static/ui.js')
+        panels_src = read('static/panels.js')
+        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
+        instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
+        error_fn = extract_js_function(ui_src, '_formatUpdateCheckError')
+        check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
+        script = f"""
+const state = {{
+  btnCheckUpdatesNow: {{ disabled: false }},
+  checkUpdatesLabel: {{ textContent: '' }},
+  checkUpdatesSpinner: {{ style: {{ display: 'none' }} }},
+  checkUpdatesStatus: {{ textContent: '', style: {{ color: '' }} }},
+}};
+let apiData = {{
+  webui: {{
+    no_git: true,
+    manual_update: true,
+    behind: 1,
+    release_based: true,
+    current_version: 'v0.51.833',
+    latest_version: 'v0.51.913',
+  }},
+  agent: null,
+}};
+function $(id) {{ return state[id] || null; }}
+function t(key) {{
+  const values = {{
+    settings_checking: 'Checking',
+    settings_check_now: 'Check now',
+    settings_updates_available: '{{count}} update(s) available',
+    settings_update_no_git: 'Cannot check for updates',
+    settings_up_to_date: 'Up to date',
+    settings_update_check_failed: 'Check failed',
+  }};
+  return values[key] || key;
+}}
+async function api() {{ return apiData; }}
+function _showUpdateBanner() {{}}
+{format_fn}
+{instruction_fn}
+{error_fn}
+{check_fn}
+(async () => {{
+  await checkUpdatesNow();
+  if(state.checkUpdatesStatus.textContent.indexOf('docker pull ghcr.io/nesquena/hermes-webui:latest') === -1) throw new Error('settings manual update must render pull guidance: '+state.checkUpdatesStatus.textContent);
+  if(state.checkUpdatesStatus.style.color !== 'var(--accent)') throw new Error('manual update should stay in available state');
+  apiData = {{ webui: {{ no_git: true, behind: 1 }}, agent: null }};
+  state.checkUpdatesStatus.textContent = '';
+  await checkUpdatesNow();
+  if(state.checkUpdatesStatus.textContent.indexOf('docker pull') !== -1) throw new Error('plain no-git must not show manual guidance');
+  if(state.checkUpdatesStatus.textContent !== 'Cannot check for updates') throw new Error('plain no-git should keep cannot-check status: '+state.checkUpdatesStatus.textContent);
+}})().catch(err => {{ console.error(err.message); process.exit(1); }});
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
 
 # ── static/index.html ─────────────────────────────────────────────────────────
