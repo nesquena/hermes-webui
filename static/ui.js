@@ -2016,6 +2016,10 @@ function _mountMermaidViewer(svgEl, options = {}) {
     pinching: false,
     pinchStartDist: 0,
     pinchStartScale: 1,
+    pinchStartCX: 0,
+    pinchStartCY: 0,
+    pinchStartX: 0,
+    pinchStartY: 0,
   };
   root._mermaidViewer = state;
 
@@ -2219,6 +2223,11 @@ function _mountMermaidViewer(svgEl, options = {}) {
       state.pinching = true;
       state.pinchStartDist = _touchDist(e.touches);
       state.pinchStartScale = state.scale;
+      state.pinchStartX = state.x;
+      state.pinchStartY = state.y;
+      const rect = viewport.getBoundingClientRect();
+      state.pinchStartCX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
+      state.pinchStartCY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
       _endPointerDrag();
       if(e.preventDefault) e.preventDefault();
     }
@@ -2226,19 +2235,26 @@ function _mountMermaidViewer(svgEl, options = {}) {
 
   function _onTouchMove(e){
     if(!state.pinching || e.touches.length < 2) return;
+    const rect = viewport.getBoundingClientRect();
+    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
+    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
     const currDist = _touchDist(e.touches);
-    if(state.pinchStartDist > 0){
-      const rect = viewport.getBoundingClientRect();
-      const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
-      const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
-      _setScale(state.pinchStartScale * (currDist / state.pinchStartDist), cx, cy);
+    if(state.pinchStartDist > 0 && state.pinchStartScale > 0){
+      const rawScale = state.pinchStartScale * (currDist / state.pinchStartDist);
+      const boundedScale = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, rawScale));
+      const ratio = boundedScale / state.pinchStartScale;
+      state.scale = boundedScale;
+      state.x = cx - (state.pinchStartCX - state.pinchStartX) * ratio;
+      state.y = cy - (state.pinchStartCY - state.pinchStartY) * ratio;
+      _applyTransform();
     }
     if(e.preventDefault) e.preventDefault();
   }
 
   function _onTouchEnd(e){
-    if(e.touches.length < 2){
+    if(e.touches.length < 2 && state.pinching){
       state.pinching = false;
+      state.dragged = true;
     }
   }
 
