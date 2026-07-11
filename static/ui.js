@@ -11999,11 +11999,17 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
   const activeMode=chatActivityMode();
-  const sceneMode=activeMode==='hide_all_activity'
-    ? 'hide_all_activity'
-    : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='hide_all_activity'
-    ? requestedMode
-    : activeMode);
+  // The USER's active activity-display mode is authoritative for what gets
+  // painted. `requestedMode` (opts.mode) is only a fallback hint from callers
+  // that hardcode {mode:'compact_worklog'} (appendLiveToolCard / ensureLiveWorklogShell
+  // / appendLiveCompressionCard, etc.) — it must NEVER override the active mode, or a
+  // transparent_stream turn gets a compact grouped-worklog frame forced onto it. That
+  // regressed #5942 (grouped↔individual alternating) + #5943 (per-tick row rebuild /
+  // flicker) when #5746's requestedMode-precedence landed: the good build always
+  // checked isTransparentStream() FIRST and ignored the hint. Restore active-mode-wins:
+  // honor requestedMode ONLY when there is no usable active mode.
+  const knownMode=(m)=>m==='compact_worklog'||m==='transparent_stream'||m==='hide_all_activity';
+  const sceneMode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
   if(sceneMode==='hide_all_activity') return false;
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
@@ -13110,7 +13116,7 @@ function _compressionCardsNode(state){
 function appendLiveCompressionCard(state){
   if(!S.session||!S.activeStreamId||!state) return false;
   if(isLiveAnchorActivitySceneOwner(S.activeStreamId)){
-    return _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id, {mode:'compact_worklog'});
+    return _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
   }
   const scrollSnapshot=_captureMessageScrollSnapshot();
   let turn=$('liveAssistantTurn');
@@ -16696,7 +16702,7 @@ function appendLiveToolCard(tc){
   if(opts.streamId&&S.activeStreamId!==opts.streamId) return;
   if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(isLiveAnchorActivitySceneOwner(opts.streamId||S.activeStreamId)){
-    _renderLiveAnchorActivitySceneForStream(opts.streamId||S.activeStreamId, opts.sessionId||S.session.session_id, {mode:'compact_worklog'});
+    _renderLiveAnchorActivitySceneForStream(opts.streamId||S.activeStreamId, opts.sessionId||S.session.session_id);
     return;
   }
   let turn=$('liveAssistantTurn');
@@ -16910,12 +16916,12 @@ function ensureLiveWorklogShell(){
   if(!S.session) return null;
   if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return null;
   const activeStreamId=S.activeStreamId||'';
-  if(activeStreamId&&typeof _renderLiveAnchorActivitySceneForStream==='function'&&_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'})){
+  if(activeStreamId&&typeof _renderLiveAnchorActivitySceneForStream==='function'&&_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id)){
     _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
     return $('liveAssistantTurn');
   }
   if(activeStreamId&&isLiveAnchorActivitySceneOwner(activeStreamId)){
-    _renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'});
+    _renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id);
     _dedupeLiveProcessedWorklogAnchors($('liveAssistantTurn'));
     return $('liveAssistantTurn');
   }
@@ -17859,7 +17865,7 @@ function appendThinking(text='', options){
   if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
   if(!allowPendingPlaceholder&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
-    _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id, {mode:'compact_worklog'});
+    _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
   }
   const empty=$('emptyState');
