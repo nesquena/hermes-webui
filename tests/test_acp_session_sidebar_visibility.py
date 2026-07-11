@@ -69,6 +69,26 @@ def test_empty_acp_row_stays_hidden():
     assert is_cli_session_row_visible({**row, **normalize_agent_session_source('acp')}) is False
 
 
+def test_acp_row_without_user_turns_stays_hidden():
+    """An ACP row holding only assistant/tool/system messages is not user-driven.
+
+    A replayed or aborted turn can leave an ended ACP connection with a
+    positive message_count but zero user turns — it must not surface in the
+    sidebar (Greptile review on #5939).
+    """
+    row = {
+        'id': 'acp-no-user-turns',
+        'source': 'acp',
+        'title': 'Replayed segment',
+        'message_count': 3,
+        'actual_message_count': 3,
+        'actual_user_message_count': 0,
+        'ended_at': 1751000000.0,
+        'end_reason': 'client_disconnect',
+    }
+    assert is_cli_session_row_visible({**row, **normalize_agent_session_source('acp')}) is False
+
+
 # --- state.db projection (mirrors tests/test_issue3586_cli_session_source_label.py) ---
 
 def _make_state_db(path, sessions):

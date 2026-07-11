@@ -276,16 +276,20 @@ def is_cli_session_row_visible(row: dict) -> bool:
     ):
         return True
 
-    if {"tui", "acp"} & {
+    interactive_sources = {
         _normalize_source_name(row.get("source")),
         _normalize_source_name(row.get("source_tag")),
         _normalize_source_name(row.get("raw_source")),
         _normalize_source_name(row.get("source_label")),
-    }:
-        # Like TUI rows, ACP sessions are always genuinely user-interactive
-        # (an external agent client drove them), never framework-generated
-        # metadata — keep ended/untitled ones visible.
+    }
+    if "tui" in interactive_sources:
         return True
+    if "acp" in interactive_sources:
+        # Like TUI rows, user-driven ACP sessions stay visible even when
+        # ended/untitled. Unlike TUI, an ACP connection can record only
+        # assistant/tool/system rows (e.g. a replayed or aborted turn), so
+        # require at least one user turn before surfacing the row.
+        return _count_user_turns(row) > 0
 
     if _has_cli_lineage(row):
         return True
