@@ -832,6 +832,13 @@ def reset_trusted_auth_request_state(handler) -> None:
         '_trusted_auth_session_rejected',
         '_trusted_auth_session_info',
         '_trusted_auth_session_cookie_value',
+        # Clear any auth cookie queued by a prior request but not yet flushed.
+        # The handler is reused across HTTP/1.1 keep-alive requests, so a stale
+        # queued Set-Cookie would otherwise cross the request boundary and be
+        # emitted by a later response — e.g. after trusted-identity rotation on
+        # logout it could overwrite a subsequent valid login cookie and 401 the
+        # user. Reset it at the per-request boundary (server.py do_GET/do_POST).
+        '_pending_set_cookies',
     ):
         try:
             delattr(handler, name)

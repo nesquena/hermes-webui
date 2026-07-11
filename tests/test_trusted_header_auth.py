@@ -468,6 +468,29 @@ def test_server_resets_trusted_auth_request_state_per_request():
     assert server_source.count("reset_trusted_auth_request_state(self)") == 2
 
 
+def test_reset_clears_pending_cookies_across_keepalive_requests(monkeypatch):
+    # A queued-but-unflushed Set-Cookie must NOT survive onto the next request on
+    # a reused HTTP/1.1 keep-alive handler (regression: a stale trusted-auth
+    # cookie leaking across the request boundary could overwrite a later valid
+    # login cookie and 401 the user). reset_trusted_auth_request_state() runs at
+    # the per-request entry (server.py do_GET/do_POST), so it must drop the queue.
+    _trusted_env(monkeypatch)
+    handler = _Handler()
+
+    # Request N queues an auth cookie but the response is never flushed.
+    auth._queue_pending_cookie(handler, "hermes_session=stale-value; Path=/")
+    assert handler._pending_set_cookies == ["hermes_session=stale-value; Path=/"]
+
+    # Request N+1 begins on the same reused handler.
+    auth.reset_trusted_auth_request_state(handler)
+
+    # The stale queued cookie must be gone — nothing to flush into N+1's response.
+    assert getattr(handler, "_pending_set_cookies", []) == []
+    from api.helpers import flush_pending_auth_cookies
+    flush_pending_auth_cookies(handler)
+    assert handler.header_values("Set-Cookie") == []
+
+
 def test_auth_status_reports_reconciled_trusted_identity(monkeypatch):
     _trusted_env(
         monkeypatch,
