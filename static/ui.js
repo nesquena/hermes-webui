@@ -2666,7 +2666,11 @@ function _providerFromModelValue(modelId){
   const inner=value.slice(1);
   // Check if we have known custom provider slugs available
   if(typeof window!=='undefined'&&Array.isArray(window._customProviderSlugs)){
-    for(const slug of window._customProviderSlugs){
+    // Sort by length descending to match longest slugs first.
+    // This prevents matching a shorter slug (e.g. 'custom:litellm')
+    // before a longer one (e.g. 'custom:litellm-proxy').
+    const sortedSlugs=[...window._customProviderSlugs].sort((a,b)=>b.length-a.length);
+    for(const slug of sortedSlugs){
       if(inner.startsWith(slug+':')){
         return slug;
       }
