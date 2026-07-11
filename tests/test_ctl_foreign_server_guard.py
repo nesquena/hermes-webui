@@ -365,3 +365,150 @@ def test_stop_warns_about_unmanaged_instance_and_leaves_it_alone(tmp_path):
             pass
     finally:
         _stop_proc(server)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX daemon guards")
+def test_port_guard_ignores_http_proxy_env(tmp_path):
+    """The ownership probe must force a direct connection: a configured
+    http_proxy would report the proxy, not the local port (Greptile P1 on
+    #5944) — a dead proxy hides an occupied port and start proceeds doomed."""
+    port = _free_port()
+    server = _start_dummy_http_server(port)
+    try:
+        result = run_ctl(
+            tmp_path,
+            "start",
+            env=_guard_env(
+                HERMES_WEBUI_PORT=str(port),
+                HERMES_WEBUI_CTL_ALLOW_SYSTEMD_CONFLICT="1",
+                # Dead proxy: any probe routed through it sees no responder.
+                http_proxy="http://127.0.0.1:1",
+                https_proxy="http://127.0.0.1:1",
+                HTTP_PROXY="http://127.0.0.1:1",
+                HTTPS_PROXY="http://127.0.0.1:1",
+            ),
+            timeout=15,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 2, combined
+        assert "already responding" in combined
+    finally:
+        _stop_proc(server)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX daemon guards")
+def test_ipv6_host_probe_builds_bracketed_url(tmp_path):
+    """HERMES_WEBUI_HOST='::1' must probe http://[::1]:port — the unbracketed
+    literal is rejected by curl/wget and the running instance is missed."""
+    if not socket.has_ipv6:
+        pytest.skip("no IPv6 support")
+    port = _free_port()
+    code = textwrap.dedent(
+        f"""
+        import socket
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class V6Server(HTTPServer):
+            address_family = socket.AF_INET6
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{{"status": "ok"}}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        V6Server(("::1", {port}), H).serve_forever()
+        """
+    )
+    try:
+        server = subprocess.Popen([sys.executable, "-c", code])
+    except OSError:
+        pytest.skip("cannot bind ::1")
+    try:
+        deadline = time.time() + 5
+        up = False
+        while time.time() < deadline:
+            if server.poll() is not None:
+                pytest.skip("IPv6 loopback unavailable")
+            try:
+                with socket.create_connection(("::1", port), timeout=0.2):
+                    up = True
+                    break
+            except OSError:
+                time.sleep(0.05)
+        assert up, "IPv6 dummy server did not come up"
+
+        result = run_ctl(
+            tmp_path,
+            "start",
+            env=_guard_env(
+                HERMES_WEBUI_HOST="::1",
+                HERMES_WEBUI_PORT=str(port),
+                HERMES_WEBUI_CTL_ALLOW_SYSTEMD_CONFLICT="1",
+            ),
+            timeout=15,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 2, combined
+        assert "already responding" in combined
+    finally:
+        _stop_proc(server)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX daemon guards")
+def test_zero_start_grace_still_monitors_startup(tmp_path):
+    """HERMES_WEBUI_START_GRACE=0 must not disable the startup watch — that
+    would restore the exact stale-PID-on-early-death behavior being fixed."""
+    dying_python = tmp_path / "dying-python"
+    dying_python.write_text(
+        "#!/usr/bin/env bash\nsleep 0.5\nexit 1\n",
+        encoding="utf-8",
+    )
+    dying_python.chmod(0o755)
+
+    port = _free_port()
+    result = run_ctl(
+        tmp_path,
+        "start",
+        env=_guard_env(
+            HERMES_WEBUI_PORT=str(port),
+            HERMES_WEBUI_PYTHON=str(dying_python),
+            HERMES_WEBUI_CTL_ALLOW_SYSTEMD_CONFLICT="1",
+            HERMES_WEBUI_START_GRACE="0",
+        ),
+        timeout=15,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, combined
+    assert "failed to stay running" in combined
+    assert not (tmp_path / ".hermes" / "webui.pid").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX daemon guards")
+def test_stop_warns_using_saved_binding_from_state_file(tmp_path):
+    """With no PID file but a saved off-default binding in the state file,
+    stop must probe THAT binding (before deleting the file) and still warn
+    about the unmanaged instance."""
+    port = _free_port()
+    server = _start_dummy_http_server(port)
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "webui.ctl.env").write_text(
+        f"PID=999999\nHOST=127.0.0.1\nPORT={port}\n",
+        encoding="utf-8",
+    )
+    try:
+        # No HERMES_WEBUI_PORT in the environment: the probe target must come
+        # from the saved state file.
+        result = run_ctl(tmp_path, "stop", env=_guard_env(), timeout=15)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined
+        assert "NOT managed by ctl.sh" in combined
+        assert server.poll() is None
+    finally:
+        _stop_proc(server)

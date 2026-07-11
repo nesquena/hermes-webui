@@ -440,10 +440,15 @@ _launchd_webui_pid() {
 
 _probe_target_host() {
   # A bind-all host (0.0.0.0 / ::) is not a connectable probe target; probe
-  # loopback instead (mirrors server.py _abort_if_already_serving).
-  case "${1:-}" in
+  # loopback instead (mirrors server.py _abort_if_already_serving). IPv6
+  # literals must be bracketed for URL interpolation ("http://[::1]:8787"),
+  # or curl/wget reject the URL and an existing instance is missed.
+  local host="${1:-}"
+  case "${host}" in
     0.0.0.0 | '' | ::) printf '127.0.0.1' ;;
-    *) printf '%s' "$1" ;;
+    \[*\]) printf '%s' "${host}" ;;
+    *:*) printf '[%s]' "${host}" ;;
+    *) printf '%s' "${host}" ;;
   esac
 }
 
@@ -458,12 +463,14 @@ _port_answers_http() {
     url="${scheme}://${host}:${port}/health"
     if command -v curl >/dev/null 2>&1; then
       # No -f: an HTTP error status is still a responder. -k: a self-signed
-      # cert is still a responder.
-      curl -sS -o /dev/null -k --max-time 2 "${url}" 2>/dev/null
+      # cert is still a responder. --noproxy: this is a LOCAL ownership
+      # check — routed through an http(s)_proxy it would report the proxy,
+      # not the port (false block or, with a dead proxy, a missed conflict).
+      curl -sS -o /dev/null -k --noproxy '*' --max-time 2 "${url}" 2>/dev/null
       rc=$?
       [[ ${rc} -eq 0 ]] && return 0
     elif command -v wget >/dev/null 2>&1; then
-      wget -qO /dev/null --no-check-certificate "--timeout=2" --tries=1 "${url}" 2>/dev/null
+      wget -qO /dev/null --no-check-certificate --no-proxy "--timeout=2" --tries=1 "${url}" 2>/dev/null
       rc=$?
       # 0 = OK; 8 = server answered with an error status — both are responders.
       [[ ${rc} -eq 0 || ${rc} -eq 8 ]] && return 0
@@ -606,6 +613,9 @@ start_cmd() {
   # on timeout we keep the optimistic legacy behavior and say so.
   local grace="${HERMES_WEBUI_START_GRACE:-3}"
   [[ "${grace}" =~ ^[0-9]+$ ]] || grace=3
+  # 0 would skip startup monitoring entirely and restore the stale-PID
+  # behavior this window exists to prevent; treat it like any invalid value.
+  (( grace > 0 )) || grace=3
   local grace_steps=$(( grace * 4 )) step=0 healthy=0
   while (( step < grace_steps )); do
     if ! _is_alive "${pid}"; then
@@ -613,7 +623,8 @@ start_cmd() {
       rm -f "${PID_FILE}" "${STATE_FILE}"
       return 1
     fi
-    if hermes_webui_probe_health "${probe_host}" "${CTL_PORT}" "/health" 1 >/dev/null 2>&1; then
+    if http_proxy='' https_proxy='' HTTP_PROXY='' HTTPS_PROXY='' \
+        hermes_webui_probe_health "${probe_host}" "${CTL_PORT}" "/health" 1 >/dev/null 2>&1; then
       healthy=1
       break
     fi
@@ -657,14 +668,16 @@ stop_cmd() {
   local pid
   if ! pid="$(_pid_from_file 2>/dev/null)"; then
     echo "[ctl] Hermes WebUI is stopped"
-    rm -f "${PID_FILE}" "${STATE_FILE}"
+    # Warn BEFORE deleting the state file: it carries the saved host/port
+    # binding the probe needs when the instance was started off-default.
     _warn_if_unmanaged_instance_serving
+    rm -f "${PID_FILE}" "${STATE_FILE}"
     return 0
   fi
 
   if ! _is_alive "${pid}" || ! _is_owned_webui_pid "${pid}"; then
-    _clear_stale_pid
     _warn_if_unmanaged_instance_serving
+    _clear_stale_pid
     return 0
   fi
 
