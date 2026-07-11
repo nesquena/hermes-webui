@@ -849,9 +849,27 @@ function setLargeMarkdownForceRenderVisible(visible){
 }
 
 function renderMarkdownPreviewContent(data){
+  // #5933: resolve relative image paths to /api/file/raw?… API URLs so
+  // images referenced in the markdown (e.g. ![alt](./img.png)) render inline
+  // in the workspace preview rather than showing broken links.
+  let content = data.content;
+  if (_previewCurrentPath && S.session) {
+    const dirPath = _previewCurrentPath.includes('/')
+      ? _previewCurrentPath.substring(0, _previewCurrentPath.lastIndexOf('/') + 1)
+      : '';
+    content = content.replace(
+      /!\[([^\]]*)\]\((?!https?:\/\/|\/api\/|file:\/\/)([^\)]+)\)/g,
+      (_, alt, relPath) => {
+        const resolvedPath = _normalizeWorkspaceRelPath(dirPath + relPath);
+        const sessionId = encodeURIComponent(S.session.session_id);
+        const apiUrl = `/api/file/raw?session_id=${sessionId}&path=${encodeURIComponent(resolvedPath)}&inline=1`;
+        return `![${alt}](${apiUrl})`;
+      }
+    );
+  }
   const target=data&&data.el?data.el:$('previewMd');
   if(!data||!data.el) showPreview('md');
-  target.innerHTML=renderMd(data.content);
+  target.innerHTML=renderMd(content);
   requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
 }
 

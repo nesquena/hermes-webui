@@ -789,3 +789,55 @@ class TestBareFileUrlMediaRendering:
         # Labeled anchors keep the normal link path (routed to /api/media as a link,
         # not auto-loaded as an <img>).
         assert "<img" not in out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #5933: Markdown image syntax ![alt](url) must render <img> for more URL
+# schemes than just https?://.  The workspace .md preview pre-resolves relative
+# image paths to /api/file/raw?… API URLs, and file:// URLs also appear in
+# user-authored markdown.  Before the fix the inlineMd image regex only matched
+# https?:// so those images showed up as broken links.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMarkdownImageSchemeCoverage:
+    """![alt](url) must produce <img> for /api/file/raw and file:// URLs too."""
+
+    def test_api_file_raw_url_renders_as_img(self, driver_path):
+        out = _render(driver_path, "![chart](/api/file/raw?session_id=abc&path=images%2Fchart.png&inline=1)")
+        assert "<img" in out and "msg-media-img" in out, (
+            f"/api/file/raw?… image must render as <img>: {out!r}"
+        )
+        # HTML sanitizer escapes & → &amp; in attribute values (correct behaviour)
+        assert 'src="/api/file/raw?session_id=abc&amp;path=images%2Fchart.png&amp;inline=1"' in out
+        assert 'alt="chart"' in out
+
+    def test_file_scheme_url_renders_as_img(self, driver_path):
+        out = _render(driver_path, "![screenshot](file:///tmp/shot.png)")
+        assert "<img" in out and "msg-media-img" in out, (
+            f"file:// image must render as <img>: {out!r}"
+        )
+        assert 'src="file:///tmp/shot.png"' in out
+        assert 'alt="screenshot"' in out
+
+    def test_https_url_still_renders_as_img(self, driver_path):
+        """Regression guard: the existing https?:// match must still work."""
+        out = _render(driver_path, "![capy](https://example.com/capy.png)")
+        assert "<img" in out and "msg-media-img" in out
+        assert 'src="https://example.com/capy.png"' in out
+
+    def test_image_inside_code_fence_stays_literal(self, driver_path):
+        """Images inside fenced code must NOT be rendered — fence stash protects them."""
+        out = _render(driver_path, "```\n![alt](./image.png)\n```")
+        assert "<img" not in out
+        assert "![alt](./image.png)" in out or "!&#91;alt&#93;" in out, (
+            f"Image inside code fence must stay literal: {out!r}"
+        )
+
+    def test_image_inside_inline_code_stays_literal(self, driver_path):
+        """Images inside backtick code spans must NOT be rendered — code stash protects them."""
+        out = _render(driver_path, "Run `![alt](./image.png)` now")
+        assert "<img" not in out
+        assert "<code>" in out, (
+            f"Image inside inline code must stay literal: {out!r}"
+        )
