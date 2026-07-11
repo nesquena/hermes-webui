@@ -9388,7 +9388,11 @@ def _settings_payload_for_write(settings: dict, persisted_speech_keys: set[str])
     persisted = {
         k: v
         for k, v in settings.items()
-        if k not in {"default_model", _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD}
+        if k not in {
+            "default_model",
+            "codex_app_server_auto",
+            _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD,
+        }
     }
     for speech_key in _SETTINGS_SPEECH_KEYS:
         if speech_key not in persisted_speech_keys:
@@ -9459,11 +9463,23 @@ def load_settings() -> dict:
     )
     settings["default_model"] = get_effective_default_model()
     try:
-        model_cfg = get_config().get("model", {})
+        active_cfg = get_config()
+        model_cfg = active_cfg.get("model", {})
         if isinstance(model_cfg, dict) and model_cfg.get("provider"):
             settings["default_model_provider"] = str(model_cfg.get("provider"))
+        compression_cfg = active_cfg.get("compression", {})
+        auto_mode = (
+            compression_cfg.get("codex_app_server_auto", "native")
+            if isinstance(compression_cfg, dict)
+            else "native"
+        )
+        auto_mode = str(auto_mode or "native").strip().lower()
+        settings["codex_app_server_auto"] = (
+            auto_mode if auto_mode in {"native", "hermes", "off"} else "native"
+        )
     except Exception:
-        logger.debug("Failed to resolve default model provider for settings")
+        logger.debug("Failed to resolve model/compression settings")
+        settings["codex_app_server_auto"] = "native"
     return settings
 
 

@@ -3285,6 +3285,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showTitlebarProfile=!!s.show_titlebar_profile;
     _applyTitlebarProfileVisibility();
     window._botName=s.bot_name||'Hermes';
+    window._codexAppServerAutoCompaction=['native','hermes','off'].includes(s.codex_app_server_auto)
+      ? s.codex_app_server_auto
+      : 'native';
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
     if(s.default_model){
       window._defaultModel=s.default_model;
