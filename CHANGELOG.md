@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **A pending prompt no longer renders twice across a context-compaction boundary.** On reload / reattach to an active turn, a synthetic `[CONTEXT COMPACTION]` marker (a user-role row that isn't a real submitted turn) placed after your prompt was treated as the latest user message, so the tail scan missed the actual prompt right before it and rendered the same pending prompt twice. The session-load and refresh/reconnect tail scans now skip compaction markers when locating the current user message, while completed assistant rows stay hard boundaries so genuinely-repeated prompts still render. Thanks @starship-s. (#5920)
+
 - **Sessions from Zed and other ACP (Agent Client Protocol) clients now show up in the sidebar.** An ACP-adapter session persists to the agent database with source `acp`, which was classified as `other` and fell through both sidebar buckets — so those conversations were completely invisible and unclickable. ACP sessions are now grouped with the CLI/TUI family (labelled "ACP"), with the same zero-message / ended-connection hiding rules as other interactive agent sessions. Thanks @ai-ag2026. (#5939)
 
 - **Date-stamped legacy Claude 3.0 model ids no longer show reasoning-effort controls they don't support.** The capability check read an 8-digit date suffix (e.g. `claude-3-opus-20240229`) as the model's minor version, so a bare date-stamped Claude 3.0 id wrongly qualified as reasoning-capable. The minor-version match is now bounded (mirroring the existing date-stamp defense), so date-stamped Claude 3.0 ids correctly hide reasoning-effort options while Claude 3.7 / 4.x / adaptive keep them. Thanks @nankingjing. (#5934)
