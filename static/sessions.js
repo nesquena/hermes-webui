@@ -5289,6 +5289,33 @@ function _syncSessionAttentionSoundState(sessions){
       const s=(Array.isArray(sessions)?sessions:[]).find(item=>item&&item.session_id===sid)||{session_id:sid};
       const playKey=typeof _attentionSoundKey==='function'?_attentionSoundKey(s.session_id,kind,count):`${s.session_id}:${sig}`;
       if(playKey&&typeof playAttentionSound==='function') playAttentionSound(playKey);
+      // Pair the audio cue with a background system notification so a
+      // minimized/backgrounded PWA still surfaces a NON-active session that
+      // needs attention. The active session's own approval/clarify SSE
+      // handlers already notify, so skip it here to avoid a double alert.
+      // sendBrowserNotification self-gates to hidden tabs and honors the
+      // user's notification setting, matching every other audio cue.
+      try{
+        const _activeSid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
+        if(sig&&sid!==_activeSid&&typeof sendBrowserNotification==='function'
+          &&typeof _hasAttentionNotificationKey==='function'
+          &&typeof _markAttentionNotificationKey==='function'
+          &&!_hasAttentionNotificationKey(s.session_id,kind,count)){
+          const _title=kind==='approval'?'Waiting for permission decision'
+            :(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
+          const _body=(s&&s.title)?String(s.title):'A background session needs you';
+          if(sendBrowserNotification(_title,_body,{
+            sid:s.session_id,onDelivered:()=>_markAttentionNotificationKey(s.session_id,kind,count)
+          })){
+            _markAttentionNotificationKey(s.session_id,kind,count);
+          }
+        }
+      }catch(_e){}
+    }
+  });
+  _sessionAttentionSoundState.forEach((_sig,sid)=>{
+    if(!next.has(sid)&&typeof _clearAttentionNotificationKey==='function'){
+      _clearAttentionNotificationKey(sid);
     }
   });
   _sessionAttentionSoundState.clear();

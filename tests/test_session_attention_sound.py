@@ -1,4 +1,4 @@
-"""Regression tests for attention sounds on session attention state.
+"""Regression tests for attention alerts on session attention state.
 
 Approval/clarify prompts can surface through the sidebar session metadata rather
 than the active live SSE stream. The sidebar badge path must play the distinct
@@ -6,10 +6,16 @@ attention sound when a session newly needs user input, without blasting sounds
 for already-existing badges on initial load.
 """
 from pathlib import Path
+import json
+import shutil
+import subprocess
+
+import pytest
 
 REPO = Path(__file__).parent.parent
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 def _body_from_brace(src: str, brace: int, label: str) -> str:
@@ -36,6 +42,56 @@ def _function_body(src: str, name: str) -> str:
     return _body_from_brace(src, signature_end + 1, name)
 
 
+def _function_source(src: str, name: str) -> str:
+    marker = f"function {name}("
+    start = src.find(marker)
+    assert start >= 0, f"function not found: {name}"
+    signature_end = src.find("){", start)
+    assert signature_end >= 0, f"function body not found: {name}"
+    body = _body_from_brace(src, signature_end + 1, name)
+    return src[start : signature_end + 2] + body + "}"
+
+
+def _run_attention_notification_probe(steps: str) -> list[dict]:
+    if NODE is None:  # pragma: no cover - node is installed in CI
+        pytest.skip("node not on PATH")
+    functions = "\n".join(
+        (
+            _function_source(MESSAGES_JS, "_attentionSoundKey"),
+            _function_source(MESSAGES_JS, "_hasAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_markAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "_clearAttentionNotificationKey"),
+            _function_source(MESSAGES_JS, "sendBrowserNotification"),
+            _function_source(SESSIONS_JS, "_sessionAttentionSoundSignature"),
+            _function_source(SESSIONS_JS, "_syncSessionAttentionSoundState"),
+        )
+    )
+    script = f"""
+global.window = global;
+global.document = {{hidden: false, hasFocus: () => true}};
+global.S = {{session: {{session_id: 'other'}}}};
+global.playAttentionSound = () => {{}};
+global.Notification = {{permission: 'granted'}};
+global._notificationsEnabled = true;
+global._isBackgroundedForBrowserNotification = () => document.hidden;
+const notifications = [];
+global._showPwaNotification = (title, body, options) => {{notifications.push({{title, body, options}}); return Promise.resolve();}};
+let _sessionAttentionSoundPrimed = false;
+const _sessionAttentionSoundState = new Map();
+{functions}
+{steps}
+console.log(JSON.stringify(notifications));
+"""
+    completed = subprocess.run(
+        [NODE, "-e", script],
+        cwd=REPO,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return json.loads(completed.stdout)
+
+
 def test_sidebar_attention_state_plays_distinct_sound_on_new_attention_only():
     sync_body = _function_body(SESSIONS_JS, "_syncSessionAttentionSoundState")
     apply_body = _function_body(SESSIONS_JS, "_applySessionListPayload")
@@ -59,6 +115,57 @@ def test_attention_signature_tracks_kind_and_count_for_badge_changes():
     assert "approval" in signature_body
     assert "clarify" in signature_body
     assert "return `${kind}:${Math.max(1,count||1)}`;" in signature_body
+
+
+def test_clearing_attention_does_not_notify_and_rearms_same_request():
+    notifications = _run_attention_notification_probe(
+        """
+document.hidden = true;
+_syncSessionAttentionSoundState([]);
+_syncSessionAttentionSoundState([{session_id:'target',title:'Build',attention:{kind:'approval',count:1}}]);
+_syncSessionAttentionSoundState([{session_id:'target',title:'Build',attention:null}]);
+_syncSessionAttentionSoundState([{session_id:'target',title:'Build',attention:{kind:'approval',count:1}}]);
+"""
+    )
+
+    assert [item["title"] for item in notifications] == [
+        "Waiting for permission decision",
+        "Waiting for permission decision",
+    ]
+
+
+def test_sidebar_deduplicates_attention_already_notified_by_active_sse():
+    notifications = _run_attention_notification_probe(
+        """
+_syncSessionAttentionSoundState([]);
+_markAttentionNotificationKey('target','clarify',1);
+S.session.session_id = 'other';
+_syncSessionAttentionSoundState([{session_id:'target',title:'Build',attention:{kind:'clarify',count:1}}]);
+"""
+    )
+
+    assert notifications == []
+
+
+@pytest.mark.parametrize("initially_enabled", [True, False])
+def test_ineligible_active_sse_does_not_suppress_later_background_notification(initially_enabled):
+    notifications = _run_attention_notification_probe(
+        f"""
+_syncSessionAttentionSoundState([]);
+window._notificationsEnabled = {str(initially_enabled).lower()};
+document.hidden = false;
+if(!_hasAttentionNotificationKey('target','approval',1)
+  && sendBrowserNotification('Approval required','Tool approval needed',{{sid:'target'}})){{
+  _markAttentionNotificationKey('target','approval',1);
+}}
+S.session.session_id = 'other';
+window._notificationsEnabled = true;
+document.hidden = true;
+_syncSessionAttentionSoundState([{{session_id:'target',title:'Build',attention:{{kind:'approval',count:1}}}}]);
+"""
+    )
+
+    assert [item["title"] for item in notifications] == ["Waiting for permission decision"]
 
 
 def test_attention_sound_is_softer_short_reverse_of_completion_sound():

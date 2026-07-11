@@ -5621,7 +5621,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
+      if(!_hasAttentionNotificationKey(activeSid,'approval',1)
+        &&sendBrowserNotification('Approval required',d.description||'Tool approval needed',{
+          sid:activeSid,onDelivered:()=>_markAttentionNotificationKey(activeSid,'approval',1)
+        })){
+        _markAttentionNotificationKey(activeSid,'approval',1);
+      }
     });
 
     source.addEventListener('clarify',e=>{
@@ -5629,7 +5634,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
+      if(!_hasAttentionNotificationKey(activeSid,'clarify',1)
+        &&sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{
+          sid:activeSid,onDelivered:()=>_markAttentionNotificationKey(activeSid,'clarify',1)
+        })){
+        _markAttentionNotificationKey(activeSid,'clarify',1);
+      }
     });
 
     source.addEventListener('state_saved',e=>{
@@ -8559,6 +8569,29 @@ function _attentionSoundKey(sid,kind,count){
   return `${safeSid}:${safeKind}:${safeCount}`;
 }
 
+function _hasAttentionNotificationKey(sid,kind,count){
+  const safeSid=String(sid||'');
+  const seen=window._attentionNotificationKeys;
+  return !!safeSid&&seen instanceof Map&&seen.get(safeSid)===_attentionSoundKey(safeSid,kind,count);
+}
+
+function _markAttentionNotificationKey(sid,kind,count){
+  const safeSid=String(sid||'');
+  if(!safeSid) return false;
+  const key=_attentionSoundKey(safeSid,kind,count);
+  const seen=window._attentionNotificationKeys instanceof Map?window._attentionNotificationKeys:new Map();
+  window._attentionNotificationKeys=seen;
+  if(seen.get(safeSid)===key) return false;
+  seen.set(safeSid,key);
+  return true;
+}
+
+function _clearAttentionNotificationKey(sid){
+  const safeSid=String(sid||'');
+  const seen=window._attentionNotificationKeys;
+  if(safeSid&&seen instanceof Map) seen.delete(safeSid);
+}
+
 function playAttentionSound(key){
   if(!window._soundEnabled) return;
   const nowMs=Date.now();
@@ -8645,16 +8678,23 @@ function sendBrowserNotification(title,body,options={}){
   // notifications-enabled SETTING is still honored (unlike `force`, which is the
   // explicit "Send test" override); only the visibility gate is bypassed.
   const forceHidden=!!(options&&options.forceHidden);
-  if(!force&&!window._notificationsEnabled) return;
-  if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;
-  if(!('Notification' in window)) return;
+  if(!force&&!window._notificationsEnabled) return false;
+  if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return false;
+  if(!('Notification' in window)) return false;
   if(Notification.permission==='granted'){
+    if(typeof options.onDelivered==='function') options.onDelivered();
     _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+    return true;
   }else if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+    return false;
   }else{
-    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
+    requestNotificationPermission().then(p=>{if(p==='granted'){
+      if(typeof options.onDelivered==='function') options.onDelivered();
+      _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+    }});
+    return false;
   }
 }
 
