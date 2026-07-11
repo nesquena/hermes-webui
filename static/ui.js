@@ -2649,7 +2649,11 @@ function _getOptionProviderId(opt){
     return group.dataset.provider;
   }
   const value=String(opt.value||'');
-  if(value.startsWith('@') && value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
+  if(value.startsWith('@') && value.includes(':')){
+    // Use the same heuristics as _providerFromModelValue to handle
+    // custom providers with host:port slugs and models containing colons.
+    return _providerFromModelValue(value);
+  }
   return '';
 }
 function _providerFromModelValue(modelId){
@@ -2691,10 +2695,24 @@ function _providerFromModelValue(modelId){
     // No more colons — malformed, return what we have
     return inner;
   }
-  // Check if this looks like host:port (contains exactly one colon in the slug)
+  // Check if this looks like host:port (contains a dot in the slug segment)
   const potentialSlug=afterCustom.slice(0,firstColonPos);
   if(potentialSlug.includes('.')){
-    // Looks like an IP or hostname with port — don't peel further
+    // Looks like an IP or hostname — the next segment may be a port number.
+    // Consume it so the provider ID retains the full host:port slug
+    // (e.g. custom:proxy.internal:8443 → provider, not custom:proxy.internal).
+    const afterSlug=afterCustom.slice(firstColonPos+1);
+    const secondColonPos=afterSlug.indexOf(':');
+    if(secondColonPos===-1){
+      // No model after the host segment — return what we have
+      return 'custom:'+potentialSlug;
+    }
+    const portSegment=afterSlug.slice(0,secondColonPos);
+    if(/^\d+$/.test(portSegment)){
+      // Numeric port — include it in the provider slug
+      return 'custom:'+potentialSlug+':'+portSegment;
+    }
+    // Not a numeric port — the host is the slug, rest is the model
     return 'custom:'+potentialSlug;
   }
   // Simple slug (e.g. 'litellm-proxy') — provider is 'custom:<slug>'
