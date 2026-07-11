@@ -2662,7 +2662,7 @@ function _providerFromModelValue(modelId){
   // lastIndexOf(':') — that would eat part of the model name when the model
   // itself contains colons (e.g. qwen3.6:27b-vision).
   // Strategy: try known custom provider slugs from the global model catalog
-  // first (window._customProviderSlugs), then fall back to lastIndexOf.
+  // first (window._customProviderSlugs), then fall back to heuristics.
   const inner=value.slice(1);
   // Check if we have known custom provider slugs available
   if(typeof window!=='undefined'&&Array.isArray(window._customProviderSlugs)){
@@ -2676,11 +2676,26 @@ function _providerFromModelValue(modelId){
   if(!inner.startsWith('custom:')){
     return inner.slice(0,inner.indexOf(':'));
   }
-  // Custom provider without slug list: fall back to lastIndexOf.
-  // This is the imperfect legacy path — it works when the model name
-  // has no colons, but may mis-split when it does. The option-based
-  // lookup in _modelStateForSelect should be preferred.
-  return inner.slice(0,inner.lastIndexOf(':'));
+  // Custom provider without slug list: use heuristics.
+  // The slug after 'custom:' is typically a single word (e.g. 'litellm-proxy')
+  // or a host:port (e.g. '10.8.71.41:8080'). If the slug contains a colon,
+  // it's likely host:port and we should treat it as the provider. Otherwise,
+  // assume the first segment is the slug and the model may contain colons.
+  const afterCustom=inner.slice('custom:'.length);
+  const firstColonPos=afterCustom.indexOf(':');
+  if(firstColonPos===-1){
+    // No more colons — malformed, return what we have
+    return inner;
+  }
+  // Check if this looks like host:port (contains exactly one colon in the slug)
+  const potentialSlug=afterCustom.slice(0,firstColonPos);
+  if(potentialSlug.includes('.')){
+    // Looks like an IP or hostname with port — don't peel further
+    return 'custom:'+potentialSlug;
+  }
+  // Simple slug (e.g. 'litellm-proxy') — provider is 'custom:<slug>'
+  // and model is everything after the first colon.
+  return 'custom:'+potentialSlug;
 }
 function _providerSkipsModelMismatchWarning(providerId){
   const p=String(providerId||'').toLowerCase();
