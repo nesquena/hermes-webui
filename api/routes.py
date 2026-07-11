@@ -11711,6 +11711,8 @@ def handle_get(handler, parsed) -> bool:
 
                 if is_auth_enabled():
                     cookie_val = parse_cookie(handler)
+                    if not cookie_val:
+                        cookie_val = getattr(handler, "_trusted_auth_session_cookie_value", None)
                     if cookie_val and verify_session(cookie_val):
                         csrf_token = csrf_token_for_session(cookie_val) or ""
             except Exception:
@@ -11827,19 +11829,27 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/auth/status":
-        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, is_oidc_auth_enabled, parse_cookie, verify_session
+        from api.auth import (
+            _passkey_feature_flag_enabled,
+            ensure_trusted_auth_session,
+            get_password_hash,
+            is_auth_enabled,
+            is_oidc_auth_enabled,
+            is_trusted_auth_enabled,
+        )
         from api.passkeys import registered_credentials
 
         logged_in = False
+        session_info = None
         auth_enabled = is_auth_enabled()
         oidc_enabled = is_oidc_auth_enabled()
         if auth_enabled:
-            cv = parse_cookie(handler)
-            logged_in = bool(cv and verify_session(cv))
+            session_info = ensure_trusted_auth_session(handler)
+            logged_in = bool(session_info)
         passkey_flag = _passkey_feature_flag_enabled()
         passkeys = registered_credentials() if passkey_flag else []
         password_auth_enabled = get_password_hash() is not None
-        return j(handler, {
+        payload = {
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
             "oidc_enabled": oidc_enabled,
@@ -11849,7 +11859,14 @@ def handle_get(handler, parsed) -> bool:
             "passkeys_count": len(passkeys),
             "passkey_feature_flag": passkey_flag,
             "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
-        })
+        }
+        if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
+            payload["trusted_auth_enabled"] = True
+        if session_info and session_info.get("auth_type") == "trusted":
+            payload["auth_type"] = session_info.get("auth_type")
+            payload["user"] = session_info.get("username")
+            payload["bound_profile"] = session_info.get("bound_profile")
+        return j(handler, payload)
 
     if parsed.path.startswith("/api/share/"):
         token = parsed.path[len("/api/share/"):].strip()
@@ -15133,10 +15150,17 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
+            from api.auth import ensure_trusted_auth_session
             from api.profiles import switch_profile, _validate_profile_name
             from api.helpers import build_profile_cookie
             if name != 'default':
                 _validate_profile_name(name)
+            session_info = ensure_trusted_auth_session(handler)
+            if getattr(handler, '_trusted_auth_session_rejected', False):
+                return bad(handler, 'Authentication required', 401)
+            bound_profile = str((session_info or {}).get("bound_profile") or "").strip() or None
+            if bound_profile and name != bound_profile:
+                return bad(handler, "Profile is bound to the current session", 403)
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
             result = switch_profile(name, process_wide=False)
@@ -15150,8 +15174,15 @@ def handle_post(handler, parsed) -> bool:
                 restart_watcher_for_profile(name)
             except Exception as exc:
                 logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
+            session_cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None)
+            if session_cookie_value:
+                if bound_profile and name == bound_profile:
+                    return j(handler, result)
+                extra_header = build_profile_cookie(name, session_cookie_value=session_cookie_value)
+            else:
+                extra_header = build_profile_cookie(name, handler)
             return j(handler, result, extra_headers={
-                'Set-Cookie': build_profile_cookie(name, handler),
+                'Set-Cookie': extra_header,
             })
         except PermissionError as e:
             return bad(handler, _sanitize_error(e), 403)
@@ -16087,18 +16118,26 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"credentials": registered_credentials()})
 
     if parsed.path == "/api/auth/logout":
-        from api.auth import clear_auth_cookie, invalidate_session, parse_cookie
+        from api.auth import clear_auth_cookie, ensure_trusted_auth_session, get_trusted_auth_logout_url, invalidate_session, parse_cookie
+        from api.helpers import clear_profile_cookie
 
-        cookie_val = parse_cookie(handler)
+        session_info = ensure_trusted_auth_session(handler)
+        cookie_val = getattr(handler, '_trusted_auth_session_cookie_value', None) or parse_cookie(handler)
         if cookie_val:
             invalidate_session(cookie_val)
-        body = json.dumps({"ok": True}).encode()
+        payload = {"ok": True}
+        if session_info and session_info.get("auth_type") == "trusted":
+            logout_url = get_trusted_auth_logout_url()
+            if logout_url:
+                payload["trusted_logout_url"] = logout_url
+        body = json.dumps(payload).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         clear_auth_cookie(handler)
+        clear_profile_cookie(handler)
         handler.end_headers()
         handler.wfile.write(body)
         return True

@@ -188,6 +188,15 @@ def _security_headers(handler):
     )
 
 
+def flush_pending_auth_cookies(handler) -> None:
+    pending = getattr(handler, '_pending_set_cookies', None)
+    if not pending:
+        return
+    handler._pending_set_cookies = []
+    for cookie in pending:
+        handler.send_header('Set-Cookie', cookie)
+
+
 def _accepts_gzip(handler) -> bool:
     """Check if the client accepts gzip encoding."""
     headers = getattr(handler, 'headers', None)
@@ -250,6 +259,7 @@ def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bo
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
     _security_headers(handler)
+    flush_pending_auth_cookies(handler)
     if extra_headers:
         for k, v in extra_headers.items():
             handler.send_header(k, v)
@@ -273,6 +283,7 @@ def t(
     if extra_headers:
         for k, v in extra_headers.items():
             handler.send_header(k, v)
+    flush_pending_auth_cookies(handler)
     _safe_write(handler, body)
 
 
@@ -720,7 +731,7 @@ def get_profile_cookie(handler) -> str | None:
     return raw_val if _valid_profile_name(raw_val) else None
 
 
-def build_profile_cookie(name: str, handler=None) -> str:
+def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str | None = None) -> str:
     """Build a Set-Cookie header value for the active-profile cookie.
 
     Always persist the selected profile in the cookie, including 'default'.
@@ -746,8 +757,16 @@ def build_profile_cookie(name: str, handler=None) -> str:
     except Exception:
         _auth_on = False
     if _auth_on and handler is None:
-        raise RuntimeError("build_profile_cookie requires a request handler when auth is enabled (to bind the profile cookie to the session)")
-    if handler is not None:
+        if session_cookie_value is None:
+            raise RuntimeError("build_profile_cookie requires a request handler when auth is enabled (to bind the profile cookie to the session)")
+    if session_cookie_value is not None:
+        try:
+            from api.auth import sign_profile_cookie_value
+            value = sign_profile_cookie_value(name, session_cookie_value)
+        except Exception as exc:
+            logger.warning("Failed to sign active profile cookie", exc_info=True)
+            raise RuntimeError("could not sign active profile cookie") from exc
+    elif handler is not None:
         try:
             from api.auth import is_auth_enabled, parse_cookie, sign_profile_cookie_value
             if is_auth_enabled():
@@ -760,3 +779,16 @@ def build_profile_cookie(name: str, handler=None) -> str:
     cookie[cookie_name]['httponly'] = True
     cookie[cookie_name]['samesite'] = 'Lax'
     return cookie[cookie_name].OutputString()
+
+
+def clear_profile_cookie(handler) -> None:
+    import http.cookies as _hc
+
+    cookie = _hc.SimpleCookie()
+    cookie_name = get_profile_cookie_name()
+    cookie[cookie_name] = ''
+    cookie[cookie_name]['path'] = '/'
+    cookie[cookie_name]['httponly'] = True
+    cookie[cookie_name]['samesite'] = 'Lax'
+    cookie[cookie_name]['max-age'] = '0'
+    handler.send_header('Set-Cookie', cookie[cookie_name].OutputString())
