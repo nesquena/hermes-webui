@@ -417,3 +417,34 @@ def test_max_only_offered_in_ui_when_actually_supported():
     assert "max" not in cfg.resolve_model_reasoning_efforts("claude-sonnet-4-5", provider_id="anthropic")
     assert "max" not in cfg.resolve_model_reasoning_efforts("gpt-5.1", provider_id="openai")
     assert "max" not in cfg.resolve_model_reasoning_efforts("gemini-3-pro", provider_id="gemini")
+
+
+def test_datestamped_claude3_not_reasoning_capable_heuristic():
+    # A bare, date-stamped Claude 3.0 id must NOT be treated as reasoning-capable
+    # by the heuristic. The minor-version capture previously used `(\d+)`, which
+    # swallowed the 8-digit date stamp ("...-20240229") as the minor version so
+    # `major==3 and minor>=7` wrongly matched — surfacing reasoning-effort
+    # controls for models that don't support them. Claude 3.0/3.5 have no
+    # extended-thinking support; only 3.7+ (and 4.x) do.
+    for model in (
+        "claude-3-opus-20240229",
+        "claude-3-sonnet-20240229",
+        "claude-3-haiku-20240307",
+        "claude-3-opus",
+        "claude-3-5-sonnet-20241022",
+    ):
+        assert cfg._candidate_supports_reasoning(model) is False, (
+            f"{model} must not be reasoning-capable (Claude 3.0/3.5 excluded)"
+        )
+    # 3.7+ and 4.x (including date-stamped builds) stay reasoning-capable.
+    for model in (
+        "claude-3-7-sonnet",
+        "claude-3-7-sonnet-20250219",
+        "claude-sonnet-4-5",
+        "claude-opus-4-20250514",
+        "claude-opus-4.6",
+    ):
+        assert cfg._candidate_supports_reasoning(model) is True, (
+            f"{model} must remain reasoning-capable"
+        )
+
