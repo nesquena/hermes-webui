@@ -255,6 +255,21 @@ console.log(JSON.stringify({open, collapsed}));
             WORKSPACE_JS,
         ), "filter clear must be gated on a workspace identity change"
 
+    def test_switch_to_workspace_bumps_tree_gen(self):
+        """#5911 gate: a DIRECT switchToWorkspace() must bump the workspace-tree
+        generation so a filter-render debounce timer scheduled for the previous
+        workspace (which guards on _wsTreeGenSnapshot()) cannot paint the old
+        workspace's filtered entries under the new one."""
+        start = PANELS_JS.find("async function switchToWorkspace(")
+        assert start != -1, "switchToWorkspace not found"
+        body = PANELS_JS[start:PANELS_JS.find("\n}", start)]
+        assign = body.find("S.session.workspace=path;")
+        bump = body.find("bumpWorkspaceTreeGen", assign)
+        assert assign != -1 and bump != -1 and assign < bump, (
+            "switchToWorkspace must call bumpWorkspaceTreeGen() after changing "
+            "S.session.workspace so a stale filter timer is invalidated"
+        )
+
     def test_workspace_identity_gate_via_node(self):
         """Reproduce the loadDir root-load filter-clear decision: same workspace
         preserves the filter; a workspace change clears it."""

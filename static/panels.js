@@ -6370,6 +6370,13 @@ async function switchToWorkspace(path,name){
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
     S.session.workspace=path;
+    // #5911 gate: bump the workspace-tree generation on a DIRECT workspace switch
+    // (not just profile switches). A filter-render debounce timer scheduled for
+    // the previous workspace guards on _wsTreeGenSnapshot() — without this bump
+    // the gen is unchanged and the stale timer would paint the OLD workspace's
+    // filtered entries under the NEW workspace. Bumping invalidates any pending
+    // filter render for the workspace we just left.
+    if (typeof bumpWorkspaceTreeGen === 'function') bumpWorkspaceTreeGen();
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
