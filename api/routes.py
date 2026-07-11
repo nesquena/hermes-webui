@@ -5240,6 +5240,19 @@ def _check_same_origin_browser_request(handler, *, require_provenance: bool = Fa
     referer = handler.headers.get("Referer", "")
     host = handler.headers.get("Host", "")
     sec_fetch_site = handler.headers.get("Sec-Fetch-Site", "").strip().lower()
+    # An explicitly allowlisted public origin (HERMES_WEBUI_ALLOWED_ORIGINS) is
+    # trusted for cross-origin use, so accept it before the Sec-Fetch-Site
+    # cross-site short-circuit below. Modern browsers send
+    # Sec-Fetch-Site: cross-site on every genuine cross-origin request; without
+    # this, credentialed cross-origin preflights and writes from opted-in
+    # front-ends would be refused. The CSRF token check in _check_csrf still
+    # applies afterward. With no allowlist configured the set is empty, so
+    # default same-origin-only behavior is unchanged.
+    _allow_target = origin or referer
+    if _allow_target:
+        _am = _re.match(r"^https?://([^/]+)", _allow_target)
+        if _am and _am.group(0).rstrip('/').lower() in _allowed_public_origins():
+            return True
     if not (origin or referer or sec_fetch_site):
         return not require_provenance or _set_csrf_failure_reason(handler, "origin_mismatch")
     if sec_fetch_site == "cross-site":
@@ -5285,6 +5298,22 @@ def _check_same_origin_browser_request(handler, *, require_provenance: bool = Fa
     return True
 
 
+def cors_credentialed_origin(handler) -> str:
+    """Origin to grant credentialed cross-origin CORS access, or '' to omit.
+
+    Unlike the same-origin check, this consults the *explicit*
+    HERMES_WEBUI_ALLOWED_ORIGINS allowlist only. Same-origin browser traffic
+    never needs CORS headers, so gating on the allowlist keeps normal requests
+    header-free and emits Allow-Origin + Allow-Credentials only for the
+    cross-origin front-ends an operator has deliberately opted in. Returning a
+    specific origin (never ``*``) is what lets the browser attach credentials.
+    """
+    origin = handler.headers.get("Origin", "").strip()
+    if not origin:
+        return ""
+    return origin if origin.rstrip('/').lower() in _allowed_public_origins() else ""
+
+
 def apply_cors_preflight_headers(handler) -> None:
     """Emit CORS preflight headers on ``handler`` for a same-origin/allowlisted
     request; emit nothing for a disallowed origin (browser treats the header-less
@@ -5297,14 +5326,63 @@ def apply_cors_preflight_headers(handler) -> None:
     be granted. A wildcard here would let any site read authenticated responses
     on a deployment with no password set. Kept in api/ so server.py stays a thin
     dispatcher.
+
+    For allowlisted cross-origin front-ends it additionally advertises the CSRF
+    token headers (or the browser strips them on cross-origin writes and every
+    mutation 403s), Access-Control-Max-Age, and — over HTTPS only, matching the
+    session cookie's SameSite=None gate — Access-Control-Allow-Credentials.
     """
+    from api.auth import CSRF_HEADER_NAME, _is_secure_context
+
     origin = handler.headers.get("Origin", "").strip()
-    if not origin or not _check_same_origin_browser_request(handler):
+    allowed = bool(origin) and _check_same_origin_browser_request(handler)
+    # Vary: Origin whenever the response could vary by Origin — either we echo a
+    # specific origin, or an allowlist is configured so a different origin would
+    # get a different response. Prevents shared-cache cross-origin poisoning.
+    if allowed or _allowed_public_origins():
+        handler.send_header("Vary", "Origin")
+    if not allowed:
         return
     handler.send_header("Access-Control-Allow-Origin", origin)
-    handler.send_header("Vary", "Origin")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    handler.send_header(
+        "Access-Control-Allow-Headers",
+        f"Content-Type, Authorization, {CSRF_HEADER_NAME}, X-CSRF-Token",
+    )
+    handler.send_header("Access-Control-Max-Age", "600")
+    if cors_credentialed_origin(handler) and _is_secure_context(handler):
+        handler.send_header("Access-Control-Allow-Credentials", "true")
+
+
+def apply_cors_actual_response_headers(handler) -> None:
+    """Emit credentialed CORS headers on actual (non-preflight) responses for
+    allowlisted cross-origin front-ends. Called from server.py end_headers on
+    EVERY response so server.py stays a thin dispatcher (mirrors
+    apply_cors_preflight_headers). Skips OPTIONS (the preflight path owns those
+    headers) and no-ops when no allowlist is configured. Guarded so a header
+    hiccup never breaks the response body.
+
+    Gated on the explicit HERMES_WEBUI_ALLOWED_ORIGINS allowlist; Allow-Credentials
+    additionally requires a Secure (HTTPS) context, matching the cookie gate.
+    """
+    try:
+        if getattr(handler, "command", None) == "OPTIONS":
+            return
+        if not _allowed_public_origins():
+            return
+        # Vary whenever the allowlist is configured so a shared cache never
+        # replays an Origin-specific response to a different origin.
+        handler.send_header("Vary", "Origin")
+        origin = cors_credentialed_origin(handler)
+        if not origin:
+            return
+        from api.auth import _is_secure_context
+
+        handler.send_header("Access-Control-Allow-Origin", origin)
+        if _is_secure_context(handler):
+            handler.send_header("Access-Control-Allow-Credentials", "true")
+    except Exception:
+        pass
 
 
 def _csrf_exempt_path(path: str) -> bool:

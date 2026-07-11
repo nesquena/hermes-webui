@@ -855,7 +855,7 @@ def _is_secure_context(handler=None) -> bool:
     if env in ('0', 'false', 'no'):
         return False
     if handler is not None:
-        if getattr(handler.request, 'getpeercert', None) is not None:
+        if getattr(getattr(handler, 'request', None), 'getpeercert', None) is not None:
             return True
         trust_fwd = os.getenv('HERMES_WEBUI_TRUST_FORWARDED_PROTO', '').strip().lower()
         if trust_fwd in ('1', 'true', 'yes'):
@@ -864,16 +864,41 @@ def _is_secure_context(handler=None) -> bool:
     return False
 
 
+def _cross_origin_credentialed_mode(handler) -> bool:
+    """True when the auth cookie should use SameSite=None for cross-origin use.
+
+    Only when the operator has opted into public origins
+    (HERMES_WEBUI_ALLOWED_ORIGINS) AND the connection is a Secure (HTTPS)
+    context — SameSite=None is invalid without Secure, and relaxing SameSite
+    trades away a CSRF defense-in-depth layer, so it must never happen by
+    default. Deployments that have not set an allowlist keep SameSite=Lax.
+    """
+    if not _is_secure_context(handler):
+        return False
+    try:
+        from api.routes import _allowed_public_origins
+        return bool(_allowed_public_origins())
+    except Exception:
+        return False
+
+
 def set_auth_cookie(handler, cookie_value) -> None:
     """Set the auth cookie on the response."""
     cookie = http.cookies.SimpleCookie()
     name = _resolve_cookie_name()
     cookie[name] = cookie_value
     cookie[name]['httponly'] = True
-    cookie[name]['samesite'] = 'Lax'
     cookie[name]['path'] = '/'
     cookie[name]['max-age'] = str(_resolve_session_ttl())
-    if _is_secure_context(handler):
+    secure = _is_secure_context(handler)
+    # Relax SameSite only for opted-in cross-origin HTTPS deployments so the
+    # browser sends the session cookie to allowlisted front-ends; SameSite=None
+    # requires Secure. Everyone else keeps the SameSite=Lax CSRF hardening.
+    if _cross_origin_credentialed_mode(handler):
+        cookie[name]['samesite'] = 'None'
+    else:
+        cookie[name]['samesite'] = 'Lax'
+    if secure:
         cookie[name]['secure'] = True
     handler.send_header('Set-Cookie', cookie[name].OutputString())
 
