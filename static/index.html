@@ -1653,6 +1653,19 @@
       <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false">Artifacts <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
       <button class="workspace-panel-tab" id="workspaceTodosTab" type="button" onclick="switchWorkspacePanelTab('todos')" role="tab" aria-selected="false" hidden data-i18n="tab_todos">Todos</button>
     </div>
+    <div class="workspace-search-row" id="workspaceSearchRow">
+      <input
+        type="text"
+        id="workspaceFilterInput"
+        class="workspace-search-input"
+        placeholder="Filter loaded files…"
+        autocomplete="off"
+        spellcheck="false"
+        oninput="setWorkspaceTreeFilter(this.value)"
+        onkeydown="if(event.key==='Escape' && this.value){ clearWorkspaceTreeFilter(); event.preventDefault(); event.stopPropagation(); }"
+      >
+      <button type="button" class="workspace-search-clear" id="workspaceFilterClearBtn" title="Clear filter" aria-label="Clear filter" onclick="clearWorkspaceTreeFilter()" hidden>×</button>
+    </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
     <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>

@@ -710,6 +710,13 @@ async function loadDir(path, opts={}){
   try{
     if(!path||path==='.'||refreshExpanded){
       S._dirCache={};
+      // Clear the loaded-tree filter on a root load / workspace switch so a
+      // stale needle doesn't paint a misleading "no matches" empty-state over a
+      // freshly loaded workspace (#4674 review: filter leaked across switches).
+      if(typeof S.workspaceTreeFilter==='string' && S.workspaceTreeFilter){
+        S.workspaceTreeFilter='';
+        if(typeof _syncWorkspaceTreeFilterUI==='function') _syncWorkspaceTreeFilterUI();
+      }
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
     S.currentDir=path||'.';

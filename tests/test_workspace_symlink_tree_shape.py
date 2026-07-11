@@ -13,7 +13,11 @@ WS_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 
 def _render_block() -> str:
-    start = UI_JS.find("function _renderTreeItems(container, entries, depth)")
+    # Anchor on the function name only — the signature gained an optional
+    # `opts={}` param for the loaded-tree filter (#4673), so don't pin the
+    # closing paren here. This block-extractor guards the #4226 isDirLike
+    # locals, not the exact argument list.
+    start = UI_JS.find("function _renderTreeItems(container, entries, depth")
     assert start >= 0, "_renderTreeItems not found in static/ui.js"
     # Capture to end of function (next top-level async/function declaration)
     end = UI_JS.find("\nasync function deleteWorkspaceDir", start)
@@ -56,7 +60,10 @@ class TestExpandToggle:
 
     def test_recursive_render_uses_isDirLike(self):
         block = _render_block()
-        assert "if(isDirLike&&S._expandedDirs.has(item.path)){" in block, \
+        # The recursive child render gained an `||showFilteredChildren` clause
+        # for the loaded-tree filter (#4673); it must still branch on isDirLike
+        # and honor the manual _expandedDirs state.
+        assert "if(isDirLike&&(S._expandedDirs.has(item.path)" in block, \
             "recursive child render must branch on isDirLike"
 
 

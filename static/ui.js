@@ -18340,6 +18340,82 @@ function _showWorkspaceRootContextMenu(e){
 if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
 if(!S._dirCache) S._dirCache={};
+// Client-side loaded-tree filter (#4673 phase 1). Filters entries already in
+// S._dirCache by name / relative path; does NOT hit the backend (deeper
+// backend-backed recursive search is follow-up work).
+if(typeof S.workspaceTreeFilter!=='string') S.workspaceTreeFilter='';
+
+function _workspaceTreeFilterNeedle(){
+  return String(S.workspaceTreeFilter||'').trim().toLowerCase();
+}
+function _syncWorkspaceTreeFilterUI(){
+  const input=$('workspaceFilterInput');
+  const clearBtn=$('workspaceFilterClearBtn');
+  const raw=typeof S.workspaceTreeFilter==='string'?S.workspaceTreeFilter:'';
+  if(input){
+    if(input.value!==raw) input.value=raw;
+    input.placeholder=t('workspace_filter_placeholder')||'Filter loaded files…';
+    input.disabled=!(S.session&&S.session.workspace);
+  }
+  if(clearBtn){
+    const hasFilter=!!raw.trim();
+    clearBtn.hidden=!hasFilter;
+    clearBtn.disabled=!hasFilter;
+  }
+}
+// Debounce the filter re-render (~150ms). Keeps per-character typing from
+// thrashing the tree render, and — critically — means a future backend-backed
+// recursive search (#4673) won't fire one request per keystroke. State + UI
+// sync stay synchronous so the input value / clear button update instantly.
+let _workspaceFilterRenderTimer=null;
+function setWorkspaceTreeFilter(value){
+  S.workspaceTreeFilter=String(value||'');
+  _syncWorkspaceTreeFilterUI();
+  if(_workspaceFilterRenderTimer){clearTimeout(_workspaceFilterRenderTimer);}
+  _workspaceFilterRenderTimer=setTimeout(()=>{
+    _workspaceFilterRenderTimer=null;
+    renderFileTree();
+  },150);
+}
+function clearWorkspaceTreeFilter(){
+  if(_workspaceFilterRenderTimer){clearTimeout(_workspaceFilterRenderTimer);_workspaceFilterRenderTimer=null;}
+  S.workspaceTreeFilter='';
+  _syncWorkspaceTreeFilterUI();
+  renderFileTree();
+  const input=$('workspaceFilterInput');
+  if(input) input.focus();
+}
+function _workspaceEntryMatchesFilter(item, needle){
+  if(!needle) return true;
+  const name=String(item&&item.name||'').toLowerCase();
+  const path=String(item&&item.path||'').toLowerCase();
+  return name.includes(needle)||path.includes(needle);
+}
+// Recursive walk over the LOADED tree (S._dirCache). Keeps an entry when it
+// matches, or when it is a directory with matching cached descendants — the
+// matching ancestor folders are preserved and their surviving children are
+// attached as _filteredChildren so the render can surface them even when the
+// directory is currently collapsed.
+function _filterWorkspaceTreeEntries(entries, needle){
+  const list=Array.isArray(entries)?entries:[];
+  if(!needle) return list;
+  const out=[];
+  for(const item of list){
+    if(!item) continue;
+    const isExternalLink=item.type==='symlink'&&item.target_outside_workspace;
+    const isDirLike=!isExternalLink&&(item.type==='dir'||(item.type==='symlink'&&item.is_dir));
+    let filteredChildren=[];
+    if(isDirLike&&S._dirCache&&S._dirCache[item.path]){
+      filteredChildren=_filterWorkspaceTreeEntries(_visibleWorkspaceEntries(S._dirCache[item.path]||[]),needle);
+    }
+    if(_workspaceEntryMatchesFilter(item,needle)||filteredChildren.length){
+      const next=Object.assign({},item);
+      if(filteredChildren.length) next._filteredChildren=filteredChildren;
+      out.push(next);
+    }
+  }
+  return out;
+}
 
 function renderFileTree(){
   const box=$('fileTree');
@@ -18354,6 +18430,7 @@ function renderFileTree(){
   // getBoundingClientRect anchor delta needed — that's only for prepend-above cases).
   const prevScrollTop=box?box.scrollTop:0;
   box.innerHTML='';
+  _syncWorkspaceTreeFilterUI();
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
@@ -18367,11 +18444,16 @@ function renderFileTree(){
   if(emptyEl) emptyEl.style.display='none';
   box.style.display='';
   const visibleEntries=_visibleWorkspaceEntries(S.entries);
-  if(!visibleEntries.length){
-    if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
+  const filterNeedle=_workspaceTreeFilterNeedle();
+  const filteredEntries=filterNeedle?_filterWorkspaceTreeEntries(visibleEntries,filterNeedle):visibleEntries;
+  if(!filteredEntries.length){
+    if(emptyEl){
+      emptyEl.textContent=filterNeedle?(t('workspace_filter_no_matches')||'No loaded files match this filter.'):t('workspace_empty_dir');
+      emptyEl.style.display='flex';
+    }
     return;
   }
-  _renderTreeItems(box, visibleEntries, 0);
+  _renderTreeItems(box, filteredEntries, 0, {filterActive:!!filterNeedle});
   // #5657: restore the pre-wipe scroll position now that the tree is tall again.
   if(box) box.scrollTop=prevScrollTop;
 }
@@ -18530,7 +18612,8 @@ function elideMiddle(str, maxLen = 60) {
   return str.slice(0, half) + '...' + str.slice(str.length - half);
 }
 
-function _renderTreeItems(container, entries, depth){
+function _renderTreeItems(container, entries, depth, opts={}){
+  const filterActive=!!(opts&&opts.filterActive);
   for(const item of entries){
     const el=document.createElement('div');el.className='file-item';
     el.style.paddingLeft=(8+depth*16)+'px';
@@ -18555,6 +18638,11 @@ function _renderTreeItems(container, entries, depth){
     // The read gate (safe_resolve_ws) still blocks navigation through them.
     const isDirLike = !isExternalLink && (item.type === 'dir' || (isLk && item.is_dir));
     const isFileLike = !isExternalLink && !isDirLike;
+    // During filtering, a directory carrying matching cached descendants is
+    // force-opened (see arrow + children render below). Compute once so the
+    // click handler can treat it as expanded — a first click then COLLAPSES it
+    // instead of re-adding it to _expandedDirs (the #4674 "dead first click").
+    const forcedExpanded=filterActive&&isDirLike&&Array.isArray(item._filteredChildren)&&!!item._filteredChildren.length;
     el.dataset.wsIsDir = String(isDirLike);
     if(isExternalLink || isReadOnlyEscape){el.removeAttribute('draggable');el.ondragstart=null;}
 
@@ -18562,7 +18650,10 @@ function _renderTreeItems(container, entries, depth){
       // Toggle arrow for directories
       const arrow=document.createElement('span');
       arrow.className='file-tree-toggle';
-      const isExpanded=S._expandedDirs.has(item.path);
+      // During filtering, a folder with matching cached descendants is
+      // force-opened so the surfaced matches are visible even if the user
+      // hadn't manually expanded it.
+      const isExpanded=forcedExpanded||S._expandedDirs.has(item.path);
       arrow.textContent=isExpanded?'\u25BE':'\u25B8';
       el.appendChild(arrow);
     }else{
@@ -18707,7 +18798,12 @@ function _renderTreeItems(container, entries, depth){
       // Single-click toggles expand/collapse
       el.onclick=async(e)=>{
         e.stopPropagation();
-        if(S._expandedDirs.has(item.path)){
+        // Treat a filter-forced-open folder as expanded so the FIRST click
+        // collapses it. The original #4674 code only checked _expandedDirs, so
+        // clicking a force-opened folder silently added it to _expandedDirs
+        // (a "dead first click" that also leaked the folder open once the
+        // filter was cleared). Collapsing here clears that manual-expand state.
+        if(S._expandedDirs.has(item.path)||forcedExpanded){
           S._expandedDirs.delete(item.path);
           if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
           renderFileTree();
@@ -18752,12 +18848,17 @@ function _renderTreeItems(container, entries, depth){
 
     container.appendChild(el);
 
-    // Render children if directory is expanded
-    if(isDirLike&&S._expandedDirs.has(item.path)){
-      const children=_visibleWorkspaceEntries(S._dirCache[item.path]||[]);
+    // Render children if directory is expanded. During filter mode, show matching
+    // loaded descendants even if the directory is currently collapsed, so the
+    // filter surfaces cached tree results rather than only visible rows.
+    const showFilteredChildren=filterActive&&Array.isArray(item._filteredChildren)&&!!item._filteredChildren.length;
+    if(isDirLike&&(S._expandedDirs.has(item.path)||showFilteredChildren)){
+      const children=showFilteredChildren
+        ? item._filteredChildren
+        : _visibleWorkspaceEntries(S._dirCache[item.path]||[]);
       if(children.length){
-        _renderTreeItems(container, children, depth+1);
-      }else{
+        _renderTreeItems(container, children, depth+1, opts);
+      }else if(!filterActive){
         const empty=document.createElement('div');
         empty.className='file-item file-empty';
         empty.style.paddingLeft=(8+(depth+1)*16)+'px';
