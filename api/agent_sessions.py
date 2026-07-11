@@ -53,6 +53,7 @@ CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 
 SOURCE_LABELS = {
+    'acp': 'ACP',
     'api_server': 'API',
     'cli': 'CLI',
     'cron': 'Cron',
@@ -81,7 +82,12 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
 
     if raw == 'webui':
         session_source = 'webui'
-    elif raw in {'cli', 'tui'}:
+    elif raw in {'acp', 'cli', 'tui'}:
+        # 'acp' (Agent Client Protocol adapter — Zed, external device bridges)
+        # is a local interactive agent client like the CLI/TUI: its sessions
+        # live only in state.db, so classifying it 'other' would leave them
+        # invisible in both sidebar buckets (webui skips the state.db
+        # projection; cli keeps only CLI-classified rows).
         session_source = 'cli'
     elif raw in MESSAGING_SOURCES:
         session_source = 'messaging'
@@ -231,10 +237,10 @@ def is_cli_session_row(row: dict) -> bool:
     if source in {"external_agent", "external-agent"}:
         return True
     if (
-        source_tag in {"cli", "tui"}
-        or raw_source in {"cli", "tui"}
-        or source_name in {"cli", "tui"}
-        or source_label in {"cli", "tui"}
+        source_tag in {"acp", "cli", "tui"}
+        or raw_source in {"acp", "cli", "tui"}
+        or source_name in {"acp", "cli", "tui"}
+        or source_label in {"acp", "cli", "tui"}
     ):
         return True
 
@@ -270,12 +276,15 @@ def is_cli_session_row_visible(row: dict) -> bool:
     ):
         return True
 
-    if "tui" in {
+    if {"tui", "acp"} & {
         _normalize_source_name(row.get("source")),
         _normalize_source_name(row.get("source_tag")),
         _normalize_source_name(row.get("raw_source")),
         _normalize_source_name(row.get("source_label")),
     }:
+        # Like TUI rows, ACP sessions are always genuinely user-interactive
+        # (an external agent client drove them), never framework-generated
+        # metadata — keep ended/untitled ones visible.
         return True
 
     if _has_cli_lineage(row):
