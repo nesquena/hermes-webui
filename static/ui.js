@@ -12405,13 +12405,17 @@ function _refreshTransparentLiveRow(existing, node, opts){
   return existing;
 }
 function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
+  // Active user mode is authoritative for projection too (mirrors the fix in
+  // renderLiveAnchorActivityScene). opts.mode is only a fallback when there is no
+  // usable active mode — a caller hint must never override the user's setting, or
+  // a future {mode:'compact_worklog'} caller would project compact while the
+  // renderer paints the active mode (the latent-drift Fable flagged). Projection
+  // mode does not filter scene content (all rows carry display_hints for every
+  // mode), so this is defensive-consistency, not a behavior change today.
   const requestedMode=opts&&opts.mode;
   const activeMode=chatActivityMode();
-  const mode=activeMode==='hide_all_activity'
-    ? 'hide_all_activity'
-    : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='hide_all_activity'
-    ? requestedMode
-    : activeMode);
+  const knownMode=(m)=>m==='compact_worklog'||m==='transparent_stream'||m==='hide_all_activity';
+  const mode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
   const scene=_projectLiveAnchorActivitySceneForStream(streamId,mode);
   if(!scene) return false;
   return renderLiveAnchorActivityScene(streamId,scene,{...(opts||{}),sessionId});
