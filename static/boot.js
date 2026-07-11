@@ -328,6 +328,14 @@ function _setButtonTooltip(btn, text){
   }
 }
 
+function _uiText(key, fallback){
+  if(typeof t==='function'){
+    const val=t(key);
+    if(val&&val!==key) return val;
+  }
+  return fallback;
+}
+
 function syncWorkspacePanelUI(){
   const {layout,panel,toggleBtn,edgeToggleBtn,collapseBtn}= _workspacePanelEls();
   if(!layout||!panel)return;
@@ -340,17 +348,21 @@ function syncWorkspacePanelUI(){
   if(toggleBtn){
     toggleBtn.classList.toggle('active',isOpen);
     toggleBtn.setAttribute('aria-pressed',isOpen?'true':'false');
-    _setButtonTooltip(toggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
+    const label=_uiText(isOpen?'workspace_panel_hide':'workspace_panel_show', isOpen?'Hide workspace panel':'Show workspace panel');
+    _setButtonTooltip(toggleBtn, label);
+    toggleBtn.setAttribute('aria-label', label);
     toggleBtn.disabled=!canBrowse;
   }
   if(edgeToggleBtn){
     edgeToggleBtn.classList.toggle('active',isOpen);
     edgeToggleBtn.setAttribute('aria-expanded',isOpen?'true':'false');
-    _setButtonTooltip(edgeToggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
+    const label=_uiText(isOpen?'workspace_panel_hide':'workspace_panel_show', isOpen?'Hide workspace panel':'Show workspace panel');
+    _setButtonTooltip(edgeToggleBtn, label);
+    edgeToggleBtn.setAttribute('aria-label', label);
     edgeToggleBtn.disabled=!canBrowse;
   }
   if(collapseBtn){
-    _setButtonTooltip(collapseBtn, isCompact?'Close workspace panel':'Hide workspace panel');
+    _setButtonTooltip(collapseBtn, isCompact?_uiText('workspace_panel_close','Close workspace panel'):_uiText('workspace_panel_hide','Hide workspace panel'));
   }
   const hasSession=!!S.session;
   ['btnUpDir','btnNewFile','btnNewFolder','btnRefreshPanel'].forEach(id=>{
@@ -360,7 +372,9 @@ function syncWorkspacePanelUI(){
   const clearBtn=$('btnClearPreview');
   if(clearBtn){
     clearBtn.disabled=!isOpen;
-    _setButtonTooltip(clearBtn, hasPreview?'Close preview':'Close');
+    const label=hasPreview?_uiText('workspace_close_preview','Close preview'):_uiText('terminal_close','Close');
+    _setButtonTooltip(clearBtn, label);
+    clearBtn.setAttribute('aria-label', label);
     if(!isCompact) clearBtn.style.display='';
   }
 }

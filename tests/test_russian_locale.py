@@ -93,6 +93,11 @@ def test_russian_locale_includes_representative_translations():
         "profile_clone_label: '\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u044e \u0438\u0437 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u043f\u0440\u043e\u0444\u0438\u043b\u044f'",
         "profile_base_url_placeholder: '\u0411\u0430\u0437\u043e\u0432\u044b\u0439 URL \u0028\u043d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440 http://localhost:11434\u0029'",
         "profile_api_key_placeholder: 'API-\u043a\u043b\u044e\u0447 \u0028\u043d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0029'",
+        "mcp_tools_title: '\u0418\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442\u044b MCP'",
+        "goal_status_none: '\u0410\u043a\u0442\u0438\u0432\u043d\u043e\u0439 \u0446\u0435\u043b\u0438 \u043d\u0435\u0442. \u0417\u0430\u0434\u0430\u0439\u0442\u0435 \u0435\u0451 \u043a\u043e\u043c\u0430\u043d\u0434\u043e\u0439 /goal <\u0442\u0435\u043a\u0441\u0442>.'",
+        "settings_heading_title: '\u0426\u0435\u043d\u0442\u0440 \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f'",
+        "providers_tab_title: '\u041f\u0440\u043e\u0432\u0430\u0439\u0434\u0435\u0440\u044b'",
+        "wiki_not_configured: 'Wiki \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u0430'",
     ]
     for entry in expected:
         assert entry in src
@@ -100,7 +105,7 @@ def test_russian_locale_includes_representative_translations():
 
 def test_russian_locale_covers_english_keys():
     src = read(REPO / "static" / "i18n.js")
-    key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
+    key_pattern = re.compile(r"^\s+([a-zA-Z0-9_]+):", re.MULTILINE)
     en_keys = set(key_pattern.findall(extract_locale_block(src, "en")))
     ru_keys = set(key_pattern.findall(extract_locale_block(src, "ru")))
 
@@ -110,7 +115,13 @@ def test_russian_locale_covers_english_keys():
 
 def test_russian_locale_has_no_duplicate_keys():
     src = read(REPO / "static" / "i18n.js")
-    key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
+    key_pattern = re.compile(r"^\s+([a-zA-Z0-9_]+):", re.MULTILINE)
     keys = key_pattern.findall(extract_locale_block(src, "ru"))
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
     assert not duplicates, f"Russian locale has duplicate keys: {duplicates}"
+
+
+def test_russian_locale_has_no_cjk_fallback_text():
+    src = read(REPO / "static" / "i18n.js")
+    ru_block = extract_locale_block(src, "ru")
+    assert not re.search(r"[\u3400-\u9fff\u3040-\u30ff]", ru_block)

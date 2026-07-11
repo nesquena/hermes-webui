@@ -9440,6 +9440,13 @@ function _showUpdateBanner(data){
   const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
   _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
 }
+function _i18nUpdateText(key, fallback){
+  if(typeof t==='function'){
+    const val=t(key);
+    if(val&&val!==key) return val;
+  }
+  return fallback;
+}
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
   sessionStorage.setItem('hermes-update-dismissed','1');
@@ -9451,24 +9458,25 @@ function _isUpdateApplyNetworkError(error){
 }
 function _formatUpdateApplyExceptionMessage(error){
   if(_isUpdateApplyNetworkError(error)){
-    return 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.';
+    return _i18nUpdateText('update_failed_network','Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.');
   }
   const message=(error&&error.message)||String(error||'unknown error');
-  return 'Update failed: '+message;
+  return _i18nUpdateText('update_failed_prefix','Update failed: ')+message;
 }
 async function applyUpdates(){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
+  const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
     const reset=()=>{
       window._updateApplyInFlight=false;
-      if(btn){btn.disabled=false;btn.textContent='Update Now';}
+      if(btn){btn.disabled=false;btn.textContent=updateText('update_now','Update Now');}
     };
     if(delayMs>0) setTimeout(reset,delayMs);
     else reset();
   };
-  if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
+  if(btn){btn.disabled=true;btn.textContent=updateText('update_updating','Updating\u2026');}
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
   // Hide any leftover force-update button from a prior conflict so a fresh
@@ -9479,7 +9487,7 @@ async function applyUpdates(){
   if(window._updateData?.agent?.behind>0) targets.push('agent');
   if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(!targets.length){
-    const msg='No update target selected. Refresh update status and retry.';
+    const msg=updateText('update_no_target','No update target selected. Refresh update status and retry.');
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
     else showToast(msg,5000,'error');
     resetApplyButton(0);
