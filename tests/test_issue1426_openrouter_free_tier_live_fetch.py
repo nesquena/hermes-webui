@@ -111,9 +111,28 @@ def test_openrouter_group_uses_live_fetch_when_available(monkeypatch):
         return _FakeResponse(fake_payload)
 
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    # The OpenRouter branch does TWO live fetches:
+    #   (1) hermes_cli.models.fetch_openrouter_models() — the curated catalog.
+    #       This routes through hermes_cli's `open_credentialed_url()`, which
+    #       builds its own opener and calls `.open()`; it does NOT go through
+    #       the module-level `urllib.request.urlopen` symbol patched above.
+    #       So the monkeypatch alone leaves fetch (1) hitting the REAL network
+    #       whenever hermes_cli is installed — returning the live curated list,
+    #       which fills the visible picker cap and pushes the mocked free-tier
+    #       entries into `extra_models`. Mock fetch (1) here too so the test is
+    #       genuinely hermetic (as the module docstring promises) and the
+    #       free-tier augment path (2) is what is actually under test.
+    #   (2) the direct urllib.request.urlopen(".../v1/models") — the free-tier
+    #       augment; this one IS intercepted by the monkeypatch above.
     try:
         from hermes_cli import models as _hm
         monkeypatch.setattr(_hm, "_openrouter_catalog_cache", None, raising=False)
+        # A small curated base ("live data, not just the fallback list") so the
+        # tool-supporting paid model is present alongside the free-tier augment.
+        monkeypatch.setattr(
+            _hm, "fetch_openrouter_models",
+            lambda *a, **k: [("anthropic/claude-sonnet-4.6", "")],
+        )
     except Exception:
         pass
 
@@ -121,7 +140,16 @@ def test_openrouter_group_uses_live_fetch_when_available(monkeypatch):
     or_group = next((g for g in grouped if g.get("provider_id") == "openrouter"), None)
     assert or_group is not None, "openrouter group must be present"
 
-    model_ids = [m["id"] for m in or_group["models"]]
+    # Both `models` (visible dropdown) and `extra_models` (slash-command
+    # autocomplete / dynamic-label overflow) are picker surfaces — a free-tier
+    # entry that lands in either bucket has surfaced in the picker. Assert
+    # across both, matching the sibling fail-closed / cap tests, so a large
+    # curated base overflowing the visible cap does not flip this assertion.
+    model_ids = [
+        m["id"]
+        for bucket in ("models", "extra_models")
+        for m in or_group.get(bucket, [])
+    ]
     # Resilient to test-isolation pollution: when a sibling test mutates
     # `cfg` and triggers the openrouter-not-active branch, _apply_provider_prefix
     # adds an `@openrouter:` prefix to model IDs. Skip rather than fail — the
