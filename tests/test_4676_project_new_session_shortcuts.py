@@ -46,7 +46,7 @@ def test_quick_create_button_attaches_filter_align_and_request_path():
     src = _read(SESSIONS_JS)
     helper = _extract_function(src, "_attachProjectQuickCreateButton")
     assert "project-chip-quick-create" in helper
-    assert "_setActiveProjectFilter(project.project_id)" in helper
+    assert "_setActiveProjectFilter(project)" in helper
     assert "newSession(false,{project_id:project.project_id})" in helper
     assert "if(_newSessionInFlight)" in helper
     assert "_setActiveProjectFilter(previousProject)" in helper
@@ -194,20 +194,29 @@ eval(newSessionSrc);
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_new_session_aligns_project_id_override_when_explicitly_set():
-    body = _run_new_session_case({"project_id": "explicit-project"}, active_project="active-project")
+    body = _run_new_session_case(
+        {"project_id": "explicit-project"},
+        active_project={"profile": "default", "project_id": "active-project"},
+    )
     assert body["project_id"] == "explicit-project"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_new_session_respects_explicit_project_id_none():
-    body = _run_new_session_case({"project_id": None}, active_project="active-project")
+    body = _run_new_session_case(
+        {"project_id": None},
+        active_project={"profile": "default", "project_id": "active-project"},
+    )
     assert "project_id" in body
     assert body["project_id"] is None
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_new_session_falls_back_to_active_project_when_override_missing():
-    body = _run_new_session_case({}, active_project="active-project")
+    body = _run_new_session_case(
+        {},
+        active_project={"profile": "default", "project_id": "active-project"},
+    )
     assert body["project_id"] == "active-project"
 
 
@@ -251,10 +260,11 @@ globalThis.document = {
     };
   },
 };
-globalThis._setActiveProjectFilter = (projectId) => {
-  globalThis._activeProject = projectId;
-  params.filterProjectId = projectId;
-  params.calls.push({type: 'set-filter', projectId});
+globalThis._setActiveProjectFilter = (project) => {
+  globalThis._activeProject = project;
+  params.filterProject = project;
+  params.filterProjectId = project && typeof project === 'object' ? project.project_id : project;
+  params.calls.push({type: 'set-filter', project});
 };
 globalThis._activeProject = params.activeProject;
 globalThis.newSession = async (flash, options) => {
@@ -282,7 +292,7 @@ const chip = {
   appended: [],
   appendChild(child) { this.appended.push(child); },
 };
-_attachProjectQuickCreateButton(chip, { project_id: params.projectId });
+_attachProjectQuickCreateButton(chip, { project_id: params.projectId, profile: params.projectProfile || 'default' });
 const btn = chip.appended[0];
 const ev = {
   stopPropagation() { params.stopCount++; },
@@ -306,6 +316,7 @@ const touchEv = {
     buttonText: btn.textContent,
     buttonAriaLabel: btn.getAttribute('aria-label'),
     newSession: params.newSession,
+    filterProject: params.filterProject,
     filterProjectId: params.filterProjectId,
     stopCount: params.stopCount,
     preventCount: params.preventCount,
@@ -326,15 +337,19 @@ const touchEv = {
 def _run_quick_create_case(
     project_id="example-project",
     *,
-    active_project="active-project",
+    active_project=None,
     fail_new_session=False,
     new_session_inflight=None,
     new_session_inflight_reject=None,
 ):
+    if active_project is None:
+        active_project = {"profile": "default", "project_id": "active-project"}
     payload = {
         "projectId": project_id,
+        "projectProfile": "default",
         "activeProject": active_project,
-        "filterProjectId": active_project,
+        "filterProject": active_project,
+        "filterProjectId": active_project["project_id"],
         "calls": [],
         "stopCount": 0,
         "preventCount": 0,
@@ -368,9 +383,10 @@ def test_project_chip_quick_create_keeps_active_filter_and_uses_project_override
     assert out["buttonTag"] == "BUTTON"
     assert out["buttonText"] == "+"
     assert out["buttonAriaLabel"] == "New conversation in this project"
+    assert out["filterProject"] == {"profile": "default", "project_id": "project-123"}
     assert out["filterProjectId"] == "project-123"
     assert out["newSession"] == {"flash": False, "options": {"project_id": "project-123"}}
-    assert {"type": "set-filter", "projectId": "project-123"} in out["calls"]
+    assert {"type": "set-filter", "project": {"profile": "default", "project_id": "project-123"}} in out["calls"]
     assert {"type": "new-session", "flash": False, "options": {"project_id": "project-123"}} in out["calls"]
     assert out["stopCount"] >= 3
     assert out["preventCount"] >= 3
@@ -384,13 +400,13 @@ def test_project_chip_quick_create_keeps_active_filter_and_uses_project_override
 def test_project_chip_quick_create_restores_filter_when_new_session_fails():
     out = _run_quick_create_case(
         "project-123",
-        active_project="keep-me",
+        active_project={"profile": "default", "project_id": "keep-me"},
         fail_new_session=True,
     )
 
     assert out["filterProjectId"] == "keep-me"
-    assert {"type": "set-filter", "projectId": "project-123"} in out["calls"]
-    assert {"type": "set-filter", "projectId": "keep-me"} in out["calls"]
+    assert {"type": "set-filter", "project": {"profile": "default", "project_id": "project-123"}} in out["calls"]
+    assert {"type": "set-filter", "project": {"profile": "default", "project_id": "keep-me"}} in out["calls"]
     assert any(msg.startswith("New conversation failed:") for msg in out["toasts"])
 
 
@@ -398,12 +414,12 @@ def test_project_chip_quick_create_restores_filter_when_new_session_fails():
 def test_project_chip_quick_create_leaves_filter_unchanged_during_inflight_guard():
     out = _run_quick_create_case(
         "project-123",
-        active_project="keep-me",
+        active_project={"profile": "default", "project_id": "keep-me"},
         new_session_inflight={"session_id": "existing"},
     )
 
     assert out["filterProjectId"] == "keep-me"
-    assert {"type": "set-filter", "projectId": "project-123"} not in out["calls"]
+    assert {"type": "set-filter", "project": {"profile": "default", "project_id": "project-123"}} not in out["calls"]
     assert "newSession" not in out
 
 
@@ -411,10 +427,10 @@ def test_project_chip_quick_create_leaves_filter_unchanged_during_inflight_guard
 def test_project_chip_quick_create_swallows_duplicate_inflight_rejections():
     out = _run_quick_create_case(
         "project-123",
-        active_project="keep-me",
+        active_project={"profile": "default", "project_id": "keep-me"},
         new_session_inflight_reject="request failed",
     )
 
     assert out["filterProjectId"] == "keep-me"
-    assert {"type": "set-filter", "projectId": "project-123"} not in out["calls"]
+    assert {"type": "set-filter", "project": {"profile": "default", "project_id": "project-123"}} not in out["calls"]
     assert out["toasts"] == ["New conversation already in progress"]

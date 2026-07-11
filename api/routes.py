@@ -12955,13 +12955,23 @@ def handle_get(handler, parsed) -> bool:
         isolated_profile_mode = _is_isolated_profile_mode()
         all_profiles = _all_profiles_enabled(parsed)
         active_profile = profiles_api.get_active_profile_name()
+        root_profile_names = ['default']
         if all_profiles:
             from api.models import load_projects_for_profiles
 
-            profile_names = [
-                row.get("name")
+            profile_rows = [
+                row
                 for row in profiles_api.list_profiles_api()
                 if isinstance(row, dict) and row.get("name")
+            ]
+            profile_names = [
+                row.get("name")
+                for row in profile_rows
+            ]
+            root_profile_names = ['default'] + [
+                row.get("name")
+                for row in profile_rows
+                if row.get("is_default") and row.get("name") != 'default'
             ]
             if active_profile not in profile_names:
                 profile_names.insert(0, active_profile)
@@ -12969,6 +12979,8 @@ def handle_get(handler, parsed) -> bool:
             scoped = all_projects
             other_profile_count = 0
         else:
+            if profiles_api._is_root_profile(active_profile) and active_profile != 'default':
+                root_profile_names.append(active_profile)
             all_projects = load_projects(include_db=True, profile_name=active_profile)
             scoped = [p for p in all_projects
                       if _profiles_match(p.get("profile"), active_profile)]
@@ -12977,6 +12989,7 @@ def handle_get(handler, parsed) -> bool:
             "projects": scoped,
             "all_profiles": all_profiles,
             "active_profile": active_profile,
+            "root_profile_names": root_profile_names,
             "other_profile_count": other_profile_count,
         })
 

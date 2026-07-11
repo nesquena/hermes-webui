@@ -5847,9 +5847,9 @@ def load_projects(
                 # rows (which a mutation route could then write back,
                 # silently overwriting the migration).
                 try:
-                    return json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
+                    projects = json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
                 except Exception:
-                    return projects
+                    pass
             if _backfill_project_profiles_if_needed(projects):
                 try:
                     save_projects(projects)
@@ -5865,15 +5865,9 @@ def load_projects(
 
         db_projects = load_projects_from_db(profile_name=profile_name)
         if db_projects:
-            seen = {
-                (str(p.get('profile') or 'default'), p.get('project_id'))
-                for p in projects
-            }
+            seen = {project_identity_key(p) for p in projects}
             for project in db_projects:
-                key = (
-                    str(project.get('profile') or 'default'),
-                    project.get('project_id'),
-                )
+                key = project_identity_key(project)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -5889,22 +5883,29 @@ def project_identity_matches(project: dict, project_id: str | None, profile_name
     return _profiles_match(project.get('profile'), profile_name)
 
 
+def project_identity_key(project: dict) -> tuple[str, object]:
+    """Return the dedupe key shared by JSON and database project rows."""
+    from api.profiles import _is_root_profile
+
+    profile = str(project.get('profile') or 'default').strip() or 'default'
+    if _is_root_profile(profile):
+        profile = 'default'
+    return profile, project.get('project_id')
+
+
 def load_projects_for_profiles(profile_names: list[str]) -> list:
     """Load JSON projects plus DB-backed rows for each named profile."""
     projects = load_projects()
     from api.projects_db_adapter import load_projects_from_db
 
-    seen = {
-        (str(p.get('profile') or 'default'), p.get('project_id'))
-        for p in projects
-    }
+    seen = {project_identity_key(p) for p in projects}
     for profile_name in profile_names:
         profile = str(profile_name or 'default').strip() or 'default'
         db_projects = load_projects_from_db(profile_name=profile)
         if not db_projects:
             continue
         for project in db_projects:
-            key = (str(project.get('profile') or 'default'), project.get('project_id'))
+            key = project_identity_key(project)
             if key in seen:
                 continue
             seen.add(key)

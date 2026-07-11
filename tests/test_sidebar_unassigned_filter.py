@@ -147,3 +147,23 @@ def test_all_chip_clear_clears_unassigned_filter_too():
         "The All chip handler must route through the helper that clears "
         "_activeProject and refreshes the filtered payload."
     )
+
+
+def test_real_project_filter_uses_profile_and_project_id_identity():
+    """Real project filters must distinguish reused IDs across profiles."""
+    js = _js()
+    assert "function _canonicalProjectFilterProfile(profile)" in js
+    assert "function _projectFilterIdentity(project)" in js
+    assert "function _projectFilterMatches(filter, row)" in js
+    assert "_canonicalProjectFilterProfile(filter.profile)===_canonicalProjectFilterProfile(row.profile)" in js
+    assert "filter.project_id===String(row.project_id||'')" in js
+    assert "_setActiveProjectFilter(p)" in js
+    assert "_projectFilterMatches(_activeProject,s)" in js
+    assert "_projectFilterMatches(_activeProject,proj)" in js
+    assert "S.rootProfileNames = Array.isArray(projData.root_profile_names)" in js
+
+
+def test_project_filter_payload_keeps_scalar_wire_format():
+    """Creating a session under a real filter still sends only project_id."""
+    js = _js()
+    assert "reqBody.project_id=_activeProject.project_id;" in js
