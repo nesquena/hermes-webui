@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import sqlite3
 import sys
@@ -243,6 +244,84 @@ def test_projects_db_adapter_reads_live_wal_rows(monkeypatch, tmp_path):
     ]
 
 
+def test_projects_db_adapter_reads_wal_only_from_temporary_snapshot(monkeypatch, tmp_path):
+    import api.projects_db_adapter as adapter
+
+    db_file = _profile_home(tmp_path, "work") / "projects.db"
+    db_file.parent.mkdir(parents=True)
+    source_db = tmp_path / "source.db"
+    writer = sqlite3.connect(source_db)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE projects (slug TEXT, name TEXT, color TEXT)")
+        writer.execute("INSERT INTO projects VALUES ('partial', 'Partial', '#abcdef')")
+        writer.commit()
+        db_file.write_bytes(source_db.read_bytes())
+        db_file.with_name("projects.db-wal").write_bytes(source_db.with_name("source.db-wal").read_bytes())
+
+        module = types.ModuleType("hermes_cli.projects_db")
+        module.list_projects = lambda conn: [
+            types.SimpleNamespace(slug=row["slug"], name=row["name"], color=row["color"], archived=False)
+            for row in conn.execute("SELECT slug, name, color FROM projects")
+        ]
+        package = types.ModuleType("hermes_cli")
+        package.__path__ = []
+        package.projects_db = module
+        monkeypatch.setitem(sys.modules, "hermes_cli", package)
+        monkeypatch.setitem(sys.modules, "hermes_cli.projects_db", module)
+        monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: _profile_home(tmp_path, name), raising=False)
+
+        assert adapter.load_projects_from_db(profile_name="work") == [
+            {"project_id": "partial", "name": "Partial", "color": "#abcdef", "profile": "work"}
+        ]
+        assert not db_file.with_name("projects.db-shm").exists()
+    finally:
+        writer.close()
+
+
+def test_projects_db_adapter_fails_closed_for_shm_only_without_mutation(monkeypatch, tmp_path):
+    import api.projects_db_adapter as adapter
+
+    _install_fake_projects_db(monkeypatch, projects=[])
+    db_file = _profile_home(tmp_path, "work") / "projects.db"
+    db_file.parent.mkdir(parents=True)
+    db_file.write_bytes(b"not a database")
+    shm_path = db_file.with_name("projects.db-shm")
+    shm_path.write_bytes(b"stale")
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: _profile_home(tmp_path, name), raising=False)
+
+    assert adapter.load_projects_from_db(profile_name="work") is None
+    assert shm_path.read_bytes() == b"stale"
+
+
+def test_projects_db_adapter_concurrent_first_readers_both_get_rows(monkeypatch, tmp_path):
+    import api.projects_db_adapter as adapter
+
+    db_file = _profile_home(tmp_path, "work") / "projects.db"
+    db_file.parent.mkdir(parents=True)
+    with sqlite3.connect(db_file) as conn:
+        conn.execute("CREATE TABLE projects (slug TEXT, name TEXT, color TEXT)")
+        conn.execute("INSERT INTO projects VALUES ('first', 'First', '#123456')")
+    module = types.ModuleType("hermes_cli.projects_db")
+    module.list_projects = lambda conn: [
+        types.SimpleNamespace(slug=row["slug"], name=row["name"], color=row["color"], archived=False)
+        for row in conn.execute("SELECT slug, name, color FROM projects")
+    ]
+    package = types.ModuleType("hermes_cli")
+    package.__path__ = []
+    package.projects_db = module
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.projects_db", module)
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: _profile_home(tmp_path, name), raising=False)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        rows = list(executor.map(lambda _: adapter.load_projects_from_db(profile_name="work"), range(2)))
+
+    expected = [{"project_id": "first", "name": "First", "color": "#123456", "profile": "work"}]
+    assert rows == [expected, expected]
+
+
 def test_projects_db_adapter_retries_without_immutable_when_wal_appears(monkeypatch, tmp_path):
     import api.projects_db_adapter as adapter
 
@@ -351,6 +430,73 @@ def test_load_projects_read_only_merges_db_rows_when_json_exists(monkeypatch, tm
         {"project_id": "json", "name": "JSON", "profile": "default"},
         {"project_id": "json", "name": "DB Shadow", "color": None, "profile": "work"},
         {"project_id": "db", "name": "DB", "color": None, "profile": "work"},
+    ]
+
+
+def test_load_projects_dedupes_root_aliases(monkeypatch, tmp_path):
+    import api.models as models
+
+    projects_file = tmp_path / "projects.json"
+    projects_file.write_text(json.dumps([{"project_id": "root", "name": "JSON", "profile": ""}]), encoding="utf-8")
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file, raising=False)
+    monkeypatch.setattr(models, "_projects_migrated", True, raising=False)
+    monkeypatch.setattr("api.profiles._is_root_profile", lambda name: name in {"default", "renamed"})
+    monkeypatch.setattr(
+        "api.projects_db_adapter.load_projects_from_db",
+        lambda **_kwargs: [{"project_id": "root", "name": "DB", "profile": "renamed"}],
+        raising=False,
+    )
+
+    assert models.load_projects(_migrate=False, include_db=True) == [
+        {"project_id": "root", "name": "JSON", "profile": ""}
+    ]
+
+
+def test_load_projects_for_profiles_dedupes_root_aliases(monkeypatch, tmp_path):
+    import api.models as models
+
+    projects_file = tmp_path / "projects.json"
+    projects_file.write_text(json.dumps([{"project_id": "root", "name": "JSON", "profile": "default"}]), encoding="utf-8")
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file, raising=False)
+    monkeypatch.setattr(models, "_projects_migrated", True, raising=False)
+    monkeypatch.setattr("api.profiles._is_root_profile", lambda name: name in {"default", "renamed"})
+    monkeypatch.setattr(
+        "api.projects_db_adapter.load_projects_from_db",
+        lambda **_kwargs: [{"project_id": "root", "name": "DB", "profile": "renamed"}],
+        raising=False,
+    )
+
+    assert models.load_projects_for_profiles(["renamed"]) == [
+        {"project_id": "root", "name": "JSON", "profile": "default"}
+    ]
+
+
+def test_load_projects_migration_reread_still_merges_db(monkeypatch, tmp_path):
+    import api.models as models
+
+    projects_file = tmp_path / "projects.json"
+    projects_file.write_text(json.dumps([{"project_id": "old", "name": "Old"}]), encoding="utf-8")
+
+    class _MigrationRace:
+        def __enter__(self):
+            projects_file.write_text(json.dumps([{"project_id": "new", "name": "New", "profile": "default"}]), encoding="utf-8")
+            models._projects_migrated = True
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file, raising=False)
+    monkeypatch.setattr(models, "_PROJECTS_MIGRATION_LOCK", _MigrationRace(), raising=False)
+    monkeypatch.setattr(models, "_projects_migrated", False, raising=False)
+    monkeypatch.setattr(
+        "api.projects_db_adapter.load_projects_from_db",
+        lambda **_kwargs: [{"project_id": "db", "name": "DB", "profile": "default"}],
+        raising=False,
+    )
+
+    assert models.load_projects(include_db=True) == [
+        {"project_id": "new", "name": "New", "profile": "default"},
+        {"project_id": "db", "name": "DB", "profile": "default"},
     ]
 
 
@@ -585,6 +731,59 @@ def test_routes_pass_active_and_session_profiles_to_project_reads(monkeypatch):
     assert move_payload["ok"] is True
     assert session.project_id == "research-project"
     assert calls == [{"include_db": True, "profile_name": "research"}]
+
+
+def test_projects_route_reports_root_profile_aliases(monkeypatch):
+    import api.models as models
+    import api.profiles as profiles
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        profiles,
+        "get_active_profile_name",
+        lambda: "work",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        profiles,
+        "_is_root_profile",
+        lambda name: name in {"default", "kinni"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routes,
+        "load_projects",
+        lambda **_kwargs: [{"project_id": "work-project", "name": "Work", "profile": "work"}],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, **_kwargs: payload,
+        raising=False,
+    )
+
+    scoped_payload = routes.handle_get(object(), urlparse("/api/projects"))
+    assert scoped_payload["root_profile_names"] == ["default"]
+
+    monkeypatch.setattr(
+        profiles,
+        "list_profiles_api",
+        lambda: [
+            {"name": "kinni", "is_default": True},
+            {"name": "work", "is_default": False},
+        ],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        models,
+        "load_projects_for_profiles",
+        lambda _names: [{"project_id": "root-project", "name": "Root", "profile": "default"}],
+        raising=False,
+    )
+
+    all_payload = routes.handle_get(object(), urlparse("/api/projects?all_profiles=1"))
+    assert all_payload["root_profile_names"] == ["default", "kinni"]
 
 
 def test_routes_project_rename_and_delete_use_profile_identity(monkeypatch):

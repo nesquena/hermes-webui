@@ -250,6 +250,9 @@ def test_default_and_unassigned_queries_send_exclude_hidden(monkeypatch):
     src = SESSIONS_JS.read_text(encoding="utf-8")
     requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
+    canonical_profile_fn = _extract_function(src, "_canonicalProjectFilterProfile")
+    project_filter_identity_fn = _extract_function(src, "_projectFilterIdentity")
+    project_filter_matches_fn = _extract_function(src, "_projectFilterMatches")
     project_filter_fn = _extract_function(src, "_setActiveProjectFilter")
     query_fn = _extract_function(src, "_sessionListQueryString")
     script = f"""
@@ -258,17 +261,22 @@ global._showCliSessions = false;
 global._showAllProfiles = false;
 global._showArchived = false;
 global._activeProject = null;
+global.S = {{ activeProfile: 'default', activeProfileIsDefault: false, rootProfileNames: ['default'] }};
 global.NO_PROJECT_FILTER = '__none__';
 global.renderSessionListFromCache = () => {{}};
 global.renderSessionList = () => Promise.resolve();
 {requested_source_fn}
 {exclude_hidden_fn}
+{canonical_profile_fn}
+{project_filter_identity_fn}
+{project_filter_matches_fn}
 {project_filter_fn}
 {query_fn}
+const demoProject = {{ profile: 'default', project_id: 'demo-project' }};
 const default_query = _sessionListQueryString();
 _setActiveProjectFilter('__none__');
 const unassigned_query = _sessionListQueryString();
-_setActiveProjectFilter('demo-project');
+_setActiveProjectFilter(demoProject);
 const named_project_query = _sessionListQueryString();
 console.log(JSON.stringify({{ default_query, unassigned_query, named_project_query }}));
 """
@@ -282,11 +290,15 @@ console.log(JSON.stringify({{ default_query, unassigned_query, named_project_que
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_project_filter_click_path_triggers_fresh_session_load():
     src = SESSIONS_JS.read_text(encoding="utf-8")
+    canonical_profile_fn = _extract_function(src, "_canonicalProjectFilterProfile")
+    project_filter_identity_fn = _extract_function(src, "_projectFilterIdentity")
+    project_filter_matches_fn = _extract_function(src, "_projectFilterMatches")
     project_filter_fn = _extract_function(src, "_setActiveProjectFilter")
     script = f"""
 const calls = [];
 global.NO_PROJECT_FILTER = '__none__';
 global._activeProject = null;
+global.S = {{ activeProfile: 'default', activeProfileIsDefault: false, rootProfileNames: ['default'] }};
 global.renderSessionListFromCache = () => {{
   calls.push('cache');
 }};
@@ -294,8 +306,11 @@ global.renderSessionList = (opts) => {{
   calls.push(opts);
   return Promise.resolve();
 }};
+{canonical_profile_fn}
+{project_filter_identity_fn}
+{project_filter_matches_fn}
 {project_filter_fn}
-_setActiveProjectFilter('demo-project');
+_setActiveProjectFilter({{ profile: 'default', project_id: 'demo-project' }});
 _setActiveProjectFilter('__none__');
 console.log(JSON.stringify({{
   activeProject: global._activeProject,
