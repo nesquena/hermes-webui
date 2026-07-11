@@ -7355,6 +7355,10 @@ def _run_agent_streaming(
     # Mutable holder so _agent_status_callback can read the live agent's
     # model/provider to enrich fallback SSE events with structured data.
     _current_agent = [None]
+    # Accumulates fallback notices so they can be persisted on the turn's
+    # final assistant message before s.save() — making them survive
+    # renderMessages() rebuilds, session switches, and page reloads.
+    _pending_fallback_notices = []
 
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
@@ -7397,6 +7401,14 @@ def _run_agent_streaming(
             if _agent_ref is not None:
                 _fallback_data['to_model'] = getattr(_agent_ref, 'model', '') or ''
                 _fallback_data['to_provider'] = getattr(_agent_ref, 'provider', '') or ''
+            # Capture for session-persisted metadata. Stamped onto the turn's
+            # final assistant message before s.save() so it survives
+            # renderMessages() rebuilds and session switches.
+            _pending_fallback_notices.append({
+                'message': _fallback_data['message'],
+                'to_model': _fallback_data.get('to_model', ''),
+                'to_provider': _fallback_data.get('to_provider', ''),
+            })
             put('warning', _fallback_data)
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
@@ -9769,6 +9781,11 @@ def _run_agent_streaming(
                             _ttft_ms = meter().get_ttft_ms(stream_id)
                             if _ttft_ms is not None:
                                 _dm['_firstTokenMs'] = _ttft_ms
+                            # Persist fallback notices on the turn's final
+                            # assistant message so they survive renderMessages()
+                            # rebuilds, session switches, and page reloads.
+                            if _pending_fallback_notices:
+                                _dm['_fallbackNotice'] = _pending_fallback_notices[-1]
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
