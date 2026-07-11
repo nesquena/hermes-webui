@@ -3142,8 +3142,13 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
     if normalized in {"o1", "o3", "o4"} or normalized.startswith(("o1-", "o3-", "o4-")):
         return True
     if "claude" in token_set or normalized.startswith("claude"):
-        # Restrict to Claude 4+ or Claude 3.7+ (exclude Claude 3.0/3.5)
-        match = re.search(r"claude.*?(\d+)(?:\D+(\d+))?", normalized)
+        # Restrict to Claude 4+ or Claude 3.7+ (exclude Claude 3.0/3.5).
+        # The minor group is capped at 1-2 digits with a (?!\d) guard so a
+        # trailing date stamp is NOT captured as a minor version — otherwise a
+        # bare, date-stamped Claude 3.0 id ("claude-3-opus-20240229") would read
+        # minor=20240229 and wrongly satisfy the 3.7+ gate. (Same date-stamp
+        # defense _is_pre_adaptive_anthropic already uses.)
+        match = re.search(r"claude.*?(\d+)(?:\D+(\d{1,2})(?!\d))?", normalized)
         if match:
             major = int(match.group(1))
             minor = int(match.group(2)) if match.group(2) else 0
