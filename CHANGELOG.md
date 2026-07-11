@@ -3,7 +3,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Deep-link straight to a profile with `?profile=<name>`.** Opening the WebUI with a `?profile=NAME` query parameter now switches to that profile on boot. The name is validated against the existing profile allowlist (a nonexistent profile boots normally, path-traversal / cross-profile attempts are rejected), the switch goes through the same access-enforced `switchToProfile`, and boot fails safe on anything invalid. Thanks @rodboev. (#5730, #5682)
+
 ### Fixed
+
+- **Russian localization refreshed and onboarding notes localized.** The `ru` bundle was refreshed and brought to full key parity with English (identical key sets across all locales), new update/workspace UI strings were propagated to every locale, and onboarding provider notes now resolve through a localized key (with the English text preserved as fallback). Thanks @DrMaks22. (#5778)
 
 - **A pending prompt no longer renders twice across a context-compaction boundary.** On reload / reattach to an active turn, a synthetic `[CONTEXT COMPACTION]` marker (a user-role row that isn't a real submitted turn) placed after your prompt was treated as the latest user message, so the tail scan missed the actual prompt right before it and rendered the same pending prompt twice. The session-load and refresh/reconnect tail scans now skip compaction markers when locating the current user message, while completed assistant rows stay hard boundaries so genuinely-repeated prompts still render. Thanks @starship-s. (#5920)
 
