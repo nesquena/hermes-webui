@@ -150,8 +150,18 @@ def test_profile_switch_clears_persisted_old_profile_cron_markers_only():
     mark = _extract_function(SESSIONS_JS, "_markSessionCompletionUnread")
     get_unread = _extract_function(SESSIONS_JS, "_getSessionCompletionUnread")
     save_unread = _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread")
-    clear_inactive = _extract_function(
-        SESSIONS_JS, "_clearCronSessionCompletionUnreadForInactiveProfiles"
+    clear_helpers = "\n".join(
+        [
+            _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
+            _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
+            _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
+            _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
+            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
+            _extract_function(
+                SESSIONS_JS, "_clearCronSessionCompletionUnreadForInactiveProfiles"
+            ),
+        ]
     )
     has_unread = _extract_function(SESSIONS_JS, "_hasUnreadForSession")
     has_marker = _extract_function(SESSIONS_JS, "_hasSessionCompletionUnread")
@@ -172,7 +182,8 @@ let _cronUnreadCount=0;
 let _cronPollGeneration=0;
 const _cronNewJobIds=new Set(['old-cron-job']);
 let renders=0;
-global.S={{activeProfile:'profile-a'}};
+global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
+global._allSessions=[];
 global.api=async()=>({{active:'profile-b',is_default:false}});
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 global.renderSessionListFromCache=()=>{{ renders+=1; }};
@@ -192,7 +203,7 @@ function _clearSessionCompletionUnread(sid){{
 {mark}
 {has_marker}
 {has_unread}
-{clear_inactive}
+{clear_helpers}
 {reset}
 {switch}
 (async()=>{{
@@ -281,3 +292,189 @@ startCronPolling();
     assert state["markCalls"] == [
         ["cron-session-a", 3, {"source": "cron", "profile": "profile-a"}]
     ]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_list_path_tags_cron_markers_with_source_and_profile():
+    """Re-gate #5975: _markPollingCompletionUnreadTransitions must tag cron rows."""
+    mark_poll = _extract_function(SESSIONS_JS, "_markPollingCompletionUnreadTransitions")
+    is_cron = _extract_function(SESSIONS_JS, "_isCronSessionForUnread")
+    meta_fn = _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession")
+    source_key = _extract_function(SESSIONS_JS, "_sourceKeyForSession")
+    script = f"""
+const markCalls=[];
+global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
+global._allSessions=[];
+global._sessionListSnapshotById=new Map();
+global._sessionStreamingById=new Map();
+global._sessionListSourceById=new Map();
+global._allSessionsScope=null;
+function _getSessionObservedStreaming(){{ return {{}}; }}
+function _isSessionEffectivelyStreaming(){{ return false; }}
+function _hasPendingUserMessageSignal(){{ return false; }}
+function _isSessionActivelyViewedForList(){{ return false; }}
+function _rememberSessionListSource(){{}}
+function _rememberObservedStreamingSession(){{}}
+function _forgetObservedStreamingSession(){{}}
+function _setSessionViewedCount(){{}}
+function _markSessionCompletionUnread(sid, count, meta){{
+  markCalls.push([sid, count, meta||null]);
+}}
+{source_key}
+{is_cron}
+{meta_fn}
+{mark_poll}
+const sessions=[
+  {{
+    session_id:'cron-from-list',
+    message_count:2,
+    last_message_at:20,
+    source_tag:'cron',
+    profile:'profile-a',
+    is_streaming:false,
+  }},
+  {{
+    session_id:'chat-from-list',
+    message_count:5,
+    last_message_at:30,
+    source_tag:'webui',
+    profile:'profile-a',
+    is_streaming:false,
+  }},
+];
+// Pretend both previously streaming so completion transition fires.
+_sessionStreamingById.set('cron-from-list', true);
+_sessionStreamingById.set('chat-from-list', true);
+_sessionListSnapshotById.set('cron-from-list', {{message_count:1, last_message_at:10}});
+_sessionListSnapshotById.set('chat-from-list', {{message_count:4, last_message_at:10}});
+_markPollingCompletionUnreadTransitions(sessions);
+process.stdout.write(JSON.stringify({{markCalls}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    by_sid = {row[0]: row for row in state["markCalls"]}
+    assert "cron-from-list" in by_sid
+    assert by_sid["cron-from-list"][2] == {"source": "cron", "profile": "profile-a"}
+    assert "chat-from-list" in by_sid
+    assert by_sid["chat-from-list"][2] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_legacy_untagged_cron_marker_cleared_via_sidebar_metadata():
+    """Re-gate #5975: untagged markers resolve from sidebar session source/profile."""
+    helpers = "\n".join(
+        [
+            _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
+            _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
+            _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
+            _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
+            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
+            _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_clearCronSessionCompletionUnreadForInactiveProfiles"),
+            _extract_function(SESSIONS_JS, "_hasSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_hasUnreadForSession"),
+        ]
+    )
+    script = f"""
+const store={{'hermes-session-completion-unread':JSON.stringify({{
+  'legacy-cron':{{message_count:2, completed_at:1}},
+  'chat':{{message_count:4, completed_at:1}},
+}})}};
+global.localStorage={{
+  getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
+  setItem:(key,value)=>{{ store[key]=String(value); }},
+  removeItem:(key)=>{{ delete store[key]; }},
+}};
+let _sessionCompletionUnread=null;
+let _sessionViewedCounts={{}};
+const SESSION_COMPLETION_UNREAD_KEY='hermes-session-completion-unread';
+global.S={{activeProfile:'profile-b',activeProfileIsDefault:false}};
+global._allSessions=[
+  {{session_id:'legacy-cron', source_tag:'cron', profile:'profile-a', message_count:2}},
+  {{session_id:'chat', source_tag:'webui', profile:'profile-a', message_count:4}},
+];
+global.renderSessionListFromCache=()=>{{}};
+function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
+function _setSessionViewedCount(){{}}
+{helpers}
+const before={{
+  legacy:_hasUnreadForSession({{session_id:'legacy-cron'}}),
+  chat:_hasUnreadForSession({{session_id:'chat'}}),
+}};
+_clearCronSessionCompletionUnreadForInactiveProfiles('profile-b');
+const after={{
+  legacy:_hasUnreadForSession({{session_id:'legacy-cron'}}),
+  chat:_hasUnreadForSession({{session_id:'chat'}}),
+  persisted:JSON.parse(store['hermes-session-completion-unread']),
+}};
+process.stdout.write(JSON.stringify({{before, after}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    assert state["before"] == {"legacy": True, "chat": True}
+    assert state["after"]["legacy"] is False
+    assert state["after"]["chat"] is True
+    assert "legacy-cron" not in state["after"]["persisted"]
+    assert "chat" in state["after"]["persisted"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_root_alias_keeps_current_profile_cron_marker():
+    """Re-gate #5975: default/renamed-root must not erase current-root cron dots."""
+    helpers = "\n".join(
+        [
+            _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
+            _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
+            _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
+            _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
+            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
+            _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_clearCronSessionCompletionUnreadForInactiveProfiles"),
+            _extract_function(SESSIONS_JS, "_hasSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_hasUnreadForSession"),
+        ]
+    )
+    script = f"""
+const store={{'hermes-session-completion-unread':JSON.stringify({{
+  'root-cron':{{message_count:2, completed_at:1, source:'cron', profile:'default'}},
+  'other-cron':{{message_count:1, completed_at:1, source:'cron', profile:'other'}},
+}})}};
+global.localStorage={{
+  getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
+  setItem:(key,value)=>{{ store[key]=String(value); }},
+  removeItem:(key)=>{{ delete store[key]; }},
+}};
+let _sessionCompletionUnread=null;
+let _sessionViewedCounts={{}};
+const SESSION_COMPLETION_UNREAD_KEY='hermes-session-completion-unread';
+// Renamed root profile is active.
+global.S={{activeProfile:'kinni',activeProfileIsDefault:true}};
+global._allSessions=[];
+global.renderSessionListFromCache=()=>{{}};
+function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
+function _setSessionViewedCount(){{}}
+{helpers}
+_clearCronSessionCompletionUnreadForInactiveProfiles('kinni');
+const persisted=JSON.parse(store['hermes-session-completion-unread']);
+process.stdout.write(JSON.stringify({{
+  rootKept:_hasUnreadForSession({{session_id:'root-cron'}}),
+  otherCleared:!_hasUnreadForSession({{session_id:'other-cron'}}),
+  persisted,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    assert state["rootKept"] is True
+    assert state["otherCleared"] is True
+    assert "root-cron" in state["persisted"]
+    assert "other-cron" not in state["persisted"]

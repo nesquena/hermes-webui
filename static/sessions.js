@@ -549,6 +549,88 @@ function _clearSessionCompletionUnread(sid) {
   _saveSessionCompletionUnread();
 }
 
+// True when a session row is a cron-origin session for unread-dot scoping.
+function _isCronSessionForUnread(session) {
+  if (!session) return false;
+  const key = (typeof _sourceKeyForSession === 'function')
+    ? _sourceKeyForSession(session)
+    : String(
+      session.raw_source
+      || session.source_tag
+      || session.source
+      || session.session_source
+      || ''
+    ).toLowerCase();
+  if (key === 'cron') return true;
+  return String(session.session_source || '').toLowerCase() === 'cron';
+}
+
+// Build {source, profile} for a cron session row; null for ordinary chat.
+function _cronCompletionUnreadMetaForSession(session) {
+  if (!_isCronSessionForUnread(session)) return null;
+  const fromRow = (session && typeof session.profile === 'string' && session.profile.trim())
+    ? session.profile.trim()
+    : '';
+  const active = (typeof S !== 'undefined' && S && typeof S.activeProfile === 'string' && S.activeProfile.trim())
+    ? S.activeProfile.trim()
+    : 'default';
+  return {source: 'cron', profile: fromRow || active};
+}
+
+// Resolve whether a persisted marker is cron and which profile owns it.
+// Untagged/legacy markers are migrated from the sidebar session row when known.
+function _resolveCronCompletionMarkerOrigin(sid, marker) {
+  let isCron = !!(marker && marker.source === 'cron');
+  let profile = (marker && typeof marker.profile === 'string' && marker.profile.trim())
+    ? marker.profile.trim()
+    : '';
+  let session = null;
+  if (Array.isArray(_allSessions)) {
+    session = _allSessions.find((s) => s && s.session_id === sid) || null;
+  }
+  if (!session && typeof _sessionListSnapshotById !== 'undefined'
+    && _sessionListSnapshotById && typeof _sessionListSnapshotById.get === 'function') {
+    // Snapshot alone lacks source/profile; keep null.
+    session = null;
+  }
+  if (session) {
+    if (!isCron && _isCronSessionForUnread(session)) isCron = true;
+    if (!profile) {
+      const sp = (typeof session.profile === 'string' && session.profile.trim())
+        ? session.profile.trim()
+        : '';
+      if (sp) profile = sp;
+    }
+  }
+  // Persist migration so later switches don't re-resolve from a cleared list.
+  if (marker && isCron) {
+    if (marker.source !== 'cron') marker.source = 'cron';
+    if (profile && marker.profile !== profile) marker.profile = profile;
+  }
+  return {isCron, profile: profile || ''};
+}
+
+// default/renamed-root equivalence for cron-marker ownership (mirrors server
+// _profiles_match enough for the active surface: literal 'default' ↔ root).
+function _cronMarkerProfileMatchesActive(origin, activeProfile) {
+  const originName = (typeof origin === 'string' && origin.trim()) ? origin.trim() : '';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim())
+    ? activeProfile.trim()
+    : 'default';
+  if (!originName) return false;
+  if (originName === activeName) return true;
+  if (typeof _profileMatchesActiveProfile === 'function'
+    && _profileMatchesActiveProfile(originName, activeName)) {
+    return true;
+  }
+  // Reverse alias: marker tagged with renamed-root name while active is 'default'
+  // (or vice versa already handled above) when the current surface is the root.
+  if (typeof S !== 'undefined' && S && S.activeProfileIsDefault) {
+    if (originName === 'default' || activeName === 'default') return true;
+  }
+  return false;
+}
+
 // Drop persisted cron unread dots that belong to inactive profiles. Ordinary
 // (non-cron) completion markers stay put — sticky all-profile sidebars still
 // need those. Called from the shared profile-switch reset in panels.js.
@@ -561,11 +643,12 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
   for (const sid of Object.keys(unread)) {
     const marker = unread[sid];
     if (!marker || typeof marker !== 'object' || Array.isArray(marker)) continue;
-    if (marker.source !== 'cron') continue;
-    const origin = (typeof marker.profile === 'string' && marker.profile.trim())
-      ? marker.profile.trim()
-      : '';
-    if (!origin || origin === active) continue;
+    const resolved = _resolveCronCompletionMarkerOrigin(sid, marker);
+    if (!resolved.isCron) continue;
+    // Only clear when we know the owning profile AND it is not the active one
+    // (incl. default/renamed-root equivalence). Untagged + unresolvable stays.
+    if (!resolved.profile) continue;
+    if (_cronMarkerProfileMatchesActive(resolved.profile, active)) continue;
     delete unread[sid];
     changed = true;
   }
@@ -1084,7 +1167,12 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
     if (completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) {
       if (!_isSessionActivelyViewedForList(sid)) {
-        _markSessionCompletionUnread(sid, s.message_count);
+        // Tag cron session-list markers with source+profile so profile-switch
+        // reset can clear only inactive-profile cron dots (#5960 / #5975 re-gate).
+        const meta = (typeof _cronCompletionUnreadMetaForSession === 'function')
+          ? _cronCompletionUnreadMetaForSession(s)
+          : null;
+        _markSessionCompletionUnread(sid, s.message_count, meta);
       } else {
         // Sync viewed count so we don't flag stale unread on tab switch (#3020)
         _setSessionViewedCount(sid, messageCount);
