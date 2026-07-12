@@ -182,6 +182,74 @@ class TestPreprocessingSkipsInlineCode:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Maintainer review feedback (nesquena-hermes, PR #5935):
+# "There is no test for the triple-backtick fenced block case, even though
+# that's the path with its own dedicated regex (the more failure-prone of the
+# two). Fenced blocks are also the common way docs show a markdown image
+# example."
+#
+# These tests lock down fenced-block image syntax against the preprocessing
+# rewrite, paralleling the inline-code tests above.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPreprocessingSkipsFencedCode:
+    """Preprocessing must not rewrite images inside triple-backtick fenced blocks."""
+
+    def test_fenced_block_image_not_rewritten(self, driver_path):
+        """![alt](./img.png) inside a ```md fence must stay literal."""
+        md = "```md\n![alt](./img.png)\n```"
+        out = _render_preview(driver_path, md)
+        assert "/api/file/raw" not in out, (
+            f"Fenced image path must stay literal, not rewritten to /api/file/raw: {out!r}"
+        )
+        assert "./img.png" in out, (
+            f"Relative path inside fenced block must be preserved verbatim: {out!r}"
+        )
+
+    def test_fenced_block_image_no_img_tag(self, driver_path):
+        """An image inside a fenced block must NOT produce an <img> tag."""
+        md = "```md\n![alt](./img.png)\n```"
+        out = _render_preview(driver_path, md)
+        assert "<img" not in out, (
+            f"Image inside fenced block must NOT be rendered as <img>: {out!r}"
+        )
+
+    def test_fenced_block_preserves_multiple_images(self, driver_path):
+        """Multiple image refs inside a fenced block must all stay literal."""
+        md = "```md\n![first](./a.png)\n![second](./b.png)\n```"
+        out = _render_preview(driver_path, md)
+        assert "/api/file/raw" not in out
+        assert "./a.png" in out
+        assert "./b.png" in out
+
+    def test_mixed_fenced_block_and_real_image(self, driver_path):
+        """Fenced example stays literal while a real sibling image renders.
+
+        This is the mixed case the maintainer requested: proves the stash
+        restores correctly and the real image outside the fence still renders.
+        """
+        md = (
+            "```md\n"
+            "![example](./img.png)\n"
+            "```\n"
+            "\n"
+            "![real](./real.png)"
+        )
+        out = _render_preview(driver_path, md)
+        # Real image outside fence must render
+        assert "<img" in out
+        assert "/api/file/raw" in out
+        assert "msg-media-img" in out
+        # The fenced example path must stay literal (not rewritten)
+        assert "path=img.png" not in out.replace("path=real.png", ""), (
+            f"Fenced image must not be rewritten, but found /api/file/raw for it: {out!r}"
+        )
+        assert "./img.png" in out, (
+            f"Fenced example path must be preserved verbatim: {out!r}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # F5: exercise the preprocessing step itself (relative path resolution).
 # ─────────────────────────────────────────────────────────────────────────────
 
