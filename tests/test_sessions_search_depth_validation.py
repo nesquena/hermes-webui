@@ -265,3 +265,86 @@ def test_metacharacter_query_plus(session_s1_json, monkeypatch):
 
     assert captured["status"] == 200
     assert captured["payload"]["count"] == 1
+
+
+# ── Escaped-character queries (greptile P3) ──────────────────────────────────
+
+def test_query_with_double_quote_is_not_dropped(session_s1_json, monkeypatch):
+    """Query 'he said "ok"' must find the session even though the on-disk JSON
+    stores the quote as `\"`. The rg prefilter is bypassed for `"`/`\\` chars
+    so the full JSON decode+match path is used.
+    """
+    import api.routes as routes
+
+    s1_with_quote = {
+        "session_id": "s1",
+        "title": "Quote test",
+        "profile": "default",
+        "messages": [
+            {"role": "user", "content": "he said \"ok\""},
+        ],
+    }
+    session_file = session_s1_json / "s1.json"
+    session_file.write_text(json.dumps(s1_with_quote), encoding="utf-8")
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Quote test", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(
+            SimpleNamespace(),
+            urlparse("/api/sessions/search?q=he%20said%20%22ok%22&content=1"),
+        )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["count"] == 1
+
+
+def test_query_with_backslash_is_not_dropped(session_s1_json, monkeypatch):
+    """Query 'path\\to' must find the session; the rg prefilter is bypassed for
+    backslash so the full decode path handles it.
+    """
+    import api.routes as routes
+
+    s1_with_backslash = {
+        "session_id": "s1",
+        "title": "Backslash test",
+        "profile": "default",
+        "messages": [
+            {"role": "user", "content": "path\\to"},
+        ],
+    }
+    session_file = session_s1_json / "s1.json"
+    session_file.write_text(json.dumps(s1_with_backslash), encoding="utf-8")
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Backslash test", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(
+            SimpleNamespace(),
+            urlparse("/api/sessions/search?q=path%5cto&content=1"),  # path\to
+        )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["count"] == 1

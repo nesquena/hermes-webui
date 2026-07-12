@@ -15693,6 +15693,14 @@ def _discover_rg_candidates(query: str, sessions: list) -> set | None:
     """
     if not query or not SESSION_DIR.is_dir():
         return None
+    # Queries containing characters that JSON-escapes in stored session files
+    # (double-quote and backslash) will NOT match as raw bytes under `rg -F`,
+    # because the on-disk JSON stores them as `\"` / `\\`.  Returning None makes
+    # the caller skip the prefilter and fall back to full Python decode+match,
+    # which handles escaping correctly.  Without this guard, sessions whose
+    # content contains `"` or `\` are silently dropped from results.
+    if any(ch in query for ch in ('"', "\\")):
+        return None
     try:
         import subprocess
         proc = subprocess.run(
