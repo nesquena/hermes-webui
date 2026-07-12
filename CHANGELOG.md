@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- **Public-share button labels now show in the right language.** A value-level locale swap shipped the public-share strings (Share / Stop sharing / confirmation dialogs) as Russian text in the English locale and English text in the Russian locale — key-parity checks didn't catch it because the keys themselves were balanced. Both locales are restored to their correct language, with a regression test that fails if the values are ever swapped again. Thanks @DrMaks22. (#5955)
+
 - **An errored turn no longer hides the response the assistant already produced.** When a turn ended in an error, the tool calls and reasoning the assistant had already generated were auto-collapsed behind a single header above the error card, so it looked like nothing came back. That produced content now stays visible by default on an errored turn (the error card still shows); successful turns collapse their worklog exactly as before. Thanks @b3nw for the report. (#5950, #5941)
 
 - **After a provider failure, retrying or edit-resubmitting now honors your newly-picked model.** If a turn failed and you switched the model/provider in the selector, `/retry` and edit-resubmit re-sent the *failed* model, forcing you to fork the conversation. A genuine non-default model pick is now carried into the recovery send, while an unchanged model still lets the server pick a compatible one — and the recovery can't leak one session's model into another when you switch sessions mid-retry. Thanks @b3nw for the report. (#5949, #5924)
