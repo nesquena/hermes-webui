@@ -55,11 +55,11 @@ def _function_body(src: str, name: str) -> str:
 def test_submit_edit_rearms_pending_pick_before_send():
     """Edit-resubmit must re-arm the explicit-pick marker before ``await send()``."""
     body = _function_body(UI_JS, "submitEdit")
-    assert "_rememberPendingSessionModel" in body, (
-        "submitEdit must re-arm the explicit-pick marker (#5924); otherwise the "
+    assert "_reArmRecoveryPick(" in body, (
+        "submitEdit must re-arm via _reArmRecoveryPick (#5924); otherwise the "
         "recovery send loses explicit_model_pick and the server re-reverts the model"
     )
-    rearm_idx = body.index("_rememberPendingSessionModel")
+    rearm_idx = body.index("_reArmRecoveryPick(")
     send_idx = body.rindex("await send()")
     assert rearm_idx < send_idx, "the re-arm must happen BEFORE await send()"
 
@@ -67,11 +67,11 @@ def test_submit_edit_rearms_pending_pick_before_send():
 def test_cmd_retry_rearms_pending_pick_before_send():
     """/retry must re-arm the explicit-pick marker before ``await send()``."""
     body = _function_body(COMMANDS_JS, "cmdRetry")
-    assert "_rememberPendingSessionModel" in body, (
-        "cmdRetry must re-arm the explicit-pick marker (#5924); otherwise /retry "
+    assert "_reArmRecoveryPick(" in body, (
+        "cmdRetry must re-arm via _reArmRecoveryPick (#5924); otherwise /retry "
         "re-sends the failed model instead of the freshly-picked one"
     )
-    rearm_idx = body.index("_rememberPendingSessionModel")
+    rearm_idx = body.index("_reArmRecoveryPick(")
     send_idx = body.rindex("await send()")
     assert rearm_idx < send_idx, "the re-arm must happen BEFORE await send()"
 
@@ -176,23 +176,44 @@ def test_non_explicit_send_still_normalizes_stale_model():
 def test_recovery_rearm_is_gated_on_a_genuine_deliberate_pick():
     """The re-arm must be CONDITIONAL on a real pick, not unconditional.
 
-    Codex gate CORE finding: re-arming _rememberPendingSessionModel on EVERY
-    recovery send (even with no fresh pick) forced explicit_model_pick=true and
-    suppressed the server's compatible-model resolution. Both recovery paths must
-    now compute a `_recoveryPick` (only set when the selector model differs from
-    the session's own stored model) and guard the re-arm on it.
+    Codex round-1 CORE: re-arming on EVERY recovery send (even with no fresh pick)
+    forced explicit_model_pick=true and suppressed the server's compatible-model
+    resolution. Both recovery paths now derive `_recoveryPick` from the shared
+    _deliberateSessionModelPick helper and re-arm only via _reArmRecoveryPick,
+    which no-ops on a null/absent pick.
     """
     for body in (_function_body(UI_JS, "submitEdit"), _function_body(COMMANDS_JS, "cmdRetry")):
         assert "_recoveryPick" in body, "recovery re-arm must be gated on _recoveryPick"
-        # the re-arm call must be guarded by the pick, not unconditional
-        assert "if(_recoveryPick" in body.replace(" ", ""), (
-            "the _rememberPendingSessionModel re-arm must be inside an `if(_recoveryPick ...)` guard"
-        )
-        # the pick is derived from the shared non-default-session helper (not inline
-        # self-comparison / provider inference — round-2 finding)
         assert "_deliberateSessionModelPick(" in body, (
             "the pick must come from _deliberateSessionModelPick, not an inline comparison"
         )
+        assert "_reArmRecoveryPick(" in body, (
+            "the re-arm must go through _reArmRecoveryPick (fire-time safety guards)"
+        )
+
+
+def test_rearm_helper_guards_stale_pick_and_newer_marker():
+    """_reArmRecoveryPick must not re-arm a stale pick or clobber a newer marker.
+
+    Codex round-3 SILENT: a same-session model change DURING the recovery awaits
+    made the pre-await captured pick stale; re-arming it overwrote the newer
+    pending marker and restored the old model on a later session load. The helper
+    must (1) require the current session model/provider to still equal the pick,
+    and (2) not overwrite a different existing pending marker.
+    """
+    body = _function_body(UI_JS, "_reArmRecoveryPick")
+    # still-matches-current-state guard
+    assert "S.session.model" in body and "pick.model" in body, (
+        "must confirm the current session model still equals the captured pick"
+    )
+    # newer-marker guard
+    assert "_readPendingSessionModel(" in body, (
+        "must read the existing pending marker and refuse to clobber a newer one"
+    )
+    # session-scope guard
+    assert "S.session.session_id!==sessionId" in body.replace(" ", ""), (
+        "must confirm the session is still the captured one before re-arming"
+    )
 
 
 def test_recovery_pick_is_captured_before_the_first_await():

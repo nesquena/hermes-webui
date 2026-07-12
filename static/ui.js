@@ -2863,15 +2863,49 @@ function _deliberateSessionModelPick(sessionId){
   if(!S.session||S.session.session_id!==sessionId) return null;
   const model=String(S.session.model||'').trim();
   if(!model) return null;
-  const provider=S.session.model_provider?String(S.session.model_provider).trim():null;
+  // Require SESSION-OWNED provider evidence — a stored model_provider on the
+  // session itself. Do NOT infer a provider from the model string: an
+  // unreachable/renamed model like "@removed:mistral-large" with no stored
+  // provider must NOT count as a deliberate pick (round-2/3 false-positive).
+  const provider=S.session.model_provider?String(S.session.model_provider).trim():'';
+  if(!provider) return null;
+  // Require a KNOWN profile default to compare against. If we don't know the
+  // default (empty window._defaultModel), we can't prove this is a non-default
+  // pick, so fail closed → no re-arm (server compatible-model resolution runs).
   const defaultModel=(typeof window!=='undefined'&&window._defaultModel)?String(window._defaultModel):'';
   const activeProvider=(typeof window!=='undefined'&&window._activeProvider)?String(window._activeProvider):'';
-  // Non-default = different model, OR same model on a different provider. A session
-  // sitting on the profile default (both match) is NOT a deliberate pick.
-  const isDefault=defaultModel&&model===defaultModel
-    &&(!activeProvider||!provider||provider===activeProvider);
+  if(!defaultModel||!activeProvider) return null;
+  // Non-default = a different model OR a different provider than the profile
+  // default. A session sitting exactly on the profile default is NOT a pick.
+  const isDefault=(model===defaultModel)&&(provider===activeProvider);
   if(isDefault) return null;
   return {model, model_provider:provider};
+}
+// #5924: re-arm the single-shot explicit-pick marker from a recovery pick, but
+// ONLY if it's still safe at fire time. Guards the SILENT same-session race where
+// the user changes the model DURING the recovery's awaits: (1) the session must
+// still be the captured one; (2) the session's CURRENT model/provider must still
+// equal the captured pick (a mid-flight change means the pick is stale — skip);
+// (3) never clobber a NEWER pending marker (an onchange during the await already
+// wrote the authoritative one). Returns true if it re-armed.
+function _reArmRecoveryPick(sessionId, pick){
+  if(!pick||!pick.model) return false;
+  if(!S.session||S.session.session_id!==sessionId) return false;
+  // Current session state must still match the captured pick (no mid-flight change).
+  if(String(S.session.model||'')!==String(pick.model||'')
+     ||String(S.session.model_provider||'')!==String(pick.model_provider||'')) return false;
+  // Do not overwrite a newer marker written by an onchange during the await.
+  if(typeof _readPendingSessionModel==='function'){
+    const existing=_readPendingSessionModel(sessionId);
+    if(existing&&existing.model
+       &&(String(existing.model)!==String(pick.model)
+          ||String(existing.model_provider||'')!==String(pick.model_provider||''))) return false;
+  }
+  if(typeof _rememberPendingSessionModel==='function'){
+    _rememberPendingSessionModel(sessionId, pick.model, pick.model_provider);
+    return true;
+  }
+  return false;
 }
 function _applyPendingSessionModelForSession(sessionId){
   if(!S.session||S.session.session_id!==sessionId) return false;
@@ -17129,14 +17163,10 @@ async function submitEdit(msgIdx, newText) {
     renderMessages();
     $('msg').value = newText;
     // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
-    // single-shot explicit-pick marker ONLY for a genuine deliberate pick
-    // (_recoveryPick, captured pre-await + scoped to initialSid). Unconditional
-    // re-arming forced explicit_model_pick on every edit even with no pick,
-    // suppressing the server's compatible-model resolution; a real cross-provider
-    // session pick is already honored every send by send()'s _isCrossProviderPick.
-    if(_recoveryPick && typeof _rememberPendingSessionModel==='function'){
-      _rememberPendingSessionModel(initialSid, _recoveryPick.model, _recoveryPick.model_provider);
-    }
+    // Re-arm the single-shot explicit-pick marker from the captured non-default
+    // pick — only if still safe at fire time (session unchanged, current model
+    // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
+    _reArmRecoveryPick(initialSid, _recoveryPick);
     await send();
   } catch(e) { setStatus(t('edit_failed') + e.message); }
 }

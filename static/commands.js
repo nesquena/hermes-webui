@@ -1700,11 +1700,11 @@ async function cmdRetry(){
     if(!S.session||S.session.session_id!==activeSid)return;
     if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
-    // Re-arm the single-shot explicit-pick marker ONLY from the captured genuine
-    // non-default pick, scoped to activeSid so it can't leak to another session.
-    if(_recoveryPick && _recoveryPick.model && typeof _rememberPendingSessionModel==='function'){
-      _rememberPendingSessionModel(activeSid, _recoveryPick.model, _recoveryPick.model_provider);
-    }
+    // Re-arm the single-shot explicit-pick marker from the captured non-default
+    // pick — but only if it's still safe at fire time (session unchanged, current
+    // model still matches the pick, and no newer onchange marker to clobber). See
+    // _reArmRecoveryPick. Scoped to activeSid so it can't leak to another session.
+    _reArmRecoveryPick(activeSid, _recoveryPick);
     await send();
   }catch(e){showToast(t('retry_failed')+e.message);}
 }
