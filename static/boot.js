@@ -674,6 +674,10 @@ function _micToastKeyForRecognitionError(error){
 
   // Raw audio mode preference: send audio file instead of transcribing
   let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
+  // Append-on-commit preference: when ON (default), dictated text is appended
+  // to any text already in the composer. When OFF, dictated text replaces the
+  // composer content (the pre-existing behavior).
+  let _dictationAppend = localStorage.getItem('hermes-dictation-append') !== 'false';
   // Capture backend pinned at recording start ('speech' | 'media' | null) so
   // _stopMic / onstop act on the backend that actually started, even if the
   // raw-audio toggle changes mid-recording (#3169 Codex review).
@@ -746,6 +750,14 @@ function _micToastKeyForRecognitionError(error){
   }
   window._applyRawAudioModePreference=_applyRawAudioModePreference;
 
+  function _applyDictationAppendPreference(enabled){
+    _dictationAppend=!!enabled;
+    try{localStorage.setItem('hermes-dictation-append',_dictationAppend?'true':'false');}catch(_){}
+    const cb=document.getElementById('settingsDictationAppend');
+    if(cb) cb.checked=_dictationAppend;
+  }
+  window._applyDictationAppendPreference=_applyDictationAppendPreference;
+
   async function _sendRawAudio(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
@@ -766,13 +778,39 @@ function _micToastKeyForRecognitionError(error){
     }
   }
 
-  function _commitTranscript(text){
+  function _commitTranscript(text, prefixOverride){
+    // `prefixOverride` is the composer content captured at recording start,
+    // passed only by the async server-STT path (recorder.onstop → _transcribeBlob).
+    // The sync browser-SR path doesn't call this function — it commits inline
+    // in sr.onend using _prefix directly.
+    //
+    // Three concerns this function has to balance (Greptile reviews):
+    //   1. Race condition: user types during async transcription → preserve those
+    //      keystrokes. Read live ta.value, not the stale snapshot.
+    //   2. Clear-during-transcription: user clears textarea during async wait →
+    //      respect that intent. Live ta.value (even empty) wins over snapshot.
+    //   3. Browser-SR fallback: if a future caller passes no prefixOverride
+    //      and live ta.value is empty, fall back to _prefix as a safety net.
+    //
+    // Resolution: when prefixOverride IS provided (server-STT path), trust live
+    // ta.value unconditionally — even when empty. Otherwise fall back to _prefix.
     const clean=(text||'').trim();
-    const committed=clean
-      ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
-          ? _prefix+' '+clean.trimStart()
-          : _prefix+clean)
-      : ta.value;
+    let committed;
+    if(!clean){
+      committed = ta.value;
+    }else if(_dictationAppend){
+      const base = prefixOverride !== undefined ? ta.value : (ta.value || _prefix);
+      if(!base){
+        committed = clean;
+      }else{
+        committed = (!base.endsWith(' ') && !base.endsWith('\n'))
+          ? base+' '+clean.trimStart()
+          : base+clean;
+      }
+    }else{
+      // Replace mode (explicit): dictated text overwrites the composer.
+      committed = clean;
+    }
     ta.value=committed;
     autoResize();
     if(window._micPendingSend){
@@ -793,10 +831,12 @@ function _micToastKeyForRecognitionError(error){
     return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
   }
 
-  async function _transcribeBlob(blob){
+  async function _transcribeBlob(blob, prefixSnapshot){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
+    // Snapshot is passed in from the recorder.onstop handler — taken there
+    // BEFORE _setRecording(false) clears _prefix (async server STT path).
     setComposerStatus('Transcribing…');
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
@@ -806,7 +846,7 @@ function _micToastKeyForRecognitionError(error){
         err.status=res.status;
         throw err;
       }
-      _commitTranscript(data.transcript||'');
+      _commitTranscript(data.transcript||'', prefixSnapshot);
     }catch(err){
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
@@ -1152,6 +1192,12 @@ function _micToastKeyForRecognitionError(error){
         const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
         if(mediaRecorder===recorder) mediaRecorder=null;
         _isRecording=false;
+        // Capture the composer prefix BEFORE _setRecording(false) clears _prefix.
+        // The await on _transcribeBlob runs after this sync block, so by the
+        // time _transcribeBlob is called, _prefix is already ''. Passing the
+        // snapshot through keeps append-mode working on the async server-STT
+        // path. See _commitTranscript() for how the snapshot is consumed.
+        const prefixSnapshot = _prefix;
         const blob=new Blob(captureChunks,{type:recorder.mimeType||mimeType||'audio/webm'});
         if(isCurrentCapture) _setRecording(false);
         _stopTracks(captureStream);
@@ -1159,7 +1205,7 @@ function _micToastKeyForRecognitionError(error){
           if(captureMode==='media-raw'){
             await _sendRawAudio(blob);
           }else{
-            await _transcribeBlob(blob);
+            await _transcribeBlob(blob, prefixSnapshot);
           }
         }
         else if(window._micPendingSend){
@@ -1249,6 +1295,13 @@ function _micToastKeyForRecognitionError(error){
     rawAudioCheckbox.checked = _rawAudioMode;
     rawAudioCheckbox.addEventListener('change', function(){
       _applyRawAudioModePreference(this.checked);
+    });
+  }
+  const appendCheckbox = document.getElementById('settingsDictationAppend');
+  if(appendCheckbox){
+    appendCheckbox.checked = _dictationAppend;
+    appendCheckbox.addEventListener('change', function(){
+      _applyDictationAppendPreference(this.checked);
     });
   }
   _updateMicTooltip();
@@ -2058,6 +2111,7 @@ function _applySessionContextMetadataUpdate(data){
   S.session.context_length=data.session.context_length||0;
   S.session.threshold_tokens=data.session.threshold_tokens||0;
   S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
+  S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
   if(typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
@@ -2067,6 +2121,7 @@ function _applySessionContextMetadataUpdate(data){
       estimated_cost:_pick(u.estimated_cost,S.session.estimated_cost),
       context_length:S.session.context_length||0,
       last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
+      post_compression_context_tokens_estimate:S.session.post_compression_context_tokens_estimate,
       threshold_tokens:S.session.threshold_tokens||0,
     });
   }
@@ -3474,6 +3529,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       else if(typeof syncModelChip==='function') syncModelChip();
     }
     if(S.session) syncTopbar();
+    else if(typeof syncReasoningChip==='function') syncReasoningChip();
   }).catch(e=>{
     window._modelDropdownReady=null;
     throw e;

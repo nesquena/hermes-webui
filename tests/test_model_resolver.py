@@ -27,6 +27,44 @@ def _resolve_with_config(model_id, provider=None, base_url=None, default=None, c
         config.cfg.update(old_cfg)
 
 
+def _resolve_with_catalog(model_id, advertised_ids, *, provider=None, base_url=None,
+                          provider_id='custom', default=None):
+    """Resolve with a seeded models-catalog snapshot (#5979 provenance).
+
+    ``advertised_ids`` is the list of model ids the endpoint's own group
+    advertised (what the user could have picked from the dropdown). Pass ``None``
+    to simulate a COLD/unbuilt catalog. Seeds ``config._available_models_cache``
+    (the snapshot ``_endpoint_advertised_model_ids`` reads) for the duration of
+    the call, resets the derivation memo, and restores both afterwards so tests
+    don't leak catalog state into each other.
+    """
+    old_cache = config._available_models_cache
+    old_memo = config._advertised_model_ids_memo
+    old_fp = config._available_models_cache_source_fingerprint
+    old_prov = config._models_cache_provenance
+    if advertised_ids is None:
+        config._available_models_cache = None
+    else:
+        config._available_models_cache = {
+            'groups': [{
+                'provider_id': provider_id,
+                'models': [{'id': mid, 'label': mid} for mid in advertised_ids],
+            }]
+        }
+        # Stamp the source fingerprint exactly as the real publish sites do, so
+        # the accessor's profile-isolation guard trusts this seeded snapshot.
+        config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
+    config._advertised_model_ids_memo = None  # force recompute against the seeded snapshot
+    config._sync_models_cache_provenance()  # publish the atomic (snapshot, fingerprint) pair
+    try:
+        return _resolve_with_config(model_id, provider=provider, base_url=base_url, default=default)
+    finally:
+        config._available_models_cache = old_cache
+        config._advertised_model_ids_memo = old_memo
+        config._available_models_cache_source_fingerprint = old_fp
+        config._models_cache_provenance = old_prov
+
+
 # ── OpenRouter prefix handling ────────────────────────────────────────────
 
 def test_openrouter_free_keeps_full_path():
@@ -170,10 +208,12 @@ def test_custom_remote_preserves_intrinsic_vendor_prefix_3872():
     A bare ``custom`` provider with a remote base_url is a vendor-routing proxy
     (LiteLLM, Bedrock gateway). ``bedrock/`` is an intrinsic routing segment the
     proxy needs whole; stripping it to ``opus-4-6`` makes the proxy return 403
-    "model not allowed for your group".
+    "model not allowed for your group". The proxy advertised the full id (the
+    user picked it from the dropdown), so provenance preserves it.
     """
-    model, provider, base_url = _resolve_with_config(
+    model, provider, base_url = _resolve_with_catalog(
         'bedrock/opus-4-6',
+        advertised_ids=['bedrock/opus-4-6'],
         provider='custom',
         base_url='https://router.example.com/v1',
     )
@@ -183,15 +223,20 @@ def test_custom_remote_preserves_intrinsic_vendor_prefix_3872():
 
 
 def test_custom_remote_strips_redundant_first_party_prefix_433():
-    """#433: bare-custom remote proxy still strips a REDUNDANT first-party prefix.
+    """#433: bare-custom remote proxy strips a prefix ONLY when the endpoint
+    advertised just the BARE id (not the full ``vendor/model``).
 
-    ``gpt-5.4`` IS a first-party OpenAI model, so ``openai/`` is a redundant
-    leftover and the proxy expects the bare id. This is the behaviour pinned by
-    test_sprint40_ui_polish.py::test_prefixed_model_stripped_for_custom_endpoint;
-    the #3872 fix must keep it while preserving intrinsic vendor prefixes.
+    #433 is a verified real relay whose ``/v1/models`` returned bare ``gpt-5.4``
+    and rejected ``openai/gpt-5.4`` (a stale cross-provider leftover). The strip
+    is now justified by PROVENANCE — the catalog advertises exactly ``gpt-5.4``
+    and NOT ``openai/gpt-5.4`` — instead of the old catalog-family guess that
+    couldn't tell this stale-leftover case apart from #5979's advertised-full-id
+    case. Behaviour is also pinned by
+    test_sprint40_ui_polish.py::test_prefixed_model_stripped_for_custom_endpoint.
     """
-    model, provider, base_url = _resolve_with_config(
+    model, provider, base_url = _resolve_with_catalog(
         'openai/gpt-5.4',
+        advertised_ids=['gpt-5.4'],  # relay advertises ONLY the bare id
         provider='custom',
         base_url='https://router.example.com/v1',
     )
@@ -199,10 +244,255 @@ def test_custom_remote_strips_redundant_first_party_prefix_433():
     assert provider == 'custom'
 
 
+def test_custom_remote_preserves_advertised_full_id_5979():
+    """#5979 (the P0 regression): a custom proxy that advertises the FULL
+    ``x-ai/grok-4.5`` must receive it whole — never the bare ``grok-4.5``.
+
+    The old code stripped it because ``grok-4.5`` had graduated into the x-ai
+    first-party catalog (agent commit 62ada5175), flipping ``_is_first_party_model``
+    to True for a model the proxy routes on by its full ``x-ai/`` namespace. This
+    is the exact HTTP 400 b3nw hit ("Invalid model format ... grok-4.5"). The
+    provenance rule preserves it because the endpoint advertised the full id.
+    """
+    # Deterministically reproduce the data-driven trigger regardless of the
+    # hermes-agent catalog version CI happens to run against: ensure grok-4.5 is
+    # first-party of x-ai so _is_first_party_model('x-ai','grok-4.5') is True (the
+    # condition under which the OLD code stripped). We stub it into the catalog
+    # rather than asserting the live catalog already contains it.
+    xai_catalog = list(config._PROVIDER_MODELS.get('x-ai') or [])
+    had_grok = any(isinstance(m, dict) and m.get('id') == 'grok-4.5' for m in xai_catalog)
+    old_xai = config._PROVIDER_MODELS.get('x-ai')
+    if not had_grok:
+        config._PROVIDER_MODELS['x-ai'] = xai_catalog + [{'id': 'grok-4.5', 'label': 'Grok 4.5'}]
+    try:
+        assert config._is_first_party_model('x-ai', 'grok-4.5'), (
+            "precondition: grok-4.5 must be first-party of x-ai for this regression"
+        )
+        model, provider, base_url = _resolve_with_catalog(
+            'x-ai/grok-4.5',
+            advertised_ids=['x-ai/grok-4.5'],  # proxy advertises the FULL namespaced id
+            provider='custom',
+            base_url='https://proxy.example.com/v1',
+        )
+    finally:
+        if not had_grok:
+            if old_xai is None:
+                config._PROVIDER_MODELS.pop('x-ai', None)
+            else:
+                config._PROVIDER_MODELS['x-ai'] = old_xai
+    assert model == 'x-ai/grok-4.5', (
+        f"advertised full id must be preserved for routing, got {model!r}"
+    )
+    assert provider == 'custom'
+    assert base_url == 'https://proxy.example.com/v1'
+
+
+def test_named_custom_slug_preserves_advertised_full_id_5979():
+    """#5979 (named-custom variant): provider=custom:<slug> proxy advertising the
+    full ``x-ai/grok-4.5`` also preserves it."""
+    model, provider, base_url = _resolve_with_catalog(
+        'x-ai/grok-4.5',
+        advertised_ids=['x-ai/grok-4.5'],
+        provider='custom:my-gateway',
+        provider_id='custom:my-gateway',
+        base_url='https://proxy.example.com/v1',
+    )
+    assert model == 'x-ai/grok-4.5', f"full id must be preserved for custom:slug, got {model!r}"
+
+
+def test_custom_remote_cold_catalog_falls_back_to_legacy_heuristic_5979():
+    """#5979 tri-state: with a COLD/unbuilt catalog AND no config declaration
+    (no provenance at all), resolution falls back to the LEGACY family heuristic
+    so this narrow edge is never worse than the pre-fix behaviour.
+
+    A first-party redundant prefix still strips (the #433 relay keeps working
+    cold), while an intrinsic/unknown prefix is preserved. The #5979 active-user
+    path never reaches this branch — a selected id is either config-declared
+    (see the config-declared test) or in the catalog the dropdown was built from.
+    """
+    # first-party redundant prefix → strip (matches pre-fix / #433 cold path)
+    model_a, _, _ = _resolve_with_catalog(
+        'openai/gpt-5.4', advertised_ids=None,
+        provider='custom', base_url='https://router.example.com/v1',
+    )
+    assert model_a == 'gpt-5.4', f"cold first-party prefix must strip (legacy), got {model_a!r}"
+    # intrinsic/unknown prefix → preserve
+    model_b, _, _ = _resolve_with_catalog(
+        'zai-org/GLM-5.1', advertised_ids=None,
+        provider='custom', base_url='https://api.deepinfra.com/v1/openai',
+    )
+    assert model_b == 'zai-org/GLM-5.1', f"cold unknown prefix must preserve, got {model_b!r}"
+
+
+def test_custom_remote_config_declared_full_id_preserved_cold_5979():
+    """#5979 cold-restart survival: even with a COLD catalog, a full vendor id
+    the user DECLARED in config (model.default) is preserved — config is
+    network-free provenance that outlives a process restart.
+    """
+    old_cache = config._available_models_cache
+    old_memo = config._advertised_model_ids_memo
+    old_fp = config._available_models_cache_source_fingerprint
+    old_prov = config._models_cache_provenance
+    old_cfg = dict(config.cfg)
+    config._available_models_cache = None  # cold
+    config._advertised_model_ids_memo = None
+    config._sync_models_cache_provenance()  # publish the cold (None) provenance
+    config.cfg['model'] = {
+        'provider': 'custom',
+        'default': 'x-ai/grok-4.5',  # user-declared full id
+        'base_url': 'https://proxy.example.com/v1',
+    }
+    try:
+        model, provider, _ = config.resolve_model_provider('x-ai/grok-4.5')
+    finally:
+        config._available_models_cache = old_cache
+        config._advertised_model_ids_memo = old_memo
+        config._available_models_cache_source_fingerprint = old_fp
+        config._models_cache_provenance = old_prov
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+    assert model == 'x-ai/grok-4.5', (
+        f"config-declared full id must survive a cold catalog, got {model!r}"
+    )
+    assert provider == 'custom'
+
+
+def test_custom_remote_prefers_full_id_when_both_advertised_5979():
+    """When a proxy advertises BOTH the full ``x-ai/grok-4.5`` and a bare
+    ``grok-4.5``, the exact full selection wins (preserve)."""
+    model, _, _ = _resolve_with_catalog(
+        'x-ai/grok-4.5',
+        advertised_ids=['x-ai/grok-4.5', 'grok-4.5'],
+        provider='custom',
+        base_url='https://proxy.example.com/v1',
+    )
+    assert model == 'x-ai/grok-4.5', f"exact full selection must win, got {model!r}"
+
+
+def test_custom_remote_extra_models_bucket_counts_as_advertised_5979():
+    """Provenance must read BOTH catalog buckets. A relay's bare id sitting in
+    ``extra_models`` (picker overflow) still counts as advertised, so the stale
+    ``openai/gpt-5.4`` prefix is stripped (#433) even when ``models`` is full of
+    OTHER ids and the bare id overflowed into ``extra_models``.
+    """
+    old_cache = config._available_models_cache
+    old_memo = config._advertised_model_ids_memo
+    old_fp = config._available_models_cache_source_fingerprint
+    old_prov = config._models_cache_provenance
+    config._available_models_cache = {
+        'groups': [{
+            'provider_id': 'custom',
+            'models': [{'id': f'filler-{i}', 'label': f'filler-{i}'} for i in range(30)],
+            'extra_models': [{'id': 'gpt-5.4', 'label': 'gpt-5.4'}],  # bare id overflowed here
+        }]
+    }
+    config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
+    config._advertised_model_ids_memo = None
+    config._sync_models_cache_provenance()
+    try:
+        model, _, _ = _resolve_with_config(
+            'openai/gpt-5.4', provider='custom', base_url='https://relay.example/v1',
+        )
+    finally:
+        config._available_models_cache = old_cache
+        config._advertised_model_ids_memo = old_memo
+        config._available_models_cache_source_fingerprint = old_fp
+        config._models_cache_provenance = old_prov
+    assert model == 'gpt-5.4', f"bare id in extra_models must count as advertised, got {model!r}"
+
+
+def test_custom_remote_foreign_profile_catalog_ignored_5979():
+    """Profile-isolation fail-safe: when the catalog snapshot's source
+    fingerprint does NOT match the current runtime (a concurrently-active
+    foreign profile published it), that snapshot is NOT trusted for provenance —
+    resolution falls back to the legacy family heuristic instead of stripping
+    against another profile's catalog.
+
+    Proof id: ``zai-org/GLM-5.1``. The foreign snapshot advertises a bare
+    ``GLM-5.1`` (which, if trusted, would strip the prefix), but ``zai-org`` is
+    NOT a first-party provider, so the legacy fallback preserves the full id.
+    A result of ``zai-org/GLM-5.1`` therefore proves the foreign catalog was
+    ignored (a trusted-catalog strip would have returned ``GLM-5.1``).
+    """
+    old_cache = config._available_models_cache
+    old_memo = config._advertised_model_ids_memo
+    old_fp = config._available_models_cache_source_fingerprint
+    old_prov = config._models_cache_provenance
+    config._available_models_cache = {
+        'groups': [{'provider_id': 'custom', 'models': [{'id': 'GLM-5.1', 'label': 'GLM-5.1'}]}]
+    }
+    config._available_models_cache_source_fingerprint = {'config_yaml': {'path': '/some/other/profile'}}
+    config._advertised_model_ids_memo = None
+    config._sync_models_cache_provenance()
+    try:
+        model, _, _ = _resolve_with_config(
+            'zai-org/GLM-5.1', provider='custom', base_url='https://relay.example/v1',
+        )
+    finally:
+        config._available_models_cache = old_cache
+        config._advertised_model_ids_memo = old_memo
+        config._available_models_cache_source_fingerprint = old_fp
+        config._models_cache_provenance = old_prov
+    assert model == 'zai-org/GLM-5.1', (
+        f"foreign-profile catalog must be ignored (legacy fallback preserves), got {model!r}"
+    )
+
+
+def test_resolver_provenance_read_does_not_block_on_cache_lock_5979():
+    """Regression: the resolver's per-send provenance read must be LOCK-FREE
+    with respect to ``_available_models_cache_lock``.
+
+    Codex found a deadlock in an earlier cut where the accessor acquired that
+    lock: config-save (``_cfg_lock`` → cache lock) opposed catalog-refresh (cache
+    lock → ``_cfg_lock``). The fix publishes an atomic ``(snapshot, fingerprint)``
+    tuple the resolver reads with one lock-free load. Proof: hold the cache lock
+    on one thread while another thread resolves — it must complete promptly, not
+    block behind the held lock.
+    """
+    import threading
+    import time as _time
+    old_cfg = dict(config.cfg)
+    config.cfg.clear()
+    config.cfg.update({'model': {
+        'provider': 'custom', 'default': 'x-ai/grok-4.5',
+        'base_url': 'https://proxy.example/v1', 'models': {'x-ai/grok-4.5': {}},
+    }})
+    config.invalidate_models_cache()
+    config.get_available_models()  # warm the catalog + publish provenance
+    try:
+        got = config._available_models_cache_lock.acquire(blocking=False)
+        assert got, "precondition: could not take cache lock non-blocking"
+        result = {}
+        def _worker():
+            t0 = _time.time()
+            result['model'] = config.resolve_model_provider(
+                config.model_with_provider_context('x-ai/grok-4.5', 'custom')
+            )[0]
+            result['elapsed'] = _time.time() - t0
+        th = threading.Thread(target=_worker)
+        th.start()
+        th.join(timeout=5)
+        blocked = th.is_alive()
+        config._available_models_cache_lock.release()
+        if blocked:
+            th.join(timeout=5)
+        assert not blocked, "DEADLOCK: resolver blocked on _available_models_cache_lock"
+        assert result.get('model') == 'x-ai/grok-4.5', f"got {result.get('model')!r}"
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config.invalidate_models_cache()
+
+
 def test_custom_remote_preserves_unknown_prefix_548():
-    """#548: an unknown vendor prefix (zai-org/GLM-5.1) is always preserved."""
-    model, provider, base_url = _resolve_with_config(
+    """#548: an unknown vendor prefix (zai-org/GLM-5.1) is always preserved.
+
+    The proxy advertised the full id; ``zai-org`` isn't in _PROVIDER_MODELS so
+    even the bare-advertised belt could never strip it.
+    """
+    model, provider, base_url = _resolve_with_catalog(
         'zai-org/GLM-5.1',
+        advertised_ids=['zai-org/GLM-5.1'],
         provider='custom',
         base_url='https://api.deepinfra.com/v1/openai',
     )
@@ -212,15 +502,13 @@ def test_custom_remote_preserves_unknown_prefix_548():
 
 def test_named_custom_slug_preserves_intrinsic_vendor_prefix_3872():
     """#3872 (named-custom variant): provider=custom:<slug> + remote base_url also
-    preserves an intrinsic vendor prefix when the typed model isn't in the entry.
-
-    A model typed/selected that is not listed in the custom_providers[] entry
-    falls through to the base_url branch; a bare id NOT first-party of the prefix
-    (bedrock/opus-4-6) must still be kept whole, same as bare ``custom``.
+    preserves an intrinsic vendor prefix the endpoint advertised whole.
     """
-    model, provider, base_url = _resolve_with_config(
+    model, provider, base_url = _resolve_with_catalog(
         'bedrock/opus-4-6',
+        advertised_ids=['bedrock/opus-4-6'],
         provider='custom:my-gateway',
+        provider_id='custom:my-gateway',
         base_url='https://router.example.com/v1',
     )
     assert model == 'bedrock/opus-4-6', f"intrinsic prefix must be preserved for custom:slug, got {model!r}"

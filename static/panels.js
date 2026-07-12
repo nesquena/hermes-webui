@@ -11910,9 +11910,7 @@ async function checkUpdatesNow(channelOverride){
       if(agentPart) parts.push(agentPart);
       const manualInstruction=(typeof _formatManualUpdateInstruction==='function')
         ? _formatManualUpdateInstruction(data.webui)
-        : (data.webui&&data.webui.no_git&&data.webui.manual_update&&data.webui.behind>0
-          ? 'Manual update required: run docker pull ghcr.io/nesquena/hermes-webui:latest, then recreate the container.'
-          : null);
+        : null;
       // Track non-git targets separately so a mixed deployment (one git
       // checkout + one no-git install) never hides the "can't check" state
       // behind an up-to-date summary (#4356).
