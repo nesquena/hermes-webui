@@ -620,6 +620,21 @@ def test_previous_identity_arrival_also_waits_during_transition():
     assert not old_arrival.is_alive()
 
 
+def test_lease_release_is_idempotent():
+    """The streaming path releases the lease twice on the normal path (inner
+    ordered release + outer backstop); the second must be a no-op and never
+    underflow another turn's count."""
+    agent = FakeAgent()
+    first, _ = turn(agent, LOCAL)
+    second, _ = turn(agent, LOCAL)
+    assert active_turn_count() == 2
+    first.release()
+    first.release()  # backstop double-release
+    assert active_turn_count() == 1  # second turn's count untouched
+    second.release()
+    assert active_turn_count() == 0
+
+
 # ── Streaming integration source guard ───────────────────────────────────────
 
 
@@ -662,5 +677,13 @@ def test_streaming_acquires_full_turn_lease_on_effective_env():
     release_idx = STREAMING_PY.find("_terminal_backend_lease.release()")
     assert restore_idx >= 0
     assert release_idx > restore_idx
+    # AND a backstop release in the outermost guaranteed-teardown finally:
+    # the lease is acquired well before the inner try begins, so an exception
+    # in that window must not leak the lease (a leaked lease under fail-closed
+    # admission is a standing denial for differing-backend turns).
+    backstop_idx = STREAMING_PY.find("_terminal_backend_lease.release()", release_idx + 1)
+    metering_teardown_idx = STREAMING_PY.find("meter().end_session(stream_id, 0)")
+    assert metering_teardown_idx > 0
+    assert backstop_idx > metering_teardown_idx
     # Point-in-time invalidation is no longer called from the turn path.
     assert "maybe_invalidate_default_terminal_env(_safe_profile_runtime_env)" not in STREAMING_PY

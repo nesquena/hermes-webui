@@ -10351,6 +10351,23 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to end metering session for stream %s", stream_id, exc_info=True)
         _metering_stop.set()
+        # #5937/#5988: BACKSTOP release of the backend-identity lease. The
+        # primary release lives in the inner try's finally so it stays ordered
+        # after the env restore — but the lease is acquired ~180 lines before
+        # that inner try begins, and an exception in the window between them
+        # (env mutation, MCP discovery, callback setup) would otherwise leak
+        # the lease. Under fail-closed admission a leaked lease is a standing
+        # denial (every later differing-backend turn waits its bound, then
+        # aborts), not just a stall. release() is idempotent, so the normal
+        # path's double-release is a no-op.
+        if _terminal_backend_lease is not None:
+            try:
+                _terminal_backend_lease.release()
+            except Exception:
+                logger.debug(
+                    "terminal backend lease backstop release failed (#5937)",
+                    exc_info=True,
+                )
         # Stop the periodic checkpoint thread before the final recovery path.
         # The checkpoint thread also uses the per-session lock; joining it first
         # avoids contending with checkpoint writes during stale-pending repair.
