@@ -375,6 +375,85 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert all(len(item) == 3 and item[2] for item in events)
 
 
+def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
+    """Gateway terminal errors must survive an empty assistant stream."""
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    error_text = (
+        'HTTP 400: {"detail":"Invalid Request: Invalid model format or no credentials '
+        'for provider: <redacted>"}'
+    )
+    response_error = [error_text]
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            if response_error[0]:
+                yield f'data: {{"error":{json.dumps(response_error[0])}}}\n\n'.encode()
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    events = []
+    channel = MagicMock()
+    channel.put_nowait = lambda item: events.append(item)
+    s = new_session()
+    stream_id = "stream-gateway-terminal-provider-error-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    apperrors = [item[1] for item in events if item[0] == "apperror"]
+    assert apperrors
+    assert apperrors[-1]["type"] in {"model_not_found", "auth_mismatch"}
+
+    response_error[0] = ""
+    empty_stream_id = "stream-gateway-empty-response-test"
+    s = new_session()
+    s.active_stream_id = empty_stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.save()
+    empty_events = []
+    empty_channel = MagicMock()
+    empty_channel.put_nowait = lambda item: empty_events.append(item)
+    STREAMS[empty_stream_id] = empty_channel
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        empty_stream_id,
+        [],
+    )
+    empty_errors = [item[1] for item in empty_events if item[0] == "apperror"]
+    assert empty_errors[-1]["type"] == "gateway_empty_response"
+
+
 def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_reasoning(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -1185,6 +1264,62 @@ def test_gateway_runs_api_body_includes_session_id():
                 )
         assert "/v1/runs" in captured["url"]
         assert captured["body"]["session_id"] == "sess-stable-uuid"
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+
+def test_gateway_runs_api_classifies_terminal_provider_error():
+    from unittest.mock import MagicMock, patch
+
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    error_text = "HTTP 400: Invalid model format or no credentials for provider"
+    events = []
+    q = MagicMock()
+    q.put_nowait = lambda item: events.append(item)
+    stream_id = "sid-runs-terminal-provider-error"
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    call_count = [0]
+
+    def fake_urlopen(req, *, timeout=None):
+        call_count[0] += 1
+        resp = MagicMock()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        if call_count[0] == 1:
+            resp.read = lambda sz=65536: b'{"run_id":"run_error"}'
+        else:
+            resp.__iter__ = lambda s: iter([
+                b'event: run.failed\n',
+                f'data: {{"error":{json.dumps(error_text)}}}\n'.encode(),
+            ])
+        return resp
+
+    try:
+        with patch.dict("os.environ", {
+            "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gateway.local",
+        }, clear=True), \
+             patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+             patch("api.gateway_chat.get_session", return_value=MagicMock(
+                 active_stream_id=stream_id, workspace="/tmp", profile=None,
+                 context_messages=[], messages=[],
+             )):
+            _run_gateway_chat_streaming(
+                session_id="sess-runs-terminal-error",
+                msg_text="hi",
+                model="test",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+        apperrors = [item[1] for item in events if item[0] == "apperror"]
+        assert apperrors[-1]["type"] in {"model_not_found", "auth_mismatch"}
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
