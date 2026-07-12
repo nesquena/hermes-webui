@@ -1548,6 +1548,9 @@ async function _trySteer(msg, explicitSteer){
   const ownerStreamId=(typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id)))||null;
   const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
   const ownerProfile=typeof S!=='undefined'&&(S.activeProfile||'default');
+  const ownerReasoningEffort=typeof getComposerReasoningEffortForRun==='function'
+    ? getComposerReasoningEffortForRun()
+    : '';
   const ownerModelState=typeof _chatPayloadModelState==='function'
     ? _chatPayloadModelState()
     : {model:(typeof S!=='undefined'&&S.session&&S.session.model)||'',model_provider:(typeof S!=='undefined'&&S.session&&S.session.model_provider)||''};
@@ -1624,6 +1627,7 @@ async function _trySteer(msg, explicitSteer){
       files:pendingFilesSnapshot,
       model:ownerModelState.model,
       model_provider:ownerModelState.model_provider,
+      reasoning_effort:ownerReasoningEffort||undefined,
       profile:ownerProfile,
     });
     if(typeof updateQueueBadge==='function')updateQueueBadge(ownerSid);

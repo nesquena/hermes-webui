@@ -247,11 +247,23 @@ function _readPersistedSessionQueue(sid){
   }
   return [];
 }
+function _reasoningEffortForQueuedMessage(sid,payload){
+  if(Object.prototype.hasOwnProperty.call(payload,'reasoning_effort')){
+    return payload.reasoning_effort;
+  }
+  const activeSid=typeof S!=='undefined'&&S.session&&S.session.session_id;
+  if(!activeSid||sid!==activeSid||typeof window.getComposerReasoningEffortForRun!=='function'){
+    return undefined;
+  }
+  return window.getComposerReasoningEffortForRun()||undefined;
+}
 function queueSessionMessage(sid, payload){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
   // Stamp created_at so the restore path can detect stale entries (agent already responded)
   const entry={...payload, _queued_at: Date.now()};
+  const reasoningEffort=_reasoningEffortForQueuedMessage(sid,payload);
+  if(reasoningEffort!==undefined) entry.reasoning_effort=reasoningEffort;
   q.push(entry);
   _persistSessionQueueStorage(sid,q);
   return q.length;
@@ -4608,6 +4620,11 @@ function _normalizeReasoningEffort(eff){
   return String(eff||'').trim().toLowerCase();
 }
 
+function getComposerReasoningEffortForRun(){
+  return _currentReasoningEffort===null?'':_normalizeReasoningEffort(_currentReasoningEffort);
+}
+window.getComposerReasoningEffortForRun=getComposerReasoningEffortForRun;
+
 function _formatReasoningEffortLabel(effort){
   if(effort==='none') return 'None';
   if(!effort) return 'Default';
@@ -4842,6 +4859,10 @@ document.addEventListener('click',function(e){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
     if(effort){
+      // The chip is the source of the next turn's request-scoped value. Update
+      // it before the profile write completes so an immediate Send cannot race
+      // the asynchronous settings request and submit the previous effort.
+      _applyReasoningChip(effort);
       const payload=Object.assign({effort:effort},_reasoningEffortContext());
       api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
@@ -7554,7 +7575,7 @@ function setBusy(v){
         }
         autoResize();
         renderTray();
-        send();
+        send({reasoningEffort:next.reasoning_effort});
       },120);
     }
   }

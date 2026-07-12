@@ -54,7 +54,7 @@ class HttpRunnerClient:
         return cls(base_url=base_url, api_key=str(source.get(_RUNNER_API_KEY_ENV) or ""))
 
     def start_run(self, request) -> dict[str, Any]:
-        return self._post("/v1/runs", {
+        payload = {
             "session_id": request.session_id,
             "message": request.message,
             "attachments": list(request.attachments or []),
@@ -65,7 +65,10 @@ class HttpRunnerClient:
             "toolsets": list(request.toolsets or []),
             "source": request.source,
             "metadata": dict(request.metadata or {}),
-        })
+        }
+        if request.reasoning_effort is not None:
+            payload["reasoning_effort"] = request.reasoning_effort
+        return self._post("/v1/runs", payload)
 
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> dict[str, Any]:
         query = ""

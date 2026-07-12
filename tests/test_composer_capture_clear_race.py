@@ -138,6 +138,8 @@ def _run_reentrant_guard_in_node(composer_value: str):
         let _sendInProgress = true;
         let _sendInProgressSid = 'sid-1';
         const S = { session: { session_id: 'sid-1' }, pendingFiles: [], activeProfile: 'default' };
+        // send() snapshots this before entering the re-entrant guard.
+        const reasoningEffortForSend = 'low';
 
         // Stubs the guard branch touches.
         function _chatPayloadModelState(){ return { model: 'm', model_provider: 'p' }; }
@@ -185,4 +187,5 @@ def test_reentrant_send_would_double_submit_if_composer_not_cleared():
         "the stale-composer scenario must reproduce the double-submit the fix removes"
     )
     assert out["queued"][0]["payload"]["text"] == "hello world"
+    assert out["queued"][0]["payload"]["reasoning_effort"] == "low"
     assert out["queued"][0]["sid"] == "sid-1"

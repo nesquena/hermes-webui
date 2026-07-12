@@ -2814,6 +2814,7 @@ from api.config import (
     set_hermes_default_model,
     canonical_model_provider_lane,
     model_with_provider_context,
+    VALID_REASONING_EFFORTS,
     get_reasoning_status,
     set_reasoning_display,
     set_reasoning_effort,
@@ -20656,6 +20657,7 @@ def _start_chat_stream_for_session(
     goal_related: bool = False,
     source: str = "webui",
     moa_config=None,
+    reasoning_effort=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -20778,7 +20780,11 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_kwargs = {
+        "model_provider": model_provider,
+        "goal_related": goal_related,
+        "reasoning_effort": reasoning_effort,
+    }
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(
@@ -20800,6 +20806,19 @@ def _start_chat_stream_for_session(
     if model_provider:
         response["effective_model_provider"] = model_provider
     return response
+
+
+def _normalize_run_reasoning_effort(value) -> str | None:
+    """Validate an optional browser-supplied effort without reading shared config."""
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+    if raw != "none" and raw not in VALID_REASONING_EFFORTS:
+        valid = ", ".join(("none", *VALID_REASONING_EFFORTS))
+        raise ValueError(f"Unknown reasoning effort '{value}'. Valid: {valid}.")
+    return raw
 
 
 def _runtime_runner_client_factory():
@@ -20867,6 +20886,7 @@ def _start_run(
     route: str,
     diag=None,
     moa_config=None,
+    reasoning_effort=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -20907,6 +20927,7 @@ def _start_run(
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                reasoning_effort=request.reasoning_effort,
             )
 
         def _legacy_adapter_factory():
@@ -20928,6 +20949,7 @@ def _start_run(
                     profile=getattr(s, "profile", None),
                     provider=model_provider,
                     model=model,
+                    reasoning_effort=reasoning_effort,
                     source=source,
                     metadata={"route": route},
                 )
@@ -20947,6 +20969,7 @@ def _start_run(
         diag=diag,
         source=source,
         moa_config=moa_config,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -21708,6 +21731,10 @@ def _handle_chat_start(handler, body, diag=None):
             explicit_model_pick=explicit_model_pick,
             profile_provider=catalog_profile_provider,
         )
+        try:
+            reasoning_effort = _normalize_run_reasoning_effort(body.get("reasoning_effort"))
+        except ValueError as e:
+            return bad(handler, str(e), 400)
         if model_provider == "moa" and moa_config is None:
             if webui_gateway_chat_enabled(get_config()):
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
@@ -21731,6 +21758,7 @@ def _handle_chat_start(handler, body, diag=None):
             "source": "webui",
             "route": "/api/chat/start",
             "diag": diag,
+            "reasoning_effort": reasoning_effort,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
