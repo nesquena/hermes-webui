@@ -1783,6 +1783,10 @@ class TestUpdateBannerUx:
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
         script = f"""
+function t(key, ...args) {{
+  const values = {{ settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.' }};
+  return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
+}}
 {format_fn}
 {instruction_fn}
 const manual=_formatUpdateTargetStatus('WebUI', {{
@@ -1818,6 +1822,10 @@ const state = {{
 global.window = {{}};
 global.$ = (id) => state[id] || null;
 global._renderUpdateWhatsNewLinks = () => {{}};
+global.t = (key, ...args) => {{
+  const values = {{ settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.' }};
+  return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
+}};
 {format_fn}
 {instruction_fn}
 {show_fn}
@@ -1871,16 +1879,17 @@ let apiData = {{
   agent: null,
 }};
 function $(id) {{ return state[id] || null; }}
-function t(key) {{
+function t(key, ...args) {{
   const values = {{
     settings_checking: 'Checking',
     settings_check_now: 'Check now',
     settings_updates_available: '{{count}} update(s) available',
     settings_update_no_git: 'Cannot check for updates',
+    settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
     settings_up_to_date: 'Up to date',
     settings_update_check_failed: 'Check failed',
   }};
-  return values[key] || key;
+  return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
 }}
 async function api() {{ return apiData; }}
 function _showUpdateBanner() {{}}
