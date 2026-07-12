@@ -3529,6 +3529,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       else if(typeof syncModelChip==='function') syncModelChip();
     }
     if(S.session) syncTopbar();
+    else if(typeof syncReasoningChip==='function') syncReasoningChip();
   }).catch(e=>{
     window._modelDropdownReady=null;
     throw e;
