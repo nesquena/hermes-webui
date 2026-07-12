@@ -12571,6 +12571,23 @@ function _anchorSceneSceneHasWorklogWorthyRows(scene){
   }
   return false;
 }
+// #5941: an errored/failed turn's terminal_state. A turn that ended in a
+// provider/agent failure but which DID produce assistant content (tool calls,
+// reasoning) still folds that content into a collapsed worklog above the error
+// card — so the user reads a lone error bubble as "nothing came back", even
+// though the real response is one click away. These are the terminal states
+// that must keep the produced content VISIBLE by default. `completed` (normal
+// turn) and null are deliberately excluded, and `cancelled`/`interrupted`
+// (user-initiated stops with their own dedicated cards + #5224 transcript
+// preservation) are left to their existing behavior — this is scoped to the
+// error/failure family the report is about.
+const _ANCHOR_SCENE_ERRORED_TERMINAL_STATES=new Set([
+  'error','no_response','degraded','connection_lost','tool_limit_reached','compression_exhausted',
+]);
+function _anchorSceneHasErroredTerminalState(scene){
+  const state=String(scene&&scene.terminal_state||'').trim().toLowerCase();
+  return _ANCHOR_SCENE_ERRORED_TERMINAL_STATES.has(state);
+}
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
@@ -12696,6 +12713,19 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(streamId&&!_readActivityDisclosureState(activityKey)){
     _copyActivityDisclosureState(`live:${streamId}`, activityKey);
   }
+  // #5941: an errored turn that produced assistant content (tool calls /
+  // reasoning) must not hide that content behind a collapsed header — the user
+  // reads a lone error card as "nothing came back". When the settled scene's
+  // terminal_state is an error/failure (NOT a normal completion) keep the
+  // worklog EXPANDED by default so the produced response stays visible. This
+  // path is only reached for worklog-worthy scenes (the guard at the top
+  // requires >=1 tool/thinking/compression row), so a genuinely-empty errored
+  // turn — a real no_response with zero produced content — never gets here and
+  // still shows only its error card, no phantom empty body. A user who has
+  // explicitly collapsed THIS turn's worklog (saved 'closed' disclosure state)
+  // is still respected, so the default-open never fights an intentional collapse.
+  const erroredWorklogKeepOpen=_anchorSceneHasErroredTerminalState(scene)
+    && _readActivityDisclosureState(activityKey)!=='closed';
   // keepSettledWorklogOpen forces collapsed:false for the ONE height-stable settle
   // render of the just-settled turn (no STREAM_DONE shrink jump) for both pinned
   // followers AND unpinned mid-turn readers. The keep-open is made genuinely
@@ -12707,7 +12737,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // (_isKeepSettledWorklogOpenArmed), so it never persists across restores.
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
-    collapsed:!keepSettledWorklogOpen,
+    collapsed:!(keepSettledWorklogOpen||erroredWorklogKeepOpen),
     beforeAnchor:true,
     anchor:segment,
     activityKey,
