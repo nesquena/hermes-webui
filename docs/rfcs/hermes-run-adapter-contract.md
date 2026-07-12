@@ -774,7 +774,8 @@ is still not the runner process itself. Its job is to pin the adapter-facing
 normalization rules before route wiring or process supervision lands:
 
 - `start_run` forwards a `StartRunRequest` carrying explicit session, profile,
-  workspace, attachments, model/provider, toolset, source, and metadata payloads;
+  workspace, attachments, model/provider, reasoning effort, toolset, source, and
+  metadata payloads;
 - `observe_run` and `get_run` normalize runner responses into `RunEventStream`
   and `RunStatus` so a recreated WebUI server can observe the same runner-owned
   state without relying on process-local `STREAMS`;
@@ -804,7 +805,7 @@ Scope:
   `HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`, while preserving `legacy-direct`
   and `legacy-journal` as the default/revert paths;
 - validate that `StartRunRequest` carries explicit session, profile, workspace,
-  attachments, provider/model, toolset, source, and metadata fields into the
+  attachments, provider/model, reasoning effort, toolset, source, and metadata fields into the
   runner boundary without relying on WebUI process-global environment mutation;
 - prove a recreated WebUI adapter can rediscover runner-owned status and replay
   ordered events from the runner/journal surface after process-local state is
@@ -889,7 +890,7 @@ Acceptance tests for Slice 4d:
    module-level maps for runner-owned streams, cancel flags, approval/clarify
    callbacks, cached agents, goal state, or queue schedulers.
 5. **Explicit context payloads.** Runner startup carries session, profile,
-   workspace, attachments, provider/model, toolsets, source, and metadata as
+   workspace, attachments, provider/model, reasoning effort, toolsets, source, and metadata as
    payload fields rather than depending on process-global environment mutation in
    the WebUI server.
 
@@ -1000,8 +1001,8 @@ Scope:
   with approval, clarify, goal, and queue either mapped to explicit runner
   capabilities or returned as bounded unsupported/conflict `ControlResult`
   values;
-- keep profile, workspace, attachments, provider/model, toolset, source, and
-  metadata as explicit payload fields at the runner boundary rather than
+- keep profile, workspace, attachments, provider/model, reasoning effort,
+  toolset, source, and metadata as explicit payload fields at the runner boundary rather than
   depending on process-global WebUI environment mutation.
 
 Acceptance tests for Slice 4f:
