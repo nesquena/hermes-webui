@@ -45,6 +45,12 @@ def setup_function(_fn=None):
     isolation.reset_terminal_backend_identity_for_tests()
 
 
+def teardown_function(_fn=None):
+    # Shard hygiene: these tests mutate process-global identity state that
+    # other streaming tests in the same shard would otherwise inherit.
+    isolation.reset_terminal_backend_identity_for_tests()
+
+
 # ── Fakes faithful to the real agent contract ────────────────────────────────
 
 
@@ -375,17 +381,36 @@ def test_unremoved_default_slot_fails_the_transition():
     assert active_turn_count() == 0
 
 
-def test_import_failure_rejects_and_is_retried_by_next_turn(monkeypatch):
-    """cleanup_vm unresolvable → the turn must NOT proceed uninvalidated."""
+def test_absent_agent_runtime_commits_vacuously(monkeypatch):
+    """When tools.terminal_tool is not importable (e.g. webui CI runs without
+    hermes-agent), no env cache can exist in this process — a transition must
+    commit vacuously instead of rejecting every turn forever."""
+    agent = FakeAgent()
+    assert one_shot(agent, SSH) is False
+    monkeypatch.setattr(
+        isolation, "_resolve_terminal_tool", lambda: isolation._AGENT_RUNTIME_ABSENT
+    )
+    assert isolation.maybe_invalidate_default_terminal_env(LOCAL) is True
+    with isolation._COND:
+        assert isolation._last_backend_identity == isolation.terminal_backend_identity(LOCAL)
+
+
+def test_present_runtime_with_unresolvable_helpers_fails_closed(monkeypatch):
+    """A present-but-broken runtime is NOT the vacuous case: the cache may
+    exist and we cannot verify it — reject the turn."""
     agent = FakeAgent()
     agent.seed_generic()
     assert one_shot(agent, SSH) is False
-    monkeypatch.setattr(isolation, "_resolve_cleanup_vm", lambda: None)
+
+    class _BrokenModule:
+        pass
+
+    monkeypatch.setattr(isolation, "_resolve_terminal_tool", lambda: _BrokenModule())
     with pytest.raises(isolation.TerminalBackendInvalidationFailed):
-        isolation.maybe_invalidate_default_terminal_env(
-            LOCAL, get_active_env=agent.get_active_env
-        )
+        isolation.maybe_invalidate_default_terminal_env(LOCAL)
+    assert active_turn_count() == 0
     monkeypatch.undo()
+    # Runtime resolvable again: retry succeeds.
     assert one_shot(agent, LOCAL) is True
     assert agent.cleanup_calls == [("default", False)]
 

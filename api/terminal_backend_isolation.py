@@ -40,6 +40,12 @@ security boundary and every path fails CLOSED:
   retry (the slot pop already happened, so the retry's ``cleanup_vm`` alone
   would be a silent no-op).
 
+One deliberate carve-out: when the hermes-agent runtime itself is not
+importable (``tools.terminal_tool`` is where the ``"default"`` cache lives),
+no cached environment can exist in this process, so a transition commits
+vacuously — that is correctness, not fail-open (exercised by webui CI, which
+runs without hermes-agent installed).
+
 Same-backend turns share the identity freely and never invalidate, preserving
 the agent's intentional cross-session sharing of one long-lived
 local/container env. A synchronous, failure-reporting forced-cleanup contract
@@ -198,31 +204,25 @@ class TerminalBackendTurnLease:
             _COND.notify_all()
 
 
-def _resolve_cleanup_vm():
-    try:
-        from tools.terminal_tool import cleanup_vm as _cleanup_vm  # type: ignore
-    except Exception:
-        logger.warning(
-            "Could not import tools.terminal_tool.cleanup_vm to invalidate "
-            "stale default terminal env after backend change (#5937); "
-            "agent-side #62720 remains the primary correctness fix",
-            exc_info=True,
-        )
-        return None
-    return _cleanup_vm
+_AGENT_RUNTIME_ABSENT = object()
 
 
-def _resolve_get_active_env():
+def _resolve_terminal_tool():
+    """Return the agent terminal_tool module, or the ``_AGENT_RUNTIME_ABSENT``
+    sentinel when hermes-agent is not installed in this process.
+
+    Absence is meaningful, not a failure: the process-global ``"default"`` env
+    cache LIVES in ``tools.terminal_tool``. If that module cannot be imported,
+    no cached environment can exist in this process, so a backend transition
+    is vacuously safe (there is nothing to invalidate). Import errors other
+    than ImportError propagate to the caller, which fails closed.
+    """
     try:
-        from tools.terminal_tool import get_active_env as _get_active_env  # type: ignore
-    except Exception:
-        logger.warning(
-            "Could not import tools.terminal_tool.get_active_env to verify "
-            "default terminal env removal (#5937)",
-            exc_info=True,
-        )
-        return None
-    return _get_active_env
+        import tools.terminal_tool as _terminal_tool  # type: ignore
+
+        return _terminal_tool
+    except ImportError:
+        return _AGENT_RUNTIME_ABSENT
 
 
 def _container_exists(container_id: str, docker_exe: str) -> bool:
@@ -310,13 +310,39 @@ def _invalidate_default_env(previous, identity, cleanup_vm, get_active_env) -> b
     success by itself: the real agent contract swallows backend-teardown
     exceptions and returns None, and Docker force-removal runs asynchronously.
     """
-    if cleanup_vm is None:
-        cleanup_vm = _resolve_cleanup_vm()
-        if cleanup_vm is None:
+    if cleanup_vm is None or get_active_env is None:
+        terminal_tool = _resolve_terminal_tool()
+        if terminal_tool is _AGENT_RUNTIME_ABSENT:
+            if cleanup_vm is None and get_active_env is None:
+                # No agent runtime -> the "default" env cache (which lives in
+                # tools.terminal_tool) cannot exist in this process. There is
+                # nothing to invalidate; the transition is vacuously safe.
+                logger.info(
+                    "hermes-agent terminal runtime not importable; no default "
+                    "terminal env cache can exist in this process — backend "
+                    "identity transition %s -> %s is vacuously safe (#5937)",
+                    previous,
+                    identity,
+                )
+                return True
+            # Partial injection with an absent runtime is ambiguous — the
+            # caller believes an env layer exists that we cannot verify.
             return False
-    if get_active_env is None:
-        get_active_env = _resolve_get_active_env()
+        if cleanup_vm is None:
+            cleanup_vm = getattr(terminal_tool, "cleanup_vm", None)
         if get_active_env is None:
+            get_active_env = getattr(terminal_tool, "get_active_env", None)
+            if get_active_env is None:
+                # Older agent builds predate get_active_env; the underlying
+                # cache dict has existed since the slot mechanism was added.
+                _envs = getattr(terminal_tool, "_active_environments", None)
+                if isinstance(_envs, dict):
+                    get_active_env = _envs.get
+        if cleanup_vm is None or get_active_env is None:
+            logger.warning(
+                "hermes-agent terminal runtime is present but cleanup_vm/"
+                "get_active_env could not be resolved (#5937); failing closed",
+            )
             return False
 
     force_remove = previous[0] in _FORCE_REMOVE_ENV_TYPES
