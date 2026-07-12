@@ -1214,7 +1214,7 @@ window._hermesNotifySessionOpen=function(sid, data, opts){
   for(var i=0;i<_HERMES_SESSION_OPEN_HANDLERS.length;i++){
     try{
       var result=_HERMES_SESSION_OPEN_HANDLERS[i](sid, data, opts);
-      if(result&&result.cancel===true) return {cancel:true};
+      if(opts.preload===true && result&&result.cancel===true) return {cancel:true};
     }catch(_){}
   }
   return {};
@@ -1236,17 +1236,14 @@ window.renderTranscript=function(container, messages, opts){
     row.setAttribute('data-role',msg.role);
     var body=document.createElement('div');
     body.className='msg-body';
-    var inner=document.createElement('div');
-    inner.className='msg-body-inner';
     try{
       if(md){
         var html=md(content);
-        if(html!=null){inner.innerHTML=html}else{inner.textContent=content}
+        if(html!=null){body.innerHTML=html}else{body.textContent=content}
       }else{
-        inner.textContent=content;
+        body.textContent=content;
       }
-    }catch(_){inner.textContent=content}
-    body.appendChild(inner);
+    }catch(_){body.textContent=content}
     row.appendChild(body);
     container.appendChild(row);
   }

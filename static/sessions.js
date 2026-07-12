@@ -1558,7 +1558,7 @@ async function loadSession(sid){
           return;
         }
         if (_loadingSessionId === sid) _loadingSessionId = null;
-        return loadSession(sid,{...opts,skipProfileResolve:true,force:true});
+        return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
       }
