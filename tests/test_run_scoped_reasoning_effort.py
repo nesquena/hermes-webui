@@ -3,6 +3,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,6 +35,136 @@ def test_browser_effort_validation_is_strict_and_optional():
 
     with pytest.raises(ValueError, match="Unknown reasoning effort"):
         _normalize_run_reasoning_effort("extreme")
+
+
+def test_explicit_effort_snapshot_wins_without_reading_profile_config(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes.api_config,
+        "get_config",
+        lambda: (_ for _ in ()).throw(AssertionError("explicit effort must not read config")),
+    )
+    monkeypatch.setattr(
+        routes.api_config,
+        "coerce_reasoning_effort_for_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("explicit effort is coerced downstream for the run model")
+        ),
+    )
+
+    assert routes._snapshot_run_reasoning_effort(
+        " XHigh ",
+        profile_config={"agent": {"reasoning_effort": "low"}},
+        model="test-model",
+        model_provider="test-provider",
+    ) == "xhigh"
+
+
+def test_omitted_effort_snapshots_coerced_profile_value(monkeypatch):
+    import api.routes as routes
+
+    calls = []
+    profile_config = {"agent": {"reasoning_effort": "max"}}
+
+    def coerce(effort, model, *, provider_id=None):
+        calls.append((effort, model, provider_id))
+        return "xhigh"
+
+    monkeypatch.setattr(routes.api_config, "coerce_reasoning_effort_for_model", coerce)
+
+    snapshot = routes._snapshot_run_reasoning_effort(
+        None,
+        profile_config=profile_config,
+        model="gpt-5",
+        model_provider="openai-codex",
+    )
+    profile_config["agent"]["reasoning_effort"] = "low"
+
+    assert snapshot == "xhigh"
+    assert calls == [("max", "gpt-5", "openai-codex")]
+
+
+def test_omitted_effort_reads_default_config_when_no_profile_config(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes.api_config,
+        "get_config",
+        lambda: {"agent": {"reasoning_effort": "medium"}},
+    )
+    monkeypatch.setattr(
+        routes.api_config,
+        "coerce_reasoning_effort_for_model",
+        lambda effort, model, *, provider_id=None: effort,
+    )
+
+    assert routes._snapshot_run_reasoning_effort(
+        "",
+        profile_config=None,
+        model="test-model",
+        model_provider="test-provider",
+    ) == "medium"
+
+
+def test_chat_start_passes_accepted_profile_effort_snapshot(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    session = SimpleNamespace(
+        session_id="reasoning-fallback-snapshot",
+        workspace=str(tmp_path),
+        model="gpt-5",
+        model_provider="openai-codex",
+        profile="default",
+        messages=[],
+        context_messages=[],
+        pending_user_message=None,
+    )
+    profile_config = {"agent": {"reasoning_effort": "max"}}
+    captured = {}
+
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args: True)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_workspace_with_recovery",
+        lambda *_args: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_read_profile_model_config",
+        lambda *_args: ("openai-codex", "gpt-5", profile_config),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("gpt-5", "openai-codex", False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_repair_foreign_session_model_provider",
+        lambda *_args, **_kwargs: "openai-codex",
+    )
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda *_args: True)
+    monkeypatch.setattr(
+        routes.api_config,
+        "coerce_reasoning_effort_for_model",
+        lambda effort, *_args, **_kwargs: "xhigh" if effort == "max" else effort,
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_run",
+        lambda _session, **kwargs: captured.update(kwargs) or {"stream_id": "snapshot-stream"},
+    )
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200: payload)
+
+    routes._handle_chat_start(
+        None,
+        {"session_id": session.session_id, "message": "use the accepted default"},
+    )
+    profile_config["agent"]["reasoning_effort"] = "low"
+
+    assert captured["reasoning_effort"] == "xhigh"
 
 
 def test_gateway_request_effort_wins_over_shared_profile_default(monkeypatch):

@@ -20821,6 +20821,38 @@ def _normalize_run_reasoning_effort(value) -> str | None:
     return raw
 
 
+def _snapshot_run_reasoning_effort(
+    value,
+    *,
+    profile_config,
+    model,
+    model_provider,
+) -> str | None:
+    """Capture one run's explicit effort or current profile fallback."""
+    explicit = _normalize_run_reasoning_effort(value)
+    if explicit is not None:
+        return explicit
+
+    cfg = profile_config if isinstance(profile_config, dict) else api_config.get_config()
+    agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else None
+    configured = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    try:
+        effective = api_config.coerce_reasoning_effort_for_model(
+            configured,
+            model,
+            provider_id=model_provider,
+        )
+    except Exception:
+        logger.warning(
+            "failed to snapshot profile reasoning effort for model=%r provider=%r",
+            model,
+            model_provider,
+            exc_info=True,
+        )
+        return None
+    return str(effective or "").strip().lower() or None
+
+
 def _runtime_runner_client_factory():
     """Return the configured runner-local client.
 
@@ -21732,7 +21764,12 @@ def _handle_chat_start(handler, body, diag=None):
             profile_provider=catalog_profile_provider,
         )
         try:
-            reasoning_effort = _normalize_run_reasoning_effort(body.get("reasoning_effort"))
+            reasoning_effort = _snapshot_run_reasoning_effort(
+                body.get("reasoning_effort"),
+                profile_config=_pp_cfg,
+                model=model,
+                model_provider=model_provider,
+            )
         except ValueError as e:
             return bad(handler, str(e), 400)
         if model_provider == "moa" and moa_config is None:
