@@ -16,7 +16,6 @@ meaning), mirroring the guard sibling handlers already use.
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -66,41 +65,6 @@ def _run_search(query, session_dir):
     with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
         "api.profiles.get_active_profile_name", return_value="default"
     ), patch("api.routes.j", side_effect=fake_j):
-        routes._handle_sessions_search(SimpleNamespace(), urlparse(query))
-    return captured
-
-
-def _run_search_via_api(query, session_dir, monkeypatch=None):
-    """Alternative: invoke the full HTTP handler via the routes module."""
-    import api.routes as routes
-
-    sessions_meta = [{"session_id": "s1", "title": "Untitled", "profile": "default"}]
-    captured = {}
-
-    def fake_j(handler, payload, status=200, extra_headers=None):
-        captured["status"] = status
-        captured["payload"] = payload
-
-    # Patch both the SESSION_DIR reference in routes.py and the
-    # all_sessions so we drive the session list from the mock.
-    patches = [
-        patch("api.routes.all_sessions", return_value=list(sessions_meta)),
-        patch("api.routes.get_session"),  # no longer called by content search
-        patch("api.profiles.get_active_profile_name", return_value="default"),
-        patch("api.routes.j", side_effect=fake_j),
-    ]
-    if monkeypatch:
-        # Allow monkeypatch to override SESSION_DIR for the imported routes module
-        import api.routes as routes
-        monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
-    else:
-        patches.append(patch("api.routes.SESSION_DIR", session_dir))
-
-    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
-        "api.routes.get_session",
-    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
-        "api.routes.j", side_effect=fake_j
-    ):
         routes._handle_sessions_search(SimpleNamespace(), urlparse(query))
     return captured
 
@@ -344,6 +308,56 @@ def test_query_with_backslash_is_not_dropped(session_s1_json, monkeypatch):
         routes._handle_sessions_search(
             SimpleNamespace(),
             urlparse("/api/sessions/search?q=path%5cto&content=1"),  # path\to
+        )
+
+    assert captured["status"] == 200
+    assert captured["payload"]["count"] == 1
+
+
+# ── Normalization parity (greptile P1: raw bypass of partial collapse) ──────
+
+def test_depth_limit_sees_message_past_collapsed_partials(session_s1_json, monkeypatch):
+    """A logical assistant message stored as N adjacent duplicate streamed
+    partials must be collapsed before the depth budget is applied, so a term in
+    the *next* real message is still found at depth=2. Without collapse, the
+    raw partials would consume the entire depth budget and hide message 2.
+    """
+    import api.routes as routes
+
+    # Two identical adjacent partial markers (as on disk from a retried stream),
+    # followed by a real user message that holds the needle.
+    s1 = {
+        "session_id": "s1",
+        "title": "Partial collapse test",
+        "profile": "default",
+        "messages": [
+            {"role": "assistant", "content": "working", "_partial": True},
+            {"role": "assistant", "content": "working", "_partial": True},
+            {"role": "user", "content": "NEEDLE after partials"},
+        ],
+    }
+    session_file = session_s1_json / "s1.json"
+    session_file.write_text(json.dumps(s1), encoding="utf-8")
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_s1_json)
+
+    sessions_meta = [{"session_id": "s1", "title": "Partial collapse test", "profile": "default"}]
+    captured = {}
+
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured["status"] = status
+        captured["payload"] = payload
+
+    # depth=2 must find the needle in the 3rd message (after the 2 partials
+    # collapse to 1), proving normalization parity with get_session().
+    with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
+        "api.routes.get_session"
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
+        routes._handle_sessions_search(
+            SimpleNamespace(),
+            urlparse("/api/sessions/search?q=needle&content=1&depth=2"),
         )
 
     assert captured["status"] == 200

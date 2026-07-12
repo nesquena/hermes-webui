@@ -15722,96 +15722,51 @@ def _discover_rg_candidates(query: str, sessions: list) -> set | None:
 
 
 def _load_messages_head(filepath, n: int) -> list:
-    """Fast partial load: parse only the first `n` messages from a session JSON file.
-    Scans the raw text to find message boundaries, then loads truncated JSON.
-    Returns the full messages list when n <= 0 or on any parse failure.
+    """Load messages from a session JSON file for content search.
+
+    Reads the full messages array from the file, applies the same
+    adjacent-partial collapse that ``Session.load()`` applies (so the
+    searchable text matches the canonical normalized transcript), then returns
+    the first ``n`` normalized messages when ``n > 0`` (0 = all).  Normalizing
+    the *whole* list before slicing by ``n`` is what keeps search consistent
+    with ``get_session()``: collapsing first means duplicate streamed partials
+    don't consume the depth budget and hide later real messages.
     """
-    if n <= 0:
-        return []
     try:
         raw = filepath.read_text("utf-8")
     except Exception:
         return []
-
-    idx = raw.find('"messages"')
-    if idx < 0:
-        return []
-    arr_start = raw.find("[", idx)
-    if arr_start < 0:
-        return []
-
-    pos = arr_start + 1
-    depth = 0
-    obj_count = 0
-    in_string = False
-    escape = False
-    last_good_end = pos
-
-    while pos < len(raw):
-        ch = raw[pos]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            pos += 1
-            continue
-        if ch == '"':
-            in_string = True
-            pos += 1
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                obj_count += 1
-                last_good_end = pos + 1
-                if obj_count >= n:
-                    break
-        elif ch == "[" and depth == 0:
-            depth -= 1
-        elif ch == "]" and depth == -1:
-            last_good_end = pos + 1
-            break
-        pos += 1
-
-    if obj_count == 0:
-        return []
-
-    truncated = raw[:last_good_end] + "]}" if not raw[:last_good_end].rstrip().endswith("]}") else raw[:last_good_end]
     try:
         import json
-        data = json.loads(truncated)
-        return data.get("messages", [])
+        data = json.loads(raw)
+        msgs = data.get("messages", [])
     except Exception:
-        try:
-            data = json.loads(raw)
-            return data.get("messages", [])
-        except Exception:
-            return []
+        return []
+
+    # Mirror Session.load() normalization so search sees the same text the rest
+    # of the app treats as canonical (fixes greptile P1: raw bypass of collapse).
+    try:
+        from api.models import _collapse_adjacent_duplicate_partials
+        msgs, _ = _collapse_adjacent_duplicate_partials(msgs)
+    except Exception:
+        pass
+
+    if n > 0:
+        msgs = msgs[:n]
+    return msgs
 
 
 def _rg_content_match(session_id: str, query: str, depth: int) -> str | None:
     """Search session messages for `query`, return matching message text or None.
-    Uses partial JSON loading when depth > 0; falls back to full get_session.
+
+    Loads messages via ``_load_messages_head`` (which applies the same partial
+    collapse normalization ``get_session``/``Session.load`` uses), bounded by
+    ``depth`` when ``depth > 0`` (0 = full transcript).
     """
     fpath = SESSION_DIR / f"{session_id}.json"
     if not fpath.exists():
         return None
-
-    if depth > 0:
-        msgs = _load_messages_head(fpath, depth)
-    else:
-        try:
-            import json
-            data = json.loads(fpath.read_text("utf-8"))
-            msgs = data.get("messages", [])
-        except Exception:
-            return None
-
+    msgs = _load_messages_head(fpath, depth)
     for m in msgs:
         c = _session_search_message_text(m)
         if query in str(c).lower():
