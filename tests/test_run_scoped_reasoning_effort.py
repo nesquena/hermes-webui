@@ -140,3 +140,225 @@ def test_queue_helper_snapshots_active_effort_without_overwriting_explicit_value
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == ["low", "xhigh", None]
+
+
+_MODEL_SWITCH_DRIVER = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+
+function extractFunc(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start); let depth = 1; i++;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++; else if (src[i] === '}') depth--; i++;
+  }
+  return src.slice(start, i);
+}
+
+function makeEl() {
+  return {
+    style: {}, dataset: {}, title: '', textContent: '', value: '',
+    classList: { add(){}, remove(){}, toggle(){}, contains(){return false} },
+    setAttribute(){}, querySelectorAll(){return []}, querySelector(){return null},
+  };
+}
+
+const els = {
+  composerReasoningWrap: makeEl(),
+  composerReasoningLabel: makeEl(),
+  composerReasoningChip: makeEl(),
+  composerReasoningDropdown: makeEl(),
+  modelSelect: makeEl(),
+};
+global.S = {
+  activeProfile: 'default',
+  session: {
+    session_id: 'switch-race', profile: 'default',
+    model: 'gpt-5', model_provider: 'openai-codex',
+  },
+};
+global.window = {};
+global.document = {addEventListener(){}, querySelector(){return null}};
+global.$ = id => els[id] || null;
+global._modelStateForSelect = () => ({model_provider: ''});
+global._highlightReasoningOption = () => {};
+global._applyReasoningOptions = () => {};
+global.showToast = () => {};
+
+let requests = [];
+global.api = (url, options) => new Promise((resolve, reject) => {
+  requests.push({url, options: options || null, resolve, reject});
+});
+
+var _currentReasoningEffort = null;
+var _currentReasoningEffortsSupported = null;
+var _currentReasoningEffortKey = null;
+var _profileTransitionReasoningContext = null;
+var _pendingReasoningEffortSelection = null;
+var _reasoningEffortWriteSeq = 0;
+var _lastReasoningFetchKey = null;
+var _reasoningFetchSeq = 0;
+
+for (const name of [
+  '_normalizeReasoningEffort',
+  '_formatReasoningEffortLabel',
+  '_reasoningEffortContext',
+  '_reasoningEffortQuery',
+  '_reasoningEffortProfileKey',
+  '_reasoningEffortStateKey',
+  'getComposerReasoningEffortForRun',
+  '_applyReasoningChip',
+  'fetchReasoningChip',
+  '_invalidateReasoningChipForKey',
+  'syncReasoningChip',
+  '_setComposerReasoningEffort',
+]) eval(extractFunc(name));
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const reset = () => {
+  S.activeProfile = 'default';
+  S.session = {
+    session_id: 'switch-race', profile: 'default',
+    model: 'gpt-5', model_provider: 'openai-codex',
+  };
+  requests = [];
+  _currentReasoningEffort = null;
+  _currentReasoningEffortsSupported = null;
+  _currentReasoningEffortKey = null;
+  _profileTransitionReasoningContext = null;
+  _pendingReasoningEffortSelection = null;
+  _reasoningEffortWriteSeq = 0;
+  _lastReasoningFetchKey = null;
+  _reasoningFetchSeq = 0;
+};
+
+(async () => {
+  const result = {};
+
+  reset();
+  const oldKey = _reasoningEffortStateKey();
+  _lastReasoningFetchKey = oldKey;
+  _applyReasoningChip('xhigh', {supported_efforts:['low','high','xhigh']}, oldKey);
+  S.session.model = 'claude-opus-4.6';
+  S.session.model_provider = 'anthropic';
+  syncReasoningChip();
+  result.switchPending = {
+    chip: _currentReasoningEffort,
+    outgoing: getComposerReasoningEffortForRun(),
+    request: requests[0].url,
+  };
+  requests[0].resolve({
+    reasoning_effort: 'max',
+    supported_efforts: ['low','high','xhigh','max'],
+  });
+  await flush();
+  result.switchResolved = {
+    chip: _currentReasoningEffort,
+    outgoing: getComposerReasoningEffortForRun(),
+  };
+
+  reset();
+  const writePromise = _setComposerReasoningEffort('max');
+  result.pendingSelectionOldModel = getComposerReasoningEffortForRun();
+  S.session.model = 'claude-opus-4.6';
+  S.session.model_provider = 'anthropic';
+  syncReasoningChip();
+  result.pendingSelectionNewModel = getComposerReasoningEffortForRun();
+  S.activeProfile = 'work';
+  result.pendingSelectionOtherProfile = getComposerReasoningEffortForRun();
+  S.activeProfile = 'default';
+
+  // This GET began before the profile write settled and may observe old config.
+  requests[1].resolve({
+    reasoning_effort: 'medium',
+    supported_efforts: ['low','medium','high','xhigh','max'],
+  });
+  await flush();
+  result.afterPrewriteGet = getComposerReasoningEffortForRun();
+
+  // The POST response was coerced for GPT-5 and must not claim Claude's key.
+  requests[0].resolve({
+    reasoning_effort: 'xhigh',
+    supported_efforts: ['low','high','xhigh'],
+  });
+  await flush();
+  result.afterWriteBeforeRefetch = getComposerReasoningEffortForRun();
+  result.requestTrace = requests.map(req => ({
+    url: req.url,
+    method: req.options && req.options.method || 'GET',
+  }));
+
+  requests[2].resolve({
+    reasoning_effort: 'max',
+    supported_efforts: ['low','medium','high','xhigh','max'],
+  });
+  await writePromise;
+  await flush();
+  result.afterRefetch = {
+    chip: _currentReasoningEffort,
+    outgoing: getComposerReasoningEffortForRun(),
+  };
+
+  process.stdout.write(JSON.stringify(result));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+
+
+@pytest.fixture(scope="module")
+def model_switch_outcome(tmp_path_factory):
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+    driver = tmp_path_factory.mktemp("reasoning_model_switch") / "driver.js"
+    driver.write_text(_MODEL_SWITCH_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [node, str(driver), str(ROOT / "static" / "ui.js")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_model_switch_invalidates_previous_effort_synchronously(model_switch_outcome):
+    assert model_switch_outcome["switchPending"] == {
+        "chip": "",
+        "outgoing": "",
+        "request": "/api/reasoning?model=claude-opus-4.6&provider=anthropic",
+    }
+    assert model_switch_outcome["switchResolved"] == {
+        "chip": "max",
+        "outgoing": "max",
+    }
+
+
+def test_pending_raw_selection_survives_target_model_change(model_switch_outcome):
+    assert model_switch_outcome["pendingSelectionOldModel"] == "max"
+    assert model_switch_outcome["pendingSelectionNewModel"] == "max"
+    assert model_switch_outcome["pendingSelectionOtherProfile"] == ""
+    assert model_switch_outcome["afterPrewriteGet"] == "max"
+
+
+def test_old_model_write_response_cannot_claim_new_model(model_switch_outcome):
+    assert model_switch_outcome["afterWriteBeforeRefetch"] == ""
+    assert model_switch_outcome["requestTrace"] == [
+        {
+            "url": "/api/reasoning",
+            "method": "POST",
+        },
+        {
+            "url": "/api/reasoning?model=claude-opus-4.6&provider=anthropic",
+            "method": "GET",
+        },
+        {
+            "url": "/api/reasoning?model=claude-opus-4.6&provider=anthropic",
+            "method": "GET",
+        },
+    ]
+    assert model_switch_outcome["afterRefetch"] == {
+        "chip": "max",
+        "outgoing": "max",
+    }
