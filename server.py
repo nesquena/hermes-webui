@@ -100,7 +100,7 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-from api.auth import check_auth
+from api.auth import check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
@@ -373,7 +373,7 @@ class Handler(BaseHTTPRequestHandler):
         self._safe_webui_print(f'[webui] {record}')
 
     def do_GET(self) -> None:
-        self._req_t0 = time.time()
+        self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -398,7 +398,7 @@ class Handler(BaseHTTPRequestHandler):
             clear_request_profile()
 
     def _handle_write(self, route_func) -> None:
-        self._req_t0 = time.time()
+        self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)

@@ -519,17 +519,32 @@ def test_completion_unread_clears_only_when_session_is_opened():
     assert load_idx != -1, "loadSession not found"
     load_block = SESSIONS_JS[load_idx:SESSIONS_JS.find("function _resolveSessionModelForDisplaySoon", load_idx)]
 
-    stale_guard_idx = load_block.find("if (!_isCurrentLoad()) return;")
-    clear_idx = load_block.find("_clearSessionCompletionUnread(S.session.session_id);")
-    set_viewed_idx = load_block.find("_setSessionViewedCount(S.session.session_id")
+    # The metadata-arrival "mark viewed + clear stale completion unread" pair now
+    # flows through _acknowledgeSessionVisit(S.session.session_id, ...), which
+    # calls _setSessionViewedCount() internally (and _setSessionViewedCount clears
+    # any stale completion-unread marker, #3020) (#4946).
+    assign_idx = load_block.find("S.session=data.session;")
+    acknowledge_idx = load_block.find("_acknowledgeSessionVisit(\n    S.session.session_id,", assign_idx)
+    # The last stale-response ownership guard before the visit is acknowledged:
+    # stale loadSession responses must not clear unread markers for sessions the
+    # user did not actually open.
+    stale_guard_idx = load_block.rfind("if (!_isCurrentLoad())", 0, acknowledge_idx)
 
-    assert clear_idx != -1, "loadSession must clear explicit completion unread when the user opens the session"
-    assert stale_guard_idx != -1 and stale_guard_idx < clear_idx, (
-        "stale loadSession responses must not clear unread markers for sessions the user did not actually open"
+    assert assign_idx != -1, "loadSession must assign S.session before acknowledging the visit"
+    assert acknowledge_idx != -1 and assign_idx < acknowledge_idx, (
+        "loadSession must acknowledge the visit only after the session metadata "
+        "response is accepted for the in-flight load"
     )
-    assert set_viewed_idx != -1 and set_viewed_idx < clear_idx, (
-        "completion unread should clear at the same point the session is marked viewed"
+    assert stale_guard_idx != -1 and stale_guard_idx < acknowledge_idx, (
+        "stale loadSession responses must be guarded out before the visit-ack "
+        "clears unread markers for sessions the user did not actually open"
     )
+    # The acknowledge helper is what clears completion unread on visit, via
+    # _setSessionViewedCount (#3020 stale-marker clear).
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    ack_body_start = SESSIONS_JS.find("function _acknowledgeSessionVisit(")
+    ack_body = SESSIONS_JS[ack_body_start:SESSIONS_JS.find("function _sessionVisitHasUnreadState", ack_body_start)]
+    assert "_setSessionViewedCount(sid, messageCount);" in ack_body
 
 
 def test_historical_sessions_are_not_marked_unread_on_list_render():

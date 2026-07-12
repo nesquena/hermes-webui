@@ -34,3 +34,24 @@ def test_newsession_clears_pending_named_context():
     assert "window._clearPendingSelections()" in head, (
         "newSession() must clear pending named context blocks before replacing S.session"
     )
+
+
+def test_selection_id_counter_resets_when_all_chips_cleared():
+    # #5929: the module-level _selectionIdCounter only ever incremented, so
+    # clearing all context chips and selecting again started at "Context N+1"
+    # instead of "Context 1". It must reset to 0 when the last chip is removed
+    # AND on _clearPendingSelections (clear-all / session switch).
+    remove_fn = MESSAGES_JS[
+        MESSAGES_JS.index("function _removeNamedContextBlock(id){"):
+        MESSAGES_JS.index("function _clearPendingSelections(){")
+    ]
+    assert "if(!_pendingSelections.length)_selectionIdCounter=0;" in remove_fn, (
+        "_removeNamedContextBlock must reset _selectionIdCounter to 0 once the "
+        "last chip is removed so the next selection restarts at Context 1"
+    )
+    clear_fn = MESSAGES_JS[MESSAGES_JS.index("function _clearPendingSelections(){"):]
+    clear_fn = clear_fn[:clear_fn.index("\n}") + 2]
+    assert "_selectionIdCounter=0;" in clear_fn, (
+        "_clearPendingSelections must reset _selectionIdCounter to 0 (clear-all "
+        "and session-switch path) so context chip numbering restarts at 1"
+    )

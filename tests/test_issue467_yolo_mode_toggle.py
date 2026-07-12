@@ -20,6 +20,37 @@ from tests.conftest import requires_agent_modules
 TEST_BASE = f"http://127.0.0.1:{os.environ.get('HERMES_WEBUI_TEST_PORT', '8788')}"
 
 
+def _read_static_file(name: str) -> str:
+    return (pathlib.Path(__file__).resolve().parents[1] / "static" / name).read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.fixture(scope="module")
+def commands_js():
+    return _read_static_file("commands.js")
+
+
+@pytest.fixture(scope="module")
+def messages_js():
+    return _read_static_file("messages.js")
+
+
+@pytest.fixture(scope="module")
+def index_html():
+    return _read_static_file("index.html")
+
+
+@pytest.fixture(scope="module")
+def style_css():
+    return _read_static_file("style.css")
+
+
+@pytest.fixture(scope="module")
+def i18n_js():
+    return _read_static_file("i18n.js")
+
+
 def _get(path, expect_ok=True):
     import urllib.request, urllib.error
     try:
@@ -132,11 +163,6 @@ class TestYoloEndpointPost:
 class TestYoloCommandRegistration:
     """/yolo slash command should be registered in commands.js."""
 
-    @pytest.fixture(scope="class")
-    def commands_js(self):
-        with open("static/commands.js", "r", encoding="utf-8") as f:
-            return f.read()
-
     def test_yolo_command_in_array(self, commands_js):
         assert "'yolo'" in commands_js or '"yolo"' in commands_js
 
@@ -152,11 +178,6 @@ class TestYoloCommandRegistration:
 
 class TestYoloBusySendPath:
     """/yolo should be recognized by the busy-send command intercept."""
-
-    @pytest.fixture(scope="class")
-    def messages_js(self):
-        with open("static/messages.js", "r", encoding="utf-8") as f:
-            return f.read()
 
     def test_yolo_in_busy_send_allowlist(self, messages_js):
         send_idx = messages_js.find("async function send(")
@@ -186,11 +207,6 @@ class TestYoloBusySendPath:
 class TestYoloPillHTML:
     """YOLO pill element should exist in index.html."""
 
-    @pytest.fixture(scope="class")
-    def index_html(self):
-        with open("static/index.html", "r", encoding="utf-8") as f:
-            return f.read()
-
     def test_yolo_pill_element_exists(self, index_html):
         assert 'id="yoloPill"' in index_html
 
@@ -208,11 +224,6 @@ class TestYoloPillHTML:
 
 class TestYoloCSS:
     """YOLO-related CSS classes should exist."""
-
-    @pytest.fixture(scope="class")
-    def style_css(self):
-        with open("static/style.css", "r", encoding="utf-8") as f:
-            return f.read()
 
     def test_yolo_pill_class(self, style_css):
         assert ".yolo-pill{" in style_css or ".yolo-pill {" in style_css
@@ -239,11 +250,6 @@ class TestYoloI18n:
     ]
 
     LOCALES = ["en", "ru", "es", "de", "zh", "ko"]
-
-    @pytest.fixture(scope="class")
-    def i18n_js(self):
-        with open("static/i18n.js", "r", encoding="utf-8") as f:
-            return f.read()
 
     @pytest.mark.parametrize("locale", LOCALES)
     def test_locale_has_all_yolo_keys(self, i18n_js, locale):

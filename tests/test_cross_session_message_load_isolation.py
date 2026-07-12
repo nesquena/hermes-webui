@@ -225,6 +225,13 @@ function createEnvironment() {
   globalThis._clearSameSessionForceReloadHint = () => { clearHintCalls += 1; };
   globalThis._clearStuckSessionOnBoot = () => {};
   globalThis._setSessionViewedCount = () => {};
+  // #4946: loadSession() now routes its viewed-count/unread clear through
+  // _acknowledgeSessionVisit(). This harness exercises cross-session load
+  // ordering + stale-reject, not unread-dot state, so stub it (and its
+  // same-session-guard predicate) to no-ops — mirroring the pre-existing
+  // _setSessionViewedCount / _clearSessionCompletionUnread stubs it replaced.
+  globalThis._acknowledgeSessionVisit = () => {};
+  globalThis._sessionVisitHasUnreadState = () => false;
   globalThis.scheduleTodosRefresh = () => {};
   globalThis.startSessionStream = () => {};
   globalThis.syncTopbar = () => {};

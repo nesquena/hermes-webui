@@ -2658,7 +2658,7 @@ function _kanbanLooksLikeStaleClientError(err){
 function _kanbanUnavailableHtml(err){
   const raw = String((err && err.message) || err || '');
   if (_kanbanLooksLikeStaleClientError(err)) {
-    return `<div class="main-view-empty"><div class="main-view-empty-title">Kanban needs a hard refresh</div><div class="main-view-empty-subtitle">The server rejected an obsolete Kanban endpoint. This usually means the browser or Mac app is still running a stale cached WebUI bundle after an update.</div><button class="btn primary" type="button" onclick="hardRefreshWebUIClient()">Hard refresh now</button><div class="main-view-empty-subtitle">Original error: ${esc(raw || 'not found')}</div></div>`;
+    return `<div class="main-view-empty"><div class="main-view-empty-title">Kanban needs a hard refresh</div><div class="main-view-empty-subtitle">The server rejected an obsolete Kanban endpoint. This usually means the browser or Mac app is still running a stale cached WebUI bundle after an update.</div><button class="btn primary" type="button" onclick="hardRefreshWebUIClient()">${esc(t('update_hard_refresh_now')||'Hard refresh now')}</button><div class="main-view-empty-subtitle">Original error: ${esc(raw || 'not found')}</div></div>`;
   }
   const msg = `${esc(t('kanban_unavailable'))}: ${esc(raw)}`;
   return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
@@ -6349,6 +6349,36 @@ async function switchToWorkspace(path,name){
     showToast(t('workspace_busy_switch'));
     return;
   }
+  // #5473 (opt-in, default off): treat switching to a DIFFERENT workspace as a
+  // new-chat boundary instead of mutating the current session in place. A
+  // workspace switch changes the project-context files the agent loaded, so
+  // reusing the session would carry stale cross-workspace context. Only fires
+  // when: the setting is on, the target workspace actually differs from the
+  // current one, and the current conversation has real messages worth keeping on
+  // its original workspace. Same-workspace selection stays an in-place refresh.
+  if(
+    window._newChatOnWorkspaceSwitch===true &&
+    S.session && S.session.workspace && path && path!==S.session.workspace &&
+    Array.isArray(S.messages) && S.messages.length>0
+  ){
+    if(typeof _previewDirty!=='undefined'&&_previewDirty){
+      const discard=await showConfirmDialog({
+        title:t('discard_file_edits_title'),
+        message:t('discard_file_edits_message'),
+        confirmLabel:t('discard'),
+        danger:true
+      });
+      if(!discard)return;
+      if(typeof cancelEditMode==='function')cancelEditMode();
+      if(typeof clearPreview==='function')clearPreview();
+    }
+    closeWsDropdown();
+    // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
+    S._profileSwitchWorkspace=path;
+    if(typeof newSession==='function') await newSession(false);
+    showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
+    return;
+  }
   if(typeof _previewDirty!=='undefined'&&_previewDirty){
     const discard=await showConfirmDialog({
       title:t('discard_file_edits_title'),
@@ -6890,7 +6920,7 @@ async function switchToProfile(name) {
   // already on this profile, so paths like activateCurrentProfile() (which
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
-  if (name && name === S.activeProfile) return;
+  if (name && name === S.activeProfile) return true;
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -6971,7 +7001,7 @@ async function switchToProfile(name) {
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
-    if (_switchGen !== _profileSwitchGeneration) return;
+    if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
     const targetActiveProfile = S.activeProfile || 'default';
@@ -6987,13 +7017,6 @@ async function switchToProfile(name) {
         sessionInProgress = true;
       }
     }
-    // #4650 review: a profile switch can change agent.reasoning_effort (and other
-    // reasoning inputs like base_url) WITHOUT changing the default model/provider,
-    // which is all the reasoning-chip cache key tracks. Force exactly one reasoning
-    // refetch for the new profile so the chip reflects the new profile's effort
-    // (the syncTopbar() calls below route through syncReasoningChip()).
-    if (typeof _lastReasoningFetchKey !== 'undefined') _lastReasoningFetchKey = null;
-
     // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
     // registry is now profile-keyed (#3629), but this tab's existing EventSource is
     // still subscribed to the PREVIOUS profile's watcher — and the probe-based
@@ -7057,6 +7080,9 @@ async function switchToProfile(name) {
     if (S.session && !sessionInProgress) {
       S.session.profile = data.active || name;
     }
+    if (typeof refreshProfileTransitionReasoningChip === 'function') {
+      refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
+    }
 
     // ── Apply workspace ────────────────────────────────────────────────────
     if (data.default_workspace) {
@@ -7092,7 +7118,7 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
@@ -7100,7 +7126,7 @@ async function switchToProfile(name) {
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       await newSession(false, {awaitWorkspaceLoad: workspaceVisible});
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -7114,7 +7140,7 @@ async function switchToProfile(name) {
       // the superseded switch would clear the newer switch's workspace skeleton
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7155,6 +7181,7 @@ async function switchToProfile(name) {
 
     await _profileSwitchPanelLoad();
     _refreshProfileSwitchBackground(_switchGen);
+    return true;
 
   } catch (e) {
     // Revert the optimistic name update on error
@@ -7181,6 +7208,7 @@ async function switchToProfile(name) {
         clearWorkspaceTreeSkeleton();
       }
     }
+    return false;
   } finally {
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
@@ -8638,6 +8666,8 @@ function _preferencesPayloadFromUi(){
   if(defaultMessageModeSel) payload.default_message_mode=defaultMessageModeSel.value;
   const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
   if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
+  const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
+  if(newChatOnWorkspaceSwitchCb) payload.new_chat_on_workspace_switch=newChatOnWorkspaceSwitchCb.checked;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
   Object.assign(payload,_speechPreferencesPayloadFromUi());
@@ -8746,6 +8776,9 @@ async function _autosavePreferencesSettings(payload){
     if(payload&&payload.show_busy_placeholder_hint!==undefined){
       window._showBusyPlaceholderHint=!!(saved&&saved.show_busy_placeholder_hint);
       if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    }
+    if(payload&&payload.new_chat_on_workspace_switch!==undefined){
+      window._newChatOnWorkspaceSwitch=!!(saved&&saved.new_chat_on_workspace_switch);  // #5473
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -9441,6 +9474,12 @@ async function loadSettingsPanel(){
       showBusyPlaceholderHintCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
+    const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
+    if(newChatOnWorkspaceSwitchCb){
+      newChatOnWorkspaceSwitchCb.checked=!!settings.new_chat_on_workspace_switch;
+      window._newChatOnWorkspaceSwitch=newChatOnWorkspaceSwitchCb.checked;
+      newChatOnWorkspaceSwitchCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');
     if(botNameField){
@@ -11866,14 +11905,18 @@ async function checkUpdatesNow(channelOverride){
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
       if(agentPart) parts.push(agentPart);
+      const manualInstruction=(typeof _formatManualUpdateInstruction==='function')
+        ? _formatManualUpdateInstruction(data.webui)
+        : null;
       // Track non-git targets separately so a mixed deployment (one git
       // checkout + one no-git install) never hides the "can't check" state
       // behind an up-to-date summary (#4356).
       const noGitParts=[];
-      if(data.webui&&data.webui.no_git) noGitParts.push('WebUI');
+      if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
+        if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
@@ -12500,8 +12543,8 @@ async function saveSettings(andClose){
 
 async function signOut(){
   try{
-    await api('/api/auth/logout',{method:'POST',body:'{}'});
-    window.location.href='login';
+    const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
+    window.location.href=response.trusted_logout_url||'login';
   }catch(e){
     showToast(t('sign_out_failed')+e.message);
   }

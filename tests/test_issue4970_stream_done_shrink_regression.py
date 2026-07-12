@@ -75,7 +75,12 @@ def test_helper_and_token_threaded_through_render():
     )
     render_fn = _function_body(UI_JS, "_renderSettledAnchorSceneForMessage")
     assert "_shouldKeepSettledWorklogOpenForStreamSettle(streamId)" in render_fn
-    assert "collapsed:!keepSettledWorklogOpen" in render_fn
+    # keepSettledWorklogOpen must still drive the settled-render collapsed flag.
+    # #5941 OR'd in an errored-turn keep-open term, so the expression is now
+    # `collapsed:!(keepSettledWorklogOpen||erroredWorklogKeepOpen)` — assert the
+    # invariant (keepSettledWorklogOpen negates into `collapsed`) without pinning
+    # the exact term list.
+    assert "collapsed:!(keepSettledWorklogOpen" in render_fn
     group_fn = _function_body(UI_JS, "_anchorSceneWorklogGroup")
     assert "collapsed:(opts&&opts.collapsed!==undefined)?opts.collapsed:!live" in group_fn
     # The STREAM_DONE handler arms one-shot then disarms around the render.

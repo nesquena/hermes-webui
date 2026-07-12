@@ -58,6 +58,7 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
+_RELEASE_TAG_RE = re.compile(r'^v[0-9][0-9A-Za-z.+-]*$')
 # Phrases git emits when its own short-lived index/refs lock files block a
 # subsequent operation. Tuned to match only the true "lock file already exists"
 # semantics that warrant a lock-conflict response -- v2 deliberately drops the
@@ -272,7 +273,7 @@ def _inventory_locks(path: Path) -> dict:
     try:
         for entry in sorted(git_dir.rglob('*.lock')):
             try:
-                rel = str(entry.relative_to(git_dir))
+                rel = entry.relative_to(git_dir).as_posix()
             except ValueError:
                 continue
             if rel == 'index.lock':
@@ -787,6 +788,101 @@ def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
     return sum(1 for line in out.splitlines() if line.strip())
 
 
+def _release_tag_sort_key(tag):
+    """Return a version-sort key that keeps release tags newest-first."""
+    raw = str(tag or '').strip()
+    if raw.startswith('v'):
+        raw = raw[1:]
+    parts = []
+    for chunk in re.split(r'(\d+)', raw):
+        if not chunk:
+            continue
+        parts.append((0, int(chunk)) if chunk.isdigit() else (1, chunk.lower()))
+    return tuple(parts)
+
+
+def _is_stable_release_tag(tag):
+    """Return True for stable release tags and False for prerelease tags."""
+    raw = str(tag or '').strip()
+    return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
+
+
+def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100', *, timeout=3.0):
+    """Return GitHub release tags newest-first, including commit SHAs when available."""
+    request = urllib.request.Request(
+        url,
+        headers={
+            'Accept': 'application/vnd.github+json',
+            'User-Agent': 'hermes-webui',
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode('utf-8'))
+    if not isinstance(payload, list):
+        return []
+    tags = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get('name')
+        if not isinstance(name, str):
+            continue
+        name = name.strip()
+        if not _is_stable_release_tag(name):
+            continue
+        commit = item.get('commit')
+        sha = None
+        if isinstance(commit, dict):
+            commit_sha = commit.get('sha')
+            if isinstance(commit_sha, str):
+                commit_sha = commit_sha.strip()
+                if commit_sha:
+                    sha = commit_sha
+        tags.append({'name': name, 'sha': sha})
+    return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
+
+
+def _check_webui_published_release_update():
+    """Return a manual-update payload when the baked WebUI version trails GitHub tags."""
+    current_version = str(WEBUI_VERSION or '').strip()
+    if not _RELEASE_TAG_RE.fullmatch(current_version):
+        return None
+    try:
+        tags = _github_release_tags()
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
+    if not tags:
+        return None
+
+    tag_names = [item['name'] for item in tags]
+    if current_version not in tag_names:
+        return None
+
+    latest = tags[0]
+    latest_version = latest['name']
+    behind = _release_gap(tag_names, current_version, latest_version)
+    if behind <= 0:
+        return None
+
+    current = next((item for item in tags if item['name'] == current_version), None) or {}
+    current_ref = current.get('sha') or current_version
+    latest_ref = latest.get('sha') or latest_version
+    repo_url = 'https://github.com/nesquena/hermes-webui'
+    return {
+        'name': 'webui',
+        'behind': behind,
+        'current_sha': current_ref,
+        'latest_sha': latest_ref,
+        'branch': latest_version,
+        'repo_url': repo_url,
+        'release_based': True,
+        'current_version': current_version,
+        'latest_version': latest_version,
+        'compare_url': _build_compare_url(repo_url, current_ref, latest_ref),
+        'manual_update': True,
+    }
+
+
 def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
     """Return True when HEAD has moved past the latest reachable channel tag.
 
@@ -1112,6 +1208,12 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """
     channel = _normalize_channel(channel)
     if path is None or not (path / '.git').exists():
+        if name == 'webui':
+            release_info = _check_webui_published_release_update()
+            if release_info is not None:
+                release_info = dict(release_info)
+                release_info['no_git'] = True
+                return release_info
         return {
             'name': name,
             'behind': None,
