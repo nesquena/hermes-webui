@@ -4642,15 +4642,24 @@ let _lastReasoningFetchKey=null;
 // profile switch that resets the cache and refetches the same default model but
 // a different agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
-
 function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
-  // while this GET is in flight short-circuit instead of re-dispatching (that
+  // while this GET is in-flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
-  const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  var baseKey=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  // Include session id so same-model sessions with different efforts
+  // don't share the cached chip value across sessions.
+  var sid=(S&&S.session&&S.session.session_id)||'';
+  baseKey=baseKey+(baseKey?'&':'?')+'sid='+sid;
+  var key='/api/reasoning'+baseKey;
+  var sessionEffort=(S&&S.session&&S.session.reasoning_effort)||null;
+  if(sessionEffort!==null){
+    key=key+(baseKey?'&':'?')+'session_effort='+encodeURIComponent(sessionEffort);
+  }
   const seq=++_reasoningFetchSeq;
-  _lastReasoningFetchKey=key;
-  api('/api/reasoning'+key).then(function(st){
+  var effForCache=(S&&S.session&&S.session.reasoning_effort)||'';
+  _lastReasoningFetchKey=baseKey+'&eff='+encodeURIComponent(effForCache);
+  api(key).then(function(st){
     // Ignore a stale/superseded response: only the most recent dispatch may
     // apply, so an older in-flight GET can't poison the current chip (#4650).
     if(seq!==_reasoningFetchSeq) return;
@@ -4681,7 +4690,6 @@ function refreshProfileTransitionReasoningChip(model, provider){
 function clearProfileTransitionReasoningContext(){
   _profileTransitionReasoningContext=null;
 }
-
 function syncReasoningChip(){
   // #4650: syncTopbar() calls this on every routine UI refresh, and during
   // streaming those fire at high frequency. Before a9ce2889 this served the
@@ -4689,17 +4697,20 @@ function syncReasoningChip(){
   // refetch unconditionally to refresh supported-efforts after a model switch,
   // which turned ordinary syncs into a GET /api/reasoning storm (one per token).
   // Restore the cache short-circuit but keep a9ce2889's intent: only hit the
-  // network when nothing is cached yet OR the model/provider identity changed
-  // since the last fetch (the only inputs that change /api/reasoning's answer).
+  // network when nothing is cached yet OR the model/provider/session identity
+  // changed since the last fetch.
   // The user-pick and model-switch paths still update the cache directly.
   const key=_reasoningEffortQuery();
+  var sid=(S&&S.session&&S.session.session_id)||'';
+  var _scEffort=(S&&S.session&&S.session.reasoning_effort)||'';
+  const sidKey=key+(key?'&':'?')+'sid='+sid+'&eff='+encodeURIComponent(_scEffort);
   // Short-circuit on the KEY alone: if a fetch for this exact model/provider has
   // already been dispatched (in-flight) or completed, do not dispatch another —
   // this is what stops the #4650 storm, including the COLD-cache window where
   // _currentReasoningEffort is still null between the first dispatch and its
   // response (10 syncs before the first GET resolves must produce ONE request,
   // not ten). Apply the cached chip only once we actually have an effort value.
-  if(_lastReasoningFetchKey===key){
+  if(_lastReasoningFetchKey===sidKey){
     if(_currentReasoningEffort!==null) _applyReasoningChip(_currentReasoningEffort);
     return;
   }
@@ -4767,13 +4778,19 @@ document.addEventListener('click',function(e){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
     if(effort){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      // Post to session update so reasoning_effort is session-scoped
+      // (like model switching), not a global config.yaml write.
+      const payload={session_id:(S&&S.session&&S.session.session_id)||'',reasoning_effort:effort};
+      api('/api/session/update',{method:'POST',body:JSON.stringify(payload)})
         .then(function(st){
+          // Update in-memory session state immediately
+          if(S&&S.session) S.session.reasoning_effort=effort;
+          ++_reasoningFetchSeq;
+          _lastReasoningFetchKey=null;
           _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+          showToast('🧠 '+t('reasoning_effort_set')+' '+((st&&st.reasoning_effort)||effort));
         })
-        .catch(function(){showToast('🧠 Failed to set effort');});
+        .catch(function(){showToast('🧠 '+t('reasoning_effort_failed'));});
       closeReasoningDropdown();
     }
   }

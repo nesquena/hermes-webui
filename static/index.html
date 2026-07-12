@@ -1152,6 +1152,20 @@
                 <div class="model-dropdown settings-model-dropdown" id="settingsModelDropdown"></div>
               </div>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
+              <div style="margin-top:10px">
+                <label for="settingsReasoningEffort" style="font-size:13px;font-weight:600" data-i18n="settings_label_reasoning_effort">Default Reasoning Effort</label>
+                <select id="settingsReasoningEffort" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;margin-top:4px">
+                  <option value="" data-i18n="reasoning_option_default">(Use provider default)</option>
+                  <option value="none" data-i18n="reasoning_option_none">None</option>
+                  <option value="minimal" data-i18n="reasoning_option_minimal">Minimal</option>
+                  <option value="low" data-i18n="reasoning_option_low">Low</option>
+                  <option value="medium" data-i18n="reasoning_option_medium">Medium</option>
+                  <option value="high" data-i18n="reasoning_option_high">High</option>
+                  <option value="xhigh" data-i18n="reasoning_option_xhigh">Extra High</option>
+                  <option value="max" data-i18n="reasoning_option_max">Max</option>
+                </select>
+                <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_reasoning_effort">Default reasoning effort for new chats. Set to "(Use provider default)" to let the provider decide.</div>
+              </div>
             </div>
             <div class="settings-field">
               <label data-i18n="settings_label_auxiliary_models">Auxiliary Models</label>

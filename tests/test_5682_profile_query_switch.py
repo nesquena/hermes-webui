@@ -644,7 +644,7 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
     payload = json.loads(_run_node(source))
     assert payload["beforeDestination"] == {
         "effort": "",
-        "cachedKey": "?model=gpt-5",
+        "cachedKey": "?model=gpt-5&sid=&eff=",
         "wrapDisplay": "none",
         "calls": 2,
     }
@@ -750,13 +750,13 @@ fetchReasoningChip();
     payload = json.loads(_run_node(source))
     assert payload["blankBoot"] == {
         "hidden": "none",
-        "urls": ["/api/reasoning", "/api/reasoning?model=gpt-high&provider=openai"],
+        "urls": ["/api/reasoning?sid=", "/api/reasoning?model=gpt-high&provider=openai&sid="],
     }
     assert payload["blankBootAfterOld"] == ""
     assert payload["blankBootAfterNew"] == "high"
     assert payload["directLoad"] == {
         "hidden": "none",
-        "urls": ["/api/reasoning?model=old-model&provider=old-provider", "/api/reasoning?model=gpt-high&provider=openai"],
+        "urls": ["/api/reasoning?model=old-model&provider=old-provider&sid=", "/api/reasoning?model=gpt-high&provider=openai&sid="],
     }
     assert payload["directLoadAfterOld"] == ""
     assert payload["directLoadAfterNew"] == "high"
@@ -825,8 +825,8 @@ console.log(JSON.stringify({{
 }}));
 """
     payload = json.loads(_run_node(source))
-    assert payload["urls"] == ["/api/reasoning?model=claude-sonnet&provider=anthropic"]
+    assert payload["urls"] == ["/api/reasoning?model=claude-sonnet&provider=anthropic&sid="]
     assert payload["context"] is None
-    assert payload["lastKey"] == "?model=claude-sonnet&provider=anthropic"
+    assert payload["lastKey"] == "?model=claude-sonnet&provider=anthropic&sid=&eff="
     assert payload["clearPos"] >= 0
     assert payload["clearPos"] < payload["noSessionSyncPos"]

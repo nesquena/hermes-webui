@@ -12194,17 +12194,20 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/reasoning":
         # Current reasoning config (shared source of truth with the CLI —
         # reads display.show_reasoning and agent.reasoning_effort from
-        # the active profile's config.yaml).
+        # the active profile's config.yaml). Accepts optional session_effort
+        # query param so the frontend can pass a session-scoped override.
         query = parse_qs(parsed.query)
         model_id = (query.get("model", [""])[0] or "").strip() or None
         provider_id = (query.get("provider", [""])[0] or "").strip() or None
         base_url = (query.get("base_url", [""])[0] or "").strip() or None
+        override_effort = (query.get("session_effort", [""])[0] or "").strip() or None
         return j(
             handler,
             get_reasoning_status(
                 model_id=model_id,
                 provider_id=provider_id,
                 base_url=base_url,
+                override_effort=override_effort,
             ),
         )
 
@@ -14457,6 +14460,8 @@ def handle_post(handler, parsed) -> bool:
                     from api.config import _evict_session_agent
 
                     _evict_session_agent(body["session_id"])
+            if "reasoning_effort" in body:
+                s.reasoning_effort = body["reasoning_effort"] or None
             s.save()
         if str(old_ws or "") != str(new_ws or ""):
             try:
@@ -20651,6 +20656,7 @@ def _start_chat_stream_for_session(
     workspace: str,
     model: str,
     model_provider=None,
+    reasoning_effort=None,
     normalized_model: bool = False,
     diag=None,
     goal_related: bool = False,
@@ -20779,6 +20785,8 @@ def _start_chat_stream_for_session(
     backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    if not backend_is_gateway:
+        worker_kwargs["reasoning_effort"] = reasoning_effort
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(
@@ -20862,6 +20870,7 @@ def _start_run(
     workspace: str,
     model,
     model_provider,
+    reasoning_effort=None,
     normalized_model,
     source: str,
     route: str,
@@ -20903,6 +20912,7 @@ def _start_run(
                 workspace=request.workspace or workspace,
                 model=request.model or model,
                 model_provider=request.provider or model_provider,
+                reasoning_effort=reasoning_effort,
                 normalized_model=normalized_model,
                 diag=diag,
                 source=request.source or source,
@@ -20943,6 +20953,7 @@ def _start_run(
         workspace=workspace,
         model=model,
         model_provider=model_provider,
+        reasoning_effort=reasoning_effort,
         normalized_model=normalized_model,
         diag=diag,
         source=source,
@@ -21075,6 +21086,7 @@ def start_session_turn(
             s = get_session(session_id)
         except KeyError:
             return {"error": "Session not found", "_status": 404}
+        _wakeup_reasoning_effort = getattr(s, "reasoning_effort", None)
         if clear_process_wakeup_pause_if_model_changed(
             s,
             model=model,
@@ -21188,6 +21200,7 @@ def start_session_turn(
         workspace=workspace,
         model=model,
         model_provider=model_provider,
+        reasoning_effort=_wakeup_reasoning_effort,
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
@@ -21658,6 +21671,13 @@ def _handle_chat_start(handler, body, diag=None):
             if "model_provider" in body
             else getattr(s, "model_provider", None)
         )
+        # Resolve reasoning_effort: session override, config.yaml as fallback
+        _session_reasoning_effort = getattr(s, "reasoning_effort", None)
+        if _session_reasoning_effort is not None:
+            _reasoning_effort = _session_reasoning_effort
+        else:
+            _cfg = get_config()
+            _reasoning_effort = (_cfg.get('agent') or {}).get('reasoning_effort')
         _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
         explicit_model_pick = bool(body.get("explicit_model_pick"))
         moa_config = None
@@ -21713,6 +21733,7 @@ def _handle_chat_start(handler, body, diag=None):
             "workspace": workspace,
             "model": model,
             "model_provider": model_provider,
+            "reasoning_effort": _reasoning_effort,
             "normalized_model": normalized_model,
             "source": "webui",
             "route": "/api/chat/start",

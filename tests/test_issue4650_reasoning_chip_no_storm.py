@@ -147,6 +147,68 @@ result.effort_after_fresh_B = _currentReasoningEffort;   // expect 'high'
 if (HANDLERS[0].onErr) HANDLERS[0].onErr();
 result.effort_after_stale_A_fail = _currentReasoningEffort; // expect still 'high'
 
+// 6. COMPOSER SELECTION RACE: exercise the ACTUAL production click handler
+//    (document.addEventListener('click', ...)) in the Node sandbox. An
+//    in-flight reasoning GET must NOT overwrite the user's new selection
+//    because the handler increments _reasoningFetchSeq.
+_currentReasoningEffort = null; _lastReasoningFetchKey = null; _reasoningFetchSeq = 0;
+global.S = { session: { session_id: 'race-session', model: 'gpt-5', model_provider: 'openai' } };
+// Capture API calls and their resolve callbacks.
+const HANDLERS2 = [];
+var CALLS2 = [];
+global.api = (url, opts) => {
+  CALLS2.push({url, opts});
+  return {
+    then: (onOk) => { HANDLERS2.push({ url, onOk, opts }); return { catch: () => {} }; },
+    catch: () => {},
+  };
+};
+// Replace the no-op addEventListener with one that stores the handler.
+var _clickHandler = null;
+global.document.addEventListener = function(type, handler) {
+  if (type === 'click') _clickHandler = handler;
+};
+// Provide stubs the production click handler calls at runtime.
+global.closeReasoningDropdown = function(){};
+global.showToast = function(){};
+global.t = function(key){ return key; };
+// Extract the production document.addEventListener('click', ...) code from ui.js
+// by finding the marker in the source and brace-matching the anonymous function.
+const ADD_CLICK_MARKER = "document.addEventListener('click',function(e){";
+const _addEventStart = src.indexOf(ADD_CLICK_MARKER);
+const _eventBraceStart = src.indexOf('{', _addEventStart);
+let _depth = 1, _eventCodeEnd = _eventBraceStart + 1;
+while (_depth > 0 && _eventCodeEnd < src.length) {
+  if (src[_eventCodeEnd] === '{') _depth++;
+  else if (src[_eventCodeEnd] === '}') _depth--;
+  _eventCodeEnd++;
+}
+// Slice includes the '});' closing so eval registers the event listener.
+const _productionClickHandlerSrc = src.slice(_addEventStart, _eventCodeEnd + 2);
+eval(_productionClickHandlerSrc);
+// Dispatch a reasoning GET (in-flight, seq = 1).
+fetchReasoningChip();
+const seqBeforeSelection = _reasoningFetchSeq;
+// Simulate a click on a .reasoning-option element with data-effort="high".
+// The production handler (registered above) will run, POST to
+// /api/session/update via the mocked api(), and invoke the .then() callback
+// which increments _reasoningFetchSeq and clears _lastReasoningFetchKey.
+var _mockEvent = { target: { closest: function(sel) {
+  if (sel === '.reasoning-option') return { dataset: { effort: 'high' } };
+  return null;
+}}};
+_clickHandler(_mockEvent);
+// Resolve the session update (HANDLERS2[1] because [0] is the reasoning GET).
+HANDLERS2[1].onOk({ reasoning_effort: 'high', supported_efforts: ['low','high'] });
+const afterSelection = _currentReasoningEffort;
+// Now resolve the OLD in-flight reasoning GET with stale data. The production
+// seq guard (if(seq!==_reasoningFetchSeq) return) must discard this.
+HANDLERS2[0].onOk({ reasoning_effort: 'low', supported_efforts: ['low','high'] });
+const afterOldResponse = _currentReasoningEffort;
+// The chip must still show the user's new effort, not the stale response.
+result.composerRace = { seqBeforeSelection, afterSelection, afterOldResponse };
+
+
 result.calls = CALLS;
 process.stdout.write(JSON.stringify(result));
 """
@@ -229,4 +291,19 @@ def test_stale_out_of_order_failure_does_not_hide_fresh_chip(outcome):
     assert outcome["effort_after_stale_A_fail"] == "high", (
         "a stale failure must not overwrite the fresh chip state: "
         f"got {outcome['effort_after_stale_A_fail']!r}"
+    )
+
+
+def test_composer_selection_invalidates_in_flight_fetch(outcome):
+    """Composer effort selection bumps seq so an in-flight GET cannot
+    overwrite the user's new selection after it resolves."""
+    race = outcome["composerRace"]
+    assert race["afterSelection"] == "high", (
+        "the chip must show the newly selected effort immediately: "
+        f"got {race['afterSelection']!r}"
+    )
+    assert race["afterOldResponse"] == "high", (
+        "a stale in-flight reasoning GET that resolves after the user selected "
+        "a new effort must be discarded (seq guard); expected 'high' (the "
+        f"selection), got {race['afterOldResponse']!r}"
     )

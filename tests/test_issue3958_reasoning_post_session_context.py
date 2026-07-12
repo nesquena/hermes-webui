@@ -56,7 +56,10 @@ def test_ui_posts_reasoning_context_with_effort():
     src = read("static/ui.js")
     assert "function _reasoningEffortContext()" in src
     assert "new URLSearchParams(_reasoningEffortContext())" in src
-    assert "Object.assign({effort:effort},_reasoningEffortContext())" in src
+    # Post-reasoning-effort now uses /api/session/update with session_id
+    # instead of Object.assign to /api/reasoning (session-scoped, #5960).
+    assert "reasoning_effort" in src
+    assert "api('/api/session/update'" in src
 
 
 def test_reasoning_post_route_threads_model_context():

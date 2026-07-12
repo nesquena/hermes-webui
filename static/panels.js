@@ -9450,6 +9450,19 @@ async function loadSettingsPanel(){
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     // show_thinking has no settings panel checkbox — controlled via /reasoning show|hide
+    // Default reasoning effort — read from config.yaml (no autosave; saved explicitly like model)
+    const reasoningEffortSel=$('settingsReasoningEffort');
+    if(reasoningEffortSel){
+      try{
+        const reStatus=await api('/api/reasoning');
+        const currentEffort=reStatus&&reStatus.reasoning_effort||'';
+        if(['none','minimal','low','medium','high','xhigh','max'].includes(currentEffort)){
+          reasoningEffortSel.value=currentEffort;
+        }
+        _settingsReasoningEffortOnOpen=currentEffort;
+        reasoningEffortSel.addEventListener('change',_markSettingsDirty,{once:false});
+      }catch(e){}
+    }
     const sidebarDensitySel=$('settingsSidebarDensity');
     if(sidebarDensitySel){
       sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
@@ -12503,6 +12516,19 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
+      // Save default reasoning effort if changed
+      const reasoningEffortSel=$('settingsReasoningEffort');
+      if(reasoningEffortSel){
+        const newReasoningEffort=reasoningEffortSel.value||'';
+        if(newReasoningEffort!==(_settingsReasoningEffortOnOpen||'')){
+          try{
+            await api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:newReasoningEffort})});
+            _settingsReasoningEffortOnOpen=newReasoningEffort;
+          }catch(_reasoningErr){
+            if(typeof showToast==='function') showToast(t('reasoning_effort_settings_failed'));
+          }
+        }
+      }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       const cpField=$('settingsCurrentPassword'); if(cpField) cpField.value='';
@@ -12531,6 +12557,19 @@ async function saveSettings(andClose){
         body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
       }catch(_modelErr){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+      }
+    }
+    // Save default reasoning effort if changed
+    const reasoningEffortSel=$('settingsReasoningEffort');
+    if(reasoningEffortSel){
+      const newReasoningEffort=reasoningEffortSel.value||'';
+      if(newReasoningEffort!==(_settingsReasoningEffortOnOpen||'')){
+        try{
+          await api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:newReasoningEffort})});
+          _settingsReasoningEffortOnOpen=newReasoningEffort;
+        }catch(_reasoningErr){
+          if(typeof showToast==='function') showToast(t('reasoning_effort_settings_failed'));
+        }
       }
     }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});

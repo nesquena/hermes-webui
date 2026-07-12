@@ -6573,6 +6573,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    reasoning_effort=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -8031,13 +8032,16 @@ def _run_agent_streaming(
             except Exception:
                 _max_tokens_cfg = None
 
-            # CLI-parity reasoning effort: read agent.reasoning_effort from the
-            # active profile's config.yaml (the same key the CLI writes via
-            # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
-            # the key is absent or invalid, pass None → agent uses its default.
+            # CLI-parity reasoning effort: prefer session-scoped override (set via
+            # the reasoning chip in the WebUI composer), fall back to the active
+            # profile's config.yaml. When the key is absent or invalid, pass None
+            # → agent uses its default.
             try:
-                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
-                _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
+                if reasoning_effort is not None:
+                    _effort_raw = reasoning_effort
+                else:
+                    _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
+                    _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
                 _effort = coerce_reasoning_effort_for_model(
                     _effort_raw,
                     resolved_model,

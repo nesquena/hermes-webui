@@ -3938,6 +3938,7 @@ def get_reasoning_status(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    override_effort: str | None = None,
 ) -> dict:
     """Return current reasoning configuration from the active profile's
     config.yaml — the same source of truth the CLI reads from.
@@ -3945,12 +3946,17 @@ def get_reasoning_status(
     Keys:
       - show_reasoning: bool — from ``display.show_reasoning`` (default True)
       - reasoning_effort: str — from ``agent.reasoning_effort`` ('' = default)
+      - override_effort: str — optional session-scoped override (overrides config)
     """
     config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
-    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    effort_raw = (
+        override_effort
+        if override_effort
+        else (agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None)
+    )
 
     resolve_model = model_id
     resolve_provider = provider_id
@@ -4096,20 +4102,22 @@ def set_reasoning_effort(
     Raises ``ValueError`` on an unrecognised level so callers can return 400.
     """
     raw = str(effort or "").strip().lower()
-    if not raw:
-        raise ValueError("effort is required")
-    if raw != "none" and raw not in VALID_REASONING_EFFORTS:
-        raise ValueError(
-            f"Unknown reasoning effort '{effort}'. "
-            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
-        )
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        agent_cfg["reasoning_effort"] = raw
+        if raw:
+            if raw != "none" and raw not in VALID_REASONING_EFFORTS:
+                raise ValueError(
+                    f"Unknown reasoning effort '{effort}'. "
+                    f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
+                )
+            agent_cfg["reasoning_effort"] = raw
+        else:
+            # Empty = clear the key → use provider default
+            agent_cfg.pop("reasoning_effort", None)
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()

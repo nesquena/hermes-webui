@@ -397,8 +397,53 @@ class TestReasoningConfigHelpers:
         import pytest as _pt
         with _pt.raises(ValueError):
             cfg.set_reasoning_effort('garbage')
-        with _pt.raises(ValueError):
-            cfg.set_reasoning_effort('')
+
+    def test_set_reasoning_effort_empty_clears_key(self, tmp_path, monkeypatch):
+        """set_reasoning_effort('') deletes agent.reasoning_effort from config."""
+        import api.config as cfg
+        cfgfile = tmp_path / 'config.yaml'
+        monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
+        cfg.set_reasoning_effort('high')
+        cfg.set_reasoning_effort('')
+        import yaml as _yaml
+        data = _yaml.safe_load(cfgfile.read_text(encoding='utf-8'))
+        assert data.get('agent', {}).get('reasoning_effort') is None, (
+            "empty effort must clear agent.reasoning_effort from config.yaml"
+        )
+
+    def test_set_reasoning_effort_preserves_env_var_references(self, tmp_path, monkeypatch):
+        """set_reasoning_effort must not expand ${VAR} refs in config.yaml."""
+        import api.config as cfg
+        monkeypatch.setenv("OPENROUTER_API_KEY", "review-secret")
+        cfgfile = tmp_path / 'config.yaml'
+        # Write a config with a secret env-var reference in an unrelated section
+        cfgfile.write_text("model:\n  provider: openrouter\n  api_key: ${OPENROUTER_API_KEY}\n", encoding="utf-8")
+        monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
+        cfg.set_reasoning_effort("high")
+        raw = cfgfile.read_text(encoding="utf-8")
+        assert "${OPENROUTER_API_KEY}" in raw, (
+            "set_reasoning_effort must not expand ${VAR} references in config.yaml"
+        )
+        assert "reasoning_effort: high" in raw
+        assert "review-secret" not in raw, (
+            "expanded env var value must not leak into config.yaml"
+        )
+
+    def test_set_reasoning_effort_clear_preserves_env_var_references(self, tmp_path, monkeypatch):
+        """Clearing reasoning_effort must not expand ${VAR} refs in config.yaml."""
+        import api.config as cfg
+        monkeypatch.setenv("OPENROUTER_API_KEY", "review-secret")
+        cfgfile = tmp_path / 'config.yaml'
+        cfgfile.write_text("model:\n  api_key: ${OPENROUTER_API_KEY}\nagent:\n  reasoning_effort: high\n", encoding="utf-8")
+        monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
+        cfg.set_reasoning_effort("")
+        raw = cfgfile.read_text(encoding="utf-8")
+        assert "${OPENROUTER_API_KEY}" in raw, (
+            "clearing reasoning_effort must not expand ${VAR} references"
+        )
+        assert "review-secret" not in raw, (
+            "expanded env var value must not leak into config.yaml"
+        )
 
     def test_get_reasoning_status_defaults_to_show_true(self, tmp_path, monkeypatch):
         """When config.yaml has no display section, show_reasoning defaults
