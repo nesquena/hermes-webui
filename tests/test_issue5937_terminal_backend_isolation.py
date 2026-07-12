@@ -358,3 +358,62 @@ def test_concurrent_same_identity_turns_share_one_invalidation():
     cleanup.assert_called_once_with("default")
     second.release()
     first.release()
+
+
+def test_piggyback_during_failing_leader_cleanup_stays_uncommitted():
+    """Gate residual: the genuine >1 piggyback window — a second same-new-identity
+    turn acquiring while the leader is still inside cleanup_vm. The piggybacker
+    proceeds without invalidating (never evicts what the leader may have built);
+    when the leader's cleanup then FAILS, the transition stays uncommitted and
+    the next unobstructed turn retries. Documents the intended self-healing
+    semantics of that window."""
+    import threading as _threading
+
+    ssh = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "box"}
+    local = {"TERMINAL_ENV": "local"}
+
+    def _acquire_once(env, cleanup):
+        return isolation.acquire_terminal_backend_turn_lease(env, cleanup_vm=cleanup)
+
+    seed, _ = _acquire_once(ssh, MagicMock())
+    seed.release()
+
+    in_cleanup = _threading.Event()
+    release_cleanup = _threading.Event()
+    cleanup_calls = []
+
+    def _failing_held_cleanup(*args, **kwargs):
+        cleanup_calls.append((args, kwargs))
+        in_cleanup.set()
+        release_cleanup.wait(timeout=10)
+        raise RuntimeError("cleanup blew up mid-transition")
+
+    leader_result = {}
+
+    def _leader_thread():
+        lease, did = _acquire_once(local, _failing_held_cleanup)
+        lease.release()
+        leader_result["invalidated"] = did
+
+    leader = _threading.Thread(target=_leader_thread, daemon=True)
+    leader.start()
+    assert in_cleanup.wait(timeout=5), "leader never reached cleanup_vm"
+
+    # Leader is mid-cleanup (identity registered, transition NOT yet committed).
+    # A same-new-identity turn acquiring NOW hits the genuine >1 piggyback path.
+    piggy, piggy_invalidated = _acquire_once(local, MagicMock())
+    assert piggy_invalidated is False
+    assert len(cleanup_calls) == 1  # piggybacker did not double-invalidate
+    piggy.release()
+
+    release_cleanup.set()
+    leader.join(timeout=10)
+    assert not leader.is_alive()
+    assert leader_result["invalidated"] is False  # cleanup failed -> not invalidated
+
+    # Failure left the transition uncommitted: the next unobstructed turn retries.
+    ok = MagicMock()
+    retry, retry_invalidated = _acquire_once(local, ok)
+    assert retry_invalidated is True
+    ok.assert_called_once_with("default")
+    retry.release()
