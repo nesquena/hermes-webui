@@ -621,11 +621,16 @@ global.api = () => {{
 }};
 var _currentReasoningEffort = 'low';
 var _currentReasoningEffortsSupported = ['low', 'high'];
+var _currentReasoningEffortKey = 'default\\n?model=gpt-5';
+var _profileTransitionReasoningContext = null;
 var _lastReasoningFetchKey = '?model=gpt-5';
 var _reasoningFetchSeq = 7;
 eval(extractFunc('_normalizeReasoningEffort'));
 eval(extractFunc('_formatReasoningEffortLabel'));
+eval(extractFunc('_reasoningEffortProfileKey'));
+eval(extractFunc('_reasoningEffortStateKey'));
 eval(extractFunc('_applyReasoningChip'));
+eval(extractFunc('_invalidateReasoningChipForKey'));
 eval(extractFunc('fetchReasoningChip'));
 eval(extractFunc('refreshProfileTransitionReasoningChip'));
 fetchReasoningChip();
@@ -644,7 +649,7 @@ console.log(JSON.stringify({{ beforeDestination, afterPreviousResponse, afterDes
     payload = json.loads(_run_node(source))
     assert payload["beforeDestination"] == {
         "effort": "",
-        "cachedKey": "?model=gpt-5",
+        "cachedKey": "default\n?model=gpt-5",
         "wrapDisplay": "none",
         "calls": 2,
     }
@@ -704,6 +709,7 @@ var _profileSwitchGeneration = 0;
 var _skillsData = null, _workspaceList = null;
 var _currentReasoningEffort = 'low';
 var _currentReasoningEffortsSupported = ['low', 'high'];
+var _currentReasoningEffortKey = null;
 var _profileTransitionReasoningContext = null;
 var _lastReasoningFetchKey = null;
 var _reasoningFetchSeq = 0;
@@ -711,7 +717,10 @@ eval(extractFunc(uiSrc, '_normalizeReasoningEffort'));
 eval(extractFunc(uiSrc, '_formatReasoningEffortLabel'));
 eval(extractFunc(uiSrc, '_reasoningEffortContext'));
 eval(extractFunc(uiSrc, '_reasoningEffortQuery'));
+eval(extractFunc(uiSrc, '_reasoningEffortProfileKey'));
+eval(extractFunc(uiSrc, '_reasoningEffortStateKey'));
 eval(extractFunc(uiSrc, '_applyReasoningChip'));
+eval(extractFunc(uiSrc, '_invalidateReasoningChipForKey'));
 eval(extractFunc(uiSrc, 'fetchReasoningChip'));
 eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
 eval(extractFunc(uiSrc, 'syncTopbar'));
@@ -793,6 +802,7 @@ global._applyReasoningOptions = () => {{}};
 global._modelStateForSelect = (_, model) => ({{ model, model_provider: 'anthropic' }});
 var _currentReasoningEffort = 'high';
 var _currentReasoningEffortsSupported = ['low', 'high'];
+var _currentReasoningEffortKey = 'vops\\n?model=gpt-high&provider=openai';
 var _profileTransitionReasoningContext = {{ profile: 'vops', model: 'gpt-high', provider: 'openai' }};
 var _lastReasoningFetchKey = '?model=gpt-high&provider=openai';
 var _reasoningFetchSeq = 1;
@@ -805,7 +815,10 @@ eval(extractFunc(uiSrc, '_normalizeReasoningEffort'));
 eval(extractFunc(uiSrc, '_formatReasoningEffortLabel'));
 eval(extractFunc(uiSrc, '_reasoningEffortContext'));
 eval(extractFunc(uiSrc, '_reasoningEffortQuery'));
+eval(extractFunc(uiSrc, '_reasoningEffortProfileKey'));
+eval(extractFunc(uiSrc, '_reasoningEffortStateKey'));
 eval(extractFunc(uiSrc, '_applyReasoningChip'));
+eval(extractFunc(uiSrc, '_invalidateReasoningChipForKey'));
 eval(extractFunc(uiSrc, 'fetchReasoningChip'));
 eval(extractFunc(uiSrc, 'refreshProfileTransitionReasoningChip'));
 eval(extractFunc(uiSrc, 'clearProfileTransitionReasoningContext'));
@@ -827,6 +840,6 @@ console.log(JSON.stringify({{
     payload = json.loads(_run_node(source))
     assert payload["urls"] == ["/api/reasoning?model=claude-sonnet&provider=anthropic"]
     assert payload["context"] is None
-    assert payload["lastKey"] == "?model=claude-sonnet&provider=anthropic"
+    assert payload["lastKey"] == "vops\n?model=claude-sonnet&provider=anthropic"
     assert payload["clearPos"] >= 0
     assert payload["clearPos"] < payload["noSessionSyncPos"]
