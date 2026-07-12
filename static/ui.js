@@ -17170,12 +17170,12 @@ function autoResizeTextarea(ta) {
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
   const initialSid = S.session.session_id;
-  // #5924: capture the deliberate-pick signal BEFORE any await, scoped to
+  const absoluteKeepCount = _oldestIdx + msgIdx;
+  // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
   // initialSid — a non-default session model (vs profile default), which is
   // inference-free and survives the failed send's marker consumption. See
   // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
   const _recoveryPick=_deliberateSessionModelPick(initialSid);
-  const absoluteKeepCount = _oldestIdx + msgIdx;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
