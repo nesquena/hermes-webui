@@ -11,7 +11,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is required for boot 
 
 
 def _boot_completion_branch() -> str:
-    source = Path("static/boot.js").read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "static" / "boot.js").read_text(encoding="utf-8")
     marker = "    if(S.session) syncTopbar();"
     start = source.index(marker)
     end = source.index("\n  }).catch(e=>", start)
