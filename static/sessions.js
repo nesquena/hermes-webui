@@ -1606,6 +1606,7 @@ async function loadSession(sid){
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
       if (!_isCurrentLoad()) {
+        if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
         _rearmActiveSessionStream();
         return;
       }
@@ -1618,6 +1619,7 @@ async function loadSession(sid){
         // before clearing _loadingSessionId or retrying so the stale
         // continuation can't hijack the UI back to the old target.
         if (!_isCurrentLoad()) {
+          if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
           _rearmActiveSessionStream();
           return;
         }
@@ -1636,6 +1638,7 @@ async function loadSession(sid){
     // load, re-arm the active session's stream and bail before any DOM mutation
     // or self-heal.
     if (!_isCurrentLoad()) {
+      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
       _rearmActiveSessionStream();
       return;
     }
@@ -1674,6 +1677,7 @@ async function loadSession(sid){
       }
     }
     _clearSameSessionForceReloadHint(sid);
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
     // Capture whether this failure self-healed away the current session (a
     // 404 on the *current* session whose sidecar was deleted server-side).
     // In that case there is no live session left to stream for, so we must
@@ -1709,6 +1713,7 @@ async function loadSession(sid){
   // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
     if (_isCurrentLoad()) _loadingSessionId = null;
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
