@@ -17081,6 +17081,19 @@ function autoResizeTextarea(ta) {
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
   const initialSid = S.session.session_id;
+  // #5924: capture a GENUINE deliberate pick (selector model differs from the
+  // session's own stored model) BEFORE any await, scoped to initialSid — so a
+  // recovery edit honors a real pick without forcing explicit_model_pick on an
+  // unchanged model (which suppressed the server's compatible-model resolution).
+  const _recoveryPick=(typeof _chatPayloadModel==='function')
+    ? (function(){
+        const m=_chatPayloadModel();
+        const p=(typeof _chatPayloadModelProvider==='function')?_chatPayloadModelProvider(m):null;
+        const changed=String(m||'')!==String(S.session.model||'')
+          || String(p||'')!==String(S.session.model_provider||'');
+        return (m && changed) ? {model:m, model_provider:p} : null;
+      })()
+    : null;
   const absoluteKeepCount = _oldestIdx + msgIdx;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
@@ -17091,21 +17104,21 @@ async function submitEdit(msgIdx, newText) {
       session_id: initialSid,
       keep_count: absoluteKeepCount
     })});
+    // #5924 SILENT-race guard: a session switch during the truncate await must not
+    // let this recovery apply session A's intent (truncate/re-arm/send) to the
+    // newly-visible session.
+    if(!S.session || S.session.session_id !== initialSid) return;
     S.messages = S.messages.slice(0, absoluteKeepCount);
     renderMessages();
     $('msg').value = newText;
-    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. The
-    // onchange explicit-pick marker is single-shot and was already consumed by
-    // an earlier send(), so re-arm it from the CURRENT selector state before
-    // this send. Otherwise explicit_model_pick goes out false and the server's
-    // compatible-model resolution re-reverts a freshly-picked cross-family
-    // model back to the failed/stale value (mirrors a fresh onchange→send).
-    // Re-arming every recovery send also lets a SECOND consecutive edit honor
-    // its pick even though send() consumes the marker each time.
-    if(typeof _rememberPendingSessionModel==='function' && typeof _chatPayloadModel==='function' && S.session){
-      const _recoveryModel=_chatPayloadModel();
-      const _recoveryProvider=(typeof _chatPayloadModelProvider==='function')?_chatPayloadModelProvider(_recoveryModel):null;
-      _rememberPendingSessionModel(S.session.session_id, _recoveryModel, _recoveryProvider);
+    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
+    // single-shot explicit-pick marker ONLY for a genuine deliberate pick
+    // (_recoveryPick, captured pre-await + scoped to initialSid). Unconditional
+    // re-arming forced explicit_model_pick on every edit even with no pick,
+    // suppressing the server's compatible-model resolution; a real cross-provider
+    // session pick is already honored every send by send()'s _isCrossProviderPick.
+    if(_recoveryPick && typeof _rememberPendingSessionModel==='function'){
+      _rememberPendingSessionModel(initialSid, _recoveryPick.model, _recoveryPick.model_provider);
     }
     await send();
   } catch(e) { setStatus(t('edit_failed') + e.message); }

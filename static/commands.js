@@ -1680,24 +1680,39 @@ async function cmdRetry(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
   const activeSid=S.session.session_id;
+  // #5924: capture whether the user has a GENUINE deliberate model pick for THIS
+  // session BEFORE any await — a recovery send should honor a real pick, but must
+  // NOT force explicit_model_pick when the model is unchanged (that made the server
+  // skip its compatible-model resolution). A deliberate pick = the current selector
+  // model differs from the session's own stored model (the failed turn's model).
+  const _recoveryPick=(typeof _chatPayloadModel==='function' && S.session)
+    ? (function(){
+        const m=_chatPayloadModel();
+        const p=(typeof _chatPayloadModelProvider==='function')?_chatPayloadModelProvider(m):null;
+        const changed=String(m||'')!==String(S.session.model||'')
+          || String(p||'')!==String(S.session.model_provider||'');
+        return (m && changed) ? {model:m, model_provider:p} : null;
+      })()
+    : null;
   try{
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    // #5924 SILENT-race guard: a session switch during the GET await must not let
+    // this recovery apply session A's intent to whatever session is now visible.
+    if(!S.session||S.session.session_id!==activeSid)return;
     if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
-    // #5924 (Facet 1 + Facet 4): /retry is a recovery send. The onchange
-    // explicit-pick marker is single-shot and was already consumed by an
-    // earlier send(), so re-arm it from the CURRENT selector state before this
-    // send. Otherwise explicit_model_pick goes out false and the server's
-    // compatible-model resolution re-reverts a freshly-picked cross-family
-    // model back to the failed/stale value. Re-arming every recovery send also
-    // lets a SECOND consecutive retry honor its pick (send() consumes it each time).
-    if(typeof _rememberPendingSessionModel==='function' && typeof _chatPayloadModel==='function' && S.session){
-      const _recoveryModel=_chatPayloadModel();
-      const _recoveryProvider=(typeof _chatPayloadModelProvider==='function')?_chatPayloadModelProvider(_recoveryModel):null;
-      _rememberPendingSessionModel(activeSid, _recoveryModel, _recoveryProvider);
+    // #5924 (Facet 1 + Facet 4): /retry is a recovery send. Re-arm the single-shot
+    // explicit-pick marker ONLY when the user made a genuine deliberate pick
+    // (_recoveryPick, captured pre-await + scoped to activeSid). Re-arming
+    // unconditionally forced explicit_model_pick on every retry — even with no
+    // pick — which suppressed the server's compatible-model resolution. A real
+    // cross-provider session pick is already honored every send by
+    // _isCrossProviderPick in send(), so this only needs to cover a fresh pick.
+    if(_recoveryPick && typeof _rememberPendingSessionModel==='function'){
+      _rememberPendingSessionModel(activeSid, _recoveryPick.model, _recoveryPick.model_provider);
     }
     await send();
   }catch(e){showToast(t('retry_failed')+e.message);}

@@ -141,3 +141,67 @@ def test_non_explicit_send_still_normalizes_stale_model():
     assert changed is True, "stale model must still be normalized on a plain send"
     assert effective == "claude-sonnet-4"
     assert provider == "anthropic"
+
+
+# ── #5924 gate re-fixes: gated re-arm + session-race guards ──────────────────
+
+
+def test_recovery_rearm_is_gated_on_a_genuine_deliberate_pick():
+    """The re-arm must be CONDITIONAL on a real pick, not unconditional.
+
+    Codex gate CORE finding: re-arming _rememberPendingSessionModel on EVERY
+    recovery send (even with no fresh pick) forced explicit_model_pick=true and
+    suppressed the server's compatible-model resolution. Both recovery paths must
+    now compute a `_recoveryPick` (only set when the selector model differs from
+    the session's own stored model) and guard the re-arm on it.
+    """
+    for body in (_function_body(UI_JS, "submitEdit"), _function_body(COMMANDS_JS, "cmdRetry")):
+        assert "_recoveryPick" in body, "recovery re-arm must be gated on _recoveryPick"
+        # the re-arm call must be guarded by the pick, not unconditional
+        assert "if(_recoveryPick" in body.replace(" ", ""), (
+            "the _rememberPendingSessionModel re-arm must be inside an `if(_recoveryPick ...)` guard"
+        )
+        # the pick is a genuine change vs the session's own stored model
+        assert "S.session.model" in body and "S.session.model_provider" in body, (
+            "a genuine pick = selector model differs from the session's stored model"
+        )
+
+
+def test_recovery_pick_is_captured_before_the_first_await():
+    """_recoveryPick must be captured BEFORE any awaited network call so a session
+
+    switch during the recovery's round-trips can't make it read the wrong
+    session's selector state. The `_recoveryPick` assignment must appear before
+    the first awaited call expression (``await api(`` / ``await _ensure`` / ``await send``).
+    """
+    import re as _re
+    for body in (_function_body(UI_JS, "submitEdit"), _function_body(COMMANDS_JS, "cmdRetry")):
+        pick_idx = body.index("const _recoveryPick")
+        # match a real awaited call, not the word "await" inside a comment
+        m = _re.search(r"await\s+\w", body)
+        assert m is not None, "expected an awaited call in the recovery path"
+        assert pick_idx < m.start(), (
+            "_recoveryPick must be captured before the first awaited call (pre-await snapshot)"
+        )
+
+
+def test_recovery_reguards_active_session_after_each_await():
+    """After each await, a session-switch guard must re-check the captured sid.
+
+    Codex gate SILENT findings: switching sessions during the retry GET await (or
+    the edit truncate await) let session A's recovery intent apply to session B —
+    in /retry it wrote B's model into A's pending marker. Each recovery path must
+    re-assert its captured session id AFTER its post-network await, before
+    mutating messages / re-arming / calling send().
+    """
+    retry = _function_body(COMMANDS_JS, "cmdRetry")
+    # cmdRetry: guard after the session GET await, before the render/re-arm/send
+    assert retry.count("S.session.session_id!==activeSid") >= 2, (
+        "cmdRetry must re-guard activeSid after the session GET await (>=2 guards total)"
+    )
+    edit = _function_body(UI_JS, "submitEdit")
+    # submitEdit: guard after the truncate await, before slice/re-arm/send
+    assert edit.count("S.session.session_id !== initialSid") >= 2, (
+        "submitEdit must re-guard initialSid after the truncate await (>=2 guards total)"
+    )
+
