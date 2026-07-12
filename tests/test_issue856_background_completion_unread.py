@@ -159,7 +159,8 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     assert "wasStreaming === true && !isStreaming" in transition_block, (
         "polling fallback must only fire on an observed streaming -> stopped transition"
     )
-    assert "_markSessionCompletionUnread(sid, s.message_count);" in transition_block
+    # #5960/#5975: third arg may carry cron source+profile meta; still mark unread.
+    assert "_markSessionCompletionUnread(sid, s.message_count" in transition_block
     assert "_sessionStreamingById.set(sid, isStreaming);" in transition_block
     assert "const _streamingPollMs = 30000;" in SESSIONS_JS
     assert "_applySessionListPayload(sessData,projData);" in refresh_block
