@@ -12620,9 +12620,11 @@ async function disableAuth(){
 let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
+let _cronPollGeneration=0;
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
 
 function _resetCronUnreadForProfileSwitch(){
+  _cronPollGeneration++;
   _cronNewJobIds.clear();
   _cronPollSince=Date.now()/1000;
   updateCronBadge();
@@ -12639,7 +12641,9 @@ function startCronPolling(){
   _cronPollTimer=setInterval(async()=>{
     if(document.hidden) return;  // don't poll when tab is in background
     try{
+      const pollGeneration=_cronPollGeneration;
       const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+      if(pollGeneration!==_cronPollGeneration) return;
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
           if(c.toast_notifications !== false){

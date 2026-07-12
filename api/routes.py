@@ -19902,19 +19902,8 @@ def _handle_cron_recent(handler, parsed):
         since = 0.0
     try:
         from cron.jobs import list_jobs
-        from api.profiles import (
-            cron_profile_context_for_home,
-            get_active_profile_name,
-            get_hermes_home_for_profile,
-        )
 
-        active_profile = get_active_profile_name() or "default"
-        active_home = get_hermes_home_for_profile(active_profile)
-        # Match the default Tasks list scope explicitly.  The recent-completion
-        # endpoint feeds an actionable unread badge, so returning jobs from a
-        # different profile can strand an ID that has no visible row to open.
-        with cron_profile_context_for_home(active_home):
-            jobs = list_jobs(include_disabled=True)
+        jobs = list_jobs(include_disabled=True)
         completions = []
         for job in jobs:
             job_id = str(job.get("id", "") or "")
