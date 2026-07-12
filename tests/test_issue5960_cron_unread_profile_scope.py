@@ -486,6 +486,147 @@ process.stdout.write(JSON.stringify({{
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_switch_to_literal_default_clears_other_profile_cron_markers():
+    """Re-gate #5975 r3: active literal 'default' must not match every origin.
+
+    The reverse alias may only keep a marker whose origin name itself provably
+    resolves to the root profile — tagged AND legacy-untagged old-profile cron
+    markers must clear when switching to 'default'.
+    """
+    helpers = "\n".join(
+        [
+            _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
+            _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
+            _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
+            _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
+            _extract_function(SESSIONS_JS, "_cronProfileNameIsRootAlias"),
+            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
+            _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_clearCronSessionCompletionUnreadForInactiveProfiles"),
+            _extract_function(SESSIONS_JS, "_hasSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_hasUnreadForSession"),
+        ]
+    )
+    script = f"""
+const store={{'hermes-session-completion-unread':JSON.stringify({{
+  'tagged-old-cron':{{message_count:3, completed_at:1, source:'cron', profile:'profile-a'}},
+  'legacy-old-cron':{{message_count:2, completed_at:1}},
+  'root-cron':{{message_count:2, completed_at:1, source:'cron', profile:'default'}},
+  'renamed-root-cron':{{message_count:1, completed_at:1, source:'cron', profile:'kinni'}},
+  'plain-chat':{{message_count:5, completed_at:1}},
+}})}};
+global.localStorage={{
+  getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
+  setItem:(key,value)=>{{ store[key]=String(value); }},
+  removeItem:(key)=>{{ delete store[key]; }},
+}};
+let _sessionCompletionUnread=null;
+let _sessionViewedCounts={{}};
+const SESSION_COMPLETION_UNREAD_KEY='hermes-session-completion-unread';
+// Root profile is active under its literal 'default' name.
+global.S={{activeProfile:'default',activeProfileIsDefault:true}};
+// Sidebar metadata resolves the legacy-untagged marker to profile-a cron;
+// 'plain-chat' stays an ordinary completion (no cron source anywhere).
+global._allSessions=[
+  {{session_id:'legacy-old-cron', source:'cron', profile:'profile-a'}},
+  {{session_id:'plain-chat', source:'chat', profile:'profile-a'}},
+];
+// Roster proves 'kinni' is a root alias; 'profile-a' is not.
+global._profilesCache={{profiles:[
+  {{name:'kinni', is_default:true}},
+  {{name:'profile-a', is_default:false}},
+]}};
+global.renderSessionListFromCache=()=>{{}};
+function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
+function _setSessionViewedCount(){{}}
+{helpers}
+_clearCronSessionCompletionUnreadForInactiveProfiles('default');
+const persisted=JSON.parse(store['hermes-session-completion-unread']);
+process.stdout.write(JSON.stringify({{
+  taggedCleared:!_hasUnreadForSession({{session_id:'tagged-old-cron'}}),
+  legacyCleared:!_hasUnreadForSession({{session_id:'legacy-old-cron'}}),
+  rootKept:_hasUnreadForSession({{session_id:'root-cron'}}),
+  renamedRootKept:_hasUnreadForSession({{session_id:'renamed-root-cron'}}),
+  chatKept:_hasUnreadForSession({{session_id:'plain-chat'}}),
+  persisted,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    assert state["taggedCleared"] is True
+    assert state["legacyCleared"] is True
+    assert state["rootKept"] is True
+    assert state["renamedRootKept"] is True
+    assert state["chatKept"] is True
+    assert "tagged-old-cron" not in state["persisted"]
+    assert "legacy-old-cron" not in state["persisted"]
+    assert "root-cron" in state["persisted"]
+    assert "renamed-root-cron" in state["persisted"]
+    assert "plain-chat" in state["persisted"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_switch_to_literal_default_without_roster_fails_closed_on_unknown_names():
+    """Re-gate #5975 r3: with no roster, an unknown origin under active 'default'
+    gets exact-name semantics (cleared), and literal-'default' markers stay."""
+    helpers = "\n".join(
+        [
+            _extract_function(SESSIONS_JS, "_isCronSessionForUnread"),
+            _extract_function(SESSIONS_JS, "_sourceKeyForSession"),
+            _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession"),
+            _extract_function(SESSIONS_JS, "_resolveCronCompletionMarkerOrigin"),
+            _extract_function(SESSIONS_JS, "_cronProfileNameIsRootAlias"),
+            _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive"),
+            _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile"),
+            _extract_function(SESSIONS_JS, "_getSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_saveSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_clearCronSessionCompletionUnreadForInactiveProfiles"),
+            _extract_function(SESSIONS_JS, "_hasSessionCompletionUnread"),
+            _extract_function(SESSIONS_JS, "_hasUnreadForSession"),
+        ]
+    )
+    script = f"""
+const store={{'hermes-session-completion-unread':JSON.stringify({{
+  'other-cron':{{message_count:1, completed_at:1, source:'cron', profile:'profile-a'}},
+  'root-cron':{{message_count:2, completed_at:1, source:'cron', profile:'default'}},
+}})}};
+global.localStorage={{
+  getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
+  setItem:(key,value)=>{{ store[key]=String(value); }},
+  removeItem:(key)=>{{ delete store[key]; }},
+}};
+let _sessionCompletionUnread=null;
+let _sessionViewedCounts={{}};
+const SESSION_COMPLETION_UNREAD_KEY='hermes-session-completion-unread';
+global.S={{activeProfile:'default',activeProfileIsDefault:true}};
+global._allSessions=[];
+global.renderSessionListFromCache=()=>{{}};
+function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
+function _setSessionViewedCount(){{}}
+{helpers}
+_clearCronSessionCompletionUnreadForInactiveProfiles('default');
+const persisted=JSON.parse(store['hermes-session-completion-unread']);
+process.stdout.write(JSON.stringify({{
+  otherCleared:!_hasUnreadForSession({{session_id:'other-cron'}}),
+  rootKept:_hasUnreadForSession({{session_id:'root-cron'}}),
+  persisted,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    assert state["otherCleared"] is True
+    assert state["rootKept"] is True
+    assert "other-cron" not in state["persisted"]
+    assert "root-cron" in state["persisted"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_stale_pre_switch_session_list_does_not_recreate_cron_markers():
     """Greptile #5975 P1: delayed /api/sessions after profile switch must not remount cron dots."""
     # Re-read sources so this test always sees the latest shipped functions.

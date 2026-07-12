@@ -610,6 +610,19 @@ function _resolveCronCompletionMarkerOrigin(sid, marker) {
   return {isCron, profile: profile || ''};
 }
 
+// A profile name provably resolving to the root profile: the literal
+// 'default' alias, or a roster entry flagged is_default (renamed root).
+// Unknown names fail closed — exact-name matching still applies to them.
+function _cronProfileNameIsRootAlias(name) {
+  if (name === 'default') return true;
+  if (typeof _profilesCache !== 'undefined' && _profilesCache
+    && Array.isArray(_profilesCache.profiles)) {
+    const entry = _profilesCache.profiles.find((p) => p && p.name === name);
+    if (entry && entry.is_default) return true;
+  }
+  return false;
+}
+
 // default/renamed-root equivalence for cron-marker ownership (mirrors server
 // _profiles_match enough for the active surface: literal 'default' ↔ root).
 function _cronMarkerProfileMatchesActive(origin, activeProfile) {
@@ -623,10 +636,14 @@ function _cronMarkerProfileMatchesActive(origin, activeProfile) {
     && _profileMatchesActiveProfile(originName, activeName)) {
     return true;
   }
-  // Reverse alias: marker tagged with renamed-root name while active is 'default'
-  // (or vice versa already handled above) when the current surface is the root.
-  if (typeof S !== 'undefined' && S && S.activeProfileIsDefault) {
-    if (originName === 'default' || activeName === 'default') return true;
+  // Reverse alias: marker tagged with the renamed-root name while the active
+  // root surface reports a different alias. Match only when the origin name
+  // ITSELF provably resolves to the root — never "active is default → match
+  // all", which under-cleared other profiles' markers on switch to 'default'.
+  if (typeof S !== 'undefined' && S && S.activeProfileIsDefault
+    && typeof _cronProfileNameIsRootAlias === 'function'
+    && _cronProfileNameIsRootAlias(originName)) {
+    return true;
   }
   return false;
 }
