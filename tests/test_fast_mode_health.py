@@ -27,7 +27,9 @@ def test_fast_health_defaults_are_truthful_and_sanitized(monkeypatch):
     assert payload["fast_mode"]["mode"] == "disabled"
     assert payload["foreground"]["strict_no_tools_enforced"] is False
     assert payload["background"]["durable_task_store"] is True
-    assert payload["background"]["parent_transcript_return"] is False
+    assert payload["background"]["parent_transcript_return"] is True
+    assert payload["background"]["parent_transcript_return_mode"] == "durable_parent_cards"
+    assert payload["background"]["live_update_event"] == "background_task_updated"
     assert payload["acceptance"]["synthetic_provider_counts_as_acceptance"] is False
 
     rendered = "\n".join(_flatten_strings(payload))

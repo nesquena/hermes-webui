@@ -56,8 +56,9 @@ def health_payload() -> dict[str, Any]:
         },
         "background": {
             "durable_task_store": True,
-            "parent_transcript_return": False,
-            "parent_transcript_return_mode": "not_implemented",
+            "parent_transcript_return": True,
+            "parent_transcript_return_mode": "durable_parent_cards",
+            "live_update_event": "background_task_updated",
             "legacy_polling_endpoint": "/api/background/status",
         },
         "delivery": {

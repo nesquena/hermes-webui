@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from typing import Any
 
 from api.config import SESSION_DIR
@@ -393,6 +394,38 @@ def durable_background_status(parent_sid: str) -> dict[str, Any]:
     return {"ok": True, "session_id": parent_sid, "tasks": tasks}
 
 
+def _emit_background_task_updated(parent_sid: str, task_id: str) -> None:
+    """Best-effort live nudge for durable background task state changes.
+
+    The parent session/task sidecar remains the source of truth. This event is
+    intentionally tiny: browser consumers use it as a prompt to refetch durable
+    state rather than trusting SSE payloads as result storage.
+    """
+    task = get_durable_background_task(parent_sid, task_id)
+    if not task:
+        return
+    payload = {
+        "session_id": parent_sid,
+        "task_id": task.get("task_id"),
+        "status": task.get("status") or "unknown",
+        "event_id": uuid.uuid4().hex,
+        "updated_at": task.get("updated_at") or time.time(),
+        "parent_append_status": task.get("parent_append_status"),
+        "parent_card_message_id": task.get("parent_card_message_id"),
+        "parent_result_message_id": task.get("parent_result_message_id"),
+    }
+    try:
+        from api.background_process import emit_session_event
+        emit_session_event(parent_sid, "background_task_updated", payload)
+    except Exception:
+        logger.debug(
+            "Failed to emit background_task_updated for %s/%s",
+            parent_sid,
+            task_id,
+            exc_info=True,
+        )
+
+
 def track_background(parent_sid: str, bg_sid: str, stream_id: str,
                      task_id: str, prompt: str) -> None:
     started_at = time.time()
@@ -421,6 +454,7 @@ def track_background(parent_sid: str, bg_sid: str, stream_id: str,
             "parent_result_message_id": None,
         })
     append_or_queue_background_parent_update(parent_sid, task_id, "running")
+    _emit_background_task_updated(parent_sid, task_id)
 
 
 def track_btw(parent_sid: str, ephemeral_sid: str, stream_id: str,
@@ -452,6 +486,7 @@ def complete_background(parent_sid: str, task_id: str, answer: str) -> None:
             "parent_result_message_id": _task_result_message_id(task_id),
         })
     append_or_queue_background_parent_update(parent_sid, task_id, "done")
+    _emit_background_task_updated(parent_sid, task_id)
 
 
 def get_results(parent_sid: str) -> list[dict[str, Any]]:

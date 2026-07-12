@@ -204,3 +204,46 @@ def test_background_parent_pending_drain_preserves_current_foreground_turn(tmp_p
     assert bg.get_durable_background_task(parent.session_id, "task-drain")["parent_append_status"] == "result_written"
 
     assert bg.drain_pending_background_parent_updates(reloaded) == 0
+
+
+def test_background_task_updates_emit_refetch_nudges(tmp_path, monkeypatch):
+    bg, _cfg, models = _prepare_isolated_session_store(tmp_path, monkeypatch)
+    import api.background_process as background_process
+
+    emitted = []
+    monkeypatch.setattr(
+        background_process,
+        "emit_session_event",
+        lambda sid, event, payload: emitted.append((sid, event, dict(payload))) or 1,
+    )
+
+    parent = models.Session(
+        session_id="parent-session-event",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "please do a deeper pass"}],
+    )
+    parent.save()
+
+    bg.track_background(parent.session_id, "bg-session", "stream-1", "task-event", "deep follow-up")
+    bg.complete_background(parent.session_id, "task-event", "deeper answer")
+
+    assert [event for _sid, event, _payload in emitted] == [
+        "background_task_updated",
+        "background_task_updated",
+    ]
+    assert emitted[0][2]["status"] == "running"
+    assert emitted[0][2]["parent_append_status"] == "card_written"
+    assert emitted[1][2]["status"] == "done"
+    assert emitted[1][2]["parent_append_status"] == "result_written"
+    assert emitted[1][2]["parent_result_message_id"] == "bgresult_task-event"
+
+
+def test_background_polling_refetches_durable_session_instead_of_appending_local_only_result():
+    src = Path("static/messages.js").read_text(encoding="utf-8")
+    idx = src.find("function startBackgroundPolling")
+    assert idx > -1
+    body = src[idx:idx + 1400]
+    assert "/api/background/tasks" in body
+    assert "/api/background/status" not in body
+    assert "S.messages.push" not in body
+    assert "_reloadCurrentSessionAfterBackgroundUpdate" in body

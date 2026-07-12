@@ -7230,6 +7230,9 @@ function startSessionStream(sid) {
         }
       } catch (_) {}
     });
+    es.addEventListener('background_task_updated', e => {
+      void _handleBackgroundTaskUpdatedEvent(e, sid);
+    });
     // ── Defect B: live-view of server-initiated (Option Z) turns ──────────
     // The drain thread starts the wakeup turn server-side and the server
     // fans a `server_turn_started` {stream_id} frame onto this per-session
@@ -7331,6 +7334,33 @@ function stopSessionStream() {
     _sessionEventSource = null;
   }
   _sessionStreamSessionId = null;
+}
+
+async function _reloadCurrentSessionAfterBackgroundUpdate(sid) {
+  if (!sid || !S.session || S.session.session_id !== sid) return;
+  try {
+    const data = await api('/api/session?session_id=' + encodeURIComponent(sid));
+    if (!S.session || S.session.session_id !== sid || !data || !data.session) return;
+    S.messages = data.session.messages || [];
+    S.session = Object.assign(S.session || {}, data.session);
+    renderMessages({preserveScroll:true});
+  } catch (_) {}
+}
+
+async function _handleBackgroundTaskUpdatedEvent(e, subscribedSid) {
+  try {
+    const d = JSON.parse((e && e.data) || '{}');
+    const sid = d.session_id || subscribedSid;
+    const taskId = d.task_id ? String(d.task_id) : '';
+    if (!sid || sid !== subscribedSid) return;
+    await _reloadCurrentSessionAfterBackgroundUpdate(sid);
+    const status = String(d.status || '').toLowerCase();
+    if (taskId && ['done','failed','cancelled','interrupted_by_restart'].includes(status)) {
+      hideBackgroundBadge(taskId);
+      if (_bgPollTimers[taskId]) { clearTimeout(_bgPollTimers[taskId]); delete _bgPollTimers[taskId]; }
+      showToast(t('bg_complete'));
+    }
+  } catch (_) {}
 }
 
 // Shared bg_task_complete handler — invoked from BOTH the in-turn STREAMS
@@ -8287,17 +8317,18 @@ function startBackgroundPolling(parentSid, taskId, prompt){
   if(_bgPollTimers[taskId]) return;
   async function _poll(){
     try{
-      const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
-      if(r&&r.results){
-        for(const res of r.results){
-          if(res.task_id===taskId){
-            hideBackgroundBadge(taskId);
-            delete _bgPollTimers[taskId];
-            const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
-            S.messages.push(msg);
-            renderMessages({preserveScroll:true});
-            showToast(t('bg_complete'));
-            return;
+      const r=await api('/api/background/tasks?session_id='+encodeURIComponent(parentSid));
+      if(r&&Array.isArray(r.tasks)){
+        for(const task of r.tasks){
+          if(task.task_id===taskId){
+            const status=String(task.status||'').toLowerCase();
+            if(['done','failed','cancelled','interrupted_by_restart'].includes(status)){
+              hideBackgroundBadge(taskId);
+              delete _bgPollTimers[taskId];
+              await _reloadCurrentSessionAfterBackgroundUpdate(parentSid);
+              showToast(t('bg_complete'));
+              return;
+            }
           }
         }
       }

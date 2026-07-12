@@ -622,6 +622,17 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
     return emitted
 
 
+def emit_session_event(session_id: str, event: str, data: dict) -> int:
+    """Publish one minimal event on a WebUI session's live channels.
+
+    This small public wrapper lets sibling runtime modules reuse the persistent
+    per-session SSE channel without coupling to the background-process wakeup
+    payloads. The caller owns event naming and payload shape; this helper only
+    handles fan-out to active turn streams plus the session channel.
+    """
+    return _emit_to_session_streams(str(session_id or ""), str(event or ""), dict(data or {}))
+
+
 def _emit_bg_task_complete_events_now(session_id: str, payload: dict) -> int:
     """Emit the canonical bg_task_complete event and temporary legacy alias."""
     # T1 emit rename: the canonical event name is now ``bg_task_complete``
