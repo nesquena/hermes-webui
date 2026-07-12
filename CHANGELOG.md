@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- **The transcript no longer jumps up while you type in a multi-row composer.** When the composer had grown to multiple rows and you were scrolled to the bottom, every keystroke nudged the transcript upward (by roughly the composer's height) and quietly broke stream auto-follow — you'd have to scroll back down. The auto-resize now preserves the scroll position of a bottom-pinned reader, so typing keeps you pinned and streaming keeps following. Readers who deliberately scrolled up are unaffected. Thanks @JeffArcLogic for the report and repro. (#5962, #5514)
+
 - **The reasoning-effort chip is correct right after an empty startup.** On a normal boot with no active session restored, the top-bar reasoning chip wasn't refreshed for the hydrated default model, so it could show a stale value until you changed the model. It now refreshes on empty boot too. Thanks @rodboev. (#5967, #5954)
 
 - **Transparent Stream no longer bloats memory (or freezes the tab) on long tool-heavy chats.** With Transparent Stream enabled, opening a conversation with many prompts built a DOM node for every activity event of every past turn at load and eagerly rendered each tool row's full detail body — a long reasoning-heavy history could balloon to multiple GB and lock up the tab. Settled tool rows now render header-only and build their detail on first expand (identical to the old view once opened), and a turn with a very large number of steps shows its most recent 30 behind a "Show N earlier steps" control. Live turns are unchanged. Thanks @curtisszmania-cytocync for the report. (#5974, #5966)
