@@ -154,3 +154,50 @@ def test_touch_css_forces_real_user_row_layout_only_during_switch():
     assert selector in STYLE_CSS
     media = STYLE_CSS[STYLE_CSS.index("@media (pointer: coarse)"):]
     assert media.index(".msg-row[data-role=\"user\"] { content-visibility: auto;") < media.index(selector)
+
+
+def test_current_load_can_force_retire_superseded_stabilization():
+    """A superseding current load must be able to retire stabilization owned by
+    the load it replaced (a forced reload that skipped _begin because
+    currentSid===sid), while a stale continuation must stay gated by generation.
+    The end helper takes a `force` flag, and every sessions.js cleanup passes
+    `_isCurrentLoad()` so only the authoritative current load forces the retire.
+    """
+    end = _function_body(UI_JS, "_endSessionSwitchLayoutStabilization")
+    # Signature carries the force flag and the generation gate is bypassed only
+    # when force is truthy.
+    assert "function _endSessionSwitchLayoutStabilization(loadGeneration,token,force)" in end
+    assert "if(!force&&loadGeneration!==undefined&&loadGeneration!==null&&loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;" in end
+    # Mutation guard: removing the !force bypass would let a stale continuation
+    # clear newer state (the very bug the finding describes).
+    assert "!force&&" in end
+    # Every sessions.js cleanup passes its ownership decision as the force arg.
+    calls = SESSIONS_JS.count(
+        "window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());"
+    )
+    assert calls == 6, f"expected 6 ownership-aware cleanups, found {calls}"
+    assert "window._endSessionSwitchLayoutStabilization(_loadGeneration);" not in SESSIONS_JS
+
+
+def test_async_pdf_and_yaml_processors_hold_pending_marker_until_completion():
+    """PDF rendering and the deferred js-yaml tree-view build are asynchronous
+    past postProcessRenderedMessages() returning. Both must register a
+    session-switch pending marker and release it only on real completion, so the
+    quiet timer cannot expire before their final DOM insertion.
+    """
+    pdf = _function_body(UI_JS, "loadPdfInline")
+    assert "_beginSessionSwitchLayoutPostProcess()" in pdf
+    assert "releaseMarker" in pdf
+    # Marker is released, not just on launch: the render-complete branch (i>n),
+    # the too-large branch, the no-pdf branch, the error catch, and the pdfjs
+    # load timeout all release it.
+    assert pdf.count("releaseMarker()") >= 4
+    # Idempotent release guard so double-release can't corrupt the pending count.
+    assert "markerReleased" in pdf
+
+    tree = _function_body(UI_JS, "initTreeViews")
+    # The deferred js-yaml path holds a marker across the async lib load + the
+    # re-run that inserts the tree DOM, releasing it from the deferred callback.
+    assert "_beginSessionSwitchLayoutPostProcess()" in tree
+    assert "_loadJsyamlThen(" in tree
+    assert "_endSessionSwitchLayoutPostProcess(yamlMarker)" in tree

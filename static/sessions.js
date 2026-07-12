@@ -1606,7 +1606,7 @@ async function loadSession(sid){
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
       if (!_isCurrentLoad()) {
-        if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
+        if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
         _rearmActiveSessionStream();
         return;
       }
@@ -1619,7 +1619,7 @@ async function loadSession(sid){
         // before clearing _loadingSessionId or retrying so the stale
         // continuation can't hijack the UI back to the old target.
         if (!_isCurrentLoad()) {
-          if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
+          if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
           _rearmActiveSessionStream();
           return;
         }
@@ -1638,7 +1638,7 @@ async function loadSession(sid){
     // load, re-arm the active session's stream and bail before any DOM mutation
     // or self-heal.
     if (!_isCurrentLoad()) {
-      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
+      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
       _rearmActiveSessionStream();
       return;
     }
@@ -1677,7 +1677,7 @@ async function loadSession(sid){
       }
     }
     _clearSameSessionForceReloadHint(sid);
-    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
     // Capture whether this failure self-healed away the current session (a
     // 404 on the *current* session whose sidecar was deleted server-side).
     // In that case there is no live session left to stream for, so we must
@@ -1713,7 +1713,7 @@ async function loadSession(sid){
   // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
-    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
     if (_isCurrentLoad()) _loadingSessionId = null;
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
@@ -2015,7 +2015,7 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
-      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
+      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, _isCurrentLoad());
       if (_isCurrentLoad()) _loadingSessionId = null;
       return;
     }

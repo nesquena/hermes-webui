@@ -5135,8 +5135,12 @@ let _sessionSwitchLayoutStabilizationObserver=null;
 let _sessionSwitchLayoutPostProcessPending=0;
 let _sessionSwitchLayoutSettleRequested=false;
 let _liveAnchorScrollRebuildGeneration=0;
-function _endSessionSwitchLayoutStabilization(loadGeneration,token){
-  if(loadGeneration!==undefined&&loadGeneration!==null&&loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
+function _endSessionSwitchLayoutStabilization(loadGeneration,token,force){
+  // `force` lets the authoritative current load retire stabilization owned by
+  // an older load it superseded (e.g. a forced reload of the incoming session
+  // that skipped _begin because currentSid===sid). Stale continuations pass
+  // force=false and stay gated on generation so they can't clear newer state.
+  if(!force&&loadGeneration!==undefined&&loadGeneration!==null&&loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
   if(token!==undefined&&token!==_sessionSwitchLayoutStabilizationToken) return;
   clearTimeout(_sessionSwitchLayoutStabilizationTimer);
   _sessionSwitchLayoutStabilizationTimer=0;
@@ -17290,7 +17294,15 @@ function initTreeViews(container){
         // Note: if CDN load fails, s.onerror does NOT call back —
         // the wrap stays un-initialised (raw view only), which is safe.
         wrap.removeAttribute('data-tree-init');
-        _loadJsyamlThen(initTreeViews);
+        // Hold session-switch stabilization across the async js-yaml fetch +
+        // the deferred re-run that builds the tree view. Without this the quiet
+        // timer can expire before the tree DOM is inserted, so the later
+        // insertion could shift the transcript after the final correction.
+        const yamlMarker=_beginSessionSwitchLayoutPostProcess();
+        _loadJsyamlThen(()=>{
+          try{ initTreeViews(container); }
+          finally{ if(yamlMarker) _endSessionSwitchLayoutPostProcess(yamlMarker); }
+        });
         return;
       }
     }
@@ -17664,6 +17676,13 @@ function loadPdfInline(container){
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    // Hold session-switch stabilization until the PDF fetch + full page render
+    // finish (or the load times out / errors). PDF work spans fetch → parse →
+    // sequential per-page canvas render, easily exceeding the quiet window, so
+    // the marker must live until the last page settles, not launch.
+    const marker=_beginSessionSwitchLayoutPostProcess();
+    let markerReleased=false;
+    const releaseMarker=()=>{ if(marker&&!markerReleased){ markerReleased=true; _endSessionSwitchLayoutPostProcess(marker); } };
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
@@ -17671,12 +17690,13 @@ function loadPdfInline(container){
           if(buf.byteLength>PDF_MAX_SIZE){
             const dlUrl=publicMediaUrl+'&download=1';
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            releaseMarker();
             return;
           }
           return pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise;
         })
         .then(pdf=>{
-          if(!pdf) return;
+          if(!pdf) { releaseMarker(); return; }
           const dlUrl=publicMediaUrl+'&download=1';
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
@@ -17699,7 +17719,7 @@ function loadPdfInline(container){
           // page can't silently halt the preview or surface an unhandled
           // promise rejection (renderPage runs outside the outer .catch chain).
           const renderPage=(i)=>{
-            if(i>n) return;
+            if(i>n) { releaseMarker(); return; }
             pdf.getPage(i).then(page=>{
               const canvas=document.createElement('canvas');
               const scale=1.5;
@@ -17718,6 +17738,7 @@ function loadPdfInline(container){
         .catch(()=>{
           const dlUrl=publicMediaUrl+'&download=1';
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+          releaseMarker();
         });
     };
     if(_pdfjsReady){
@@ -17740,6 +17761,7 @@ function loadPdfInline(container){
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }
+          releaseMarker();
         }
       },15000);
     } else {
