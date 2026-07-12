@@ -13,6 +13,10 @@
 
 ### Fixed
 
+- **An errored turn no longer hides the response the assistant already produced.** When a turn ended in an error, the tool calls and reasoning the assistant had already generated were auto-collapsed behind a single header above the error card, so it looked like nothing came back. That produced content now stays visible by default on an errored turn (the error card still shows); successful turns collapse their worklog exactly as before. Thanks @b3nw for the report. (#5950, #5941)
+
+- **After a provider failure, retrying or edit-resubmitting now honors your newly-picked model.** If a turn failed and you switched the model/provider in the selector, `/retry` and edit-resubmit re-sent the *failed* model, forcing you to fork the conversation. A genuine non-default model pick is now carried into the recovery send, while an unchanged model still lets the server pick a compatible one — and the recovery can't leak one session's model into another when you switch sessions mid-retry. Thanks @b3nw for the report. (#5949, #5924)
+
 - **Russian localization refreshed and onboarding notes localized.** The `ru` bundle was refreshed and brought to full key parity with English (identical key sets across all locales), new update/workspace UI strings were propagated to every locale, and onboarding provider notes now resolve through a localized key (with the English text preserved as fallback). Thanks @DrMaks22. (#5778)
 
 - **A pending prompt no longer renders twice across a context-compaction boundary.** On reload / reattach to an active turn, a synthetic `[CONTEXT COMPACTION]` marker (a user-role row that isn't a real submitted turn) placed after your prompt was treated as the latest user message, so the tail scan missed the actual prompt right before it and rendered the same pending prompt twice. The session-load and refresh/reconnect tail scans now skip compaction markers when locating the current user message, while completed assistant rows stay hard boundaries so genuinely-repeated prompts still render. Thanks @starship-s. (#5920)
