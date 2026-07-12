@@ -17233,18 +17233,23 @@ function highlightCode(container) {
   }
 }
 
-// Lazy load js-yaml for YAML tree view support
+// Lazy load js-yaml for YAML tree view support.
+// onSettle (optional) fires exactly once when this call reaches a terminal
+// state — after cb on success, OR on CDN/script failure — so callers holding a
+// resource (e.g. a session-switch stabilization marker) can always release it,
+// even when the loader never invokes cb because the script failed to load.
 let _jsyamlLoading=false;
-function _loadJsyamlThen(cb){
-  if(typeof jsyaml!=='undefined'){ cb(); return; }
-  if(_jsyamlLoading){ setTimeout(()=>_loadJsyamlThen(cb),100); return; }
+function _loadJsyamlThen(cb,onSettle){
+  const settle=(typeof onSettle==='function')?onSettle:null;
+  if(typeof jsyaml!=='undefined'){ try{ cb(); } finally{ if(settle) settle(); } return; }
+  if(_jsyamlLoading){ setTimeout(()=>_loadJsyamlThen(cb,onSettle),100); return; }
   _jsyamlLoading=true;
   const s=document.createElement('script');
   s.src='static/vendor/js-yaml/4.1.0/js-yaml.min.js';
   s.integrity='sha384-+pxiN6T7yvpryuJmE1gM9PX7yQit15auDb+ZwwvJOd/4be2Cie5/IuVXgQb/S9du';
   s.crossOrigin='anonymous';
-  s.onload=()=>{ _jsyamlLoading=false; cb(); };
-  s.onerror=()=>{ _jsyamlLoading=false; }; // CDN blocked, fall back to raw
+  s.onload=()=>{ _jsyamlLoading=false; try{ cb(); } finally{ if(settle) settle(); } };
+  s.onerror=()=>{ _jsyamlLoading=false; if(settle) settle(); }; // CDN blocked, fall back to raw
   document.head.appendChild(s);
 }
 
@@ -17291,18 +17296,16 @@ function initTreeViews(container){
         try{ parsed=jsyaml.load(rawText); }catch(e){ parseFailed=true; }
       }else{
         // Defer: remove init marker so we retry after load.
-        // Note: if CDN load fails, s.onerror does NOT call back —
-        // the wrap stays un-initialised (raw view only), which is safe.
         wrap.removeAttribute('data-tree-init');
         // Hold session-switch stabilization across the async js-yaml fetch +
-        // the deferred re-run that builds the tree view. Without this the quiet
-        // timer can expire before the tree DOM is inserted, so the later
-        // insertion could shift the transcript after the final correction.
+        // the deferred re-run that builds the tree view. Release the marker on
+        // settle (success OR CDN failure) so a blocked load can't leave the
+        // pending count above zero and wedge the quiet check permanently.
         const yamlMarker=_beginSessionSwitchLayoutPostProcess();
-        _loadJsyamlThen(()=>{
-          try{ initTreeViews(container); }
-          finally{ if(yamlMarker) _endSessionSwitchLayoutPostProcess(yamlMarker); }
-        });
+        _loadJsyamlThen(
+          ()=>initTreeViews(container),
+          ()=>{ if(yamlMarker) _endSessionSwitchLayoutPostProcess(yamlMarker); }
+        );
         return;
       }
     }
@@ -17676,13 +17679,10 @@ function loadPdfInline(container){
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
-    // Hold session-switch stabilization until the PDF fetch + full page render
-    // finish (or the load times out / errors). PDF work spans fetch → parse →
-    // sequential per-page canvas render, easily exceeding the quiet window, so
-    // the marker must live until the last page settles, not launch.
-    const marker=_beginSessionSwitchLayoutPostProcess();
-    let markerReleased=false;
-    const releaseMarker=()=>{ if(marker&&!markerReleased){ markerReleased=true; _endSessionSwitchLayoutPostProcess(marker); } };
+    // Hold session-switch stabilization until the async PDF fetch + full page
+    // render settle (or time out / error); released once at every exit below.
+    const _pdfMk=_beginSessionSwitchLayoutPostProcess(); let _pdfMkDone=false;
+    const releaseMarker=()=>{ if(_pdfMk&&!_pdfMkDone){ _pdfMkDone=true; _endSessionSwitchLayoutPostProcess(_pdfMk); } };
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})

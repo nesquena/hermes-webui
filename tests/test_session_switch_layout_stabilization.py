@@ -193,11 +193,17 @@ def test_async_pdf_and_yaml_processors_hold_pending_marker_until_completion():
     # load timeout all release it.
     assert pdf.count("releaseMarker()") >= 4
     # Idempotent release guard so double-release can't corrupt the pending count.
-    assert "markerReleased" in pdf
+    assert "_pdfMkDone" in pdf
 
     tree = _function_body(UI_JS, "initTreeViews")
     # The deferred js-yaml path holds a marker across the async lib load + the
-    # re-run that inserts the tree DOM, releasing it from the deferred callback.
+    # re-run that inserts the tree DOM, releasing it from the settle callback so
+    # a CDN failure (onerror, which never invokes cb) still clears the pending
+    # count instead of wedging the quiet check forever.
     assert "_beginSessionSwitchLayoutPostProcess()" in tree
     assert "_loadJsyamlThen(" in tree
     assert "_endSessionSwitchLayoutPostProcess(yamlMarker)" in tree
+    # The loader must invoke the settle callback on BOTH success and failure.
+    loader = _function_body(UI_JS, "_loadJsyamlThen")
+    assert "s.onerror=()=>{ _jsyamlLoading=false; if(settle) settle(); }" in loader
+    assert "s.onload=()=>{ _jsyamlLoading=false; try{ cb(); } finally{ if(settle) settle(); } }" in loader
