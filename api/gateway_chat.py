@@ -45,12 +45,10 @@ _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 
 
-def _gateway_provider_error_payload(message: str) -> dict | None:
+def _gateway_provider_error_payload(message: str) -> dict:
     from api.streaming import _classify_provider_error, _provider_error_payload
 
     classification = _classify_provider_error(message)
-    if classification["type"] == "error":
-        return None
     return _provider_error_payload(
         message,
         classification["type"],
@@ -912,12 +910,10 @@ def _run_gateway_chat_streaming(
                     usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
             usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
         assistant_text = final_text.strip()
+        if terminal_error:
+            put_gateway_event("apperror", _gateway_provider_error_payload(terminal_error))
+            return
         if not assistant_text:
-            if terminal_error:
-                error_payload = _gateway_provider_error_payload(terminal_error)
-                if error_payload:
-                    put_gateway_event("apperror", error_payload)
-                    return
             put_gateway_event("apperror", {
                 "label": "Gateway returned no response",
                 "type": "gateway_empty_response",
