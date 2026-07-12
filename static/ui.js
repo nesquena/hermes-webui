@@ -5128,13 +5128,15 @@ let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
 let _sessionSwitchLayoutStabilizationSid='';
+let _sessionSwitchLayoutLoadGeneration=null;
 let _sessionSwitchLayoutStabilizationToken=0;
 let _sessionSwitchLayoutStabilizationTimer=0;
 let _sessionSwitchLayoutStabilizationObserver=null;
 let _sessionSwitchLayoutPostProcessPending=0;
 let _sessionSwitchLayoutSettleRequested=false;
 let _liveAnchorScrollRebuildGeneration=0;
-function _endSessionSwitchLayoutStabilization(token){
+function _endSessionSwitchLayoutStabilization(loadGeneration,token){
+  if(loadGeneration!==undefined&&loadGeneration!==null&&loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
   if(token!==undefined&&token!==_sessionSwitchLayoutStabilizationToken) return;
   clearTimeout(_sessionSwitchLayoutStabilizationTimer);
   _sessionSwitchLayoutStabilizationTimer=0;
@@ -5145,10 +5147,11 @@ function _endSessionSwitchLayoutStabilization(token){
   _sessionSwitchLayoutPostProcessPending=0;
   _sessionSwitchLayoutSettleRequested=false;
   _sessionSwitchLayoutStabilizationSid='';
+  _sessionSwitchLayoutLoadGeneration=null;
   const el=$('messages');
   if(el&&el.classList) el.classList.remove('session-switch-layout-stabilizing');
 }
-function _beginSessionSwitchLayoutStabilization(sid){
+function _beginSessionSwitchLayoutStabilization(sid,loadGeneration){
   _endSessionSwitchLayoutStabilization();
   ++_sessionSwitchLayoutStabilizationToken;
   _bottomSettleToken++;
@@ -5158,41 +5161,42 @@ function _beginSessionSwitchLayoutStabilization(sid){
   cancelAnimationFrame(_settleRAF);
   _programmaticScroll=false;
   _sessionSwitchLayoutStabilizationSid=String(sid||'');
+  _sessionSwitchLayoutLoadGeneration=(loadGeneration===undefined?null:loadGeneration);
   _sessionSwitchLayoutPostProcessPending=0;
   _sessionSwitchLayoutSettleRequested=false;
   const el=$('messages');
   if(el&&el.classList) el.classList.add('session-switch-layout-stabilizing');
 }
-function _finishSessionSwitchLayoutStabilization(token,sid){
-  if(token!==_sessionSwitchLayoutStabilizationToken||String(sid||'')!==_sessionSwitchLayoutStabilizationSid) return;
-  _endSessionSwitchLayoutStabilization(token);
+function _finishSessionSwitchLayoutStabilization(token,sid,loadGeneration){
+  if(token!==_sessionSwitchLayoutStabilizationToken||String(sid||'')!==_sessionSwitchLayoutStabilizationSid||loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
+  _endSessionSwitchLayoutStabilization(loadGeneration,token);
   requestAnimationFrame(()=>{
     if(token!==_sessionSwitchLayoutStabilizationToken) return;
     if(!_messageUserUnpinned&&_scrollPinned&&typeof scrollToBottom==='function') scrollToBottom();
   });
 }
-function _scheduleSessionSwitchLayoutQuietCheck(token,sid){
+function _scheduleSessionSwitchLayoutQuietCheck(token,sid,loadGeneration){
   clearTimeout(_sessionSwitchLayoutStabilizationTimer);
   _sessionSwitchLayoutStabilizationTimer=setTimeout(()=>{
     if(token!==_sessionSwitchLayoutStabilizationToken||!_sessionSwitchLayoutSettleRequested) return;
     if(_sessionSwitchLayoutPostProcessPending>0) return;
-    _finishSessionSwitchLayoutStabilization(token,sid);
+    _finishSessionSwitchLayoutStabilization(token,sid,loadGeneration);
   },300);
 }
 function _beginSessionSwitchLayoutPostProcess(){
   if(!_sessionSwitchLayoutSettleRequested||!_sessionSwitchLayoutStabilizationSid) return null;
-  const marker={token:_sessionSwitchLayoutStabilizationToken,sid:_sessionSwitchLayoutStabilizationSid};
+  const marker={token:_sessionSwitchLayoutStabilizationToken,sid:_sessionSwitchLayoutStabilizationSid,loadGeneration:_sessionSwitchLayoutLoadGeneration};
   _sessionSwitchLayoutPostProcessPending++;
   clearTimeout(_sessionSwitchLayoutStabilizationTimer);
   return marker;
 }
 function _endSessionSwitchLayoutPostProcess(marker){
-  if(!marker||marker.token!==_sessionSwitchLayoutStabilizationToken||marker.sid!==_sessionSwitchLayoutStabilizationSid) return;
+  if(!marker||marker.token!==_sessionSwitchLayoutStabilizationToken||marker.sid!==_sessionSwitchLayoutStabilizationSid||marker.loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
   _sessionSwitchLayoutPostProcessPending=Math.max(0,_sessionSwitchLayoutPostProcessPending-1);
-  if(_sessionSwitchLayoutPostProcessPending===0) _scheduleSessionSwitchLayoutQuietCheck(marker.token,marker.sid);
+  if(_sessionSwitchLayoutPostProcessPending===0) _scheduleSessionSwitchLayoutQuietCheck(marker.token,marker.sid,marker.loadGeneration);
 }
-function _settleSessionSwitchLayoutStabilization(sid){
-  if(!_sessionSwitchLayoutStabilizationSid||String(sid||'')!==_sessionSwitchLayoutStabilizationSid) return;
+function _settleSessionSwitchLayoutStabilization(sid,loadGeneration){
+  if(!_sessionSwitchLayoutStabilizationSid||String(sid||'')!==_sessionSwitchLayoutStabilizationSid||loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
   const el=$('messages');
   if(!el){ _endSessionSwitchLayoutStabilization(); return; }
   const token=_sessionSwitchLayoutStabilizationToken;
@@ -5202,11 +5206,11 @@ function _settleSessionSwitchLayoutStabilization(sid){
     const observed=document.getElementById('msgInner')||el;
     _sessionSwitchLayoutStabilizationObserver=new ResizeObserver(()=>{
       if(token!==_sessionSwitchLayoutStabilizationToken) return;
-      _scheduleSessionSwitchLayoutQuietCheck(token,sid);
+      _scheduleSessionSwitchLayoutQuietCheck(token,sid,loadGeneration);
     });
     _sessionSwitchLayoutStabilizationObserver.observe(observed);
   }
-  _scheduleSessionSwitchLayoutQuietCheck(token,sid);
+  _scheduleSessionSwitchLayoutQuietCheck(token,sid,loadGeneration);
 }
 if(typeof window!=='undefined'){
   window._beginSessionSwitchLayoutStabilization=_beginSessionSwitchLayoutStabilization;
@@ -17433,7 +17437,8 @@ function loadDiffInline(container){
   root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const marker=_beginSessionSwitchLayoutPostProcess();
+    const task=fetch('api/media?path='+encodeURIComponent(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -17452,6 +17457,7 @@ function loadDiffInline(container){
       .catch(()=>{
         el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_error')}</span></div>`;
       });
+    if(marker) task.finally(()=>_endSessionSwitchLayoutPostProcess(marker));
   });
 }
 
@@ -17505,7 +17511,8 @@ function loadCsvInline(container){
     const path=el.dataset.path;
     const mediaUrl=_csvMediaUrl(path);
     const downloadUrl=_csvMediaUrl(path,{download:true});
-    fetch(mediaUrl)
+    const marker=_beginSessionSwitchLayoutPostProcess();
+    const task=fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         const preview=buildCsvTablePreview(path, text, downloadUrl);
@@ -17514,6 +17521,7 @@ function loadCsvInline(container){
       .catch(()=>{
         el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error');
       });
+    if(marker) task.finally(()=>_endSessionSwitchLayoutPostProcess(marker));
   });
 }
 
@@ -17523,7 +17531,8 @@ function loadExcalidrawInline(container){
   root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const marker=_beginSessionSwitchLayoutPostProcess();
+    const task=fetch('api/media?path='+encodeURIComponent(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -17555,6 +17564,7 @@ function loadExcalidrawInline(container){
       .catch(()=>{
         el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_error')}</span></div>`;
       });
+    if(marker) task.finally(()=>_endSessionSwitchLayoutPostProcess(marker));
   });
 }
 
@@ -17749,7 +17759,8 @@ function loadHtmlInline(container){
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
     const publicMediaUrl='api/media?path='+encodeURIComponent(path);
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
-    fetch(mediaUrl)
+    const marker=_beginSessionSwitchLayoutPostProcess();
+    const task=fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
@@ -17765,6 +17776,7 @@ function loadHtmlInline(container){
         const dlUrl=publicMediaUrl+'&download=1';
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
+    if(marker) task.finally(()=>_endSessionSwitchLayoutPostProcess(marker));
   });
 }
 
@@ -17794,7 +17806,8 @@ function renderMermaidBlocks(container){
     }
     return;
   }
-  blocks.forEach(async(block)=>{
+  const marker=_beginSessionSwitchLayoutPostProcess();
+  const tasks=Array.from(blocks).map(async(block)=>{
     block.dataset.rendered='true';
     const code=block.textContent;
     const id=block.dataset.mermaidId||('m-'+Math.random().toString(36).slice(2));
@@ -17816,6 +17829,7 @@ function renderMermaidBlocks(container){
       block.innerHTML=`<div class="pre-header">mermaid</div><pre><code>${esc(code)}</code></pre>`;
     }
   });
+  if(marker) Promise.allSettled(tasks).finally(()=>_endSessionSwitchLayoutPostProcess(marker));
 }
 
 let _katexLoading=false;

@@ -40,6 +40,7 @@ def test_session_switch_stabilization_behavior_and_mutation_sensitivity():
     script = f"""
 const assert=require('assert');
 let _sessionSwitchLayoutStabilizationSid='';
+let _sessionSwitchLayoutLoadGeneration=null;
 let _sessionSwitchLayoutStabilizationToken=0;
 let _sessionSwitchLayoutStabilizationTimer=0;
 let _sessionSwitchLayoutStabilizationObserver=null;
@@ -68,16 +69,16 @@ function cancelAnimationFrame(){{}}
 function setTimeout(fn){{timers.push(fn);return timers.length;}}
 function clearTimeout(){{}}
 {functions}
-_beginSessionSwitchLayoutStabilization('incoming');
+_beginSessionSwitchLayoutStabilization('incoming',1);
 assert(classes.has('session-switch-layout-stabilizing'));
-_settleSessionSwitchLayoutStabilization('incoming');
+_settleSessionSwitchLayoutStabilization('incoming',1);
 timers.at(-1)();
 while(raf.length) raf.shift()();
 assert(!classes.has('session-switch-layout-stabilizing'));
 assert.strictEqual(bottomCalls,1);
-_beginSessionSwitchLayoutStabilization('incoming-2');
+_beginSessionSwitchLayoutStabilization('incoming-2',2);
 _messageUserUnpinned=true;
-_settleSessionSwitchLayoutStabilization('incoming-2');
+_settleSessionSwitchLayoutStabilization('incoming-2',2);
 timers.at(-1)();
 while(raf.length) raf.shift()();
 assert.strictEqual(bottomCalls,1);
@@ -100,9 +101,9 @@ console.log(JSON.stringify({{bottomCalls,hasClass:classes.has('session-switch-la
 
 def test_session_switch_wires_begin_before_reset_and_settle_after_both_render_branches():
     load = _function_body(SESSIONS_JS, "loadSession")
-    begin = "window._beginSessionSwitchLayoutStabilization(sid);"
+    begin = "window._beginSessionSwitchLayoutStabilization(sid, _loadGeneration);"
     reset = "window._resetScrollDirectionTracker();"
-    settle = "window._settleSessionSwitchLayoutStabilization(sid);"
+    settle = "window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration);"
     assert begin in load
     assert load.index(begin) < load.index(reset)
     assert load.count(settle) == 2

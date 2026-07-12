@@ -1606,7 +1606,7 @@ async function loadSession(sid){
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
       if (!_isCurrentLoad()) {
-        if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
+        if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
         _rearmActiveSessionStream();
         return;
       }
@@ -1619,7 +1619,7 @@ async function loadSession(sid){
         // before clearing _loadingSessionId or retrying so the stale
         // continuation can't hijack the UI back to the old target.
         if (!_isCurrentLoad()) {
-          if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
+          if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
           _rearmActiveSessionStream();
           return;
         }
@@ -1638,7 +1638,7 @@ async function loadSession(sid){
     // load, re-arm the active session's stream and bail before any DOM mutation
     // or self-heal.
     if (!_isCurrentLoad()) {
-      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
+      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
       _rearmActiveSessionStream();
       return;
     }
@@ -1677,7 +1677,7 @@ async function loadSession(sid){
       }
     }
     _clearSameSessionForceReloadHint(sid);
-    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
     // Capture whether this failure self-healed away the current session (a
     // 404 on the *current* session whose sidecar was deleted server-side).
     // In that case there is no live session left to stream for, so we must
@@ -1713,7 +1713,7 @@ async function loadSession(sid){
   // send users to empty state after re-login (#4028 follow-up).
   if (!data) {
     _clearSameSessionForceReloadHint(sid);
-    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
+    if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
     if (_isCurrentLoad()) _loadingSessionId = null;
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
@@ -1775,7 +1775,7 @@ async function loadSession(sid){
     _clearDeferredActiveSessionExternalRefresh();
   }
   if (currentSid !== sid && typeof window !== 'undefined' && typeof window._beginSessionSwitchLayoutStabilization === 'function') {
-    try { window._beginSessionSwitchLayoutStabilization(sid); } catch (_) {}
+    try { window._beginSessionSwitchLayoutStabilization(sid, _loadGeneration); } catch (_) {}
   }
   if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
     try { window._resetScrollDirectionTracker(); } catch (_) {}
@@ -2015,7 +2015,7 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
-      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
+      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization(_loadGeneration);
       if (_isCurrentLoad()) _loadingSessionId = null;
       return;
     }
@@ -2076,7 +2076,7 @@ async function loadSession(sid){
       setComposerStatus('');
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
       if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._settleSessionSwitchLayoutStabilization==='function'){
-        window._settleSessionSwitchLayoutStabilization(sid);
+        window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration);
       }
       const restoredAnchorScene=activeStreamId&&typeof window!=='undefined'
         ? ((typeof window._renderLiveAnchorActivitySceneForStream==='function'&&window._renderLiveAnchorActivitySceneForStream(activeStreamId, sid, {mode:'compact_worklog'}))||
@@ -2104,7 +2104,7 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
       if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._settleSessionSwitchLayoutStabilization==='function'){
-        window._settleSessionSwitchLayoutStabilization(sid);
+        window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration);
       }
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       // Workspace refresh is guarded by session id inside loadDir(); keep it
