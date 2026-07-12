@@ -110,6 +110,24 @@ def test_syncReasoningChip_called_on_model_change():
         "syncReasoningChip() must run after S.session.model is updated"
 
 
+def test_model_dropdown_hydration_refreshes_reasoning_chip_without_session():
+    """Fresh boot must refresh reasoning after the default model is hydrated."""
+    with open("static/boot.js") as f:
+        src = f.read()
+    start = src.index("const _hydrateModelDropdown=")
+    end = src.index("const _startModelDropdown=", start)
+    block = src[start:end]
+
+    assert "if(S.session) syncTopbar();" in block, \
+        "active-session hydration must continue to refresh the full top bar"
+    assert "else if(typeof syncReasoningChip==='function') syncReasoningChip();" in block, \
+        "empty-session hydration must refresh reasoning for the hydrated default model"
+    assert block.count("syncTopbar()") == 1, \
+        "active-session hydration must refresh the top bar exactly once"
+    assert block.count("syncReasoningChip()") == 1, \
+        "empty-session hydration must refresh the reasoning chip exactly once"
+
+
 def test_selectModelFromDropdown_defers_reasoning_sync_to_onchange():
     """Custom model dropdown must not fetch reasoning before session state updates."""
     with open("static/ui.js") as f:
