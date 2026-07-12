@@ -7352,14 +7352,16 @@ def get_state_db_session_message_keys_before_timestamp(
     before_timestamp,
     *,
     profile=None,
+    require_no_null_timestamps=False,
 ) -> list[tuple] | None:
     """Return visible-identity keys before ``before_timestamp`` in DB order.
 
-    Missing timestamps are intentionally excluded because the bounded reader
-    keeps them with ``timestamp IS NULL OR timestamp >= ?``.  The caller uses
-    this as a conservative prefix-identity guard before taking the optimized
-    tail-read path, so schemas that cannot prove the merge-visible identity
-    force a full read.
+    Missing timestamps are excluded by default because the bounded reader keeps
+    them with ``timestamp IS NULL OR timestamp >= ?``.  Compression fast-path
+    callers can require their absence: a NULL-timestamp row cannot be proven
+    disjoint from an omitted parent using only the direct child sidecar.  The
+    caller uses this as a conservative prefix-identity guard, so schemas or rows
+    that cannot prove the merge-visible identity force a full read.
     """
     try:
         import sqlite3
@@ -7390,6 +7392,14 @@ def get_state_db_session_message_keys_before_timestamp(
             available = {str(row['name']) for row in cur.fetchall()}
             if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
                 return None
+            if require_no_null_timestamps:
+                cur.execute(
+                    "SELECT 1 FROM messages "
+                    "WHERE session_id = ? AND timestamp IS NULL LIMIT 1",
+                    (str(sid),),
+                )
+                if cur.fetchone() is not None:
+                    return None
             cur.execute(
                 """
                 SELECT

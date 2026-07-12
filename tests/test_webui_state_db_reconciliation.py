@@ -1088,6 +1088,89 @@ def test_msg_limit_single_hop_fast_path_falls_back_for_equal_timestamp_state_db_
     ]
 
 
+def test_msg_limit_single_hop_fast_path_falls_back_for_null_timestamp_parent_replay(
+    monkeypatch,
+    tmp_path,
+):
+    """A NULL-timestamp parent replay cannot be proven safe against a child-only merge."""
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_null_state_replay"
+    child_sid = "continuation_child_null_state_replay"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    child_messages = [
+        {"role": "user", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    null_parent_replay = {
+        "role": "user",
+        "content": "parent 50",
+        "timestamp": None,
+    }
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(
+        tmp_path / "state.db",
+        child_sid,
+        child_messages + [null_parent_replay],
+    )
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    captured = {"lineage_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+
+    first = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(first, urlparse(first.path))
+
+    assert first.status == 200
+    first_payload = first.response_json["session"]
+    assert first_payload["message_count"] == len(parent_messages) + len(child_messages)
+    assert first_payload["_messages_offset"] == len(parent_messages) + 470
+    assert [msg["content"] for msg in first_payload["messages"]] == [
+        f"child {idx}" for idx in range(470, 500)
+    ]
+    assert captured["lineage_loads"] >= 1
+
+    second = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0"
+        f"&msg_limit=30&msg_before={first_payload['_messages_offset']}"
+    )
+    routes.handle_get(second, urlparse(second.path))
+
+    assert second.status == 200
+    second_payload = second.response_json["session"]
+    assert second_payload["message_count"] == len(parent_messages) + len(child_messages)
+    assert second_payload["_messages_offset"] == len(parent_messages) + 440
+    assert [msg["content"] for msg in second_payload["messages"]] == [
+        f"child {idx}" for idx in range(440, 470)
+    ]
+
+
 def test_msg_limit_mutable_parent_timestamp_boundary_falls_back_to_lineage(
     monkeypatch,
     tmp_path,

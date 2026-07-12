@@ -8586,6 +8586,7 @@ def _state_db_has_no_timestamped_rows_before_sidecar(session, direct_sidecar_mes
         getattr(session, "session_id", None),
         first_ts,
         profile=getattr(session, "profile", None) or None,
+        require_no_null_timestamps=True,
     )
     if state_before_keys != []:
         return False
