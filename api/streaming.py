@@ -6621,6 +6621,7 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    _terminal_backend_lease = None
 
     # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
     # (was here at v0.51.30) — the previous placement always read the default
@@ -7171,6 +7172,29 @@ def _run_agent_streaming(
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
+        # #5937: multi-profile WebUI can leave an incompatible terminal env in
+        # the agent process-global "default" cache slot after a backend
+        # identity switch. Acquire a full-turn backend-identity lease BEFORE
+        # _ENV_LOCK (a differing-backend turn may block here waiting for
+        # in-flight turns, and their env restore needs _ENV_LOCK). Identity is
+        # derived from the effective turn environment — process env overlaid
+        # with this profile's runtime env, i.e. what os.environ.update below
+        # produces — not the profile env alone, so env applied by other layers
+        # is reflected. The lease is released in the turn's finally block.
+        try:
+            from api.terminal_backend_isolation import (
+                acquire_terminal_backend_turn_lease,
+            )
+            _effective_turn_env = dict(os.environ)
+            _effective_turn_env.update(_safe_profile_runtime_env)
+            _terminal_backend_lease, _ = acquire_terminal_backend_turn_lease(
+                _effective_turn_env
+            )
+        except Exception:
+            logger.warning(
+                "terminal backend isolation lease failed (#5937)",
+                exc_info=True,
+            )
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
@@ -7185,20 +7209,9 @@ def _run_agent_streaming(
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
             os.environ.update(_safe_profile_runtime_env)
-            # #5937: multi-profile WebUI can leave a remote terminal env in the
-            # agent process-global "default" cache slot after SSH→local (or any
-            # backend identity) switch. Scoped invalidation drops only that slot
-            # when identity changes; same-backend turns still share the env.
-            try:
-                from api.terminal_backend_isolation import (
-                    maybe_invalidate_default_terminal_env,
-                )
-                maybe_invalidate_default_terminal_env(_safe_profile_runtime_env)
-            except Exception:
-                logger.warning(
-                    "terminal backend isolation check failed (#5937)",
-                    exc_info=True,
-                )
+            # #5937: the backend-identity lease acquired above (before this
+            # lock) already invalidated the agent "default" terminal env slot
+            # if this turn's identity differs from the last committed one.
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
@@ -9996,6 +10009,17 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
+            # #5937: release this turn's backend-identity lease AFTER the env
+            # restore so a waiting differing-backend turn can't invalidate
+            # while this turn's environment is still nominally in effect.
+            if _terminal_backend_lease is not None:
+                try:
+                    _terminal_backend_lease.release()
+                except Exception:
+                    logger.debug(
+                        "terminal backend lease release failed (#5937)",
+                        exc_info=True,
+                    )
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
