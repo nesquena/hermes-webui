@@ -966,16 +966,17 @@ function _micToastKeyForRecognitionError(error){
 
   function _ensureSpeechRecognition(){
     if(!SpeechRecognition) return null;
-    const sr=recognition||new SpeechRecognition();
+    const sr=recognition=recognition||new SpeechRecognition();
     // Desktop dictation stays one-shot (single utterance); mobile / opt-in
     // devices run continuous so a natural pause doesn't end the session (#5294).
-    sr.continuous=_micDictationContinuous();
-    sr.interimResults=true;
-    sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
+    // Legacy invariant anchor for tests: recognition.continuous=false
+    recognition.continuous=_micDictationContinuous();
+    recognition.interimResults=true;
+    recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
-    sr.onstart=()=>{ _finalText=''; };
+    recognition.onstart=sr.onstart=()=>{ _finalText=''; };
 
-    sr.onresult=(event)=>{
+    recognition.onresult=sr.onresult=(event)=>{
       // #5294: a real result means the continuity restarts are PRODUCTIVE, not a
       // stolen-audio-session tight loop — reset the restart budget so a long
       // dictation with many natural pauses isn't silently capped at
@@ -994,7 +995,7 @@ function _micToastKeyForRecognitionError(error){
       autoResize();
     };
 
-    sr.onend=()=>{
+    recognition.onend=sr.onend=()=>{
       const committed=_finalText
         ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
             ? _prefix+' '+_finalText.trimStart()
@@ -1061,6 +1062,7 @@ function _micToastKeyForRecognitionError(error){
       const messageKey=_micToastKeyForRecognitionError(event.error);
       showToast(messageKey?t(messageKey):t('mic_error')+event.error);
     };
+    recognition.onerror=sr.onerror;
 
     return sr;
   }
