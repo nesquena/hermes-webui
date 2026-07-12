@@ -5127,6 +5127,53 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
+let _sessionSwitchLayoutStabilizationSid='';
+let _sessionSwitchLayoutStabilizationTimer=0;
+function _endSessionSwitchLayoutStabilization(){
+  clearTimeout(_sessionSwitchLayoutStabilizationTimer);
+  _sessionSwitchLayoutStabilizationTimer=0;
+  _sessionSwitchLayoutStabilizationSid='';
+  const el=$('messages');
+  if(el&&el.classList) el.classList.remove('session-switch-layout-stabilizing');
+}
+function _beginSessionSwitchLayoutStabilization(sid){
+  _endSessionSwitchLayoutStabilization();
+  _bottomSettleToken++;
+  if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
+  clearTimeout(_settleTimer);
+  clearTimeout(_settleFinalTimer);
+  cancelAnimationFrame(_settleRAF);
+  _programmaticScroll=false;
+  _sessionSwitchLayoutStabilizationSid=String(sid||'');
+  const el=$('messages');
+  if(el&&el.classList) el.classList.add('session-switch-layout-stabilizing');
+  // Failure/stale-load fallback. The loading placeholder has no user rows, so
+  // keeping this class while a slow metadata/message fetch is in flight is cheap.
+  // The normal render path replaces this long fallback with a short settle timer.
+  _sessionSwitchLayoutStabilizationTimer=setTimeout(_endSessionSwitchLayoutStabilization,15000);
+}
+function _settleSessionSwitchLayoutStabilization(sid){
+  if(!_sessionSwitchLayoutStabilizationSid||String(sid||'')!==_sessionSwitchLayoutStabilizationSid) return;
+  const el=$('messages');
+  if(!el){ _endSessionSwitchLayoutStabilization(); return; }
+  clearTimeout(_sessionSwitchLayoutStabilizationTimer);
+  // The incoming rows, post-processing, and content-visibility intrinsic sizes can
+  // keep changing for hundreds of milliseconds after renderMessages returns. Hold
+  // real row layout through that window, then expose content-visibility once and
+  // re-anchor against the final geometry. Two rAFs were empirically too short.
+  _sessionSwitchLayoutStabilizationTimer=setTimeout(()=>{
+    if(String(sid||'')!==_sessionSwitchLayoutStabilizationSid) return;
+    _endSessionSwitchLayoutStabilization();
+    requestAnimationFrame(()=>{
+      if(!_messageUserUnpinned&&_scrollPinned&&typeof scrollToBottom==='function') scrollToBottom();
+    });
+  },1200);
+}
+if(typeof window!=='undefined'){
+  window._beginSessionSwitchLayoutStabilization=_beginSessionSwitchLayoutStabilization;
+  window._settleSessionSwitchLayoutStabilization=_settleSessionSwitchLayoutStabilization;
+}
+
 // Sticky-unpin model (#3343 supersedes #3330's proximity re-pin): once the user
 // scrolls up, streaming stops auto-following until they return to the bottom or
 // click ↓. The upward-intent TIMEOUT mechanism (_lastMessageUpwardIntentMs /
@@ -12060,10 +12107,12 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(scrollRebuildGuard&&scrollRebuildGuard.release){
     requestAnimationFrame(()=>{
       scrollRebuildGuard.release();
-      // Only re-restore the unpinned snapshot if the reader is STILL unpinned at
-      // rAF time. If they re-pinned between guard-engage and this frame, the
-      // stale re-restore would yank them back off the bottom (Opus gate finding).
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+      // Releasing the temporary min-height changes layout. Restoring in this
+      // SAME callback reads the pre-release geometry and lands one frame early.
+      // Restore on the following frame after released geometry is measurable.
+      requestAnimationFrame(()=>{
+        if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+      });
     });
   }
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
@@ -12174,7 +12223,9 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(scrollRebuildGuard&&scrollRebuildGuard.release){
     requestAnimationFrame(()=>{
       scrollRebuildGuard.release();
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+      requestAnimationFrame(()=>{
+        if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+      });
     });
   }
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();

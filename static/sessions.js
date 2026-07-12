@@ -1769,6 +1769,9 @@ async function loadSession(sid){
   if (currentSid !== sid) {
     _clearDeferredActiveSessionExternalRefresh();
   }
+  if (currentSid !== sid && typeof window !== 'undefined' && typeof window._beginSessionSwitchLayoutStabilization === 'function') {
+    try { window._beginSessionSwitchLayoutStabilization(sid); } catch (_) {}
+  }
   if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
     try { window._resetScrollDirectionTracker(); } catch (_) {}
   }
@@ -2066,6 +2069,9 @@ async function loadSession(sid){
       setStatus('');
       setComposerStatus('');
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._settleSessionSwitchLayoutStabilization==='function'){
+        window._settleSessionSwitchLayoutStabilization(sid);
+      }
       const restoredAnchorScene=activeStreamId&&typeof window!=='undefined'
         ? ((typeof window._renderLiveAnchorActivitySceneForStream==='function'&&window._renderLiveAnchorActivitySceneForStream(activeStreamId, sid, {mode:'compact_worklog'}))||
           _renderRuntimeJournalAnchorActivityScene(activeStreamId, sid))
@@ -2091,6 +2097,9 @@ async function loadSession(sid){
       setComposerStatus('');
       updateQueueBadge(sid);
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
+      if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._settleSessionSwitchLayoutStabilization==='function'){
+        window._settleSessionSwitchLayoutStabilization(sid);
+      }
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       // Workspace refresh is guarded by session id inside loadDir(); keep it
       // after the transcript's first paint so chat switching is not competing
