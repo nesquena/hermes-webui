@@ -103,6 +103,22 @@ def test_russian_locale_includes_representative_translations():
         assert entry in src
 
 
+def test_public_share_locale_values_are_not_swapped():
+    src = read(REPO / "static" / "i18n.js")
+    en_block = extract_locale_block(src, "en")
+    ru_block = extract_locale_block(src, "ru")
+
+    assert "share_session: 'Share'" in en_block
+    assert "share_session_tooltip: 'Create a public read-only share link'" in en_block
+    assert "stop_sharing_session: 'Stop sharing'" in en_block
+    assert "share_session: 'Поделиться'" not in en_block
+
+    assert "share_session: 'Поделиться'" in ru_block
+    assert "share_session_tooltip: 'Создать публичную ссылку только для чтения'" in ru_block
+    assert "stop_sharing_session: 'Закрыть доступ'" in ru_block
+    assert "share_session: 'Share'" not in ru_block
+
+
 def test_russian_locale_covers_english_keys():
     src = read(REPO / "static" / "i18n.js")
     key_pattern = re.compile(r"^\s+([a-zA-Z0-9_]+):", re.MULTILINE)
