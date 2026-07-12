@@ -55,8 +55,8 @@ def test_terminal_stream_error_reuses_voice_mode_completion_hook():
 def test_final_results_route_send_timing_through_shared_silence_helper():
     block = _between(
         BOOT_JS,
-        "_recognition.onresult=(event)=>{",
-        "\n\n    _recognition.onend=()=>{",
+        "_ownedRecognition.onresult=(event)=>{",
+        "\n\n    _ownedRecognition.onend=()=>{",
     )
     assert "_armVoiceModeSilenceTimer(_voiceSilenceMs());" in _compact(block), (
         "final recognition results must route their send timing through the "
@@ -67,18 +67,15 @@ def test_final_results_route_send_timing_through_shared_silence_helper():
 def test_start_listening_keeps_armed_send_authority_intact():
     block = _between(
         BOOT_JS,
-        "function _startListening(){",
+        "function _startListening(generation=_voiceGeneration){",
         "\n\n  function _voiceModeSend(){",
     )
     compact = _compact(block)
-    assert "if(_voiceModeState==='listening'&&_silenceTimer)return;" in compact, (
-        "_startListening must no-op when a newer listening turn already armed "
-        "the silence timer, so stale delayed restarts cannot clear send authority."
-    )
-    assert compact.index("if(_voiceModeState==='listening'&&_silenceTimer)return;") < compact.index("_clearVoiceModeSilenceTimer();"), (
-        "the stale-restart guard must run before _startListening clears timer "
-        "state, or the pending send still gets destroyed."
-    )
+    assert "generation!==_voiceGeneration" in compact
+    assert "S.busy||S.activeStreamId" in compact
+    assert "_recognition!==_ownedRecognition" in compact
+    assert "_scheduleVoiceModeRestart" in compact
+    assert "if(_voiceModeState==='listening'&&_recognition)return;" in compact
 
 
 def test_shared_silence_helper_clears_state_before_sending():
@@ -90,7 +87,7 @@ def test_shared_silence_helper_clears_state_before_sending():
     compact = _compact(block)
     assert "_clearVoiceModeSilenceTimer();" in compact
     assert "_silenceDeadlineAt=Date.now()+_safeDelay;" in compact
-    assert "_silenceTimer=setTimeout(()=>{_silenceTimer=null;_silenceDeadlineAt=0;_voiceModeSend();},_safeDelay);" in compact, (
+    assert "_silenceTimer=setTimeout(()=>{_silenceTimer=null;_silenceDeadlineAt=0;if(!_voiceModeActive||_generation!==_voiceGeneration)return;_voiceModeSend();},_safeDelay);" in compact, (
         "the shared silence helper must clear its pending state before the "
         "send callback fires, so the timer stays the single send authority."
     )
@@ -99,15 +96,12 @@ def test_shared_silence_helper_clears_state_before_sending():
 def test_onend_rearms_remaining_grace_before_any_immediate_send():
     block = _between(
         BOOT_JS,
-        "_recognition.onend=()=>{",
-        "\n\n    _recognition.onerror=(event)=>{",
+        "_ownedRecognition.onend=()=>{",
+        "\n\n    _ownedRecognition.onerror=(event)=>{",
     )
     compact = _compact(block)
-    assert "const_remainingSilenceMs=_silenceDeadlineAt-Date.now();" in compact, (
-        "voice mode must compare recognition onend against the pending silence "
-        "deadline instead of treating onend as an unconditional send signal."
-    )
-    rearm = compact.index("_armVoiceModeSilenceTimer(_remainingSilenceMs);")
+    assert "const_remainingSilenceMs=_silenceDeadlineAt-Date.now();" in compact
+    rearm = compact.index("_scheduleVoiceModeRestart(0,generation);")
     branch_return = compact.index("return;", rearm)
     immediate_send = compact.index("_voiceModeSend();")
     assert branch_return < immediate_send, (
@@ -115,10 +109,55 @@ def test_onend_rearms_remaining_grace_before_any_immediate_send():
         "mode must re-arm the remaining delay and return before any immediate "
         "send path can run."
     )
-    assert compact.count("_voiceModeSend();") == 1, (
-        "onend should expose only one immediate send site, the post-deadline "
-        "branch after the remaining-grace early return."
+
+
+def test_manual_send_and_cancel_share_voice_ownership_hooks():
+    assert "window._voiceModePrepareManualSend" in MESSAGES_JS
+    assert "voiceModeInternal:true" in BOOT_JS
+    assert "_invalidateVoiceGeneration()" in BOOT_JS
+    assert "_clearOwnerInflightState();" in MESSAGES_JS
+    assert "_voiceModeOnResponseComplete({errorOnly:true})" in MESSAGES_JS
+
+
+def test_error_only_completion_runs_after_idle_settlement():
+    assert "let isRecoveryControlMessage=false;\n      if(S.session&&eventMatchesCurrent){" in MESSAGES_JS
+    apperror_hook = "_setActivePaneIdleIfOwner();\n      if(eventMatchesCurrent&&!isRecoveryControlMessage&&typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({errorOnly:true});"
+    assert apperror_hook in MESSAGES_JS
+    cancel_idx = MESSAGES_JS.index("source.addEventListener('cancel',e=>{")
+    cancel_render_idx = MESSAGES_JS.index("renderSessionList();", cancel_idx)
+    cancel_hook_idx = MESSAGES_JS.index("_setActivePaneIdleIfOwner();\n      if(typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({errorOnly:true});", cancel_idx)
+    assert cancel_hook_idx > cancel_render_idx
+    error_idx = MESSAGES_JS.index("function _handleStreamError(source){")
+    error_hook_idx = MESSAGES_JS.index("_setActivePaneIdleIfOwner();\n    if(S.session&&S.session.session_id===activeSid&&typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({errorOnly:true});", error_idx)
+    error_render_idx = MESSAGES_JS.index("renderMessages({preserveScroll:true});", error_idx)
+    assert error_hook_idx > error_render_idx
+
+
+def test_grace_restart_preserves_accumulated_voice_text():
+    block = _between(
+        BOOT_JS,
+        "function _startListening(generation=_voiceGeneration){",
+        "\n\n  function _voiceModeSend(){",
     )
+    compact = _compact(block)
+    assert "let_finalText=_voiceModeAccumulatedText;" in compact
+    assert "_finalText=_voiceModeAccumulatedText;" in compact
+    assert "_voiceModeAccumulatedText=final||interim;" in compact
+    assert "_scheduleVoiceModeRestart(0,generation);" in compact
+
+
+def test_busy_activation_captures_completion_owner():
+    block = _between(
+        BOOT_JS,
+        "function _activate(){",
+        "\n\n  function _deactivate(){",
+    )
+    compact = _compact(block)
+    assert "if(typeofS!=='undefined'&&S.busy){" in compact
+    assert "_voiceThinkingGeneration=_voiceGeneration;" in compact
+    assert "_voiceCompletionGeneration=_voiceGeneration;" in compact
+    assert "_voiceModeThinkingSid=(S.session&&S.session.session_id)||null;" in compact
+    assert "_setState('thinking');" in compact
 
 
 def test_voice_silence_timer_remains_send_authority():

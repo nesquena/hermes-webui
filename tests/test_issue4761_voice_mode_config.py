@@ -66,7 +66,7 @@ class TestVoiceModeContinuousConfig:
     def test_continuous_reads_local_storage(self):
         src = _boot_src()
         assert (
-            "_recognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true'"
+            "_ownedRecognition.continuous=localStorage.getItem('hermes-voice-continuous')==='true'"
             in src
         ), (
             "_recognition.continuous must read from localStorage key "
@@ -93,7 +93,7 @@ class TestBootJsVoiceSectionIntegrity:
 
     def test_voice_mode_declares_recognition(self):
         src = _boot_src()
-        assert "_recognition=new SpeechRecognition()" in src
+        assert "const _ownedRecognition=new SpeechRecognition()" in src
 
     def test_voice_mode_state_machine_present(self):
         src = _boot_src()

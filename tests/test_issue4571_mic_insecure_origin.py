@@ -105,7 +105,7 @@ def test_voice_mode_preflights_and_routes_permission_errors_through_shared_helpe
 
     start_body = _slice_between(
         BOOT_JS,
-        "function _startListening(){",
+        "function _startListening(generation=_voiceGeneration){",
         "\n  function _voiceModeSend(){",
     )
     assert "_micOriginNeedsSecureContext()" in start_body
