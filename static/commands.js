@@ -1680,20 +1680,16 @@ async function cmdRetry(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
   const activeSid=S.session.session_id;
-  // #5924: capture whether the user has a GENUINE deliberate model pick for THIS
-  // session BEFORE any await — a recovery send should honor a real pick, but must
-  // NOT force explicit_model_pick when the model is unchanged (that made the server
-  // skip its compatible-model resolution). A deliberate pick = the current selector
-  // model differs from the session's own stored model (the failed turn's model).
-  const _recoveryPick=(typeof _chatPayloadModel==='function' && S.session)
-    ? (function(){
-        const m=_chatPayloadModel();
-        const p=(typeof _chatPayloadModelProvider==='function')?_chatPayloadModelProvider(m):null;
-        const changed=String(m||'')!==String(S.session.model||'')
-          || String(p||'')!==String(S.session.model_provider||'');
-        return (m && changed) ? {model:m, model_provider:p} : null;
-      })()
-    : null;
+  // #5924: honor a genuine deliberate model pick across a recovery /retry without
+  // forcing explicit_model_pick when there is no real pick. The single-shot marker
+  // is already consumed by the failed send (messages.js clears it before
+  // /api/chat/start regardless of outcome), so we can't read it back. Instead
+  // derive the deliberate-pick signal the SAME way send()'s persistent path does:
+  // the session's own model is a non-default pick vs the profile default. This is
+  // NOT provider inference (no false positive) and survives marker consumption (no
+  // false negative for an already-applied pick). Captured pre-await, scoped to
+  // activeSid. No non-default pick → no re-arm → server compatible-model resolution runs.
+  const _recoveryPick=_deliberateSessionModelPick(activeSid);
   try{
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
@@ -1704,14 +1700,9 @@ async function cmdRetry(){
     if(!S.session||S.session.session_id!==activeSid)return;
     if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
-    // #5924 (Facet 1 + Facet 4): /retry is a recovery send. Re-arm the single-shot
-    // explicit-pick marker ONLY when the user made a genuine deliberate pick
-    // (_recoveryPick, captured pre-await + scoped to activeSid). Re-arming
-    // unconditionally forced explicit_model_pick on every retry — even with no
-    // pick — which suppressed the server's compatible-model resolution. A real
-    // cross-provider session pick is already honored every send by
-    // _isCrossProviderPick in send(), so this only needs to cover a fresh pick.
-    if(_recoveryPick && typeof _rememberPendingSessionModel==='function'){
+    // Re-arm the single-shot explicit-pick marker ONLY from the captured genuine
+    // non-default pick, scoped to activeSid so it can't leak to another session.
+    if(_recoveryPick && _recoveryPick.model && typeof _rememberPendingSessionModel==='function'){
       _rememberPendingSessionModel(activeSid, _recoveryPick.model, _recoveryPick.model_provider);
     }
     await send();

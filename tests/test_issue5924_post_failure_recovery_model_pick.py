@@ -31,8 +31,12 @@ COMMANDS_JS = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 
 
 def _function_body(src: str, name: str) -> str:
-    needle = f"async function {name}"
-    start = src.index(needle)
+    # Match either "async function NAME" or plain "function NAME".
+    start = src.find(f"async function {name}")
+    if start == -1:
+        start = src.find(f"function {name}")
+    if start == -1:
+        raise AssertionError(f"function {name!r} not found")
     brace = src.index("{", start)
     depth = 0
     for i in range(brace, len(src)):
@@ -72,15 +76,38 @@ def test_cmd_retry_rearms_pending_pick_before_send():
     assert rearm_idx < send_idx, "the re-arm must happen BEFORE await send()"
 
 
-def test_recovery_rearm_reads_current_selector_state():
-    """The re-arm must source the CURRENT selector/session model, not a stale const.
+def test_recovery_rearm_sources_deliberate_pick_helper():
+    """The re-arm must source the deliberate-pick signal from the shared helper.
 
-    Sourcing from ``_chatPayloadModel()`` is what makes a *freshly-picked* model
-    (typed into the selector after the failure) win on the recovery send.
+    Both recovery paths capture ``_deliberateSessionModelPick(<sid>)`` (a non-default
+    session-model signal that is inference-free and survives the failed send's marker
+    consumption) BEFORE any await, rather than comparing ``_chatPayloadModel()`` to
+    itself (which false-negatives an already-applied pick and false-positives on
+    provider inference — the round-2 gate finding).
     """
     for body in (_function_body(UI_JS, "submitEdit"), _function_body(COMMANDS_JS, "cmdRetry")):
-        assert "_chatPayloadModel()" in body
-        assert "_chatPayloadModelProvider(" in body
+        assert "_deliberateSessionModelPick(" in body, (
+            "recovery paths must derive the pick via _deliberateSessionModelPick"
+        )
+
+
+def test_deliberate_pick_helper_ignores_default_and_inference():
+    """The helper only reports a pick for a genuine NON-DEFAULT session model.
+
+    It must key off the session's own model vs the profile default (window._defaultModel
+    / _activeProvider) — NOT provider inference on an unchanged model, and NOT a
+    self-comparison. A session on the profile default returns null (no re-arm), so the
+    server's compatible-model resolution runs for a no-real-pick recovery.
+    """
+    body = _function_body(UI_JS, "_deliberateSessionModelPick")
+    assert "window._defaultModel" in body and "window._activeProvider" in body, (
+        "the pick signal must compare against the profile default, not infer a provider"
+    )
+    assert "return null" in body, "a default-model session must return null (no re-arm)"
+    # must NOT resurrect the round-2 false-positive: no provider inference in the signal
+    assert "_providerFromModelValue" not in body and "_chatPayloadModelProvider" not in body, (
+        "the deliberate-pick signal must not use provider inference (round-2 false-positive)"
+    )
 
 
 # ── Server layer: explicit pick is honored; repair path preserved (#3737) ────
@@ -161,9 +188,10 @@ def test_recovery_rearm_is_gated_on_a_genuine_deliberate_pick():
         assert "if(_recoveryPick" in body.replace(" ", ""), (
             "the _rememberPendingSessionModel re-arm must be inside an `if(_recoveryPick ...)` guard"
         )
-        # the pick is a genuine change vs the session's own stored model
-        assert "S.session.model" in body and "S.session.model_provider" in body, (
-            "a genuine pick = selector model differs from the session's stored model"
+        # the pick is derived from the shared non-default-session helper (not inline
+        # self-comparison / provider inference — round-2 finding)
+        assert "_deliberateSessionModelPick(" in body, (
+            "the pick must come from _deliberateSessionModelPick, not an inline comparison"
         )
 
 

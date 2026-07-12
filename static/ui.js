@@ -2848,6 +2848,31 @@ function _clearPendingSessionModel(sessionId){
   if(!sid) return;
   try{sessionStorage.removeItem(_pendingSessionModelKey(sid));}catch(_){}
 }
+// #5924: the recovery-send deliberate-pick signal. Returns {model, model_provider}
+// ONLY when the active session's own model is a genuine non-default pick vs the
+// profile default — the same signal send()'s persistent-pick path (_isCrossProviderPick)
+// uses, generalized to same-provider non-default picks too. Used by the recovery
+// paths (cmdRetry / submitEdit) to decide whether to re-arm the single-shot
+// explicit-pick marker: the marker is consumed by the failed send before we reach
+// recovery, so we can't read it back, and comparing _chatPayloadModel() to itself
+// either false-negatives (an already-applied pick looks unchanged) or false-positives
+// (provider inference manufactures a "change"). A non-default session model is the
+// durable, inference-free evidence of a real pick. Returns null (no re-arm → the
+// server's compatible-model resolution runs) when the session is on the default.
+function _deliberateSessionModelPick(sessionId){
+  if(!S.session||S.session.session_id!==sessionId) return null;
+  const model=String(S.session.model||'').trim();
+  if(!model) return null;
+  const provider=S.session.model_provider?String(S.session.model_provider).trim():null;
+  const defaultModel=(typeof window!=='undefined'&&window._defaultModel)?String(window._defaultModel):'';
+  const activeProvider=(typeof window!=='undefined'&&window._activeProvider)?String(window._activeProvider):'';
+  // Non-default = different model, OR same model on a different provider. A session
+  // sitting on the profile default (both match) is NOT a deliberate pick.
+  const isDefault=defaultModel&&model===defaultModel
+    &&(!activeProvider||!provider||provider===activeProvider);
+  if(isDefault) return null;
+  return {model, model_provider:provider};
+}
 function _applyPendingSessionModelForSession(sessionId){
   if(!S.session||S.session.session_id!==sessionId) return false;
   const pending=_readPendingSessionModel(sessionId);
@@ -17081,19 +17106,11 @@ function autoResizeTextarea(ta) {
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
   const initialSid = S.session.session_id;
-  // #5924: capture a GENUINE deliberate pick (selector model differs from the
-  // session's own stored model) BEFORE any await, scoped to initialSid — so a
-  // recovery edit honors a real pick without forcing explicit_model_pick on an
-  // unchanged model (which suppressed the server's compatible-model resolution).
-  const _recoveryPick=(typeof _chatPayloadModel==='function')
-    ? (function(){
-        const m=_chatPayloadModel();
-        const p=(typeof _chatPayloadModelProvider==='function')?_chatPayloadModelProvider(m):null;
-        const changed=String(m||'')!==String(S.session.model||'')
-          || String(p||'')!==String(S.session.model_provider||'');
-        return (m && changed) ? {model:m, model_provider:p} : null;
-      })()
-    : null;
+  // #5924: capture the deliberate-pick signal BEFORE any await, scoped to
+  // initialSid — a non-default session model (vs profile default), which is
+  // inference-free and survives the failed send's marker consumption. See
+  // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
+  const _recoveryPick=_deliberateSessionModelPick(initialSid);
   const absoluteKeepCount = _oldestIdx + msgIdx;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
