@@ -505,15 +505,24 @@ function _saveSessionCompletionUnread() {
   }
 }
 
-function _markSessionCompletionUnread(sid, messageCount = 0) {
+function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
   const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  unread[sid] = {message_count: count, completed_at: Date.now()};
+  const entry = {message_count: count, completed_at: Date.now()};
+  // Cron markers carry source+profile so profile switches can clear only that
+  // cross-profile leak without wiping ordinary chat completion unread (#5960).
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    if (meta.source) entry.source = String(meta.source);
+    if (typeof meta.profile === 'string' && meta.profile.trim()) {
+      entry.profile = meta.profile.trim();
+    }
+  }
+  unread[sid] = entry;
   _saveSessionCompletionUnread();
 }
 
-function _markSessionCompletionUnreadIfBackground(sid, messageCount = null) {
+function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta = null) {
   if (!sid) return false;
   let count = Number.isFinite(messageCount) ? Number(messageCount) : NaN;
   if (!Number.isFinite(count)) {
@@ -527,7 +536,7 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null) {
     if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
     return false;
   }
-  _markSessionCompletionUnread(sid, count);
+  _markSessionCompletionUnread(sid, count, meta);
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   return true;
 }
@@ -538,6 +547,32 @@ function _clearSessionCompletionUnread(sid) {
   if (!Object.prototype.hasOwnProperty.call(unread, sid)) return;
   delete unread[sid];
   _saveSessionCompletionUnread();
+}
+
+// Drop persisted cron unread dots that belong to inactive profiles. Ordinary
+// (non-cron) completion markers stay put — sticky all-profile sidebars still
+// need those. Called from the shared profile-switch reset in panels.js.
+function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
+  const active = (typeof activeProfile === 'string' && activeProfile.trim())
+    ? activeProfile.trim()
+    : 'default';
+  const unread = _getSessionCompletionUnread();
+  let changed = false;
+  for (const sid of Object.keys(unread)) {
+    const marker = unread[sid];
+    if (!marker || typeof marker !== 'object' || Array.isArray(marker)) continue;
+    if (marker.source !== 'cron') continue;
+    const origin = (typeof marker.profile === 'string' && marker.profile.trim())
+      ? marker.profile.trim()
+      : '';
+    if (!origin || origin === active) continue;
+    delete unread[sid];
+    changed = true;
+  }
+  if (!changed) return false;
+  _saveSessionCompletionUnread();
+  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+  return true;
 }
 
 function _clearSessionViewedCount(sid) {
