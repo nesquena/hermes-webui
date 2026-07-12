@@ -45,16 +45,6 @@ _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 
 
-def _gateway_provider_error_payload(message: str) -> dict:
-    from api.streaming import _classify_provider_error, _provider_error_payload
-
-    classification = _classify_provider_error(message)
-    return _provider_error_payload(
-        message,
-        classification["type"],
-        classification.get("hint", ""),
-    )
-
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
 # ``urlopen(timeout=...)``. A stream that emits ANY byte within the window never
 # trips it, so a genuinely alive (if slow) token stream is untouched; only more
