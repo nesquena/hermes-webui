@@ -12161,6 +12161,13 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   if(scrollRebuildGuard&&scrollRebuildGuard.release){
     requestAnimationFrame(()=>{
+      // Guard the release itself: a newer rebuild (B) may have installed its own
+      // min-height guard before this older callback (A) runs. A's release()
+      // would restore the value A saved and tear down B's active guard, causing
+      // an intermediate height collapse and viewport movement. Only release when
+      // we still own the current guard; otherwise B owns it and will restore the
+      // true original via its own dataset-backed release.
+      if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;
       scrollRebuildGuard.release();
       // Releasing the temporary min-height changes layout. Restoring in this
       // SAME callback reads the pre-release geometry and lands one frame early.
@@ -12279,6 +12286,13 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   if(scrollRebuildGuard&&scrollRebuildGuard.release){
     requestAnimationFrame(()=>{
+      // Guard the release itself: a newer rebuild may have installed its own
+      // min-height guard before this older callback runs. Releasing here would
+      // restore this callback's saved value and tear down the newer guard,
+      // collapsing height and moving the viewport. Only release when we still
+      // own the current guard; otherwise the newer rebuild restores the true
+      // original via its own dataset-backed release.
+      if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;
       scrollRebuildGuard.release();
       requestAnimationFrame(()=>{
         if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;

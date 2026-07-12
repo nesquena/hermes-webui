@@ -120,6 +120,11 @@ def test_live_anchor_scroll_guard_restores_after_release_layout_frame():
         body = _function_body(UI_JS, name)
         compact = re.sub(r"\s+", "", body)
         release = "scrollRebuildGuard.release();"
+        # The release() call must itself be gated on still owning the guard, so a
+        # superseded older callback cannot restore its stale min-height and tear
+        # down a newer rebuild's active guard.
+        guarded_release = "if(scrollRebuildIdentity&&typeof_liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity))return;scrollRebuildGuard.release();"
+        assert guarded_release in compact, f"{name}: release() must be identity-gated"
         nested = "requestAnimationFrame(()=>{if(scrollRebuildIdentity&&typeof_liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity))return;if(_messageUserUnpinned)_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);});"
         assert release in compact
         assert nested in compact
