@@ -146,27 +146,55 @@ if __name__ == "__main__":
 class TestCustomEndpointModelStripping:
     """Tests for fix #433: strip provider prefix when custom base_url is set."""
 
-    def _resolve(self, model_id, provider=None, base_url=None):
-        """Helper: set cfg directly (same pattern as test_model_resolver.py)."""
+    def _resolve(self, model_id, provider=None, base_url=None, advertised_ids=None):
+        """Helper: set cfg directly (same pattern as test_model_resolver.py).
+
+        ``advertised_ids`` seeds the models-catalog snapshot that provenance
+        resolution reads (#5979). Pass the ids the endpoint's own group
+        advertised; None leaves the catalog cold (preserve-verbatim default).
+        """
         old_cfg = dict(_api_config.cfg)
+        old_cache = _api_config._available_models_cache
+        old_memo = _api_config._advertised_model_ids_memo
+        old_fp = _api_config._available_models_cache_source_fingerprint
+        old_prov = _api_config._models_cache_provenance
         model_cfg = {}
         if provider:
             model_cfg['provider'] = provider
         if base_url:
             model_cfg['base_url'] = base_url
         _api_config.cfg['model'] = model_cfg
+        if advertised_ids is None:
+            _api_config._available_models_cache = None
+        else:
+            _api_config._available_models_cache = {
+                'groups': [{
+                    'provider_id': provider or 'custom',
+                    'models': [{'id': mid, 'label': mid} for mid in advertised_ids],
+                }]
+            }
+            _api_config._available_models_cache_source_fingerprint = _api_config._models_cache_source_fingerprint()
+        _api_config._advertised_model_ids_memo = None
+        _api_config._sync_models_cache_provenance()
         try:
             return _api_config.resolve_model_provider(model_id)
         finally:
             _api_config.cfg.clear()
             _api_config.cfg.update(old_cfg)
+            _api_config._available_models_cache = old_cache
+            _api_config._advertised_model_ids_memo = old_memo
+            _api_config._available_models_cache_source_fingerprint = old_fp
+            _api_config._models_cache_provenance = old_prov
 
     def test_prefixed_model_stripped_for_custom_endpoint(self):
-        """Issue #433: 'openai/gpt-5.4' with custom base_url returns bare 'gpt-5.4'."""
+        """Issue #433: 'openai/gpt-5.4' with custom base_url returns bare 'gpt-5.4'
+        when the endpoint advertised ONLY the bare id (provenance strip).
+        """
         model, provider, base_url = self._resolve(
             'openai/gpt-5.4',
             provider='custom',
             base_url='http://my-proxy.local:8080/v1',
+            advertised_ids=['gpt-5.4'],  # relay serves the bare id only
         )
         assert model == 'gpt-5.4', (
             "Expected bare 'gpt-5.4' for custom endpoint, got '{}'."
