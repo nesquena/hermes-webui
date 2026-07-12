@@ -638,6 +638,9 @@ def _run_gateway_chat_streaming(
     def put_gateway_event(event, data):
         if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
+        if event == "apperror" and isinstance(data, dict):
+            data = data.copy()
+            data.setdefault("session_id", session_id)
         event_id = None
         if run_journal is not None:
             try:

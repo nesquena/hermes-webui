@@ -433,6 +433,7 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     apperrors = [item[1] for item in events if item[0] == "apperror"]
     assert apperrors
     assert apperrors[-1]["type"] in {"model_not_found", "auth_mismatch"}
+    assert apperrors[-1]["session_id"] == s.session_id
 
     response_error[0] = ""
     empty_stream_id = "stream-gateway-empty-response-test"
@@ -455,6 +456,7 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     )
     empty_errors = [item[1] for item in empty_events if item[0] == "apperror"]
     assert empty_errors[-1]["type"] == "gateway_empty_response"
+    assert empty_errors[-1]["session_id"] == s.session_id
 
     response_error[0] = "Gateway provider failed without a known classification"
     unknown_stream_id = "stream-gateway-unknown-terminal-error-test"
@@ -1370,6 +1372,7 @@ def test_gateway_runs_api_classifies_terminal_provider_error():
             )
         apperrors = [item[1] for item in events if item[0] == "apperror"]
         assert apperrors[-1]["type"] in {"model_not_found", "auth_mismatch"}
+        assert apperrors[-1]["session_id"] == "sess-runs-terminal-error"
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
