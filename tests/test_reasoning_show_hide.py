@@ -354,13 +354,19 @@ class TestReasoningConfigHelpers:
         assert parse_reasoning_effort('  HIGH  ') == {'enabled': True, 'effort': 'high'}
 
     def test_valid_reasoning_efforts_matches_hermes_constants(self):
-        """Ensure our mirror stays in sync with hermes_constants."""
-        from api.config import VALID_REASONING_EFFORTS
-        # Snapshot-style assertion: if hermes_constants adds a level, this
-        # test will fail fast so we know to update WebUI too.
-        assert VALID_REASONING_EFFORTS == (
-            'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+        """Use the embedded Agent vocabulary, with a current standalone fallback."""
+        from api import config as cfg
+        assert cfg._FALLBACK_VALID_REASONING_EFFORTS == (
+            'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
         )
+        if cfg._HERMES_FOUND:
+            from hermes_constants import VALID_REASONING_EFFORTS as agent_efforts
+            assert cfg.VALID_REASONING_EFFORTS == tuple(agent_efforts)
+        else:
+            assert (
+                cfg.VALID_REASONING_EFFORTS
+                == cfg._FALLBACK_VALID_REASONING_EFFORTS
+            )
 
     def test_set_reasoning_effort_persists_to_config_yaml(self, tmp_path, monkeypatch):
         """set_reasoning_effort writes agent.reasoning_effort to the active

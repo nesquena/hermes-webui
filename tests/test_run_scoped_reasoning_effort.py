@@ -31,6 +31,7 @@ def test_browser_effort_validation_is_strict_and_optional():
     assert _normalize_run_reasoning_effort(None) is None
     assert _normalize_run_reasoning_effort("") is None
     assert _normalize_run_reasoning_effort(" XHigh ") == "xhigh"
+    assert _normalize_run_reasoning_effort(" ULTRA ") == "ultra"
     assert _normalize_run_reasoning_effort("none") == "none"
 
     with pytest.raises(ValueError, match="Unknown reasoning effort"):
