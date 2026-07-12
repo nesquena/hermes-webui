@@ -503,7 +503,89 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     partial_errors = [item[1] for item in partial_events if item[0] == "apperror"]
     assert partial_errors[-1]["type"] in {"model_not_found", "auth_mismatch"}
     saved = models.get_session(s.session_id)
-    assert not any(message.get("role") == "assistant" for message in saved.messages)
+    assert [message.get("role") for message in saved.messages[-3:]] == ["user", "assistant", "assistant"]
+    partial_message = saved.messages[-2]
+    assert partial_message.get("_partial") is True
+    assert partial_message["content"] == "partial"
+    error_message = saved.messages[-1]
+    assert error_message.get("_error") is True
+    assert "Invalid Request" in error_message.get("provider_details", "")
+    payload_messages = partial_errors[-1]["session"]["messages"]
+    assert payload_messages[-2]["_partial"] is True
+    assert payload_messages[-2]["content"] == "partial"
+    assert payload_messages[-1]["_error"] is True
+
+
+def test_gateway_chat_worker_persists_reasoning_and_tool_state_on_terminal_error(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    error_text = (
+        'HTTP 400: {"detail":"Invalid Request: Invalid model format or no credentials '
+        'for provider: <redacted>"}'
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"part"}}]}\n\n'
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"tool":"terminal","label":"terminal: pytest","toolCallId":"call-1","status":"running","arguments":{}}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"text":"Preview reasoning"}\n\n'
+            yield f'data: {{"error":{json.dumps(error_text)}}}\n\n'.encode()
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    events = []
+    channel = MagicMock()
+    channel.put_nowait = lambda item: events.append(item)
+    s = new_session()
+    stream_id = "stream-gateway-terminal-reasoning-tool-error-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    partial_message = saved.messages[-2]
+    assert partial_message.get("_partial") is True
+    assert partial_message["content"] == "part"
+    assert partial_message["reasoning"] == "Preview reasoning"
+    assert partial_message["_partial_tool_calls"] == [{
+        "name": "terminal",
+        "args": {},
+        "done": False,
+        "tid": "call-1",
+    }]
+    apperrors = [item[1] for item in events if item[0] == "apperror"]
+    assert apperrors[-1]["session"]["messages"][-2]["reasoning"] == "Preview reasoning"
+    assert apperrors[-1]["session"]["messages"][-2]["_partial_tool_calls"][0]["name"] == "terminal"
+    assert apperrors[-1]["session"]["messages"][-1]["_error"] is True
 
 
 def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_reasoning(tmp_path, monkeypatch):
@@ -1321,13 +1403,18 @@ def test_gateway_runs_api_body_includes_session_id():
             STREAMS.pop(stream_id, None)
 
 
-def test_gateway_runs_api_classifies_terminal_provider_error():
+def test_gateway_runs_api_classifies_terminal_provider_error(tmp_path, monkeypatch):
     from unittest.mock import MagicMock, patch
 
     from api.config import STREAMS, STREAMS_LOCK
     from api.gateway_chat import _run_gateway_chat_streaming
 
     error_text = "HTTP 400: Invalid model format or no credentials for provider"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
     events = []
     q = MagicMock()
     q.put_nowait = lambda item: events.append(item)
@@ -1352,19 +1439,20 @@ def test_gateway_runs_api_classifies_terminal_provider_error():
         return resp
 
     try:
+        s = new_session()
+        s.active_stream_id = stream_id
+        s.pending_user_message = "hi"
+        s.pending_attachments = []
+        s.save()
         with patch.dict("os.environ", {
             "HERMES_WEBUI_CHAT_BACKEND": "gateway",
             "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
             "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gateway.local",
         }, clear=True), \
              patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
-             patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-             patch("api.gateway_chat.get_session", return_value=MagicMock(
-                 active_stream_id=stream_id, workspace="/tmp", profile=None,
-                 context_messages=[], messages=[],
-             )):
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
             _run_gateway_chat_streaming(
-                session_id="sess-runs-terminal-error",
+                session_id=s.session_id,
                 msg_text="hi",
                 model="test",
                 workspace="/tmp",
@@ -1372,7 +1460,11 @@ def test_gateway_runs_api_classifies_terminal_provider_error():
             )
         apperrors = [item[1] for item in events if item[0] == "apperror"]
         assert apperrors[-1]["type"] in {"model_not_found", "auth_mismatch"}
-        assert apperrors[-1]["session_id"] == "sess-runs-terminal-error"
+        assert apperrors[-1]["session_id"] == s.session_id
+        saved = models.get_session(s.session_id)
+        assert [message.get("role") for message in saved.messages[-2:]] == ["user", "assistant"]
+        assert saved.messages[-1]["_error"] is True
+        assert apperrors[-1]["session"]["messages"][-1]["_error"] is True
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
