@@ -31,6 +31,9 @@ _TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
+_SESSION_REPLAY_MAX_BYTES = 4 * 1024 * 1024
+_SESSION_REPLAY_MAX_ROWS = 4096
+_SESSION_REPLAY_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _default_session_dir() -> Path:
@@ -83,6 +86,21 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
         else:
             malformed.append({"line": line_no, "raw": raw})
     return events, malformed
+
+
+def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
+    raw = str(raw or "").strip()
+    if not raw:
+        return None, None
+    if ":" in raw:
+        run_id, tail = raw.rsplit(":", 1)
+    else:
+        run_id, tail = None, raw
+    try:
+        seq = max(0, int(tail))
+    except (TypeError, ValueError):
+        return run_id or None, None
+    return run_id or None, seq
 
 
 def _next_seq(path: Path) -> int:
@@ -179,6 +197,49 @@ def _fsync_parent_dir(path: Path) -> None:
             os.close(dir_fd)
     except OSError:
         pass
+
+
+def _event_created_at(event: dict, *, fallback: float = 0.0) -> float:
+    try:
+        return float(event.get("created_at") or fallback)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _iter_bounded_raw_jsonl_lines(path: Path, *, max_bytes: int, retained_bytes: int = 0):
+    line_no = 0
+    buffered = bytearray()
+    total_bytes = int(retained_bytes)
+    try:
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(_SESSION_REPLAY_READ_CHUNK_BYTES)
+                if not chunk:
+                    if buffered:
+                        if total_bytes + len(buffered) > max_bytes:
+                            raise ValueError("replay_limit_bytes")
+                        line_no += 1
+                        total_bytes += len(buffered)
+                        yield line_no, bytes(buffered), total_bytes
+                    return
+                start = 0
+                while start < len(chunk):
+                    newline = chunk.find(b"\n", start)
+                    if newline == -1:
+                        buffered.extend(chunk[start:])
+                        if total_bytes + len(buffered) > max_bytes:
+                            raise ValueError("replay_limit_bytes")
+                        break
+                    buffered.extend(chunk[start : newline + 1])
+                    if total_bytes + len(buffered) > max_bytes:
+                        raise ValueError("replay_limit_bytes")
+                    line_no += 1
+                    total_bytes += len(buffered)
+                    yield line_no, bytes(buffered), total_bytes
+                    buffered.clear()
+                    start = newline + 1
+    except FileNotFoundError:
+        return
 
 
 def append_run_event(
@@ -306,6 +367,40 @@ def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None
     return _summary_from_events(session_id, run_id, journal.get("events") or [])
 
 
+def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = None) -> tuple[int, float, int]:
+    """Cheap, bounded fingerprint of a session's run journal: (file_count, max_mtime, total_size).
+
+    Reads only directory + per-file stat metadata (never parses journal bodies), so it stays
+    O(runs) and cannot be tipped over by a large ``done`` row. Used to detect that the journal
+    advanced during an idle live-subscribe wait — a run that starts AND finishes inside a single
+    keepalive tick leaves the journal changed but never materializes a live in-memory stream, so a
+    no-cursor idle subscriber would otherwise miss it until a manual refresh. Returns (0, 0.0, 0)
+    when the session has no journal yet. Invalid ids resolve to the empty fingerprint rather than
+    raising so callers can probe unconditionally.
+    """
+    try:
+        sid = _validate_id(session_id, "session_id")
+    except ValueError:
+        return (0, 0.0, 0)
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_root = root / RUN_JOURNAL_DIR_NAME / sid
+    if not session_root.exists():
+        return (0, 0.0, 0)
+    count = 0
+    max_mtime = 0.0
+    total_size = 0
+    for path in session_root.glob("*.jsonl"):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        count += 1
+        total_size += st.st_size
+        if st.st_mtime > max_mtime:
+            max_mtime = st.st_mtime
+    return (count, max_mtime, total_size)
+
+
 def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | None:
     rid = _validate_id(run_id, "run_id")
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
@@ -317,6 +412,122 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
         summary["path"] = str(path)
         return summary
     return None
+
+
+def read_session_run_events(
+    session_id: str,
+    *,
+    after_event_id: str | None = None,
+    session_dir: Path | None = None,
+    max_bytes: int = _SESSION_REPLAY_MAX_BYTES,
+    max_rows: int = _SESSION_REPLAY_MAX_ROWS,
+) -> dict:
+    """Replay durable run-journal rows for one session after an opaque cursor."""
+    sid = _validate_id(session_id, "session_id")
+    cursor_run_id, cursor_seq = _parse_run_journal_event_id(after_event_id)
+    raw_cursor = str(after_event_id or "").strip()
+    if raw_cursor and cursor_run_id is not None:
+        try:
+            cursor_run_id = _validate_id(cursor_run_id, "run_id")
+        except ValueError:
+            cursor_seq = None
+    if raw_cursor:
+        try:
+            if int(raw_cursor.rsplit(":", 1)[-1]) < 0:
+                cursor_seq = None
+        except (TypeError, ValueError):
+            pass
+    if raw_cursor and (cursor_run_id is None or cursor_seq is None or cursor_seq <= 0):
+        return {
+            "session_id": sid,
+            "cursor_run_id": cursor_run_id,
+            "cursor_seq": cursor_seq,
+            "status": "cursor_invalid",
+            "events": [],
+        }
+    if not raw_cursor:
+        return {
+            "session_id": sid,
+            "cursor_run_id": None,
+            "cursor_seq": None,
+            "status": "ok",
+            "events": [],
+        }
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_root = root / RUN_JOURNAL_DIR_NAME / sid
+    runs: list[tuple[float, str, list[dict]]] = []
+    retained_rows = 0
+    retained_bytes = 0
+    for path in sorted(session_root.glob("*.jsonl")) if session_root.exists() else []:
+        run_id = path.stem
+        try:
+            run_id = _validate_id(run_id, "run_id")
+        except ValueError:
+            continue
+        events: list[dict] = []
+        expected_seq = 1
+        try:
+            for _line_no, raw, total_bytes in _iter_bounded_raw_jsonl_lines(
+                path,
+                max_bytes=max_bytes,
+                retained_bytes=retained_bytes,
+            ):
+                retained_bytes = total_bytes
+                if not raw.strip():
+                    continue
+                try:
+                    event = json.loads(raw.decode("utf-8"))
+                    seq = int(event.get("seq")) if isinstance(event, dict) else 0
+                except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_malformed", "events": []}
+                if (
+                    seq != expected_seq
+                    or event.get("event_id") != f"{run_id}:{seq}"
+                    or event.get("run_id") != run_id
+                    or event.get("session_id") != sid
+                ):
+                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_noncontiguous", "events": []}
+                expected_seq += 1
+                retained_rows += 1
+                if retained_rows > max_rows:
+                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_rows", "events": []}
+                events.append(event)
+        except FileNotFoundError:
+            continue
+        except ValueError as exc:
+            if str(exc) == "replay_limit_bytes":
+                return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_bytes", "events": []}
+            raise
+        created_at = min((_event_created_at(event) for event in events), default=path.stat().st_mtime)
+        runs.append((created_at, run_id, events))
+    runs.sort(key=lambda run: (run[0], run[1]))
+    cursor_index = next((index for index, (_created_at, run_id, _events) in enumerate(runs) if run_id == cursor_run_id), None)
+    if cursor_index is None:
+        foreign_paths = root.joinpath(RUN_JOURNAL_DIR_NAME).glob(f"*/{cursor_run_id}.jsonl") if cursor_run_id else []
+        foreign_session_id = next((path.parent.name for path in foreign_paths if path.parent.name != sid), "")
+        status = "cursor_run_missing"
+        if foreign_session_id:
+            status = "cursor_session_mismatch"
+        return {
+            "session_id": sid,
+            "cursor_run_id": cursor_run_id,
+            "cursor_seq": cursor_seq,
+            "status": status,
+            "events": [],
+        }
+    cursor_events = runs[cursor_index][2]
+    if cursor_seq is None or cursor_seq > len(cursor_events):
+        return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "cursor_event_missing", "events": []}
+    replay_events = [event for event in cursor_events if event["seq"] > cursor_seq]
+    for _created_at, _run_id, events in runs[cursor_index + 1:]:
+        replay_events.extend(events)
+    return {
+        "session_id": sid,
+        "cursor_run_id": cursor_run_id,
+        "cursor_seq": cursor_seq,
+        "status": "ok",
+        "events": replay_events,
+    }
 
 
 def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> bool:

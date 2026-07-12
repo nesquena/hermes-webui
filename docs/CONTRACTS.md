@@ -66,7 +66,9 @@ contributor guidance; it does not change runtime behavior or CI gates.
   stream `GET /api/sessions/{session_id}/events` (#4812). Distinct from the
   existing global session-list stream `GET /api/sessions/events`. Start here for
   any work that touches per-session SSE, `Last-Event-ID` replay, or session
-  lifecycle event delivery. Proposed RFCs do not authorize implementation.
+  lifecycle event delivery. The Phase 1 server contract is now shipped; the RFC
+  remains the vocabulary reference while broader client and platform claims stay
+  behind the recorded proof gates.
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

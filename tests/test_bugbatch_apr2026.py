@@ -178,9 +178,12 @@ def test_590_transcribing_status_shown_before_fetch():
 
 def test_590_recording_stops_before_transcribe():
     """boot.js: _setRecording(false) must fire in onstop before the pinned send path."""
-    onstop_start = BOOT_JS.find("recorder.onstop")
-    assert onstop_start != -1, "recorder.onstop not found"
-    onstop_body = BOOT_JS[onstop_start:onstop_start + 700]
+    # Anchor on the handler definition (not just the substring "recorder.onstop",
+    # which can collide with comments referencing the handler) and widen the
+    # window so future comment additions don't push the send path out of range.
+    onstop_start = BOOT_JS.find("recorder.onstop=async")
+    assert onstop_start != -1, "recorder.onstop=async handler not found"
+    onstop_body = BOOT_JS[onstop_start:onstop_start + 1200]
     rec_pos = onstop_body.find("_setRecording(false)")
     blob_pos = onstop_body.find("_transcribeBlob(")
     raw_pos = onstop_body.find("_sendRawAudio(")

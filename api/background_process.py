@@ -1274,7 +1274,12 @@ def _start_server_side_wakeup_turn(
                 session_id, wakeup_prompt, source="process_wakeup"
             )
             status = int((resp or {}).get("_status", 200) or 200)
-            if status == 409:
+            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                logger.info(
+                    "server-side wakeup suppressed for session %s: provider credential state is paused",
+                    session_id,
+                )
+            elif status == 409:
                 # Raced an active turn (e.g. a human /api/chat/start, or a
                 # sibling deferred-wakeup thread). Re-defer this prompt so it
                 # is delivered by the winning turn's teardown / next-turn drain

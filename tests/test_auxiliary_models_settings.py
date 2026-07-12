@@ -4,14 +4,22 @@ Verifies that the auxiliary models card is present in the settings HTML,
 that the JS loading/saving logic is wired up, and that all locales have the
 required i18n keys.
 """
+import json
+import shutil
+import subprocess
+
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).parent.parent
-PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+PANELS_JS_PATH = ROOT / "static" / "panels.js"
+PANELS_JS = PANELS_JS_PATH.read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 STREAMING_PY = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 class TestAuxiliaryModelsHTML:
@@ -63,18 +71,102 @@ class TestAuxiliaryModelsJS:
             "Missing _applyAuxModels() in panels.js"
         )
 
-    def test_aux_task_slots_defined(self):
-        """_AUX_TASK_SLOTS must list the 12 canonical task slots."""
-        assert "_AUX_TASK_SLOTS" in PANELS_JS, (
-            "Missing _AUX_TASK_SLOTS constant in panels.js"
+    def test_auxiliary_task_metadata_is_normalized(self):
+        """Frontend should keep auxiliary task rows backed by normalized metadata."""
+        assert "let _auxTasks=[]" in PANELS_JS, "Missing _auxTasks cache in panels.js"
+        assert "function _normalizeAuxiliaryTasks" in PANELS_JS, (
+            "Missing _normalizeAuxiliaryTasks() in panels.js"
         )
-        # Verify all 12 tasks are present
-        for key in ("vision", "compression", "web_extract", "session_search",
-                     "approval", "mcp", "title_generation", "skills_hub", "curator",
-                     "kanban_decomposer", "profile_describer", "triage_specifier"):
-            assert f"key:'{key}'" in PANELS_JS, (
-                f"Missing auxiliary task slot '{key}' in _AUX_TASK_SLOTS"
-            )
+        assert "function _auxTaskLabelFromMeta" in PANELS_JS, (
+            "Missing _auxTaskLabelFromMeta() in panels.js"
+        )
+        assert "_auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[])" in PANELS_JS, (
+            "Auxiliary load flow must normalize API task payload"
+        )
+        assert "for(const task of _auxTasks)" in PANELS_JS, (
+            "Auxiliary rows should be rendered from normalized API payload"
+        )
+
+    @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+    def test_normalize_auxiliary_tasks_keeps_first_wins_and_unknown_metadata(self):
+        """Normalization should keep first occurrence and preserve unknown metadata."""
+        script = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+
+function extract(name){
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if(start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 0;
+  while(i < src.length){
+    const ch = src[i];
+    if(ch === '{') depth += 1;
+    else if(ch === '}') {
+      depth -= 1;
+      if(depth === 0){
+        break;
+      }
+    }
+    i += 1;
+  }
+  if(depth !== 0) throw new Error(name + ' parse failed');
+  return src.slice(start, i + 1);
+}
+
+global.t = (key) => {
+  const dict = {
+    settings_aux_task_vision: 'Vision',
+    settings_aux_task_vision_desc: 'image/screenshot analysis',
+  };
+  return Object.prototype.hasOwnProperty.call(dict, key) ? dict[key] : key;
+};
+
+eval(extract('_auxTaskLabelFromMeta'));
+eval(extract('_normalizeAuxiliaryTasks'));
+
+const normalized = _normalizeAuxiliaryTasks([
+  {task: 'vision', provider: 'openai', model: 'gpt-5.5', label: 'Backend Vision', description: 'backend desc'},
+  {task: 'future_task', provider: 'openai', model: 'future-1', label: 'Future Task', description: 'future tool'},
+  {task: 'vision', provider: 'openai', model: 'gpt-5.6'},
+  null,
+  {},
+]);
+
+const vision = normalized.find((entry) => entry.task === 'vision');
+const futureTask = normalized.find((entry) => entry.task === 'future_task');
+
+console.log(JSON.stringify({
+  tasks: normalized.map((entry) => entry.task),
+  visionLabel: vision ? vision.label : null,
+  visionDescription: vision ? vision.description : null,
+  futureLabel: futureTask ? futureTask.label : null,
+  futureDescription: futureTask ? futureTask.description : null,
+}));
+"""
+
+        proc = subprocess.run(
+            [NODE, "-e", script, str(PANELS_JS_PATH)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert proc.returncode == 0, f"node probe failed:\n{proc.stderr}"
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert result["tasks"] == ["vision", "future_task"], (
+            "normalize should keep duplicate removal and payload order"
+        )
+        assert result["visionLabel"] == "Vision"
+        assert result["visionDescription"] == "image/screenshot analysis"
+        assert result["futureLabel"] == "Future Task"
+        assert result["futureDescription"] == "future tool"
+
+    def test_no_hardcoded_aux_task_slot_array(self):
+        """Auxiliary rows must not come from a hardcoded task-slot list."""
+        assert "_AUX_TASK_SLOTS" not in PANELS_JS
+        assert "const _AUX_TASK_SLOTS" not in PANELS_JS
+        assert "session_search" not in PANELS_JS
 
     def test_advanced_options_button_and_modal_wiring(self):
         """Each auxiliary row and the main model should expose gear-driven advanced config editing."""
@@ -103,6 +195,17 @@ class TestAuxiliaryModelsJS:
             "Object.keys(cfg.extra_body).length",
         ):
             assert marker in PANELS_JS
+
+    def test_normalize_auxiliary_tasks_deduplicates_and_rejects_malformed(self):
+        """Frontend normalization should keep only first occurrence and valid payload entries."""
+        assert "if(!rawTask||typeof rawTask!=='object') continue;" in PANELS_JS
+        assert "if(!task||seen.has(task)) continue;" in PANELS_JS
+
+    def test_auxiliary_load_uses_api_payload_order(self):
+        """Row rendering should iterate exactly the normalized API payload order."""
+        idx = PANELS_JS.find("_auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[])")
+        assert idx >= 0
+        assert "for(const task of _auxTasks)" in PANELS_JS[idx:idx + 380]
 
     def test_main_advanced_modal_hides_unsupported_timing_fields_but_keeps_request_body(self):
         """Main-model modal should not advertise timing knobs that the chat agent cannot apply."""
@@ -302,8 +405,6 @@ class TestAuxiliaryModelsI18n:
         "settings_aux_task_compression_desc",
         "settings_aux_task_web_extract",
         "settings_aux_task_web_extract_desc",
-        "settings_aux_task_session_search",
-        "settings_aux_task_session_search_desc",
         "settings_aux_task_approval",
         "settings_aux_task_approval_desc",
         "settings_aux_task_mcp",
@@ -330,12 +431,17 @@ class TestAuxiliaryModelsI18n:
             )
 
     def test_all_locales_have_auxiliary_keys(self):
-        """Count of each key should equal the number of locales (12 with Turkish)."""
+        """Count of each key should equal the number of supported locales."""
         for key in self.REQUIRED_KEYS:
             count = I18N_JS.count(f"{key}:")
             assert count == 15, (
-                f"i18n key '{key}' found {count} times — expected 14 (one per locale)"
+                f"i18n key '{key}' found {count} times — expected 15 (one per locale)"
             )
+
+    def test_session_search_aux_task_i18n_keys_removed(self):
+        """session_search auxiliary labels were retired from the canonical set."""
+        assert "settings_aux_task_session_search" not in I18N_JS
+        assert "settings_aux_task_session_search_desc" not in I18N_JS
 
 
 class TestAuxiliaryModelsBackend:
@@ -446,6 +552,96 @@ class TestAuxiliaryModelsBackend:
         assert vision["extra_body"] == {"reasoning_effort": "none"}
         assert vision["api_key_set"] is True
         assert "api_key" not in vision
+
+    def test_get_auxiliary_models_omits_session_search_and_includes_metadata(self, monkeypatch):
+        """Backend payload should omit unknown keys and keep canonical metadata."""
+        from api import config
+
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "cfg", {
+            "model": {"provider": "openai", "default": "gpt-5.5"},
+            "auxiliary": {
+                "vision": {"provider": "openai", "model": "gpt-5.5"},
+                "future_task": {
+                    "provider": "openai",
+                    "model": "gpt-5.5",
+                    "label": "Future Task",
+                    "description": "future tool",
+                },
+                "monitor": {"provider": "openai", "model": "gpt-5.5"},
+                "tts_audio_tags": {"provider": "openai", "model": "gpt-5.5"},
+            },
+        })
+
+        data = config.get_auxiliary_models()
+        task_keys = [t["task"] for t in data["tasks"]]
+        assert task_keys == [
+            "vision",
+            "web_extract",
+            "compression",
+            "approval",
+            "mcp",
+            "title_generation",
+            "skills_hub",
+            "curator",
+            "kanban_decomposer",
+            "profile_describer",
+            "triage_specifier",
+        ]
+        assert "session_search" not in task_keys
+        assert "future_task" not in task_keys
+        assert "monitor" not in task_keys
+        assert "tts_audio_tags" not in task_keys
+        vision = next(t for t in data["tasks"] if t["task"] == "vision")
+        assert vision["label"] == "Vision"
+        assert vision["description"] == "image/screenshot analysis"
+
+    def test_set_auxiliary_model_rejects_existing_unknown_task(self, monkeypatch, tmp_path):
+        """Existing unknown keys must be rejected by the auxiliary setter."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "auxiliary:\n  future_task:\n    provider: openai\n    model: gpt-5.5\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        with pytest.raises(ValueError, match="Unknown auxiliary task slot") as excinfo:
+            config.set_auxiliary_model("future_task", "openai", "gpt-5.6")
+        assert "future_task" in str(excinfo.value)
+
+    def test_reset_removes_retired_slot_but_preserves_other_unknown_mappings(
+        self, monkeypatch, tmp_path
+    ):
+        """Reset cleans known retired slots without treating config as task schema."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "auxiliary:\n"
+            "  vision:\n"
+            "    provider: openai\n"
+            "    model: gpt-5.5\n"
+            "  session_search:\n"
+            "    provider: openai\n"
+            "    model: gpt-5.5\n"
+            "  monitor:\n"
+            "    provider: openai\n"
+            "    model: gpt-5.5\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        config.set_auxiliary_model("__reset__", "auto", "")
+
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]
+        assert "session_search" not in saved
+        assert saved["monitor"] == {"provider": "openai", "model": "gpt-5.5"}
+        assert saved["vision"]["provider"] == "auto"
+        assert saved["vision"]["model"] == ""
 
     def test_backend_surfaces_main_advanced_fields_without_api_key_value(self, monkeypatch):
         """Main model advanced fields should be visible, but API keys remain write-only."""

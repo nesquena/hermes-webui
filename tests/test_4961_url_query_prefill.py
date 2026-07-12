@@ -1,5 +1,6 @@
 """Regression tests for #4961 URL query composer prefill behavior."""
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 SESSIONS_JS_PATH = REPO_ROOT / "static" / "sessions.js"
 BOOT_JS_PATH = REPO_ROOT / "static" / "boot.js"
+REPRO_PATH = REPO_ROOT / "tests" / "fixtures" / "webui-PR-TARGET-5884-REPRO.md"
 SESSIONS_JS = SESSIONS_JS_PATH.read_text(encoding="utf-8")
 BOOT_JS = BOOT_JS_PATH.read_text(encoding="utf-8")
 NODE = shutil.which("node")
@@ -29,6 +31,13 @@ def _run_node(source: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr)
     return result.stdout.strip()
+
+
+def _recorded_repro_query() -> str:
+    repro = REPRO_PATH.read_text(encoding="utf-8")
+    match = re.search(r"\?q=hello\+world", repro)
+    assert match, "expected recorded query in repo fixture"
+    return match.group(0)
 
 
 def _node_prelude() -> str:
@@ -181,12 +190,13 @@ def test_fresh_default_workspace_bind_skips_prefill_draft_boot():
     }
 
 
-def test_apply_prefill_updates_composer_without_autosending():
-    source = _node_prelude() + """
+def test_boot_query_prefill_focuses_composer_without_sending():
+    recorded_query = _recorded_repro_query()
+    source = (_node_prelude() + """
 (async () => {
   evalBoot('_applyComposerPrefillOnBoot');
-  const counts = { autoResize: 0, updateSendBtn: 0, send: 0 };
-  const msg = { value: '' };
+  const counts = { autoResize: 0, updateSendBtn: 0, focus: 0, send: 0 };
+  const msg = { value: '', focus() { counts.focus++; document.activeElement = this; } };
   global.document = {
     getElementById(id) {
       return id === 'msg' ? msg : null;
@@ -196,19 +206,63 @@ def test_apply_prefill_updates_composer_without_autosending():
   global.autoResize = () => { counts.autoResize++; };
   global.updateSendBtn = () => { counts.updateSendBtn++; };
   global.send = async () => { counts.send++; };
-  await _applyComposerPrefillOnBoot({ hasText: true, text: 'hello world', autoSend: true });
-  delete global.autoResize;
-  await _applyComposerPrefillOnBoot({ hasText: true, text: 'second pass', autoSend: false });
-  await _applyComposerPrefillOnBoot({ hasText: false, text: '   ', autoSend: true });
-  console.log(JSON.stringify({ counts, value: msg.value }));
+  await _applyComposerPrefillOnBoot({ hasText: true, text: new URL('https://example.test/' + RECORDED_QUERY).searchParams.get('q'), autoSend: false });
+  console.log(JSON.stringify({ counts, value: msg.value, active: document.activeElement === msg }));
 })().catch(err => {
   console.error(err);
   process.exit(1);
 });
+""").replace("RECORDED_QUERY", json.dumps(recorded_query))
+    payload = json.loads(_run_node(source))
+    assert payload["counts"] == {"autoResize": 1, "updateSendBtn": 0, "focus": 1, "send": 0}
+    assert payload["value"] == "hello world"
+    assert payload["active"] is True
+
+
+def test_empty_or_absent_prefill_does_not_focus_composer():
+    source = _node_prelude() + """
+(async () => {
+  evalBoot('_applyComposerPrefillOnBoot');
+  const counts = { focus: 0, send: 0 };
+  const msg = { value: 'unchanged', focus() { counts.focus++; } };
+  global.document = { getElementById(id) { return id === 'msg' ? msg : null; } };
+  global.$ = (id) => document.getElementById(id);
+  global.send = async () => { counts.send++; };
+  await _applyComposerPrefillOnBoot({ hasText: false, text: '   ' });
+  await _applyComposerPrefillOnBoot(null);
+  console.log(JSON.stringify({ counts, value: msg.value }));
+})().catch(err => { console.error(err); process.exit(1); });
 """
     payload = json.loads(_run_node(source))
-    assert payload["counts"] == {"autoResize": 1, "updateSendBtn": 1, "send": 0}
-    assert payload["value"] == "second pass"
+    assert payload == {"counts": {"focus": 0, "send": 0}, "value": "unchanged"}
+
+
+def test_non_empty_prefill_without_focus_method_still_updates_composer():
+    source = _node_prelude() + """
+(async () => {
+  evalBoot('_applyComposerPrefillOnBoot');
+  const counts = { autoResize: 0, updateSendBtn: 0, send: 0 };
+  const msg = { value: '' };
+  global.document = {
+    activeElement: null,
+    getElementById(id) {
+      return id === 'msg' ? msg : null;
+    }
+  };
+  global.$ = (id) => document.getElementById(id);
+  global.autoResize = () => { counts.autoResize++; };
+  global.updateSendBtn = () => { counts.updateSendBtn++; };
+  global.send = async () => { counts.send++; };
+  await _applyComposerPrefillOnBoot({ hasText: true, text: 'hello world', autoSend: false });
+  console.log(JSON.stringify({ counts, value: msg.value, active: document.activeElement === msg }));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    payload = json.loads(_run_node(source))
+    assert payload == {
+        "counts": {"autoResize": 1, "updateSendBtn": 0, "send": 0},
+        "value": "hello world",
+        "active": False,
+    }
 
 
 def test_terminal_prefill_step_consumes_params_after_boot_state_is_ready():
@@ -216,8 +270,9 @@ def test_terminal_prefill_step_consumes_params_after_boot_state_is_ready():
 (async () => {
   evalBoot('_applyComposerPrefillOnBoot');
   evalBoot('_finalizeComposerPrefillOnBoot');
-  const counts = { autoResize: 0, updateSendBtn: 0, consume: 0, send: 0 };
-  const msg = { value: '' };
+  const counts = { autoResize: 0, updateSendBtn: 0, consume: 0, focus: 0, send: 0 };
+  const events = [];
+  const msg = { value: '', focus() { counts.focus++; events.push('focus'); document.activeElement = this; } };
   global.document = {
     getElementById(id) {
       return id === 'msg' ? msg : null;
@@ -227,11 +282,11 @@ def test_terminal_prefill_step_consumes_params_after_boot_state_is_ready():
   global.autoResize = () => { counts.autoResize++; };
   global.updateSendBtn = () => { counts.updateSendBtn++; };
   global.send = async () => { counts.send++; };
-  global._consumeComposerPrefillParamsFromLocation = () => { counts.consume++; };
+  global._consumeComposerPrefillParamsFromLocation = () => { counts.consume++; events.push('consume'); };
   await _finalizeComposerPrefillOnBoot({ hasParams: true, hasText: true, text: 'hello world', autoSend: false });
   delete global.autoResize;
   await _finalizeComposerPrefillOnBoot({ hasParams: false, hasText: true, text: 'second pass', autoSend: false });
-  console.log(JSON.stringify({ counts, value: msg.value }));
+  console.log(JSON.stringify({ counts, events, value: msg.value }));
 })().catch(err => {
   console.error(err);
   process.exit(1);
@@ -242,8 +297,10 @@ def test_terminal_prefill_step_consumes_params_after_boot_state_is_ready():
         "autoResize": 1,
         "updateSendBtn": 1,
         "consume": 1,
+        "focus": 2,
         "send": 0,
     }
+    assert payload["events"] == ["consume", "focus", "focus"]
     assert payload["value"] == "second pass"
 
 

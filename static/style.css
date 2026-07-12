@@ -2483,6 +2483,9 @@
 
   /* ── CSV table rendering ── */
   .csv-table-wrap{margin:6px 0;overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--surface);}
+  .csv-preview-header{justify-content:space-between;flex-wrap:wrap;row-gap:6px;}
+  .csv-preview-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .csv-download-link{margin-left:auto;text-transform:none;letter-spacing:0;font-size:12px;}
   .csv-table{width:100%;border-collapse:collapse;font-size:13px;}
   .csv-table thead{position:sticky;top:0;z-index:1;}
   .csv-table th{background:var(--hover-bg);font-weight:600;text-align:left;padding:8px 12px;border-bottom:2px solid var(--border2);white-space:nowrap;user-select:none;}
@@ -4123,6 +4126,22 @@ body.resizing .sidebar{transition:none!important;}
   font-size:11.5px;
   order:3;
 }
+.transparent-event-time{
+  flex-shrink:0;
+  order:4;
+  color:var(--muted);
+  font-variant-numeric:tabular-nums;
+  opacity:.55;
+  white-space:nowrap;
+  font-size:10px;
+}
+/* Narrow viewports: the ~50px of fixed time-label chrome squeezes the collapsed
+   row's flexible preview (the most informative part) toward zero. Hide the label
+   under ~420px; the full timing is still available in Compact/expanded review and
+   via the title tooltip on wider screens. (#5739 Fable UX fix.) */
+@media (max-width:420px){
+  .transparent-event-time{ display:none; }
+}
 .transparent-event-row .thinking-card-label{
   display:inline;
   flex:0 0 auto;
@@ -4147,7 +4166,7 @@ body.resizing .sidebar{transition:none!important;}
 }
 .transparent-event-status{
   flex-shrink:0;
-  order:4;
+  order:5;
   color:var(--muted);
   opacity:.64;
   font-size:10px;
@@ -4156,6 +4175,13 @@ body.resizing .sidebar{transition:none!important;}
   padding:1px 5px;
   border-radius:6px;
   background:transparent;
+}
+.transparent-event-row .thinking-card-btn-row{
+  order:10;
+  flex-shrink:0;
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
 }
 /* Failed / running / interrupted must be legible — a failure in a long trace was
    previously invisible (only a muted .64 badge), a regression vs the old card's
@@ -4330,7 +4356,8 @@ body.resizing .sidebar{transition:none!important;}
 
 /* ── Collapsible Hermes chat name tag ───────── */
 .assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-row,
-.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-controls{
+.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-controls,
+.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-earlier-steps{
   display:none;
 }
 .assistant-turn .msg-role.assistant{cursor:pointer;user-select:none;}
@@ -5118,7 +5145,7 @@ main.main > #mainPlugin{display:none;}
 #mainSettings .theme-pick-btn.active,
 #mainSettings .skin-pick-btn.active,
 #mainSettings .font-size-pick-btn.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent-bg-strong)!important;background:var(--surface)!important;}
-#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:4px;}
+#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:4px;}
 #mainSettings .chat-activity-mode-btn{min-height:34px;padding:7px 10px;border:1px solid var(--border2);border-radius:8px;background:var(--surface);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;}
 #mainSettings .chat-activity-mode-btn:hover{border-color:var(--accent-bg-strong);color:var(--text);background:var(--hover-bg);}
 #mainSettings .chat-activity-mode-btn.active{border-color:var(--accent);color:var(--accent-text);background:var(--accent-bg);box-shadow:0 0 0 1px var(--accent-bg-strong);}
@@ -6234,6 +6261,49 @@ main.main > #mainPlugin{display:none;}
 .load-older-indicator:hover{opacity:.75;}
 .message-window-load-earlier{align-self:center;margin:4px auto 14px;padding:7px 14px;border:1px solid var(--border);border-radius:999px;background:var(--surface);box-shadow:var(--shadow-sm);}
 .message-window-load-earlier:hover{background:var(--hover-bg);border-color:var(--accent);}
+/* #5966: "Show earlier steps" affordance for a capped Transparent Stream turn.
+   Sits inline at the top of the turn's activity run, styled as a quiet pill in
+   the app's own visual language (matches .message-window-load-earlier) but
+   left-aligned + fit-content so the PILL (not the full row) is the click/tap
+   target and it reads as part of the run. >=44px tall for touch on phones. */
+.transparent-earlier-steps{
+  display:inline-flex;align-items:center;gap:7px;
+  align-self:flex-start;width:fit-content;max-width:100%;
+  margin:2px 0 8px;padding:7px 13px;
+  min-height:34px;box-sizing:border-box;
+  cursor:pointer;user-select:none;
+  font-size:12.5px;font-weight:500;line-height:1;
+  color:var(--text-muted,var(--muted));
+  background:var(--surface);
+  border:1px solid var(--border);border-radius:999px;
+  box-shadow:var(--shadow-sm);
+  transition:background .15s ease,border-color .15s ease,color .15s ease;
+}
+.transparent-earlier-steps:hover{
+  background:var(--hover-bg);
+  border-color:var(--accent);
+  color:var(--accent-text,var(--text));
+}
+.transparent-earlier-steps:focus-visible{
+  outline:2px solid var(--accent);outline-offset:2px;
+}
+.transparent-earlier-steps-chevron{
+  display:inline-flex;align-items:center;justify-content:center;
+  color:var(--accent-text,var(--blue));
+  transition:transform .15s ease;
+}
+.transparent-earlier-steps:hover .transparent-earlier-steps-chevron{transform:translateY(-1px);}
+.transparent-earlier-steps-label{white-space:nowrap;}
+@media (max-width:640px){
+  .transparent-earlier-steps{min-height:44px;padding:11px 15px;font-size:13px;}
+}
+/* Newly-revealed prefix rows fade in gently so the reveal feels intentional,
+   not a flash of hundreds of rows. Respects reduced-motion. */
+@keyframes transparentEarlierReveal{from{opacity:0;transform:translateY(-2px);}to{opacity:1;transform:none;}}
+.transparent-event-row[data-earlier-revealed="1"]{animation:transparentEarlierReveal .18s ease both;}
+@media (prefers-reduced-motion:reduce){
+  .transparent-earlier-steps-chevron,.transparent-event-row[data-earlier-revealed="1"]{transition:none;animation:none;}
+}
 .message-virtual-spacer{width:100%;pointer-events:none;}
 .msg-date-sep {
   display: flex; align-items: center; gap: 10px;

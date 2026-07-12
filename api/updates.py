@@ -58,6 +58,7 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
+_RELEASE_TAG_RE = re.compile(r'^v[0-9][0-9A-Za-z.+-]*$')
 # Phrases git emits when its own short-lived index/refs lock files block a
 # subsequent operation. Tuned to match only the true "lock file already exists"
 # semantics that warrant a lock-conflict response -- v2 deliberately drops the
@@ -272,7 +273,7 @@ def _inventory_locks(path: Path) -> dict:
     try:
         for entry in sorted(git_dir.rglob('*.lock')):
             try:
-                rel = str(entry.relative_to(git_dir))
+                rel = entry.relative_to(git_dir).as_posix()
             except ValueError:
                 continue
             if rel == 'index.lock':
@@ -716,8 +717,17 @@ def channel_version_badge(channel=None) -> str:
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    # NOTE: no ``--always`` here (deliberately different from _detect_webui_version).
+    # The current version is channel-INDEPENDENT — it's just what's installed. The
+    # channel only picks which tag family we compare AGAINST for updates. On a
+    # stable-tagged install (e.g. HEAD == v0.52.0) that opts into Experimental, no
+    # ``exp-v*`` tag is reachable BEHIND HEAD (the exp tags sit ahead on master), so
+    # ``--always`` would fall through to a bare SHA and render "WebUI: d4e80b45 ·
+    # Experimental" instead of the real installed version. Falling back to the
+    # channel-neutral WEBUI_VERSION keeps the badge showing "v0.52.0 · Experimental".
+    # (#5862)
     out, ok = _run_git(
-        ['describe', '--tags', '--always', '--match', _channel_tag_glob(channel)],
+        ['describe', '--tags', '--match', _channel_tag_glob(channel)],
         REPO_ROOT,
     )
     if ok and out:
@@ -756,6 +766,121 @@ def _release_gap(tags, current, latest):
     if current in tags:
         return tags.index(current)
     return 1
+
+
+def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
+    """Count channel release tags strictly ahead of HEAD (fast-forwardable).
+
+    Used only when NO channel tag is reachable behind HEAD — the channel-scoped
+    ``describe`` returned None — e.g. a stable ``v0.52.0`` install opting into
+    Experimental (all ``exp-v*`` tags sit ahead on master). ``_release_gap`` can't
+    position HEAD in the tag list then and returns a bogus 1. ``git tag --contains
+    HEAD`` lists tags whose history includes HEAD, i.e. tags that are ahead of (or
+    on) HEAD; since HEAD carries no channel tag in this path, that count is exactly
+    the number of channel releases the install can fast-forward to. (#5862)
+    """
+    out, ok = _run_git(
+        ['tag', '--list', _channel_tag_glob(channel), '--contains', 'HEAD'],
+        path,
+    )
+    if not (ok and out):
+        return 0
+    return sum(1 for line in out.splitlines() if line.strip())
+
+
+def _release_tag_sort_key(tag):
+    """Return a version-sort key that keeps release tags newest-first."""
+    raw = str(tag or '').strip()
+    if raw.startswith('v'):
+        raw = raw[1:]
+    parts = []
+    for chunk in re.split(r'(\d+)', raw):
+        if not chunk:
+            continue
+        parts.append((0, int(chunk)) if chunk.isdigit() else (1, chunk.lower()))
+    return tuple(parts)
+
+
+def _is_stable_release_tag(tag):
+    """Return True for stable release tags and False for prerelease tags."""
+    raw = str(tag or '').strip()
+    return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
+
+
+def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100', *, timeout=3.0):
+    """Return GitHub release tags newest-first, including commit SHAs when available."""
+    request = urllib.request.Request(
+        url,
+        headers={
+            'Accept': 'application/vnd.github+json',
+            'User-Agent': 'hermes-webui',
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode('utf-8'))
+    if not isinstance(payload, list):
+        return []
+    tags = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get('name')
+        if not isinstance(name, str):
+            continue
+        name = name.strip()
+        if not _is_stable_release_tag(name):
+            continue
+        commit = item.get('commit')
+        sha = None
+        if isinstance(commit, dict):
+            commit_sha = commit.get('sha')
+            if isinstance(commit_sha, str):
+                commit_sha = commit_sha.strip()
+                if commit_sha:
+                    sha = commit_sha
+        tags.append({'name': name, 'sha': sha})
+    return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
+
+
+def _check_webui_published_release_update():
+    """Return a manual-update payload when the baked WebUI version trails GitHub tags."""
+    current_version = str(WEBUI_VERSION or '').strip()
+    if not _RELEASE_TAG_RE.fullmatch(current_version):
+        return None
+    try:
+        tags = _github_release_tags()
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
+    if not tags:
+        return None
+
+    tag_names = [item['name'] for item in tags]
+    if current_version not in tag_names:
+        return None
+
+    latest = tags[0]
+    latest_version = latest['name']
+    behind = _release_gap(tag_names, current_version, latest_version)
+    if behind <= 0:
+        return None
+
+    current = next((item for item in tags if item['name'] == current_version), None) or {}
+    current_ref = current.get('sha') or current_version
+    latest_ref = latest.get('sha') or latest_version
+    repo_url = 'https://github.com/nesquena/hermes-webui'
+    return {
+        'name': 'webui',
+        'behind': behind,
+        'current_sha': current_ref,
+        'latest_sha': latest_ref,
+        'branch': latest_version,
+        'repo_url': repo_url,
+        'release_based': True,
+        'current_version': current_version,
+        'latest_version': latest_version,
+        'compare_url': _build_compare_url(repo_url, current_ref, latest_ref),
+        'manual_update': True,
+    }
 
 
 def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
@@ -901,6 +1026,42 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     current_tag = _current_release_tag(path, channel)
     behind = _release_gap(tags, current_tag, latest_tag)
 
+    # When NO channel tag is reachable behind HEAD, _current_release_tag returns
+    # None (channel-scoped `describe --abbrev=0` fatals with "No tags can describe").
+    # This is the normal state of a stable-tagged install (HEAD == v0.52.0) opting
+    # into Experimental: every exp-v* tag sits AHEAD on master. _release_gap can't
+    # position None in the tag list and returns a bogus 1, and the display fields
+    # would carry current_version=None (rendered as "unknown"). Recover the real
+    # ahead-count and show the channel-neutral installed version as the current
+    # version — the channel only chooses the comparison tag family, not what's
+    # installed. (#5862)
+    current_version_display = current_tag
+    # A git-verified ref for the compare link (defaults to the resolved channel
+    # tag; may be refined below in the no-channel-tag-behind-HEAD fallback).
+    current_sha_ref = current_tag
+    if current_tag is None:
+        ahead = _count_channel_tags_ahead(path, channel)
+        if ahead > 0:
+            behind = ahead
+        # Scope the installed-version fallback to the WebUI repo only.
+        # _check_repo_release() is shared with the Agent repo, and WEBUI_VERSION
+        # (e.g. v0.52.0) is not a valid ref/tag in the Agent repository — injecting
+        # it there would display the WebUI version as the Agent's installed version
+        # and produce a broken Agent compare link. (#5864)
+        if name == "webui":
+            current_version_display = WEBUI_VERSION
+            # For the compare link, derive a git-VERIFIED installed tag rather than
+            # reusing WEBUI_VERSION (which can be `vX.Y.Z-dirty-<hash>`, `-N-g<sha>`,
+            # a bare SHA, or `unknown` — none guaranteed refs). Prefer the exact tag
+            # on HEAD across ALL release families (channel-neutral), so a stable-
+            # pinned Experimental install still gets a resolvable /compare/<tag>...
+            # link; fall back to None (no link) when HEAD is not exactly on a tag. (#5864)
+            exact_tag, ok = _run_git(
+                ['describe', '--tags', '--exact-match', 'HEAD'], path
+            )
+            exact_tag = (exact_tag or '').strip()
+            current_sha_ref = exact_tag if ok and exact_tag else None
+
     # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
     # keeps committing to master between tagged releases), the release check
     # would report "Up to date" even though hundreds of commits are missing.
@@ -944,13 +1105,18 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
         'name': name,
         'behind': behind,
         # GitHub compare URLs accept tag names, and tag-to-tag links are the
-        # clearest "what changed in this release?" view for operators.
-        'current_sha': current_tag,
+        # clearest "what changed in this release?" view for operators. Use a
+        # git-VERIFIED ref for the compare link: the resolved channel tag when
+        # one is reachable behind HEAD, else None. WEBUI_VERSION is NOT safe here
+        # — it can be `v0.52.0-dirty-<hash>`, `v0.52.0-N-g<sha>`, a bare SHA, or
+        # `unknown`, none of which are guaranteed refs, so reusing it would emit
+        # a broken /compare link (ui.js) and lose update-summary commit subjects. (#5864)
+        'current_sha': current_sha_ref,
         'latest_sha': latest_tag,
         'branch': latest_tag,
         'repo_url': remote_url,
         'release_based': True,
-        'current_version': current_tag,
+        'current_version': current_version_display,
         'latest_version': latest_tag,
         'channel': channel,
     }
@@ -1042,6 +1208,12 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """
     channel = _normalize_channel(channel)
     if path is None or not (path / '.git').exists():
+        if name == 'webui':
+            release_info = _check_webui_published_release_update()
+            if release_info is not None:
+                release_info = dict(release_info)
+                release_info['no_git'] = True
+                return release_info
         return {
             'name': name,
             'behind': None,
