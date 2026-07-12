@@ -4356,7 +4356,8 @@ body.resizing .sidebar{transition:none!important;}
 
 /* ── Collapsible Hermes chat name tag ───────── */
 .assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-row,
-.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-controls{
+.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-event-controls,
+.assistant-turn[data-transparent-turn-collapsed="1"] .transparent-earlier-steps{
   display:none;
 }
 .assistant-turn .msg-role.assistant{cursor:pointer;user-select:none;}
