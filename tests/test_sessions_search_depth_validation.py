@@ -16,7 +16,6 @@ meaning), mirroring the guard sibling handlers already use.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
