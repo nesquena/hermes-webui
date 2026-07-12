@@ -7004,6 +7004,9 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if (typeof _resetCronUnreadForProfileSwitch === 'function') {
+      _resetCronUnreadForProfileSwitch();
+    }
     const targetActiveProfile = S.activeProfile || 'default';
     let sessionProfileMatchesTarget = true;
     if (!sessionInProgress && S.session) {
@@ -12618,6 +12621,12 @@ let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
+
+function _resetCronUnreadForProfileSwitch(){
+  _cronNewJobIds.clear();
+  _cronPollSince=Date.now()/1000;
+  updateCronBadge();
+}
 
 // Auto-refresh the cron list when a job is created from chat or any external source.
 // The chat path dispatches this event when the agent response mentions cron creation.
