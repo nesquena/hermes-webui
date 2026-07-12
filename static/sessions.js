@@ -1172,7 +1172,21 @@ function _markPollingCompletionUnreadTransitions(sessions) {
         const meta = (typeof _cronCompletionUnreadMetaForSession === 'function')
           ? _cronCompletionUnreadMetaForSession(s)
           : null;
-        _markSessionCompletionUnread(sid, s.message_count, meta);
+        // Defense: never re-create a cron unread for a non-active profile while
+        // the sidebar is single-profile (stale pre-switch payloads).
+        const allProfilesOn = (typeof _showAllProfiles !== 'undefined' && !!_showAllProfiles);
+        if (
+          meta
+          && meta.source === 'cron'
+          && meta.profile
+          && !allProfilesOn
+          && typeof _cronMarkerProfileMatchesActive === 'function'
+          && !_cronMarkerProfileMatchesActive(meta.profile, (typeof S !== 'undefined' && S && S.activeProfile) || 'default')
+        ) {
+          // Skip mark for inactive-profile cron row.
+        } else {
+          _markSessionCompletionUnread(sid, s.message_count, meta);
+        }
       } else {
         // Sync viewed count so we don't flag stale unread on tab switch (#3020)
         _setSessionViewedCount(sid, messageCount);
@@ -5039,7 +5053,11 @@ function _schedulePendingSessionListApply(){
     const payload=_pendingSessionListPayload;
     _pendingSessionListPayload=null;
     if(payload.gen!==_renderSessionListGen) return;
-    _applySessionListPayload(payload.sessData,payload.projData);
+    // Profile switch may have bumped unread gen after the list gen check
+    // window; still drop completion-marking for the stale pre-switch payload.
+    _applySessionListPayload(payload.sessData,payload.projData,{
+      unreadGen:payload.unreadGen,
+    });
   }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
 }
 
@@ -5109,10 +5127,11 @@ function _sessionListRenderSignature(){
     ]);
   }catch(_){ return null; }
 }
-function _applySessionListPayload(sessData, projData){
+function _applySessionListPayload(sessData, projData, opts){
   // Server's other_profile_count tells us how many sessions exist outside the
   // active profile so the "Show N from other profiles" toggle can render
   // without a second round-trip. Stashed on the module for renderSessionListFromCache.
+  const applyOpts = (opts && typeof opts === 'object') ? opts : {};
   _otherProfileCount = sessData.other_profile_count || 0;
   _archivedWebuiCount = Number(sessData.archived_webui_count ?? sessData.archived_count ?? 0);
   _archivedCliCount = Number(sessData.archived_cli_count ?? 0);
@@ -5176,7 +5195,16 @@ function _applySessionListPayload(sessData, projData){
   const _hadSessionListLoadError = !!_sessionListLoadError;
   _sessionListLoadError = null;
   _sessionListHasLoadedOnce = true;
-  _markPollingCompletionUnreadTransitions(_allSessions);
+  // Greptile #5975 P1: a /api/sessions request started under profile A can
+  // finish after a switch to B already cleared A's cron markers. The list gen
+  // check can already have passed (TOCTOU) or a deferred apply can land later.
+  // Re-validate the profile-switch unread generation (shared with cron poll
+  // reset via _cronPollGeneration) immediately before marking completions.
+  const expectedUnreadGen = applyOpts.unreadGen;
+  const currentUnreadGen = (typeof _cronPollGeneration === 'number') ? _cronPollGeneration : 0;
+  if (typeof expectedUnreadGen !== 'number' || expectedUnreadGen === currentUnreadGen) {
+    _markPollingCompletionUnreadTransitions(_allSessions);
+  }
   const isStreaming = _allSessions.some(s => _isSessionEffectivelyStreaming(s));
   if (isStreaming) {
     startStreamingPoll();
@@ -5315,6 +5343,10 @@ function _renderSessionListLoadErrorNote(){
 async function _runRenderSessionListRefresh(opts, _gen){
   const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
+  // Capture profile-switch unread generation BEFORE the await so a switch
+  // mid-flight (which increments _cronPollGeneration) invalidates completion
+  // marking for this response even if list gen checks already passed.
+  const unreadGen = (typeof _cronPollGeneration === 'number') ? _cronPollGeneration : 0;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const sessionListQS = _sessionListQueryString();
@@ -5343,11 +5375,11 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // renderSessionList(), so that render's payload is the first allowed to paint.
     if (_profileSwitchListEmbargo) return;
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
-      _pendingSessionListPayload={gen:_gen,sessData,projData};
+      _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};
       _schedulePendingSessionListApply();
       return;
     }
-    _applySessionListPayload(sessData,projData);
+    _applySessionListPayload(sessData,projData,{unreadGen});
   }catch(e){
     if (_gen !== _renderSessionListGen) return;
     // #4671: same embargo guard as the success path — a mid-switch /api/sessions that

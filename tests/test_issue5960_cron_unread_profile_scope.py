@@ -301,9 +301,12 @@ def test_session_list_path_tags_cron_markers_with_source_and_profile():
     is_cron = _extract_function(SESSIONS_JS, "_isCronSessionForUnread")
     meta_fn = _extract_function(SESSIONS_JS, "_cronCompletionUnreadMetaForSession")
     source_key = _extract_function(SESSIONS_JS, "_sourceKeyForSession")
+    match_fn = _extract_function(SESSIONS_JS, "_cronMarkerProfileMatchesActive")
+    profile_match = _extract_function(SESSIONS_JS, "_profileMatchesActiveProfile")
     script = f"""
 const markCalls=[];
 global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
+let _showAllProfiles=false;
 global._allSessions=[];
 global._sessionListSnapshotById=new Map();
 global._sessionStreamingById=new Map();
@@ -323,6 +326,8 @@ function _markSessionCompletionUnread(sid, count, meta){{
 {source_key}
 {is_cron}
 {meta_fn}
+{profile_match}
+{match_fn}
 {mark_poll}
 const sessions=[
   {{
@@ -478,3 +483,244 @@ process.stdout.write(JSON.stringify({{
     assert state["otherCleared"] is True
     assert "root-cron" in state["persisted"]
     assert "other-cron" not in state["persisted"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_stale_pre_switch_session_list_does_not_recreate_cron_markers():
+    """Greptile #5975 P1: delayed /api/sessions after profile switch must not remount cron dots."""
+    # Re-read sources so this test always sees the latest shipped functions.
+    sessions_js = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    panels_js = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    apply_fn = _extract_function(sessions_js, "_applySessionListPayload")
+    mark_poll = _extract_function(sessions_js, "_markPollingCompletionUnreadTransitions")
+    helpers = "\n".join(
+        [
+            _extract_function(sessions_js, "_isCronSessionForUnread"),
+            _extract_function(sessions_js, "_sourceKeyForSession"),
+            _extract_function(sessions_js, "_cronCompletionUnreadMetaForSession"),
+            _extract_function(sessions_js, "_resolveCronCompletionMarkerOrigin"),
+            _extract_function(sessions_js, "_cronMarkerProfileMatchesActive"),
+            _extract_function(sessions_js, "_profileMatchesActiveProfile"),
+            _extract_function(sessions_js, "_getSessionCompletionUnread"),
+            _extract_function(sessions_js, "_saveSessionCompletionUnread"),
+            _extract_function(sessions_js, "_markSessionCompletionUnread"),
+            _extract_function(sessions_js, "_hasSessionCompletionUnread"),
+            _extract_function(sessions_js, "_hasUnreadForSession"),
+            _extract_function(sessions_js, "_clearCronSessionCompletionUnreadForInactiveProfiles"),
+            _extract_function(panels_js, "_resetCronUnreadForProfileSwitch"),
+        ]
+    )
+    script = f"""
+const store={{'hermes-session-completion-unread':JSON.stringify({{}})}};
+global.localStorage={{
+  getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
+  setItem:(key,value)=>{{ store[key]=String(value); }},
+  removeItem:(key)=>{{ delete store[key]; }},
+}};
+let _sessionCompletionUnread=null;
+let _sessionViewedCounts={{}};
+const SESSION_COMPLETION_UNREAD_KEY='hermes-session-completion-unread';
+let _cronPollGeneration=0;
+let _cronPollSince=10;
+let _cronUnreadCount=0;
+const _cronNewJobIds=new Set(['old-job']);
+let _allSessions=[];
+let _allSessionsScope=null;
+let _sidebarReferenceSessions=[];
+let _otherProfileCount=0;
+let _archivedWebuiCount=0;
+let _archivedCliCount=0;
+let _serverWebuiSessionCount=null;
+let _serverCliSessionCount=null;
+let _serverTimeDelta=0;
+let _serverTz=null;
+let _sessionListLoadError=null;
+let _sessionListHasLoadedOnce=false;
+let _sessionListFirstRenderAnimated=true;
+let _showAllProfiles=false;
+const _optimisticallyRemovedSessionIds=new Set();
+const _sessionStreamingById=new Map([['old-cron', true]]);
+const _sessionListSnapshotById=new Map([['old-cron', {{message_count:1, last_message_at:10}}]]);
+const _sessionListSourceById=new Map();
+global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
+global.renderSessionListFromCache=()=>{{}};
+global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
+function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
+function _setSessionViewedCount(){{}}
+function _getSessionObservedStreaming(){{ return {{}}; }}
+function _isSessionEffectivelyStreaming(){{ return false; }}
+function _hasPendingUserMessageSignal(){{ return false; }}
+function _isSessionActivelyViewedForList(){{ return false; }}
+function _rememberSessionListSource(){{}}
+function _rememberObservedStreamingSession(){{}}
+function _forgetObservedStreamingSession(){{}}
+function _reconcileActiveSessionIdleStateFromList(){{}}
+function _mergeOptimisticFirstTurnSessions(s){{ return s; }}
+function _recordSessionProfileCount(){{}}
+function _syncSessionAttentionSoundState(){{}}
+function _pruneLineageReportCacheToVisibleSessions(){{}}
+function _requestedSessionSidebarSource(){{ return 'webui'; }}
+function _sessionListExcludeHiddenEnabled(){{ return false; }}
+function startStreamingPoll(){{}}
+function stopStreamingPoll(){{}}
+function ensureSessionTimeRefreshPoll(){{}}
+function ensureActiveSessionExternalRefreshPoll(){{}}
+function animateNextSessionListRefresh(){{}}
+function ensureSessionEventsSSE(){{}}
+function _activeSessionIdForSidebar(){{ return null; }}
+function _sessionListRenderSignature(){{ return 'sig'; }}
+function _purgeStaleInflightEntries(){{}}
+let _sessionListSkeletonActive=false;
+let _sessionListRefreshAnimationPending=false;
+let _lastSessionListRenderSig=null;
+let _renamingSid=null;
+let _sessionActionMenu=null;
+let _allProjects=[];
+{helpers}
+{mark_poll}
+{apply_fn}
+// Snapshot generation under profile A (request starts).
+const unreadGenAtStart=_cronPollGeneration;
+// Profile switch to B: bumps unread gen + clears markers.
+global.S.activeProfile='profile-b';
+_resetCronUnreadForProfileSwitch();
+// Delayed pre-switch /api/sessions payload (profile A cron still streaming→done).
+const sessData={{
+  sessions:[{{
+    session_id:'old-cron',
+    message_count:2,
+    last_message_at:20,
+    source_tag:'cron',
+    profile:'profile-a',
+    is_streaming:false,
+  }}],
+  active_profile:'profile-a',
+  other_profile_count:0,
+}};
+_applySessionListPayload(sessData, {{projects:[]}}, {{unreadGen:unreadGenAtStart}});
+const persisted=JSON.parse(store['hermes-session-completion-unread']||'{{}}');
+process.stdout.write(JSON.stringify({{
+  generation:_cronPollGeneration,
+  badgeJobs:Array.from(_cronNewJobIds),
+  oldCronMarked:Object.prototype.hasOwnProperty.call(persisted,'old-cron'),
+  persisted,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    assert state["generation"] == 1
+    assert state["badgeJobs"] == []
+    assert state["oldCronMarked"] is False
+    assert "old-cron" not in state["persisted"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_fresh_session_list_still_marks_when_unread_gen_matches():
+    """Sanity: matching unreadGen still allows completion marks after switch."""
+    sessions_js = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    apply_fn = _extract_function(sessions_js, "_applySessionListPayload")
+    mark_poll = _extract_function(sessions_js, "_markPollingCompletionUnreadTransitions")
+    helpers = "\n".join(
+        [
+            _extract_function(sessions_js, "_isCronSessionForUnread"),
+            _extract_function(sessions_js, "_sourceKeyForSession"),
+            _extract_function(sessions_js, "_cronCompletionUnreadMetaForSession"),
+            _extract_function(sessions_js, "_cronMarkerProfileMatchesActive"),
+            _extract_function(sessions_js, "_profileMatchesActiveProfile"),
+            _extract_function(sessions_js, "_getSessionCompletionUnread"),
+            _extract_function(sessions_js, "_saveSessionCompletionUnread"),
+            _extract_function(sessions_js, "_markSessionCompletionUnread"),
+            _extract_function(sessions_js, "_hasSessionCompletionUnread"),
+            _extract_function(sessions_js, "_hasUnreadForSession"),
+        ]
+    )
+    script = f"""
+const store={{'hermes-session-completion-unread':JSON.stringify({{}})}};
+global.localStorage={{
+  getItem:(key)=>Object.prototype.hasOwnProperty.call(store,key)?store[key]:null,
+  setItem:(key,value)=>{{ store[key]=String(value); }},
+  removeItem:(key)=>{{ delete store[key]; }},
+}};
+let _sessionCompletionUnread=null;
+let _sessionViewedCounts={{}};
+const SESSION_COMPLETION_UNREAD_KEY='hermes-session-completion-unread';
+let _cronPollGeneration=3;
+let _allSessions=[];
+let _allSessionsScope=null;
+let _sidebarReferenceSessions=[];
+let _otherProfileCount=0;
+let _archivedWebuiCount=0;
+let _archivedCliCount=0;
+let _serverWebuiSessionCount=null;
+let _serverCliSessionCount=null;
+let _serverTimeDelta=0;
+let _serverTz=null;
+let _sessionListLoadError=null;
+let _sessionListHasLoadedOnce=false;
+let _sessionListFirstRenderAnimated=true;
+let _showAllProfiles=false;
+const _optimisticallyRemovedSessionIds=new Set();
+const _sessionStreamingById=new Map([['new-cron', true]]);
+const _sessionListSnapshotById=new Map([['new-cron', {{message_count:1, last_message_at:10}}]]);
+const _sessionListSourceById=new Map();
+global.S={{activeProfile:'profile-b',activeProfileIsDefault:false}};
+global.renderSessionListFromCache=()=>{{}};
+function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
+function _setSessionViewedCount(){{}}
+function _getSessionObservedStreaming(){{ return {{}}; }}
+function _isSessionEffectivelyStreaming(){{ return false; }}
+function _hasPendingUserMessageSignal(){{ return false; }}
+function _isSessionActivelyViewedForList(){{ return false; }}
+function _rememberSessionListSource(){{}}
+function _rememberObservedStreamingSession(){{}}
+function _forgetObservedStreamingSession(){{}}
+function _reconcileActiveSessionIdleStateFromList(){{}}
+function _mergeOptimisticFirstTurnSessions(s){{ return s; }}
+function _recordSessionProfileCount(){{}}
+function _syncSessionAttentionSoundState(){{}}
+function _pruneLineageReportCacheToVisibleSessions(){{}}
+function _requestedSessionSidebarSource(){{ return 'webui'; }}
+function _sessionListExcludeHiddenEnabled(){{ return false; }}
+function startStreamingPoll(){{}}
+function stopStreamingPoll(){{}}
+function ensureSessionTimeRefreshPoll(){{}}
+function ensureActiveSessionExternalRefreshPoll(){{}}
+function animateNextSessionListRefresh(){{}}
+function ensureSessionEventsSSE(){{}}
+function _sessionListRenderSignature(){{ return 'sig'; }}
+function _purgeStaleInflightEntries(){{}}
+let _sessionListSkeletonActive=false;
+let _sessionListRefreshAnimationPending=false;
+let _lastSessionListRenderSig=null;
+let _renamingSid=null;
+let _sessionActionMenu=null;
+let _allProjects=[];
+{helpers}
+{mark_poll}
+{apply_fn}
+_applySessionListPayload({{
+  sessions:[{{
+    session_id:'new-cron',
+    message_count:2,
+    last_message_at:20,
+    source_tag:'cron',
+    profile:'profile-b',
+    is_streaming:false,
+  }}],
+  active_profile:'profile-b',
+}}, {{projects:[]}}, {{unreadGen:3}});
+const persisted=JSON.parse(store['hermes-session-completion-unread']||'{{}}');
+process.stdout.write(JSON.stringify({{
+  marked:Object.prototype.hasOwnProperty.call(persisted,'new-cron'),
+  meta:persisted['new-cron']||null,
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    assert state["marked"] is True
+    assert state["meta"]["source"] == "cron"
+    assert state["meta"]["profile"] == "profile-b"
