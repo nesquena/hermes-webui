@@ -94,9 +94,26 @@ def test_materialize_helper_recovers_and_postprocesses():
     # In-memory stash first, dataset recovery fallback after cache round-trip.
     assert "row._deferredToolCall" in body
     assert "_transparentToolCallFromRowDataset(row)" in body
+    # Codex F1(r2): rebuild via the CANONICAL buildToolCard() detail (richer: diff
+    # coloring / show-more / shell detail), not the thinner _transparentToolDetailHtml.
+    assert "buildToolCard(tc)" in body
+    assert "rebuilt&&rebuilt.querySelector('.tool-card-detail')" in body
     # Same post-processing as the eager path (highlight/copy/katex/mermaid).
     assert "_postProcessWithAnchorSuppression(card)" in body
     assert "requestAnimationFrame" in body
+
+
+def test_disclosure_restore_materializes_deferred_transparent_detail():
+    # Codex F2(r2): restoring an OPEN state on a deferred transparent row must
+    # materialize the body, or the card restores open-but-empty after an
+    # in-session rebuild (next send re-defers, then restore toggles .open only).
+    body = _function_body(UI_JS, "_setWorklogDetailDisclosureOpen")
+    assert 'transparent-event-row[data-transparent-detail-deferred="1"]' in body
+    assert "_materializeTransparentToolDetail(drow)" in body
+    # Materialize must run BEFORE the .open toggle.
+    mat_at = body.index("_materializeTransparentToolDetail(drow)")
+    open_at = body.index("el.classList.toggle('open'")
+    assert mat_at < open_at
 
 
 def test_dataset_recovery_maps_row_to_scene():

@@ -10553,6 +10553,16 @@ function _worklogDetailScrollableBody(el){
 }
 function _setWorklogDetailDisclosureOpen(el, open){
   if(!el||!el.classList) return;
+  // #5966 (Codex F2 r2): restoring an OPEN state on a settled Transparent Stream
+  // tool row whose detail was deferred must MATERIALIZE the body first, or the
+  // card restores open-but-empty after an in-session renderMessages() rebuild
+  // (e.g. the next send re-defers it, then this toggles .open with no content).
+  if(open){
+    const drow=(el.matches&&el.matches('.transparent-event-row[data-transparent-detail-deferred="1"]'))
+      ? el
+      : (el.closest&&el.closest('.transparent-event-row[data-transparent-detail-deferred="1"]'));
+    if(drow&&typeof _materializeTransparentToolDetail==='function') _materializeTransparentToolDetail(drow);
+  }
   el.classList.toggle('open', !!open);
   if(el.matches&&el.matches('.tool-group[data-tool-worklog-tool-group="1"],.tool-worklog-tool-group')){
     el.classList.toggle('tool-worklog-tool-group-collapsed', !open);
@@ -10866,7 +10876,22 @@ function _materializeTransparentToolDetail(row){
   row.removeAttribute('data-transparent-detail-deferred');
   row._deferredToolCall=null;
   if(!card.querySelector('.tool-card-detail')){
-    card.insertAdjacentHTML('beforeend',_transparentToolDetailHtml(tc,status));
+    // Codex F1(r2): rebuild through the CANONICAL buildToolCard() detail path, not
+    // the thinner _transparentToolDetailHtml() — the latter drops diff coloring,
+    // "Show diff/Show more", and canonical shell-command detail that buildToolCard
+    // produces, so an expanded deferred row must transplant buildToolCard's own
+    // `.tool-card-detail` to stay byte-identical to the eager path.
+    let sourceDetail=null;
+    try{
+      const rebuilt=buildToolCard(tc);
+      sourceDetail=rebuilt&&rebuilt.querySelector('.tool-card-detail');
+    }catch(_){ sourceDetail=null; }
+    if(sourceDetail){
+      card.appendChild(sourceDetail);   // move the canonical detail node onto the live card
+    }else{
+      // Fallback (e.g. buildToolCard unavailable): the lighter detail is better than none.
+      card.insertAdjacentHTML('beforeend',_transparentToolDetailHtml(tc,status));
+    }
     const detail=card.querySelector('.tool-card-detail');
     if(detail&&!detail.querySelector('.transparent-detail-modes')){
       const modes=document.createElement('div');
