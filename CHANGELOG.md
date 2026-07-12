@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- **A failed turn now shows the real provider error instead of "no response, try again".** When a turn hit a non-retryable provider error (e.g. HTTP 400 "invalid model" or a credentials problem), the WebUI showed a misleading "No response from provider — this often means a usage/rate limit was hit silently, try again in a moment" message and hid the actual, non-retryable cause. The terminal error the agent reports is now surfaced through to the turn-completion classifier, so you see an accurate, actionable message (e.g. "Model not found — check the model ID in Settings" / "Authentication failed") instead of being told to retry a request that can never succeed. The generic no-response message stays reserved for genuinely empty completions. Thanks @b3nw for the report. (#5940)
+
 - **Public-share button labels now show in the right language.** A value-level locale swap shipped the public-share strings (Share / Stop sharing / confirmation dialogs) as Russian text in the English locale and English text in the Russian locale — key-parity checks didn't catch it because the keys themselves were balanced. Both locales are restored to their correct language, with a regression test that fails if the values are ever swapped again. Thanks @DrMaks22. (#5955)
 
 - **An errored turn no longer hides the response the assistant already produced.** When a turn ended in an error, the tool calls and reasoning the assistant had already generated were auto-collapsed behind a single header above the error card, so it looked like nothing came back. That produced content now stays visible by default on an errored turn (the error card still shows); successful turns collapse their worklog exactly as before. Thanks @b3nw for the report. (#5950, #5941)
