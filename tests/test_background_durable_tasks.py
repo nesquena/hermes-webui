@@ -238,6 +238,62 @@ def test_background_task_updates_emit_refetch_nudges(tmp_path, monkeypatch):
     assert emitted[1][2]["parent_result_message_id"] == "bgresult_task-event"
 
 
+def test_cancel_background_task_is_durable_idempotent_and_not_overwritten(tmp_path, monkeypatch):
+    bg, _cfg, models = _prepare_isolated_session_store(tmp_path, monkeypatch)
+    import api.background_process as background_process
+    import api.streaming as streaming
+
+    emitted = []
+    cancelled_streams = []
+    monkeypatch.setattr(
+        background_process,
+        "emit_session_event",
+        lambda sid, event, payload: emitted.append((sid, event, dict(payload))) or 1,
+    )
+    monkeypatch.setattr(streaming, "cancel_stream", lambda stream_id: cancelled_streams.append(stream_id) or True)
+
+    parent = models.Session(
+        session_id="parent-session-cancel",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "please do a deeper pass"}],
+    )
+    parent.save()
+
+    bg.track_background(parent.session_id, "bg-session", "stream-cancel", "task-cancel", "deep follow-up")
+    result = bg.cancel_background_task(parent.session_id, "task-cancel")
+
+    assert result["ok"] is True
+    assert result["status"] == "cancelled"
+    assert result["cancel_requested"] is True
+    assert cancelled_streams == ["stream-cancel"]
+    durable = bg.get_durable_background_task(parent.session_id, "task-cancel")
+    assert durable["status"] == "cancelled"
+    assert durable["parent_append_status"] == "result_written"
+    assert emitted[-1][1] == "background_task_updated"
+    assert emitted[-1][2]["status"] == "cancelled"
+
+    # A late hidden-worker completion must not overwrite a cancellation.
+    bg.complete_background(parent.session_id, "task-cancel", "late answer")
+    durable = bg.get_durable_background_task(parent.session_id, "task-cancel")
+    assert durable["status"] == "cancelled"
+    assert durable["answer"] == "(background task cancelled)"
+
+    assert bg.cancel_background_task(parent.session_id, "task-cancel") == {
+        "ok": True,
+        "idempotent": True,
+        "status": "cancelled",
+        "session_id": parent.session_id,
+        "task_id": "task-cancel",
+    }
+    assert bg.get_results(parent.session_id) == []
+
+
+def test_background_cancel_route_is_registered():
+    routes = Path("api/routes.py").read_text(encoding="utf-8")
+    assert 'parsed.path == "/api/background/cancel"' in routes
+    assert "cancel_background_task" in routes
+
+
 def test_background_polling_refetches_durable_session_instead_of_appending_local_only_result():
     src = Path("static/messages.js").read_text(encoding="utf-8")
     idx = src.find("function startBackgroundPolling")

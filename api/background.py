@@ -18,6 +18,7 @@ _lock = threading.Lock()
 _DURABLE_SCHEMA_VERSION = 1
 _PROMPT_PREVIEW_LIMIT = 500
 _BACKGROUND_CARD_TEXT = "Background task running…"
+_TERMINAL_TASK_STATUSES = {"done", "failed", "cancelled", "interrupted_by_restart"}
 
 # parent_session_id -> list of task dicts
 _BACKGROUND_TASKS: dict[str, list[dict[str, Any]]] = {}
@@ -426,6 +427,64 @@ def _emit_background_task_updated(parent_sid: str, task_id: str) -> None:
         )
 
 
+def cancel_background_task(parent_sid: str, task_id: str, reason: str = "cancel_requested") -> dict[str, Any]:
+    """Best-effort cancel for one durable `/api/background` task.
+
+    Cancellation is idempotent. The durable task record and parent transcript
+    projection are the source of truth; the hidden stream cancel is best-effort
+    because a background worker may already have exited by the time the request
+    arrives.
+    """
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        raise ValueError("task_id is required")
+    task = get_durable_background_task(parent_sid, task_id)
+    if not task:
+        return {"ok": False, "error": "task not found", "status": "missing", "session_id": parent_sid, "task_id": task_id}
+    status = str(task.get("status") or "").lower()
+    if status in _TERMINAL_TASK_STATUSES:
+        return {"ok": True, "idempotent": True, "status": status, "session_id": parent_sid, "task_id": task_id}
+
+    stream_id = str(task.get("stream_id") or "").strip()
+    cancel_requested = False
+    if stream_id:
+        try:
+            from api.streaming import cancel_stream
+            cancel_requested = bool(cancel_stream(stream_id))
+        except Exception:
+            logger.debug("Failed to request cancellation for background stream %s", stream_id, exc_info=True)
+
+    completed_at = time.time()
+    with _lock:
+        for t in _BACKGROUND_TASKS.get(parent_sid, []):
+            if str(t.get("task_id") or "") == task_id:
+                t["status"] = "cancelled"
+                t["answer"] = "(background task cancelled)"
+                t["completed_at"] = completed_at
+                break
+        _upsert_durable_task_unlocked(parent_sid, task_id, {
+            "status": "cancelled",
+            "answer": "(background task cancelled)",
+            "completed_at": completed_at,
+            "error": reason,
+            "cancel_requested_at": completed_at,
+            "cancel_requested": cancel_requested,
+            "parent_append_status": "result_pending",
+            "parent_card_message_id": _task_card_message_id(task_id),
+            "parent_result_message_id": _task_result_message_id(task_id),
+        })
+    projection = append_or_queue_background_parent_update(parent_sid, task_id, "done")
+    _emit_background_task_updated(parent_sid, task_id)
+    return {
+        "ok": True,
+        "status": "cancelled",
+        "session_id": parent_sid,
+        "task_id": task_id,
+        "cancel_requested": cancel_requested,
+        "parent_append_status": projection,
+    }
+
+
 def track_background(parent_sid: str, bg_sid: str, stream_id: str,
                      task_id: str, prompt: str) -> None:
     started_at = time.time()
@@ -470,6 +529,12 @@ def track_btw(parent_sid: str, ephemeral_sid: str, stream_id: str,
 def complete_background(parent_sid: str, task_id: str, answer: str) -> None:
     completed_at = time.time()
     with _lock:
+        existing = next(
+            (t for t in _read_durable_tasks_unlocked(parent_sid) if str(t.get("task_id") or "") == str(task_id or "")),
+            None,
+        )
+        if str((existing or {}).get("status") or "").lower() in _TERMINAL_TASK_STATUSES:
+            return
         for t in _BACKGROUND_TASKS.get(parent_sid, []):
             if t["task_id"] == task_id and t["status"] == "running":
                 t["status"] = "done"
@@ -499,7 +564,7 @@ def get_results(parent_sid: str) -> list[dict[str, Any]]:
     with _lock:
         tasks = _BACKGROUND_TASKS.get(parent_sid, [])
         done = [t for t in tasks if t["status"] == "done"]
-        still_running = [t for t in tasks if t["status"] != "done"]
+        still_running = [t for t in tasks if str(t.get("status") or "") not in _TERMINAL_TASK_STATUSES]
         if still_running:
             _BACKGROUND_TASKS[parent_sid] = still_running
         else:

@@ -14937,6 +14937,22 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/btw":
         return _handle_btw(handler, body)
 
+    if parsed.path == "/api/background/cancel":
+        try:
+            require(body, "session_id")
+            require(body, "task_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        from api.background import cancel_background_task
+        result = cancel_background_task(
+            str(body.get("session_id") or ""),
+            str(body.get("task_id") or ""),
+            reason=str(body.get("reason") or "cancel_requested"),
+        )
+        if result.get("error") == "task not found":
+            return bad(handler, "Task not found", 404)
+        return j(handler, result)
+
     if parsed.path == "/api/background":
         return _handle_background(handler, body)
 
