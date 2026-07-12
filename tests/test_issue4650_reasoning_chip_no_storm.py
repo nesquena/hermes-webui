@@ -147,13 +147,15 @@ result.effort_after_fresh_B = _currentReasoningEffort;   // expect 'high'
 if (HANDLERS[0].onErr) HANDLERS[0].onErr();
 result.effort_after_stale_A_fail = _currentReasoningEffort; // expect still 'high'
 
-// 6. COMPOSER SELECTION RACE: in-flight reasoning GET resolves AFTER user
-//    picks a new effort via the composer chip. The old response must be
-//    discarded (seq guard) and the chip must show the user's new selection.
-const HANDLERS2 = [];
-var CALLS2 = [];
+// 6. COMPOSER SELECTION RACE: exercise the ACTUAL production click handler
+//    (document.addEventListener('click', ...)) in the Node sandbox. An
+//    in-flight reasoning GET must NOT overwrite the user's new selection
+//    because the handler increments _reasoningFetchSeq.
 _currentReasoningEffort = null; _lastReasoningFetchKey = null; _reasoningFetchSeq = 0;
 global.S = { session: { session_id: 'race-session', model: 'gpt-5', model_provider: 'openai' } };
+// Capture API calls and their resolve callbacks.
+const HANDLERS2 = [];
+var CALLS2 = [];
 global.api = (url, opts) => {
   CALLS2.push({url, opts});
   return {
@@ -161,27 +163,49 @@ global.api = (url, opts) => {
     catch: () => {},
   };
 };
-// Dispatch a reasoning fetch (in-flight, seq becomes 1)
+// Replace the no-op addEventListener with one that stores the handler.
+var _clickHandler = null;
+global.document.addEventListener = function(type, handler) {
+  if (type === 'click') _clickHandler = handler;
+};
+// Provide stubs the production click handler calls at runtime.
+global.closeReasoningDropdown = function(){};
+global.showToast = function(){};
+global.t = function(key){ return key; };
+// Extract the production document.addEventListener('click', ...) code from ui.js
+// by finding the marker in the source and brace-matching the anonymous function.
+const ADD_CLICK_MARKER = "document.addEventListener('click',function(e){";
+const _addEventStart = src.indexOf(ADD_CLICK_MARKER);
+const _eventBraceStart = src.indexOf('{', _addEventStart);
+let _depth = 1, _eventCodeEnd = _eventBraceStart + 1;
+while (_depth > 0 && _eventCodeEnd < src.length) {
+  if (src[_eventCodeEnd] === '{') _depth++;
+  else if (src[_eventCodeEnd] === '}') _depth--;
+  _eventCodeEnd++;
+}
+// Slice includes the '});' closing so eval registers the event listener.
+const _productionClickHandlerSrc = src.slice(_addEventStart, _eventCodeEnd + 2);
+eval(_productionClickHandlerSrc);
+// Dispatch a reasoning GET (in-flight, seq = 1).
 fetchReasoningChip();
 const seqBeforeSelection = _reasoningFetchSeq;
-// User clicks a new effort in the composer
-const effort = 'high';
-const payload = { session_id: 'race-session', reasoning_effort: effort };
-// This is the code path from the chip click handler (ui.js:4784-4791)
-api('/api/session/update', {method:'POST', body: JSON.stringify(payload)})
-  .then(function(st){
-    if(S&&S.session) S.session.reasoning_effort = effort;
-    ++_reasoningFetchSeq;
-    _lastReasoningFetchKey = null;
-    _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-  });
-// Resolve the session update (HANDLERS2[1] because [0] is the reasoning GET)
+// Simulate a click on a .reasoning-option element with data-effort="high".
+// The production handler (registered above) will run, POST to
+// /api/session/update via the mocked api(), and invoke the .then() callback
+// which increments _reasoningFetchSeq and clears _lastReasoningFetchKey.
+var _mockEvent = { target: { closest: function(sel) {
+  if (sel === '.reasoning-option') return { dataset: { effort: 'high' } };
+  return null;
+}}};
+_clickHandler(_mockEvent);
+// Resolve the session update (HANDLERS2[1] because [0] is the reasoning GET).
 HANDLERS2[1].onOk({ reasoning_effort: 'high', supported_efforts: ['low','high'] });
 const afterSelection = _currentReasoningEffort;
-// Now the OLD in-flight reasoning GET resolves with stale data
+// Now resolve the OLD in-flight reasoning GET with stale data. The production
+// seq guard (if(seq!==_reasoningFetchSeq) return) must discard this.
 HANDLERS2[0].onOk({ reasoning_effort: 'low', supported_efforts: ['low','high'] });
 const afterOldResponse = _currentReasoningEffort;
-// The chip label should show 'high' (the new effort), not 'low' (the stale data)
+// The chip must still show the user's new effort, not the stale response.
 result.composerRace = { seqBeforeSelection, afterSelection, afterOldResponse };
 
 
