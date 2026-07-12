@@ -270,6 +270,11 @@ def test_steady_state_keystroke_preserves_near_bottom_unpinned_reader():
     # re-read the tail while composing must keep their EXACT position across the
     # round-trip — the re-pin approach would skip them and the transient clamp
     # would still move them. Preserve-scrollTop keeps them put.
-    out = _run_autoresize({"unpinned": "true", "pinned": "false", "scrolltop": 7900, "composerH": 164})
-    assert out["scrollTop"] == 7900, f"near-bottom unpinned reader must not move; got {out}"
+    # scrolltop 7990 sits INSIDE the clamp zone: settled bottom = 8768-745 = 8023,
+    # transient max (composer collapsed) = 8768-865 = 7903. So on the pre-fix path
+    # the transient clamp pulls 7990 -> 7903 (an 87px yank); the fix restores 7990.
+    # (Chosen > 7903 so the case genuinely exercises the clamp — a value below the
+    # transient max would never clamp and the assertion would be vacuous.)
+    out = _run_autoresize({"unpinned": "true", "pinned": "false", "scrolltop": 7990, "composerH": 164})
+    assert out["scrollTop"] == 7990, f"near-bottom unpinned reader must not move; got {out}"
     assert out["repinCalls"] == 0, "must not re-pin an unpinned reader"
