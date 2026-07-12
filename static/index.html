@@ -1152,6 +1152,20 @@
                 <div class="model-dropdown settings-model-dropdown" id="settingsModelDropdown"></div>
               </div>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
+              <div style="margin-top:10px">
+                <label for="settingsReasoningEffort" style="font-size:13px;font-weight:600">Default Reasoning Effort</label>
+                <select id="settingsReasoningEffort" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;margin-top:4px">
+                  <option value="">(Use provider default)</option>
+                  <option value="none">None</option>
+                  <option value="minimal">Minimal</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="xhigh">Extra High</option>
+                  <option value="max">Max</option>
+                </select>
+                <div style="font-size:11px;color:var(--muted);margin-top:4px">Default reasoning effort for new chats. Set to "None" to disable thinking.</div>
+              </div>
             </div>
             <div class="settings-field">
               <label data-i18n="settings_label_auxiliary_models">Auxiliary Models</label>
