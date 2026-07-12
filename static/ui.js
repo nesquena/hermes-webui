@@ -4642,22 +4642,19 @@ let _lastReasoningFetchKey=null;
 // profile switch that resets the cache and refetches the same default model but
 // a different agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
-
 function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
   // while this GET is in-flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
   var baseKey=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
-  // If the session has a reasoning_effort override, pass it as a hint so the
-  // backend returns it as authoritative (session-scoped, not config.yaml).
-  var key=baseKey;
+  var key='/api/reasoning'+baseKey;
   var sessionEffort=(S&&S.session&&S.session.reasoning_effort)||null;
   if(sessionEffort!==null){
-    key=baseKey+(baseKey?'&':'?')+'session_effort='+encodeURIComponent(sessionEffort);
+    key=key+(baseKey?'&':'?')+'session_effort='+encodeURIComponent(sessionEffort);
   }
   const seq=++_reasoningFetchSeq;
-  _lastReasoningFetchKey=key;
-  api('/api/reasoning'+key).then(function(st){
+  _lastReasoningFetchKey=baseKey;
+  api(key).then(function(st){
     // Ignore a stale/superseded response: only the most recent dispatch may
     // apply, so an older in-flight GET can't poison the current chip (#4650).
     if(seq!==_reasoningFetchSeq) return;

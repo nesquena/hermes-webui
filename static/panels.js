@@ -12519,7 +12519,7 @@ async function saveSettings(andClose){
         const newReasoningEffort=reasoningEffortSel.value||'';
         if(newReasoningEffort!==(_settingsReasoningEffortOnOpen||'')){
           try{
-            await api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:newReasoningEffort||'none'})});
+            await api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:newReasoningEffort})});
             _settingsReasoningEffortOnOpen=newReasoningEffort;
           }catch(_reasoningErr){
             if(typeof showToast==='function') showToast('Failed to update default reasoning effort — settings saved');
@@ -12562,7 +12562,7 @@ async function saveSettings(andClose){
       const newReasoningEffort=reasoningEffortSel.value||'';
       if(newReasoningEffort!==(_settingsReasoningEffortOnOpen||'')){
         try{
-          await api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:newReasoningEffort||'none'})});
+          await api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:newReasoningEffort})});
           _settingsReasoningEffortOnOpen=newReasoningEffort;
         }catch(_reasoningErr){
           if(typeof showToast==='function') showToast('Failed to update default reasoning effort — settings saved');

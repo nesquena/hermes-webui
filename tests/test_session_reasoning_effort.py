@@ -5,12 +5,10 @@ Verifies that reasoning_effort is stored per-session in the Session model
 /api/session/update, and overrides config.yaml at agent invocation time.
 """
 
-import json
-import os
 import tempfile
 from pathlib import Path
 
-from api.models import Session, new_session
+from api.models import Session
 from api.config import get_reasoning_status
 
 

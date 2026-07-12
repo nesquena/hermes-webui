@@ -4,7 +4,6 @@ Verifies the HTML element exists, options are present, the selector is
 initialised on settings load, and saveSettings() persists changes to the
 /api/reasoning endpoint (writes agent.reasoning_effort to config.yaml).
 """
-import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

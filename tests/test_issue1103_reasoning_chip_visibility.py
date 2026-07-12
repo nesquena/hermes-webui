@@ -63,7 +63,7 @@ def test_ui_js_passes_model_context_to_reasoning_api():
     inlined = "api('/api/reasoning'+_reasoningEffortQuery())" in src
     captured = (
         "_reasoningEffortQuery()" in fetch_body
-        and "api('/api/reasoning'+key)" in fetch_body
+        and ("api('/api/reasoning'+key)" in fetch_body or "api(key)" in fetch_body)
     )
     assert inlined or captured, (
         "fetchReasoningChip must pass _reasoningEffortQuery() (model/provider context) "
