@@ -7185,6 +7185,20 @@ def _run_agent_streaming(
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
             os.environ.update(_safe_profile_runtime_env)
+            # #5937: multi-profile WebUI can leave a remote terminal env in the
+            # agent process-global "default" cache slot after SSH→local (or any
+            # backend identity) switch. Scoped invalidation drops only that slot
+            # when identity changes; same-backend turns still share the env.
+            try:
+                from api.terminal_backend_isolation import (
+                    maybe_invalidate_default_terminal_env,
+                )
+                maybe_invalidate_default_terminal_env(_safe_profile_runtime_env)
+            except Exception:
+                logger.warning(
+                    "terminal backend isolation check failed (#5937)",
+                    exc_info=True,
+                )
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
