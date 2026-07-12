@@ -44,6 +44,19 @@ _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 
+
+def _gateway_provider_error_payload(message: str) -> dict | None:
+    from api.streaming import _classify_provider_error, _provider_error_payload
+
+    classification = _classify_provider_error(message)
+    if classification["type"] == "error":
+        return None
+    return _provider_error_payload(
+        message,
+        classification["type"],
+        classification.get("hint", ""),
+    )
+
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
 # ``urlopen(timeout=...)``. A stream that emits ANY byte within the window never
 # trips it, so a genuinely alive (if slow) token stream is untouched; only more
@@ -515,6 +528,8 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.completed":
+                if payload.get("error"):
+                    raise RuntimeError(str(payload["error"]))
                 output = str(payload.get("output") or "")
                 if output and not final_text:
                     final_text = output
@@ -647,6 +662,7 @@ def _run_gateway_chat_streaming(
 
     s = None
     final_text = ""
+    terminal_error = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
@@ -728,7 +744,8 @@ def _run_gateway_chat_streaming(
                     session=s,
                 )
             except Exception as exc:
-                put_gateway_event("apperror", {
+                error_payload = _gateway_provider_error_payload(str(exc))
+                put_gateway_event("apperror", error_payload or {
                     "label": "Gateway runs API error",
                     "type": "gateway_runs_error",
                     "message": str(exc)[:400],
@@ -879,6 +896,8 @@ def _run_gateway_chat_streaming(
                         sse_event = "message"
                         continue
                     last_payload = payload
+                    if payload.get("error"):
+                        terminal_error = str(payload["error"])
                     reasoning_delta = _gateway_sse_reasoning_delta(payload)
                     if reasoning_delta:
                         if stream_id in STREAM_REASONING_TEXT:
@@ -894,6 +913,11 @@ def _run_gateway_chat_streaming(
             usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
         assistant_text = final_text.strip()
         if not assistant_text:
+            if terminal_error:
+                error_payload = _gateway_provider_error_payload(terminal_error)
+                if error_payload:
+                    put_gateway_event("apperror", error_payload)
+                    return
             put_gateway_event("apperror", {
                 "label": "Gateway returned no response",
                 "type": "gateway_empty_response",
