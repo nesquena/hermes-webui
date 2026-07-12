@@ -398,7 +398,10 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
             return False
 
         def __iter__(self):
-            if response_error[0]:
+            if response_error[0] == "partial":
+                yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                yield f'data: {{"error":{json.dumps(error_text)}}}\n\n'.encode()
+            elif response_error[0]:
                 yield f'data: {{"error":{json.dumps(response_error[0])}}}\n\n'.encode()
             yield b"data: [DONE]\n\n"
 
@@ -452,6 +455,53 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     )
     empty_errors = [item[1] for item in empty_events if item[0] == "apperror"]
     assert empty_errors[-1]["type"] == "gateway_empty_response"
+
+    response_error[0] = "Gateway provider failed without a known classification"
+    unknown_stream_id = "stream-gateway-unknown-terminal-error-test"
+    s = new_session()
+    s.active_stream_id = unknown_stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.save()
+    unknown_events = []
+    unknown_channel = MagicMock()
+    unknown_channel.put_nowait = lambda item: unknown_events.append(item)
+    STREAMS[unknown_stream_id] = unknown_channel
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        unknown_stream_id,
+        [],
+    )
+    unknown_errors = [item[1] for item in unknown_events if item[0] == "apperror"]
+    assert unknown_errors[-1]["type"] == "error"
+    assert "Gateway provider failed" in unknown_errors[-1]["message"]
+
+    response_error[0] = "partial"
+    partial_stream_id = "stream-gateway-partial-terminal-error-test"
+    s = new_session()
+    s.active_stream_id = partial_stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.save()
+    partial_events = []
+    partial_channel = MagicMock()
+    partial_channel.put_nowait = lambda item: partial_events.append(item)
+    STREAMS[partial_stream_id] = partial_channel
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        partial_stream_id,
+        [],
+    )
+    partial_errors = [item[1] for item in partial_events if item[0] == "apperror"]
+    assert partial_errors[-1]["type"] in {"model_not_found", "auth_mismatch"}
+    saved = models.get_session(s.session_id)
+    assert not any(message.get("role") == "assistant" for message in saved.messages)
 
 
 def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_reasoning(tmp_path, monkeypatch):
