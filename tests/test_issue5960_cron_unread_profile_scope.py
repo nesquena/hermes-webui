@@ -12,12 +12,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
 def _extract_function(source: str, name: str) -> str:
     start = source.index(f"function {name}(")
+    if source[max(0, start - 6) : start] == "async ":
+        start -= 6
     brace = source.index("{", start)
     depth = 1
     pos = brace + 1
@@ -59,6 +62,43 @@ def test_successful_profile_switch_resets_unread_cron_state():
     assert "_cronNewJobIds.clear();" in reset_body
     assert "_cronPollSince=Date.now()/1000;" in reset_body
     assert "updateCronBadge();" in reset_body
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_session_load_profile_switch_resets_unread_cron_state():
+    switch = _extract_function(SESSIONS_JS, "_switchProfileForSessionLoad")
+    reset = _extract_function(PANELS_JS, "_resetCronUnreadForProfileSwitch")
+    script = f"""
+let _cronPollSince=10;
+let _cronUnreadCount=1;
+let _cronPollGeneration=0;
+const _cronNewJobIds=new Set(['old-profile-job']);
+global.S={{activeProfile:'default'}};
+global.api=async()=>({{active:'alternate',is_default:false}});
+global.localStorage={{removeItem(){{}}}};
+global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
+{reset}
+{switch}
+(async()=>{{
+  await _switchProfileForSessionLoad('alternate');
+  process.stdout.write(JSON.stringify({{
+    profile:S.activeProfile,
+    unread:Array.from(_cronNewJobIds),
+    count:_cronUnreadCount,
+    generation:_cronPollGeneration,
+  }}));
+}})().catch(error=>{{ console.error(error); process.exit(1); }});
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    assert state == {
+        "profile": "alternate",
+        "unread": [],
+        "count": 0,
+        "generation": 1,
+    }
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
