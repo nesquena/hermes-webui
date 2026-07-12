@@ -732,11 +732,16 @@ def test_frontend_subscribes_with_known_count_and_handles_session_updated():
     knc_ix = ss_src.index("_knownCount")
     knc_src = ss_src[knc_ix:knc_ix + 400]
     assert "S.messages.length" not in knc_src
-    # (b) the session-updated listener routes through the swap-in-place path.
+    # (b) the session-updated listener routes through the coordinator helper,
+    # whose load options own the swap-in-place path.
     su_ix = js.index("addEventListener('session-updated'")
     su_src = js[su_ix:su_ix + 1800]
-    assert "keepStaleUntilLoaded: true" in su_src or "keepStaleUntilLoaded:true" in su_src
-    assert "loadSession(" in su_src
+    assert "_queueSessionUpdatedRefresh(sid, Number(d.message_count));" in su_src
+    helper_ix = js.index("function _queueSessionUpdatedRefresh(sid, serverCount)")
+    helper_end = js.index("function startSessionStream", helper_ix)
+    helper_src = js[helper_ix:helper_end]
+    assert "keepStaleUntilLoaded:true" in helper_src
+    assert "minimumMessageCount:serverCount" in helper_src
     # Idle-only: must bail when a live turn is rendering (that path owns its own
     # message updates) and when the session isn't the one on screen.
     assert "S.activeStreamId" in su_src
