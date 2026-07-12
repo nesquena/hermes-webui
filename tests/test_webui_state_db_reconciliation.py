@@ -1088,9 +1088,17 @@ def test_msg_limit_single_hop_fast_path_falls_back_for_equal_timestamp_state_db_
     ]
 
 
+@pytest.mark.parametrize(
+    "insert_during_state_read",
+    [
+        pytest.param(False, id="present-before-validation"),
+        pytest.param(True, id="inserted-after-validation"),
+    ],
+)
 def test_msg_limit_single_hop_fast_path_falls_back_for_null_timestamp_parent_replay(
     monkeypatch,
     tmp_path,
+    insert_during_state_read,
 ):
     """A NULL-timestamp parent replay cannot be proven safe against a child-only merge."""
     import api.models as models
@@ -1130,17 +1138,31 @@ def test_msg_limit_single_hop_fast_path_falls_back_for_null_timestamp_parent_rep
     _make_state_db(
         tmp_path / "state.db",
         child_sid,
-        child_messages + [null_parent_replay],
+        child_messages + ([] if insert_during_state_read else [null_parent_replay]),
     )
 
     real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    real_state_reader = routes.get_state_db_session_messages
     captured = {"lineage_loads": 0}
+    inserted = False
 
     def wrapped_lineage_loader(*args, **kwargs):
         captured["lineage_loads"] += 1
         return real_lineage_loader(*args, **kwargs)
 
+    def wrapped_state_reader(*args, **kwargs):
+        nonlocal inserted
+        if insert_during_state_read and not inserted:
+            inserted = True
+            _append_state_db_rows(
+                tmp_path / "state.db",
+                child_sid,
+                [null_parent_replay],
+            )
+        return real_state_reader(*args, **kwargs)
+
     monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+    monkeypatch.setattr(routes, "get_state_db_session_messages", wrapped_state_reader)
 
     first = _GetHandler(
         f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
