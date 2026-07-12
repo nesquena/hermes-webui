@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- **The reasoning-effort chip is correct right after an empty startup.** On a normal boot with no active session restored, the top-bar reasoning chip wasn't refreshed for the hydrated default model, so it could show a stale value until you changed the model. It now refreshes on empty boot too. Thanks @rodboev. (#5967, #5954)
+
 - **Transparent Stream no longer bloats memory (or freezes the tab) on long tool-heavy chats.** With Transparent Stream enabled, opening a conversation with many prompts built a DOM node for every activity event of every past turn at load and eagerly rendered each tool row's full detail body — a long reasoning-heavy history could balloon to multiple GB and lock up the tab. Settled tool rows now render header-only and build their detail on first expand (identical to the old view once opened), and a turn with a very large number of steps shows its most recent 30 behind a "Show N earlier steps" control. Live turns are unchanged. Thanks @curtisszmania-cytocync for the report. (#5974, #5966)
 
 - **Dictation no longer wipes text you already typed.** When you typed part of a prompt and then used the microphone (server-side transcription / MediaRecorder path), the recognized text replaced your typed prefix instead of being appended to it. Dictation now appends to whatever is already in the composer, so you can type a partial sentence and dictate the rest. A Settings toggle lets you opt back into the old replace behavior. Thanks @Kopamed. (#5895)
