@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- **Cross-platform test suite stabilized.** The profile skill-statistics coverage test now selects a genuinely-incompatible platform per-OS (so the incompatibility assertion holds on macOS as well as Linux), and eight pytest class-scoped instance-fixture deprecation warnings were removed by switching to state-free module fixtures. Test-only; no product code changes. Thanks @tahabakhit. (#5970)
+
 - **The transcript no longer jumps up while you type in a multi-row composer.** When the composer had grown to multiple rows and you were scrolled to the bottom, every keystroke nudged the transcript upward (by roughly the composer's height) and quietly broke stream auto-follow — you'd have to scroll back down. The auto-resize now preserves the scroll position of a bottom-pinned reader, so typing keeps you pinned and streaming keeps following. Readers who deliberately scrolled up are unaffected. Thanks @JeffArcLogic for the report and repro. (#5962, #5514)
 
 - **The reasoning-effort chip is correct right after an empty startup.** On a normal boot with no active session restored, the top-bar reasoning chip wasn't refreshed for the hydrated default model, so it could show a stale value until you changed the model. It now refreshes on empty boot too. Thanks @rodboev. (#5967, #5954)
