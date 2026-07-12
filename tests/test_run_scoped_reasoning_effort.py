@@ -108,7 +108,9 @@ def test_browser_snapshots_immediate_and_queued_turn_effort():
     commands = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 
     assert "reasoning_effort:reasoningEffortForSend||undefined" in messages
-    assert messages.count("reasoning_effort:reasoningEffortForSend||undefined") >= 5
+    assert messages.count("reasoning_effort:reasoningEffortForSend||undefined") >= 4
+    assert "reasoning_effort:_targetReasoningEffort||undefined" in messages
+    assert "_sendInProgressReasoningEffort=reasoningEffortForSend" in messages
     assert "send({reasoningEffort:next.reasoning_effort})" in ui
     assert "window.getComposerReasoningEffortForRun=getComposerReasoningEffortForRun" in ui
     assert "typeof getComposerReasoningEffortForRun==='function'" in commands
