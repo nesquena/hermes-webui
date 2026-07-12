@@ -1680,13 +1680,32 @@ async function cmdRetry(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
   const activeSid=S.session.session_id;
+  // #5924: honor a genuine deliberate model pick across a recovery /retry without
+  // forcing explicit_model_pick when there is no real pick. The single-shot marker
+  // is already consumed by the failed send (messages.js clears it before
+  // /api/chat/start regardless of outcome), so we can't read it back. Instead
+  // derive the deliberate-pick signal the SAME way send()'s persistent path does:
+  // the session's own model is a non-default pick vs the profile default. This is
+  // NOT provider inference (no false positive) and survives marker consumption (no
+  // false negative for an already-applied pick). Captured pre-await, scoped to
+  // activeSid. No non-default pick → no re-arm → server compatible-model resolution runs.
+  const _recoveryPick=_deliberateSessionModelPick(activeSid);
   try{
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    // #5924 SILENT-race guard: a session switch during the GET await must not let
+    // this recovery apply session A's intent to whatever session is now visible.
+    if(!S.session||S.session.session_id!==activeSid)return;
     if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
-    $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();await send();
+    $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
+    // Re-arm the single-shot explicit-pick marker from the captured non-default
+    // pick — but only if it's still safe at fire time (session unchanged, current
+    // model still matches the pick, and no newer onchange marker to clobber). See
+    // _reArmRecoveryPick. Scoped to activeSid so it can't leak to another session.
+    _reArmRecoveryPick(activeSid, _recoveryPick);
+    await send();
   }catch(e){showToast(t('retry_failed')+e.message);}
 }
 async function cmdUndo(){
