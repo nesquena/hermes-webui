@@ -30,7 +30,7 @@ const COMMANDS=[
   {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max|ultra', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max','ultra'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
@@ -1820,15 +1820,19 @@ function cmdStatus(){
 function cmdReasoning(args){
   const arg=(args||'').trim().toLowerCase();
   const BRAIN='\uD83E\uDDE0';
-  // Matches hermes_constants.VALID_REASONING_EFFORTS + 'none' (CLI parity).
-  // Keep this WebUI effort list in sync with hermes-agent#29248.
-  const EFFORTS=['none','minimal','low','medium','high','xhigh','max'];
+  // Current standalone fallback plus levels materialized from server capabilities.
+  // The API remains the strict authority for accepting the submitted value.
+  const EFFORTS=new Set(['none','minimal','low','medium','high','xhigh','max','ultra']);
+  document.querySelectorAll('.reasoning-option').forEach(function(opt){
+    const effort=String(opt.dataset.effort||'').trim().toLowerCase();
+    if(effort) EFFORTS.add(effort);
+  });
   // Shared status renderer used by the no-args branch and as a fallback.
   function _fmtStatus(st){
     const vis=(st && st.show_reasoning===false)?'off':'on';
     const eff=(st && st.reasoning_effort)||'default';
     return BRAIN+' Reasoning effort: '+eff+' \u00B7 display: '+vis
-      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh|max';
+      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh|max|ultra';
   }
   if(!arg){
     // Status — read from the same config.yaml keys the CLI uses.
@@ -1852,7 +1856,7 @@ function cmdReasoning(args){
     showToast(BRAIN+' Thinking blocks: '+(on?'on':'off')+' (saved)');
     return true;
   }
-  if(EFFORTS.includes(arg)){
+  if(EFFORTS.has(arg)){
     // Persist via /api/reasoning → config.yaml agent.reasoning_effort.
     // Takes effect on the NEXT session/turn (agent re-reads config at
     // construction time), matching CLI semantics where `/reasoning high`

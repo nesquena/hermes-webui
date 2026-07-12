@@ -312,7 +312,9 @@ class TestReasoningCommand:
         m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
-        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+        for level in (
+            'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
+        ):
             assert f"'{level}'" in fn, (
                 f"cmdReasoning must accept '{level}' (CLI parity with "
                 f"hermes_constants.parse_reasoning_effort)"
@@ -325,7 +327,8 @@ class TestReasoningCommand:
         assert m, "reasoning COMMANDS entry not found"
         entry = m.group(0)
         for suggestion in (
-            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh',
+            'max', 'ultra'
         ):
             assert f"'{suggestion}'" in entry, (
                 f"reasoning subArgs must include '{suggestion}' for CLI parity"

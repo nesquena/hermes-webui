@@ -4692,7 +4692,24 @@ window.getComposerReasoningEffortForRun=getComposerReasoningEffortForRun;
 function _applyReasoningOptions(supportedEfforts){
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
-  const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  const supported=new Set(
+    (Array.isArray(supportedEfforts)?supportedEfforts:[])
+      .map(_normalizeReasoningEffort)
+      .filter(Boolean)
+  );
+  // The server follows the Agent's canonical vocabulary. Materialize levels
+  // added after this WebUI release so capability updates do not become hidden.
+  supported.forEach(function(effort){
+    if(effort==='none') return;
+    const exists=Array.from(dd.querySelectorAll('.reasoning-option'))
+      .some(function(opt){return opt.dataset.effort===effort;});
+    if(exists) return;
+    const opt=document.createElement('div');
+    opt.className='reasoning-option';
+    opt.dataset.effort=effort;
+    opt.textContent=_formatReasoningEffortLabel(effort);
+    dd.appendChild(opt);
+  });
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
     if(effort==='none'){
