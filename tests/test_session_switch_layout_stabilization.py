@@ -30,13 +30,21 @@ def test_session_switch_stabilization_behavior_and_mutation_sensitivity():
         for name in (
             "_endSessionSwitchLayoutStabilization",
             "_beginSessionSwitchLayoutStabilization",
+            "_finishSessionSwitchLayoutStabilization",
+            "_scheduleSessionSwitchLayoutQuietCheck",
+            "_beginSessionSwitchLayoutPostProcess",
+            "_endSessionSwitchLayoutPostProcess",
             "_settleSessionSwitchLayoutStabilization",
         )
     )
     script = f"""
 const assert=require('assert');
 let _sessionSwitchLayoutStabilizationSid='';
+let _sessionSwitchLayoutStabilizationToken=0;
 let _sessionSwitchLayoutStabilizationTimer=0;
+let _sessionSwitchLayoutStabilizationObserver=null;
+let _sessionSwitchLayoutPostProcessPending=0;
+let _sessionSwitchLayoutSettleRequested=false;
 let _messageUserUnpinned=false;
 let _scrollPinned=true;
 let _bottomSettleToken=0;
@@ -49,8 +57,11 @@ let bottomCalls=0;
 let raf=[];
 let timers=[];
 const classes=new Set();
+const inner={{}};
 const el={{classList:{{add:x=>classes.add(x),remove:x=>classes.delete(x)}}}};
-function $(id){{return id==='messages'?el:null;}}
+function $(id){{return id==='messages'?el:(id==='msgInner'?inner:null);}}
+const document={{getElementById:id=>id==='msgInner'?inner:null}};
+class ResizeObserver{{constructor(cb){{this.cb=cb;}}observe(){{}}disconnect(){{}}}}
 function scrollToBottom(){{bottomCalls++;}}
 function requestAnimationFrame(fn){{raf.push(fn);return raf.length;}}
 function cancelAnimationFrame(){{}}
@@ -108,10 +119,33 @@ def test_live_anchor_scroll_guard_restores_after_release_layout_frame():
         body = _function_body(UI_JS, name)
         compact = re.sub(r"\s+", "", body)
         release = "scrollRebuildGuard.release();"
-        nested = "requestAnimationFrame(()=>{if(_messageUserUnpinned)_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);});"
+        nested = "requestAnimationFrame(()=>{if(scrollRebuildIdentity&&typeof_liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity))return;if(_messageUserUnpinned)_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);});"
         assert release in compact
         assert nested in compact
         assert compact.index(release) < compact.index(nested)
+
+
+def test_session_switch_has_no_fixed_load_expiry_and_postprocess_is_event_driven():
+    begin = _function_body(UI_JS, "_beginSessionSwitchLayoutStabilization")
+    settle = _function_body(UI_JS, "_settleSessionSwitchLayoutStabilization")
+    quiet = _function_body(UI_JS, "_scheduleSessionSwitchLayoutQuietCheck")
+    post = _function_body(UI_JS, "_postProcessWithAnchorSuppression")
+    assert "15000" not in begin
+    assert "ResizeObserver" in settle
+    assert "_sessionSwitchLayoutPostProcessPending>0" in quiet
+    assert "_beginSessionSwitchLayoutPostProcess()" in post
+    assert "_endSessionSwitchLayoutPostProcess(sessionSwitchPostProcess)" in post
+
+
+def test_live_anchor_delayed_restore_is_generation_and_session_guarded():
+    guard = _function_body(UI_JS, "_liveAnchorScrollRebuildGuardCurrent")
+    assert "_liveAnchorScrollRebuildGeneration" in guard
+    assert "S.session.session_id" in guard
+    for name in ("renderLiveAnchorActivityScene", "_renderLiveAnchorActivitySceneTransparent"):
+        body = _function_body(UI_JS, name)
+        guarded_identity = "const scrollRebuildIdentity=(typeof _nextLiveAnchorScrollRebuildGuard==='function')?_nextLiveAnchorScrollRebuildGuard():null;"
+        assert guarded_identity in body
+        assert "_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)" in body
 
 
 def test_touch_css_forces_real_user_row_layout_only_during_switch():

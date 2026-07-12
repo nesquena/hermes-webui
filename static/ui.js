@@ -5128,16 +5128,29 @@ let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
 let _sessionSwitchLayoutStabilizationSid='';
+let _sessionSwitchLayoutStabilizationToken=0;
 let _sessionSwitchLayoutStabilizationTimer=0;
-function _endSessionSwitchLayoutStabilization(){
+let _sessionSwitchLayoutStabilizationObserver=null;
+let _sessionSwitchLayoutPostProcessPending=0;
+let _sessionSwitchLayoutSettleRequested=false;
+let _liveAnchorScrollRebuildGeneration=0;
+function _endSessionSwitchLayoutStabilization(token){
+  if(token!==undefined&&token!==_sessionSwitchLayoutStabilizationToken) return;
   clearTimeout(_sessionSwitchLayoutStabilizationTimer);
   _sessionSwitchLayoutStabilizationTimer=0;
+  if(_sessionSwitchLayoutStabilizationObserver){
+    _sessionSwitchLayoutStabilizationObserver.disconnect();
+    _sessionSwitchLayoutStabilizationObserver=null;
+  }
+  _sessionSwitchLayoutPostProcessPending=0;
+  _sessionSwitchLayoutSettleRequested=false;
   _sessionSwitchLayoutStabilizationSid='';
   const el=$('messages');
   if(el&&el.classList) el.classList.remove('session-switch-layout-stabilizing');
 }
 function _beginSessionSwitchLayoutStabilization(sid){
   _endSessionSwitchLayoutStabilization();
+  ++_sessionSwitchLayoutStabilizationToken;
   _bottomSettleToken++;
   if(_settleRO){ _settleRO.disconnect(); _settleRO=null; }
   clearTimeout(_settleTimer);
@@ -5145,33 +5158,60 @@ function _beginSessionSwitchLayoutStabilization(sid){
   cancelAnimationFrame(_settleRAF);
   _programmaticScroll=false;
   _sessionSwitchLayoutStabilizationSid=String(sid||'');
+  _sessionSwitchLayoutPostProcessPending=0;
+  _sessionSwitchLayoutSettleRequested=false;
   const el=$('messages');
   if(el&&el.classList) el.classList.add('session-switch-layout-stabilizing');
-  // Failure/stale-load fallback. The loading placeholder has no user rows, so
-  // keeping this class while a slow metadata/message fetch is in flight is cheap.
-  // The normal render path replaces this long fallback with a short settle timer.
-  _sessionSwitchLayoutStabilizationTimer=setTimeout(_endSessionSwitchLayoutStabilization,15000);
+}
+function _finishSessionSwitchLayoutStabilization(token,sid){
+  if(token!==_sessionSwitchLayoutStabilizationToken||String(sid||'')!==_sessionSwitchLayoutStabilizationSid) return;
+  _endSessionSwitchLayoutStabilization(token);
+  requestAnimationFrame(()=>{
+    if(token!==_sessionSwitchLayoutStabilizationToken) return;
+    if(!_messageUserUnpinned&&_scrollPinned&&typeof scrollToBottom==='function') scrollToBottom();
+  });
+}
+function _scheduleSessionSwitchLayoutQuietCheck(token,sid){
+  clearTimeout(_sessionSwitchLayoutStabilizationTimer);
+  _sessionSwitchLayoutStabilizationTimer=setTimeout(()=>{
+    if(token!==_sessionSwitchLayoutStabilizationToken||!_sessionSwitchLayoutSettleRequested) return;
+    if(_sessionSwitchLayoutPostProcessPending>0) return;
+    _finishSessionSwitchLayoutStabilization(token,sid);
+  },300);
+}
+function _beginSessionSwitchLayoutPostProcess(){
+  if(!_sessionSwitchLayoutSettleRequested||!_sessionSwitchLayoutStabilizationSid) return null;
+  const marker={token:_sessionSwitchLayoutStabilizationToken,sid:_sessionSwitchLayoutStabilizationSid};
+  _sessionSwitchLayoutPostProcessPending++;
+  clearTimeout(_sessionSwitchLayoutStabilizationTimer);
+  return marker;
+}
+function _endSessionSwitchLayoutPostProcess(marker){
+  if(!marker||marker.token!==_sessionSwitchLayoutStabilizationToken||marker.sid!==_sessionSwitchLayoutStabilizationSid) return;
+  _sessionSwitchLayoutPostProcessPending=Math.max(0,_sessionSwitchLayoutPostProcessPending-1);
+  if(_sessionSwitchLayoutPostProcessPending===0) _scheduleSessionSwitchLayoutQuietCheck(marker.token,marker.sid);
 }
 function _settleSessionSwitchLayoutStabilization(sid){
   if(!_sessionSwitchLayoutStabilizationSid||String(sid||'')!==_sessionSwitchLayoutStabilizationSid) return;
   const el=$('messages');
   if(!el){ _endSessionSwitchLayoutStabilization(); return; }
-  clearTimeout(_sessionSwitchLayoutStabilizationTimer);
-  // The incoming rows, post-processing, and content-visibility intrinsic sizes can
-  // keep changing for hundreds of milliseconds after renderMessages returns. Hold
-  // real row layout through that window, then expose content-visibility once and
-  // re-anchor against the final geometry. Two rAFs were empirically too short.
-  _sessionSwitchLayoutStabilizationTimer=setTimeout(()=>{
-    if(String(sid||'')!==_sessionSwitchLayoutStabilizationSid) return;
-    _endSessionSwitchLayoutStabilization();
-    requestAnimationFrame(()=>{
-      if(!_messageUserUnpinned&&_scrollPinned&&typeof scrollToBottom==='function') scrollToBottom();
+  const token=_sessionSwitchLayoutStabilizationToken;
+  _sessionSwitchLayoutSettleRequested=true;
+  if(typeof ResizeObserver==='function'){
+    if(_sessionSwitchLayoutStabilizationObserver) _sessionSwitchLayoutStabilizationObserver.disconnect();
+    const observed=document.getElementById('msgInner')||el;
+    _sessionSwitchLayoutStabilizationObserver=new ResizeObserver(()=>{
+      if(token!==_sessionSwitchLayoutStabilizationToken) return;
+      _scheduleSessionSwitchLayoutQuietCheck(token,sid);
     });
-  },1200);
+    _sessionSwitchLayoutStabilizationObserver.observe(observed);
+  }
+  _scheduleSessionSwitchLayoutQuietCheck(token,sid);
 }
 if(typeof window!=='undefined'){
   window._beginSessionSwitchLayoutStabilization=_beginSessionSwitchLayoutStabilization;
   window._settleSessionSwitchLayoutStabilization=_settleSessionSwitchLayoutStabilization;
+  window._endSessionSwitchLayoutStabilization=_endSessionSwitchLayoutStabilization;
 }
 
 // Sticky-unpin model (#3343 supersedes #3330's proximity re-pin): once the user
@@ -12004,6 +12044,12 @@ function _projectLiveAnchorActivitySceneForStream(streamId, mode){
     return null;
   }
 }
+function _nextLiveAnchorScrollRebuildGuard(){
+  return {generation:++_liveAnchorScrollRebuildGeneration,sessionId:String(S.session&&S.session.session_id||'')};
+}
+function _liveAnchorScrollRebuildGuardCurrent(guard){
+  return !!(guard&&guard.generation===_liveAnchorScrollRebuildGeneration&&String(S.session&&S.session.session_id||'')===guard.sessionId);
+}
 function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
   const messagesEl=$('messages');
   if(!messagesEl||!scrollSnapshot) return {readerAwayFromBottom:false,release:null};
@@ -12079,6 +12125,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     : null;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  const scrollRebuildIdentity=(typeof _nextLiveAnchorScrollRebuildGuard==='function')?_nextLiveAnchorScrollRebuildGuard():null;
   blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
@@ -12111,6 +12158,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
       // SAME callback reads the pre-release geometry and lands one frame early.
       // Restore on the following frame after released geometry is measurable.
       requestAnimationFrame(()=>{
+        if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;
         if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
       });
     });
@@ -12140,6 +12188,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!blocks) return false;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  const scrollRebuildIdentity=(typeof _nextLiveAnchorScrollRebuildGuard==='function')?_nextLiveAnchorScrollRebuildGuard():null;
   const activeStreamId = String(streamId || S.activeStreamId || '');
   const activeSessionId = String(S.session && S.session.session_id || '');
   const preserveByKey = new Map();
@@ -12224,6 +12273,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     requestAnimationFrame(()=>{
       scrollRebuildGuard.release();
       requestAnimationFrame(()=>{
+        if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;
         if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
       });
     });
@@ -17126,12 +17176,14 @@ async function regenerateResponse(btn) {
 // it) in the same suppression so the browser layer cannot re-anchor during the
 // async settle window. Desktop rests at `none`, so this is a no-op there.
 function _postProcessWithAnchorSuppression(container){
+  const sessionSwitchPostProcess=_beginSessionSwitchLayoutPostProcess();
   const scroller=$('messages');
   const release=(scroller&&typeof _suppressBrowserOverflowAnchor==='function')
     ? _suppressBrowserOverflowAnchor(scroller) : null;
   try{
     postProcessRenderedMessages(container);
   }finally{
+    _endSessionSwitchLayoutPostProcess(sessionSwitchPostProcess);
     // Hold suppression across ONE more frame so late media/layout reflow
     // (image decode, katex/mermaid measure) cannot re-anchor either, then let
     // _suppressBrowserOverflowAnchor's own rAF-deferred restore run.

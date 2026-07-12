@@ -2010,6 +2010,7 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
+      if(typeof window!=='undefined'&&typeof window._endSessionSwitchLayoutStabilization==='function') window._endSessionSwitchLayoutStabilization();
       if (_isCurrentLoad()) _loadingSessionId = null;
       return;
     }
