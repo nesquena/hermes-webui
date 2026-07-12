@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- **Cron unread ("Tasks") dots are now scoped to the active profile — no more ghost dots after switching.** In multi-profile setups, the session-sidebar unread dot and the Tasks badge could keep showing a cron completion from a *different* profile after you switched, and the count could resurrect from a stale poll. Cron completion markers now carry their source + owning profile, are cleared for the profile you switch away from (including legacy/untagged markers), and a previous-profile poll response can no longer restore a stale unread. Non-cron completion unread and the current profile's own cron unread are preserved; default ↔ renamed-root aliases are treated as the same profile so a root cron marker is neither wrongly cleared nor wrongly kept. Thanks @jbbottoms. (#5975, #5960)
+
 - **The Docker "manual update" banner instruction is now localized.** On Docker/no-git deployments the update banner shows the manual update command; that guidance string was hardcoded in English. It now goes through the i18n system, so it renders in the active language (English fallback where a translation isn't present yet). Thanks @jbbottoms. (#5973, #5959)
 
 - **Cross-platform test suite stabilized.** The profile skill-statistics coverage test now selects a genuinely-incompatible platform per-OS (so the incompatibility assertion holds on macOS as well as Linux), and eight pytest class-scoped instance-fixture deprecation warnings were removed by switching to state-free module fixtures. Test-only; no product code changes. Thanks @tahabakhit. (#5970)
