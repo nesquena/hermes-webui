@@ -556,6 +556,63 @@ def _run_gateway_runs_api_streaming(
     return final_text, usage
 
 
+def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+    from api.streaming import (
+        _classify_provider_error,
+        _materialize_pending_user_turn_before_error,
+        _provider_error_payload,
+        _session_payload_with_full_messages,
+        _snapshot_and_append_partial_on_error,
+    )
+
+    with _get_session_agent_lock(session_id):
+        session = get_session(session_id)
+        if not _stream_writeback_is_current(session, stream_id):
+            return None
+        error_classification = _classify_provider_error(terminal_error)
+        error_payload = _provider_error_payload(
+            terminal_error,
+            error_classification["type"],
+            error_classification.get("hint", ""),
+        )
+        _materialize_pending_user_turn_before_error(session)
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+        try:
+            _snapshot_and_append_partial_on_error(session, stream_id)
+        except Exception:
+            logger.debug("Failed to snapshot gateway partials on terminal error", exc_info=True)
+        error_message = {
+            "role": "assistant",
+            "content": (
+                f"**{error_classification['label']}:** "
+                f"{error_payload.get('message') or error_classification['label']}"
+            ) + (f"\n\n*{error_payload['hint']}*" if error_payload.get("hint") else ""),
+            "timestamp": int(time.time()),
+            "_error": True,
+        }
+        if error_payload.get("details"):
+            error_message["provider_details"] = error_payload["details"]
+        if not isinstance(session.messages, list):
+            session.messages = []
+        session.messages.append(error_message)
+        session.workspace = str(workspace)
+        session.model = model
+        session.model_provider = model_provider
+        try:
+            session.save()
+        except Exception:
+            logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
+        error_payload["session"] = redact_session_data(
+            _session_payload_with_full_messages(session, tool_calls=[])
+        )
+        error_payload["session_id"] = session.session_id
+        return error_payload
+
+
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
     return bool(stream_id and getattr(session, "active_stream_id", None) == stream_id)
 
@@ -745,13 +802,17 @@ def _run_gateway_chat_streaming(
                     session=s,
                 )
             except Exception as exc:
-                error_payload = _gateway_provider_error_payload(str(exc))
-                put_gateway_event("apperror", error_payload or {
-                    "label": "Gateway runs API error",
-                    "type": "gateway_runs_error",
-                    "message": str(exc)[:400],
-                    "hint": "Check that the Hermes Gateway runs API (/v1/runs) is available.",
-                })
+                error_payload = _settle_gateway_terminal_error(
+                    session_id,
+                    stream_id,
+                    workspace,
+                    model,
+                    model_provider,
+                    str(exc),
+                )
+                if error_payload is None:
+                    return
+                put_gateway_event("apperror", error_payload)
                 return
             if final_text is None:
                 return
@@ -914,7 +975,17 @@ def _run_gateway_chat_streaming(
             usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
         assistant_text = final_text.strip()
         if terminal_error:
-            put_gateway_event("apperror", _gateway_provider_error_payload(terminal_error))
+            error_payload = _settle_gateway_terminal_error(
+                session_id,
+                stream_id,
+                workspace,
+                model,
+                model_provider,
+                terminal_error,
+            )
+            if error_payload is None:
+                return
+            put_gateway_event("apperror", error_payload)
             return
         if not assistant_text:
             put_gateway_event("apperror", {
