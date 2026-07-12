@@ -7183,6 +7183,7 @@ def _run_agent_streaming(
         # is reflected. The lease is released in the turn's finally block.
         try:
             from api.terminal_backend_isolation import (
+                TerminalBackendIsolationError,
                 acquire_terminal_backend_turn_lease,
             )
             _effective_turn_env = dict(os.environ)
@@ -7190,9 +7191,21 @@ def _run_agent_streaming(
             _terminal_backend_lease, _ = acquire_terminal_backend_turn_lease(
                 _effective_turn_env
             )
+        except TerminalBackendIsolationError:
+            # Fail CLOSED: the module rejected this turn (bounded wait timed
+            # out, or the previous backend env could not be verifiably
+            # removed). Running the turn anyway would execute tools against a
+            # slot that may belong to a different profile's backend — abort
+            # the turn instead; the exception's message is user-readable and
+            # surfaces through the standard stream error path below.
+            raise
         except Exception:
+            # An UNEXPECTED bug in the isolation module itself must not brick
+            # every chat turn; log loudly and proceed (matches the module's
+            # pre-#5988 posture for internal errors only — deliberate
+            # rejections are re-raised above).
             logger.warning(
-                "terminal backend isolation lease failed (#5937)",
+                "terminal backend isolation lease failed unexpectedly (#5937)",
                 exc_info=True,
             )
         # Still set process-level env as fallback for tools that bypass thread-local
