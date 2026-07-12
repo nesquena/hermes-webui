@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- **The Docker "manual update" banner instruction is now localized.** On Docker/no-git deployments the update banner shows the manual update command; that guidance string was hardcoded in English. It now goes through the i18n system, so it renders in the active language (English fallback where a translation isn't present yet). Thanks @jbbottoms. (#5973, #5959)
+
 - **Cross-platform test suite stabilized.** The profile skill-statistics coverage test now selects a genuinely-incompatible platform per-OS (so the incompatibility assertion holds on macOS as well as Linux), and eight pytest class-scoped instance-fixture deprecation warnings were removed by switching to state-free module fixtures. Test-only; no product code changes. Thanks @tahabakhit. (#5970)
 
 - **The transcript no longer jumps up while you type in a multi-row composer.** When the composer had grown to multiple rows and you were scrolled to the bottom, every keystroke nudged the transcript upward (by roughly the composer's height) and quietly broke stream auto-follow — you'd have to scroll back down. The auto-resize now preserves the scroll position of a bottom-pinned reader, so typing keeps you pinned and streaming keeps following. Readers who deliberately scrolled up are unaffected. Thanks @JeffArcLogic for the report and repro. (#5962, #5514)
