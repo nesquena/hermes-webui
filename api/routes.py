@@ -20694,6 +20694,7 @@ def _start_chat_stream_for_session(
     goal_related: bool = False,
     source: str = "webui",
     moa_config=None,
+    fast_mode: bool = False,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -20816,7 +20817,7 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related, "fast_mode": bool(fast_mode)}
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(
@@ -20905,6 +20906,7 @@ def _start_run(
     route: str,
     diag=None,
     moa_config=None,
+    fast_mode: bool = False,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -20945,6 +20947,7 @@ def _start_run(
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                fast_mode=fast_mode,
             )
 
         def _legacy_adapter_factory():
@@ -20967,7 +20970,7 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata={"route": route, "fast_mode": bool(fast_mode)},
                 )
             )
         except NotImplementedError as exc:
@@ -20985,6 +20988,7 @@ def _start_run(
         diag=diag,
         source=source,
         moa_config=moa_config,
+        fast_mode=fast_mode,
     )
 
 
@@ -21755,6 +21759,7 @@ def _handle_chat_start(handler, body, diag=None):
             "source": "webui",
             "route": "/api/chat/start",
             "diag": diag,
+            "fast_mode": bool(body.get("fast_mode")),
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config

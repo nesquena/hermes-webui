@@ -114,6 +114,62 @@ function _chatPayloadModelState(){
   return {model,model_provider:_chatPayloadModelProvider(model)};
 }
 
+const _FAST_MODE_STORAGE_KEY='hermes-webui-fast-mode-enabled';
+
+function _isFastModeEnabled(){
+  try{return localStorage.getItem(_FAST_MODE_STORAGE_KEY)==='1';}
+  catch(_){return false;}
+}
+
+function syncFastModePill(){
+  const btn=$('fastModePill');
+  if(!btn)return;
+  const enabled=_isFastModeEnabled();
+  btn.classList.toggle('active',enabled);
+  btn.setAttribute('aria-pressed',enabled?'true':'false');
+  btn.title=enabled
+    ? 'Fast mode on: sends a short foreground answer and starts a background follow-up'
+    : 'Fast mode: short foreground answer plus background follow-up';
+}
+
+function toggleFastMode(){
+  const next=!_isFastModeEnabled();
+  try{localStorage.setItem(_FAST_MODE_STORAGE_KEY,next?'1':'0');}catch(_){}
+  syncFastModePill();
+  if(typeof showToast==='function')showToast(next?'Fast mode on':'Fast mode off',1800);
+}
+
+function _fastModeBackgroundPrompt(prompt){
+  return [
+    'Fast mode background follow-up for the user\'s latest message.',
+    '',
+    'User message:',
+    prompt,
+    '',
+    'Do the deeper check that was intentionally skipped by the fast foreground answer. Use tools only when they materially improve the answer. Return a concise follow-up that the parent conversation can append as a background result. If no deeper work is needed, say that briefly.',
+  ].join('\n');
+}
+
+async function _launchFastModeBackground(parentSid,prompt){
+  if(!parentSid||!String(prompt||'').trim())return;
+  try{
+    const r=await api('/api/background',{method:'POST',body:JSON.stringify({session_id:parentSid,prompt:_fastModeBackgroundPrompt(prompt)})});
+    if(r&&r.error){if(typeof showToast==='function')showToast(r.error);return;}
+    if(r&&r.task_id){
+      if(typeof showBackgroundBadge==='function')showBackgroundBadge(r.task_id);
+      if(typeof startBackgroundPolling==='function')startBackgroundPolling(parentSid,r.task_id,prompt);
+    }
+  }catch(e){
+    const label=(typeof t==='function'&&t('bg_failed'))||'Background task failed: ';
+    if(typeof showToast==='function')showToast(label+(e&&e.message||e));
+  }
+}
+
+if(typeof document!=='undefined'){
+  document.addEventListener('DOMContentLoaded',syncFastModePill);
+  setTimeout(syncFastModePill,0);
+}
+
 function _deferStreamErrorIfOffline(){
   if(typeof isOfflineBannerVisible==='function' && isOfflineBannerVisible()){
     setComposerStatus(t('offline_stream_waiting'));
@@ -1623,6 +1679,8 @@ async function send(){
     }
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
+  const fastModeActive=!!(text&&typeof _isFastModeEnabled==='function'&&_isFastModeEnabled());
+  const fastModeOriginalPrompt=msgText;
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
   // the re-entrant double-send race AND avoid clobbering a draft typed during the
@@ -1745,6 +1803,7 @@ async function send(){
       model_provider:_modelState.model_provider,
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
+      fast_mode:fastModeActive||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined
     })});
@@ -1886,6 +1945,9 @@ async function send(){
       void renderSessionList();
     }
   });
+  if(fastModeActive){
+    void _launchFastModeBackground(activeSid,fastModeOriginalPrompt);
+  }
 
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);

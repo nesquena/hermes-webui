@@ -25,11 +25,13 @@ def test_fast_health_defaults_are_truthful_and_sanitized(monkeypatch):
     assert payload["ok"] is True
     assert payload["fast_mode"]["enabled"] is False
     assert payload["fast_mode"]["mode"] == "disabled"
+    assert payload["foreground"]["normal_composer_fast_toggle"] is True
     assert payload["foreground"]["strict_no_tools_enforced"] is False
     assert payload["background"]["durable_task_store"] is True
     assert payload["background"]["parent_transcript_return"] is True
     assert payload["background"]["parent_transcript_return_mode"] == "durable_parent_cards"
     assert payload["background"]["live_update_event"] == "background_task_updated"
+    assert payload["background"]["normal_composer_auto_launch"] is True
     assert payload["acceptance"]["synthetic_provider_counts_as_acceptance"] is False
 
     rendered = "\n".join(_flatten_strings(payload))
@@ -61,3 +63,32 @@ def test_fast_health_route_is_registered():
     routes = Path("api/routes.py").read_text(encoding="utf-8")
     assert 'parsed.path == "/api/fast/health"' in routes
     assert "health_payload" in routes
+
+
+def test_fast_mode_composer_surface_and_background_launch_are_registered():
+    from pathlib import Path
+
+    index = Path("static/index.html").read_text(encoding="utf-8")
+    messages = Path("static/messages.js").read_text(encoding="utf-8")
+
+    assert 'id="fastModePill"' in index
+    assert 'onclick="toggleFastMode()"' in index
+    assert "hermes-webui-fast-mode-enabled" in messages
+    assert "_fastModeBackgroundPrompt" in messages
+    assert "fast_mode:fastModeActive||undefined" in messages
+    assert "void _launchFastModeBackground(activeSid,fastModeOriginalPrompt)" in messages
+    assert "api('/api/background'" in messages
+
+
+def test_fast_mode_foreground_guidance_is_ephemeral_not_user_message():
+    from pathlib import Path
+
+    routes = Path("api/routes.py").read_text(encoding="utf-8")
+    streaming = Path("api/streaming.py").read_text(encoding="utf-8")
+    gateway = Path("api/gateway_chat.py").read_text(encoding="utf-8")
+    messages = Path("static/messages.js").read_text(encoding="utf-8")
+
+    assert '"fast_mode": bool(body.get("fast_mode"))' in routes
+    assert "FAST_MODE_FOREGROUND_GUIDANCE" in streaming
+    assert "FAST_MODE_FOREGROUND_GUIDANCE" in gateway
+    assert "_fastModeForegroundPrompt" not in messages

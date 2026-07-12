@@ -11,6 +11,12 @@ import os
 from typing import Any
 
 _FAST_MODE_VERSION = 1
+FAST_MODE_FOREGROUND_GUIDANCE = (
+    "Fast conversation mode is enabled for this WebUI turn. Answer first from "
+    "readily available context, keep the foreground reply concise and useful, "
+    "avoid nonessential tool use, and do not wait on deeper investigation. If "
+    "more work is useful, mention that a background follow-up is running."
+)
 _ALLOWED_MODES = {
     "disabled",
     "synthetic_fixture",
@@ -50,6 +56,7 @@ def health_payload() -> dict[str, Any]:
         },
         "foreground": {
             "path": "webui_chat_stream",
+            "normal_composer_fast_toggle": True,
             "real_profile_required_for_acceptance": True,
             "strict_no_tools_enforced": False,
             "strict_no_tools_enforcement": "not_implemented",
@@ -59,6 +66,7 @@ def health_payload() -> dict[str, Any]:
             "parent_transcript_return": True,
             "parent_transcript_return_mode": "durable_parent_cards",
             "live_update_event": "background_task_updated",
+            "normal_composer_auto_launch": True,
             "legacy_polling_endpoint": "/api/background/status",
         },
         "delivery": {

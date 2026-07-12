@@ -6573,6 +6573,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    fast_mode=False,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -8342,6 +8343,14 @@ def _run_agent_streaming(
             # (agent's own mechanism). This preserves any selected personality
             # while making long tool runs emit real user-visible interim text
             # through interim_assistant_callback instead of frontend guesses.
+            if fast_mode:
+                try:
+                    from api.fast_mode import FAST_MODE_FOREGROUND_GUIDANCE
+                    _personality_prompt = '\n\n'.join(
+                        p for p in (_personality_prompt, FAST_MODE_FOREGROUND_GUIDANCE) if p
+                    )
+                except Exception:
+                    logger.debug("Failed to attach fast-mode foreground guidance", exc_info=True)
             agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
                 _personality_prompt,
                 surface_context={

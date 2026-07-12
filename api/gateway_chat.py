@@ -583,6 +583,7 @@ def _run_gateway_chat_streaming(
     *,
     model_provider=None,
     goal_related=False,
+    fast_mode=False,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -683,6 +684,14 @@ def _run_gateway_chat_streaming(
                 },
                 config_data=cfg,
             )
+            if fast_mode:
+                try:
+                    from api.fast_mode import FAST_MODE_FOREGROUND_GUIDANCE
+                    _gateway_system_prompt = "\n\n".join(
+                        p for p in (_gateway_system_prompt, FAST_MODE_FOREGROUND_GUIDANCE) if p
+                    )
+                except Exception:
+                    logger.debug("Failed to attach gateway fast-mode guidance", exc_info=True)
             prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
             prefill_messages = [
