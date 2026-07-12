@@ -182,18 +182,18 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "env_var": "MINIMAX_API_KEY",
         "default_model": "MiniMax-M3",
         "default_base_url": "https://api.minimax.io/v1",
-        "default_anthropic_base_url": "https://api.minimax.io/anthropic/v1",
+        "default_anthropic_base_url": "https://api.minimax.io/anthropic",
         "endpoint_options": [
             {
                 "region": "global_en",
                 "openai_base_url": "https://api.minimax.io/v1",
-                "anthropic_base_url": "https://api.minimax.io/anthropic/v1",
+                "anthropic_base_url": "https://api.minimax.io/anthropic",
                 "docs_root": "https://platform.minimax.io/docs",
             },
             {
                 "region": "cn_zh",
                 "openai_base_url": "https://api.minimaxi.com/v1",
-                "anthropic_base_url": "https://api.minimaxi.com/anthropic/v1",
+                "anthropic_base_url": "https://api.minimaxi.com/anthropic",
                 "docs_root": "https://platform.minimaxi.com/docs",
             },
         ],
@@ -206,18 +206,18 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "env_var": "MINIMAX_CN_API_KEY",
         "default_model": "MiniMax-M3",
         "default_base_url": "https://api.minimaxi.com/v1",
-        "default_anthropic_base_url": "https://api.minimaxi.com/anthropic/v1",
+        "default_anthropic_base_url": "https://api.minimaxi.com/anthropic",
         "endpoint_options": [
             {
                 "region": "global_en",
                 "openai_base_url": "https://api.minimax.io/v1",
-                "anthropic_base_url": "https://api.minimax.io/anthropic/v1",
+                "anthropic_base_url": "https://api.minimax.io/anthropic",
                 "docs_root": "https://platform.minimax.io/docs",
             },
             {
                 "region": "cn_zh",
                 "openai_base_url": "https://api.minimaxi.com/v1",
-                "anthropic_base_url": "https://api.minimaxi.com/anthropic/v1",
+                "anthropic_base_url": "https://api.minimaxi.com/anthropic",
                 "docs_root": "https://platform.minimaxi.com/docs",
             },
         ],
