@@ -1932,7 +1932,8 @@ async function forkFromMessage(msgIdx){
   // waiting for the stream to finish.
   if(S.busy){
     const _msg=(Array.isArray(S.messages)&&S.messages[msgIdx-1])||null;
-    if(_msg&&_msg._live){
+    const _isLastMsg=msgIdx>=(Array.isArray(S.messages)?S.messages.length:0);
+    if((_msg&&(_msg._live||_msg._pending))||_isLastMsg){
       showToast('Cannot fork a message still being generated.',3000);
       return;
     }
