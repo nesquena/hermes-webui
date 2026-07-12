@@ -145,6 +145,8 @@ const LOCALES = {
     thinking: 'Thinking',
     expand_all: 'Expand all',
     collapse_all: 'Collapse all',
+    show_earlier_step_one: 'Show 1 earlier step',
+    show_earlier_steps: 'Show {0} earlier steps',
     edit_failed: 'Edit failed: ',
     regen_failed: 'Regenerate failed: ',
     reconnect_active: 'A response is still being generated. Reload when ready?',

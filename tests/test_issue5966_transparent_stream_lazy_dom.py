@@ -54,12 +54,27 @@ def _function_body(src: str, name: str) -> str:
 
 def test_settled_collapsed_tool_row_defers_detail_body():
     body = _function_body(UI_JS, "_decorateTransparentEventRow")
-    # Defer only on settled + collapsed (live / already-open rows build eagerly).
-    assert "opts.settled===true&&!card.classList.contains('open')" in body
+    # Defer on settled + collapsed + has-detail (live / already-open build eagerly).
+    assert "opts.settled===true&&!card.classList.contains('open')&&_transparentToolRowHasDetail(tc)" in body
     assert "row.setAttribute('data-transparent-detail-deferred','1')" in body
     assert "row._deferredToolCall=tc" in body
-    # The eager build path is still present for the non-deferred branch.
+    # Codex F1: buildToolCard PRE-BUILDS the detail body when the tool has
+    # args/output, so the defer branch must STRIP that prebuilt body — a bare
+    # `!detail` guard skipped exactly the heavy rows. Assert the strip + the
+    # no-detail class removal.
+    assert "detail.remove(); detail=null;" in body
+    assert "card.classList.remove('tool-card-no-detail')" in body
+    # The eager build path remains for the non-deferred branch.
     assert "_transparentToolDetailHtml(tc,status)" in body
+
+
+def test_defer_gate_only_fires_when_detail_worth_building():
+    # Codex F1 corollary: a detail-less tool row must NOT be marked deferred/
+    # expandable (no empty chevron). The has-detail guard mirrors buildToolCard.
+    body = _function_body(UI_JS, "_transparentToolRowHasDetail")
+    assert "tc.snippet" in body
+    assert "Object.keys(tc.args)" in body
+    assert "_toolCardAllowsDetail" in body
 
 
 def test_expand_materializes_deferred_detail_before_open():
@@ -216,3 +231,55 @@ def test_boundary_no_stub_affordance():
     # cap+slack+1 (41) we cap. Proves the slack guard works.
     assert _run_cap_harness(40)["capped"] is False
     assert _run_cap_harness(41)["capped"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Codex gate fixes — F2 (owner index) + F3 (persistent reveal)
+# --------------------------------------------------------------------------- #
+
+def test_owner_index_stamped_on_rows_and_affordance():
+    # Codex F2: a multi-segment turn's scene is owned by a later segment, so
+    # recovery keyed off the turn's FIRST segment resolves the wrong message.
+    # Rows and the affordance must carry the owner rawIdx.
+    body = _function_body(UI_JS, "_renderSettledAnchorSceneTransparentForMessage")
+    assert "node.setAttribute('data-anchor-owner-idx',String(rawIdx))" in body
+    assert "earlier.setAttribute('data-anchor-owner-idx',String(rawIdx))" in body
+
+
+def test_dataset_recovery_uses_owner_index():
+    body = _function_body(UI_JS, "_transparentToolCallFromRowDataset")
+    assert "data-anchor-owner-idx" in body
+    # And still has a scene-owning-segment fallback if the stamp is absent.
+    assert "_anchor_activity_scene" in body
+
+
+def test_rehydrate_binds_affordance_to_owner_message():
+    body = _function_body(UI_JS, "_rehydrateTransparentStreamDom")
+    assert "data-anchor-owner-idx" in body
+    assert "_revealTransparentEarlierSteps(msg,seg,idx,el)" in body
+
+
+def test_reveal_state_persists_and_invalidates_cache():
+    # Codex F3: the DOM-only revealed flag is lost across the HTML-cache round-trip,
+    # silently re-capping a turn the user already expanded. Reveal state lives in a
+    # persistent session/owner-keyed set, and reveal invalidates the session cache.
+    assert "const _transparentRevealedTurns=new Set()" in UI_JS
+    render = _function_body(UI_JS, "_renderSettledAnchorSceneTransparentForMessage")
+    assert "_transparentRevealedTurns.has(revealKey)" in render
+    reveal = _function_body(UI_JS, "_revealTransparentEarlierSteps")
+    assert "_transparentRevealedTurns.add(revealKey)" in reveal
+    assert "_sessionHtmlCache.delete(sid)" in reveal
+
+
+def test_label_uses_i18n_with_fallback():
+    # Fable fast-follow: label resolves via t() when the key exists, else the
+    # English literal (t() returns the key name for unknown keys, so a plain
+    # `t()||literal` wouldn't fall back).
+    body = _function_body(UI_JS, "_tOrDefault")
+    assert "v!==key" in body
+    assert "show_earlier_step_one: 'Show 1 earlier step'" in (
+        (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    )
+    assert "show_earlier_steps: 'Show {0} earlier steps'" in (
+        (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    )

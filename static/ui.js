@@ -10840,6 +10840,19 @@ function _setTransparentCardOpen(card, open){
 // Idempotent: clears the deferred flag and runs anchor-suppressed post-processing
 // (Prism / copy buttons / KaTeX / Mermaid / trees) on just the new subtree so an
 // expanded deferred row is byte-identical to the eager path.
+// #5966: does this tool call have a detail body worth deferring? Mirrors
+// buildToolCard's `hasDetail` (snippet OR args, gated by _toolCardAllowsDetail)
+// so we only mark a row deferred/expandable when there's genuinely something to
+// build — a detail-less tool row keeps its `tool-card-no-detail` (no chevron).
+function _transparentToolRowHasDetail(tc){
+  if(!tc||typeof tc!=='object') return false;
+  const hasRaw=!!tc.snippet||(tc.args&&typeof tc.args==='object'&&Object.keys(tc.args).length>0);
+  if(!hasRaw) return false;
+  if(typeof _toolActionKind==='function'&&typeof _toolCardAllowsDetail==='function'){
+    try{ return !!_toolCardAllowsDetail(_toolActionKind(tc), tc); }catch(_){ return true; }
+  }
+  return true;
+}
 function _materializeTransparentToolDetail(row){
   if(!row||row.getAttribute('data-transparent-detail-deferred')!=='1') return false;
   const card=row.querySelector('.tool-card');
@@ -10878,10 +10891,24 @@ function _materializeTransparentToolDetail(row){
 function _transparentToolCallFromRowDataset(row){
   try{
     const rowId=row.getAttribute('data-anchor-row-id')||'';
-    const turn=row.closest&&row.closest('.assistant-turn');
-    const seg=turn&&turn.querySelector('.assistant-segment[data-msg-idx]');
-    const idx=seg?Number(seg.getAttribute('data-msg-idx')):NaN;
-    const msg=Number.isFinite(idx)?S.messages[idx]:null;
+    // #5966 (Codex F2): resolve the OWNER message by its stamped index, not the
+    // turn's first assistant segment — a multi-segment turn's scene is owned by a
+    // later segment, so the first-segment lookup recovered the wrong (or no) scene.
+    const ownerIdxAttr=row.getAttribute('data-anchor-owner-idx');
+    let msg=null;
+    if(ownerIdxAttr!==null&&ownerIdxAttr!==''){
+      const oi=Number(ownerIdxAttr);
+      if(Number.isFinite(oi)) msg=S.messages[oi];
+    }
+    if(!msg){
+      // Fallback: find the assistant segment in this turn that actually owns a scene.
+      const turn=row.closest&&row.closest('.assistant-turn');
+      const segs=turn?Array.from(turn.querySelectorAll('.assistant-segment[data-msg-idx]')):[];
+      for(const seg of segs){
+        const i=Number(seg.getAttribute('data-msg-idx'));
+        if(Number.isFinite(i)&&S.messages[i]&&S.messages[i]._anchor_activity_scene){ msg=S.messages[i]; break; }
+      }
+    }
     const scene=msg&&msg._anchor_activity_scene;
     if(!scene||!rowId) return null;
     const rows=_anchorSceneRowsForRendering(scene,{settled:true})||[];
@@ -11026,10 +11053,21 @@ function _rehydrateTransparentStreamDom(root){
   root.querySelectorAll('.transparent-earlier-steps[data-anchor-earlier-steps="1"]').forEach(el=>{
     if(el.getAttribute('data-earlier-rewired')==='1') return;
     el.setAttribute('data-earlier-rewired','1');
+    // #5966 (Codex F2): rebind to the OWNER message by stamped index (multi-segment
+    // turns own the scene on a later segment, not the first).
     const turn=el.closest&&el.closest('.assistant-turn');
-    const seg=turn&&turn.querySelector('.assistant-segment[data-msg-idx]');
-    const idx=seg?Number(seg.getAttribute('data-msg-idx')):NaN;
-    const msg=Number.isFinite(idx)?S.messages[idx]:null;
+    const ownerIdxAttr=el.getAttribute('data-anchor-owner-idx');
+    let idx=(ownerIdxAttr!==null&&ownerIdxAttr!=='')?Number(ownerIdxAttr):NaN;
+    let msg=Number.isFinite(idx)?S.messages[idx]:null;
+    let seg=(turn&&Number.isFinite(idx))?turn.querySelector('.assistant-segment[data-msg-idx="'+idx+'"]'):null;
+    if(!msg||!msg._anchor_activity_scene||!seg){
+      // Fallback: the scene-owning segment in this turn.
+      const segs=turn?Array.from(turn.querySelectorAll('.assistant-segment[data-msg-idx]')):[];
+      for(const s of segs){
+        const i=Number(s.getAttribute('data-msg-idx'));
+        if(Number.isFinite(i)&&S.messages[i]&&S.messages[i]._anchor_activity_scene){ idx=i; msg=S.messages[i]; seg=s; break; }
+      }
+    }
     if(!msg||!seg){ return; }
     const handler=()=>_revealTransparentEarlierSteps(msg,seg,idx,el);
     el.addEventListener('click',handler);
@@ -11109,26 +11147,29 @@ function _decorateTransparentEventRow(row, opts){
         }
       }
       let detail=row.querySelector('.tool-card-detail');
-      // #5966: on a SETTLED, COLLAPSED tool row, defer building the heavy
-      // `.tool-card-detail` body (full tool input/output HTML + Prism/KaTeX/Mermaid
-      // post-processing) until the row is first expanded. A reasoning-heavy history
-      // can carry thousands of settled tool rows; eagerly materializing every
-      // detail body at load is the Transparent-Stream analogue of the #5860
-      // compact-worklog freeze. The header (name, preview summary, status, chevron)
-      // is fully built above, so a deferred row looks identical collapsed; the
-      // chevron affordance is added here so it still reads as expandable. The tool
-      // call is stashed for _materializeTransparentToolDetail() to build on expand,
-      // with a data-attr fallback (data-anchor-row-id → S.messages scene) that
-      // survives the _sessionHtmlCache innerHTML round-trip (#5839 class). Live and
-      // already-open rows keep the eager build (they're about to be read).
-      const _deferDetail=!detail&&card&&opts.settled===true&&!card.classList.contains('open');
+      // #5966: on a SETTLED, COLLAPSED tool row, defer the heavy `.tool-card-detail`
+      // body (full tool input/output HTML + Prism/KaTeX/Mermaid post-processing)
+      // until first expand. A reasoning-heavy history can carry thousands of settled
+      // tool rows; eagerly materializing every detail at load is the Transparent-
+      // Stream analogue of the #5860 compact-worklog freeze. NOTE buildToolCard
+      // PRE-BUILDS `.tool-card-detail` whenever the tool has args/output (hasDetail),
+      // so we must strip that prebuilt body too — a `!detail` guard would skip
+      // exactly the heavy rows we need to defer (Codex gate F1). The header (name,
+      // preview, status, chevron) stays; a deferred row looks identical collapsed.
+      // _materializeTransparentToolDetail() rebuilds on expand from the stashed tool
+      // call, or from data-anchor-row-id → owner message scene after the
+      // _sessionHtmlCache innerHTML round-trip drops the JS stash (#5839 class).
+      // Live and already-open rows keep their detail (about to be read).
+      const _deferDetail=card&&opts.settled===true&&!card.classList.contains('open')&&_transparentToolRowHasDetail(tc);
       if(_deferDetail){
+        if(detail){ detail.remove(); detail=null; }   // drop any buildToolCard prebuilt body
         if(!header.querySelector('.tool-card-toggle')){
           const toggle=document.createElement('span');
           toggle.className='tool-card-toggle';
           toggle.innerHTML=li('chevron-right',12);
           header.appendChild(toggle);
         }
+        card.classList.remove('tool-card-no-detail');  // it DOES have detail (deferred)
         row._deferredToolCall=tc;
         row.setAttribute('data-transparent-detail-deferred','1');
       }else if(!detail&&card){
@@ -12755,7 +12796,12 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   const turnEl=segment.closest('.assistant-turn');
   const streamId=String(message._anchor_stream_id||scene.stream_id||(scene.identity&&scene.identity.stream_id)||'');
   const justSettled=_shouldKeepSettledWorklogOpenForStreamSettle(streamId);
-  const alreadyRevealed=!!(turnEl&&turnEl.getAttribute('data-transparent-earlier-revealed')==='1');
+  // #5966 (Codex F3): revealed-state is authoritative from the persistent set
+  // (survives cache round-trip / rebuild / switch-away), with the DOM flag as a
+  // same-render fast path.
+  const revealKey=_transparentRevealKey(S.session&&S.session.session_id, rawIdx);
+  const alreadyRevealed=_transparentRevealedTurns.has(revealKey)
+    || !!(turnEl&&turnEl.getAttribute('data-transparent-earlier-revealed')==='1');
   const cap=_TRANSPARENT_SETTLED_ROW_CAP;
   const slack=_TRANSPARENT_SETTLED_ROW_CAP_SLACK;
   let startIdx=0;
@@ -12776,6 +12822,10 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
     const row=rows[idx];
     const node=_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer,liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex});
     if(!node) return null;
+    // #5966 (Codex F2): stamp the OWNER message index so cache-round-trip recovery
+    // resolves the correct scene in a multi-segment turn (the scene owner is often
+    // NOT the turn's first assistant segment).
+    node.setAttribute('data-anchor-owner-idx',String(rawIdx));
     if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
     else blocks.appendChild(node);
     return node;
@@ -12786,6 +12836,7 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
   // it lands at the top of this turn's activity run.
   if(startIdx>0){
     const earlier=_buildTransparentEarlierStepsAffordance(startIdx);
+    earlier.setAttribute('data-anchor-owner-idx',String(rawIdx));
     if(segment.parentElement===blocks) blocks.insertBefore(earlier,segment);
     else blocks.appendChild(earlier);
     // Reveal handler: materialize the omitted prefix in place, holding the reader's
@@ -12810,9 +12861,22 @@ function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx
 // worth its own row.
 const _TRANSPARENT_SETTLED_ROW_CAP=30;
 const _TRANSPARENT_SETTLED_ROW_CAP_SLACK=10;
+// t() returns the key name itself for an unknown key, so `t(k)||literal` doesn't
+// fall back. This resolves via t() only when the key is genuinely defined,
+// otherwise uses the English literal — keeping the label correct before the
+// locale keys are present in every bundle. (Fable UX i18n fast-follow.)
+function _tOrDefault(key, literal, ...args){
+  try{
+    if(typeof t==='function'){
+      const v=t(key, ...args);
+      if(v && v!==key) return v;
+    }
+  }catch(_){ }
+  return literal;
+}
 // A clean, in-flow affordance styled on the existing "Load earlier messages"
 // pill (same visual language, so it reads as native). Shows the exact hidden
-// count; the whole row is the click target with a leading up-chevron.
+// count; the pill is the click target with a leading up-chevron.
 function _buildTransparentEarlierStepsAffordance(hiddenCount){
   const el=document.createElement('div');
   el.className='transparent-earlier-steps';
@@ -12822,7 +12886,12 @@ function _buildTransparentEarlierStepsAffordance(hiddenCount){
   el.setAttribute('role','button');
   el.setAttribute('tabindex','0');
   el.setAttribute('data-earlier-count',String(hiddenCount));
-  const label=hiddenCount===1?'Show 1 earlier step':`Show ${hiddenCount} earlier steps`;
+  // i18n with English fallback, matching the sibling "Expand all"/"Collapse all"
+  // controls' t() pattern. Keys live in the en locale (i18n.js); t() falls back to
+  // en for other locales and to the key name if absent — so guard with a literal.
+  const label=hiddenCount===1
+    ? _tOrDefault('show_earlier_step_one','Show 1 earlier step')
+    : _tOrDefault('show_earlier_steps','Show '+hiddenCount+' earlier steps',hiddenCount);
   el.setAttribute('aria-label',label);
   el.innerHTML=`<span class="transparent-earlier-steps-chevron">${li('chevron-up',13)}</span><span class="transparent-earlier-steps-label">${esc(label)}</span>`;
   el.addEventListener('keydown',(ev)=>{
@@ -12835,6 +12904,15 @@ function _buildTransparentEarlierStepsAffordance(hiddenCount){
 // affordance, so without compensation the content below would jump down).
 function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   const turnEl=segment.closest('.assistant-turn');
+  // #5966 (Codex F3): record the reveal in the PERSISTENT set (survives rebuild /
+  // switch-away / cache round-trip) and invalidate this session's cached HTML so
+  // the stored markup isn't re-served stale-capped.
+  const revealKey=_transparentRevealKey(S.session&&S.session.session_id, rawIdx);
+  _transparentRevealedTurns.add(revealKey);
+  try{
+    const sid=S.session&&S.session.session_id;
+    if(sid&&_sessionHtmlCache&&typeof _sessionHtmlCache.delete==='function') _sessionHtmlCache.delete(sid);
+  }catch(_){ }
   if(turnEl){
     turnEl.setAttribute('data-transparent-earlier-revealed','1');
     // Full run now mounted → drop the capped-count stash so the Trace label
@@ -13942,6 +14020,16 @@ function renderCompressionUi(){
 // in-session updates (new messages, edits, stream events).
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
+// #5966 (Codex F3): persist which capped Transparent-Stream turns the user has
+// revealed, keyed by `${session_id}:${ownerRawIdx}`, so a switch-away/back or a
+// normal rebuild does NOT silently re-cap a turn the user already expanded. The
+// DOM `data-transparent-earlier-revealed` flag alone is lost across the
+// _sessionHtmlCache innerHTML round-trip; this survives it. Reveal also
+// invalidates that session's cached HTML so the stored markup isn't stale-capped.
+const _transparentRevealedTurns=new Set();
+function _transparentRevealKey(sessionId, ownerIdx){
+  return String(sessionId||(S.session&&S.session.session_id)||'')+':'+String(ownerIdx);
+}
 function clearMessageRenderCache(){
   _clearRenderCache();
   _sessionHtmlCache.clear();
