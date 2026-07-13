@@ -33,6 +33,7 @@ tests/test_session_channel_option_x.py.
 from __future__ import annotations
 
 import importlib
+import queue
 import threading
 
 import pytest
@@ -362,3 +363,45 @@ def test_async_delegation_drain_uses_exact_owner_end_to_end(monkeypatch):
     assert emitted == ["webui-session-a"]
     assert cfg.PENDING_BG_TASK_COMPLETIONS == {"webui-session-a"}
     assert started == ["webui-session-a"]
+
+
+def test_next_turn_drain_uses_same_exact_owner_policy(monkeypatch):
+    """A later user turn in B must not adopt a process completion owned by A."""
+    from types import SimpleNamespace
+
+    streaming = importlib.import_module("api.streaming")
+    process_registry_module = importlib.import_module("tools.process_registry")
+
+    completion_queue: queue.Queue = queue.Queue()
+    completion_queue.put({
+        "type": "completion",
+        "session_id": "proc_exact_owner",
+        "session_key": "route-b",
+        "origin_ui_session_id": "webui-session-a",
+        "exit_code": 0,
+        "command": "probe",
+        "output": "ok",
+    })
+    fake_registry = SimpleNamespace(
+        completion_queue=completion_queue,
+        _lock=threading.Lock(),
+        _completion_consumed=set(),
+        is_completion_consumed=lambda _pid: False,
+        get=lambda _pid: SimpleNamespace(session_key="webui-session-b"),
+    )
+    monkeypatch.setattr(process_registry_module, "process_registry", fake_registry)
+
+    assert streaming._drain_webui_process_notifications("webui-session-b") == []
+    assert completion_queue.qsize() == 1
+
+    notifications = streaming._drain_webui_process_notifications("webui-session-a")
+    assert len(notifications) == 1
+    assert completion_queue.empty()
+    assert fake_registry._completion_consumed == {"proc_exact_owner"}
+
+
+def test_sync_chat_path_binds_exact_turn_owner():
+    """The direct fallback endpoint must use the same context-local binder."""
+    routes = importlib.import_module("api.routes")
+
+    assert "_bind_turn_session_identity" in routes._handle_chat_sync.__code__.co_names
