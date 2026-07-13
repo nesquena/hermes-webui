@@ -134,6 +134,31 @@ def test_full_index_rebuild_includes_hyphenated_sessions():
     assert sid in ids
 
 
+def test_save_invalidates_persisted_id_snapshot_when_directory_mtime_stalls(monkeypatch):
+    """A same-tick create must not stay hidden behind the directory snapshot cache."""
+    first = _make_session("snapshot_first", "First")
+    first.save()
+    assert models._persisted_session_ids_snapshot() == frozenset({first.session_id})
+
+    session_dir = models.SESSION_DIR
+    frozen_dir_stat = session_dir.stat()
+    original_stat = Path.stat
+
+    def stat_with_stalled_directory_mtime(path, *args, **kwargs):
+        if path == session_dir:
+            return frozen_dir_stat
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_stalled_directory_mtime)
+
+    second = _make_session("snapshot_second", "Second")
+    second.save()
+
+    assert models._persisted_session_ids_snapshot() == frozenset(
+        {first.session_id, second.session_id}
+    )
+
+
 def test_prune_session_from_index_removes_requested_row_only():
     index_file = models.SESSION_INDEX_FILE
     s_a = _make_session("sess_a", "A", updated_at=100)
