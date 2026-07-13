@@ -801,19 +801,26 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     context_messages = getattr(session, 'context_messages', None)
     if not isinstance(context_messages, list) or not context_messages:
         return
-    role = str(recovered.get('role') or '')
-    recovered_text = " ".join(str(recovered.get('content') or '').split())
+    recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if not recovered_text and not recovered.get('tool_call_id') and not recovered.get('tool_calls'):
         return
     if recovered_text:
-        for existing in reversed(context_messages[-8:]):
-            if not isinstance(existing, dict) or existing.get('role') != role:
-                continue
-            existing_text = " ".join(str(existing.get('content') or '').split())
-            if existing_text == recovered_text:
+        if recovered.get('role') == 'user':
+            if _message_matches_pending_checkpoint(
+                context_messages[-1] if context_messages else None,
+                recovered.get('content'),
+                recovered.get('timestamp'),
+                recovered.get('_source'),
+                recovered.get('attachments'),
+            ):
                 return
-    context_entry = {k: v for k, v in recovered.items() if k != 'timestamp'}
-    context_messages.append(context_entry)
+        else:
+            for existing in reversed(context_messages[-8:]):
+                if not isinstance(existing, dict) or existing.get('role') != recovered.get('role'):
+                    continue
+                if _normalize_journal_recovery_text(existing.get('content')) == recovered_text:
+                    return
+    context_messages.append(dict(recovered))
 
 
 def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
@@ -1081,6 +1088,21 @@ def _parse_nonnegative_int(value):
     return parsed if parsed >= 0 else None
 
 
+def model_explicit_pick_signature(model, model_provider) -> str:
+    """Stable signature of a (model, provider) selection for #5979 explicit-pick
+    provenance. The persisted ``Session.model_explicit_pick_signature`` is set to
+    this when the user deliberately picks a model; the streaming resolver only
+    treats a selection as deliberate when the CURRENT routing context produces
+    the same signature. Any model/provider change (chat-start, session-update,
+    normalization, provider repair) yields a different signature and thus
+    invalidates the stale pick — so a #433 first-party leftover is never wrongly
+    preserved. Uses \\x1f (unit separator) so it can't collide with model ids.
+    """
+    _m = str(model or "").strip()
+    _p = str(model_provider or "").strip().lower()
+    return f"{_m}\x1f{_p}"
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
@@ -1108,6 +1130,7 @@ class Session:
                  context_engine_state=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
+                 post_compression_context_tokens_estimate=None,
                  compression_recovery=None,
                  recommended_recovery_action=None,
                  compression_recovery_source_session_id=None,
@@ -1135,6 +1158,16 @@ class Session:
         self.workspace = str(Path(workspace).expanduser().resolve())
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
+        # #5979: signature of the model the user DELIBERATELY picked this session
+        # (``"<model>\x1f<provider>"``), or None. Used by the streaming resolver
+        # to preserve a custom-proxy vendor namespace on a COLD catalog ONLY when
+        # the current routing context still matches what was picked. Storing a
+        # SIGNATURE (not a bare bool) means any later model/provider change — via
+        # /api/chat/start, /api/session/update, normalization, or provider repair
+        # — automatically invalidates the pick (the signatures no longer match),
+        # so a stale first-party leftover (#433) is never wrongly preserved.
+        # Restored from persisted metadata on load (arrives via **kwargs).
+        self.model_explicit_pick_signature = kwargs.get('model_explicit_pick_signature') or None
         self.messages = messages or []
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
@@ -1167,6 +1200,10 @@ class Session:
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
+        _post_compression_tokens = _parse_nonnegative_int(post_compression_context_tokens_estimate)
+        self.post_compression_context_tokens_estimate = (
+            _post_compression_tokens if _post_compression_tokens and _post_compression_tokens > 0 else None
+        )
         self.compression_recovery = compression_recovery if isinstance(compression_recovery, dict) else {}
         self.recommended_recovery_action = recommended_recovery_action
         self.compression_recovery_source_session_id = (
@@ -1250,7 +1287,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'model', 'model_provider', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -1261,6 +1298,7 @@ class Session:
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
             'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
+            'post_compression_context_tokens_estimate',
             'compression_recovery', 'recommended_recovery_action',
             'compression_recovery_source_session_id', 'compression_recovery_action',
             'truncation_watermark',
@@ -1622,6 +1660,7 @@ class Session:
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
+            'post_compression_context_tokens_estimate': self.post_compression_context_tokens_estimate,
             'compression_recovery': self.compression_recovery,
             'recommended_recovery_action': self.recommended_recovery_action,
             'gateway_routing': self.gateway_routing,
@@ -2157,6 +2196,41 @@ def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
 
 def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
+
+
+def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    try:
+        message_timestamp = int(message.get('timestamp'))
+        expected_timestamp = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    return (
+        _normalize_journal_recovery_text(message.get('content'))
+        == _normalize_journal_recovery_text(pending_text)
+        and message_timestamp == expected_timestamp
+        and (message.get('_source') or 'webui') == (source or 'webui')
+        and list(message.get('attachments') or []) == list(attachments or [])
+    )
+
+
+def _message_matches_pending_text(message, pending_text):
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    return (
+        _normalize_journal_recovery_text(message.get('content'))
+        == _normalize_journal_recovery_text(pending_text)
+    )
+
+
+def _latest_user_matches_pending_text(messages, pending_text):
+    if not isinstance(messages, list) or not pending_text:
+        return False
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get('role') == 'user':
+            return _message_matches_pending_text(message, pending_text)
+    return False
 
 
 def _partial_message_signature(message: dict) -> tuple:
@@ -2855,21 +2929,24 @@ def _apply_core_sync_or_error_marker(
     # prompt submitted just before a server restart, so materialize it before
     # clearing runtime stream state.
     if len(session.messages) != 0:
-        _pending_text = " ".join(str(session.pending_user_message or "").split())
-        _already_checkpointed = False
-        if _pending_text and session.messages:
-            for _last_msg in reversed(session.messages):
-                if isinstance(_last_msg, dict) and _last_msg.get('role') == 'user':
-                    _last_text = " ".join(str(_last_msg.get('content') or "").split())
-                    _already_checkpointed = _last_text == _pending_text
-                    break
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
+        _already_checkpointed = _message_matches_pending_checkpoint(
+            session.messages[-1],
+            session.pending_user_message,
+            _recovered_ts,
+            session.pending_user_source,
+            session.pending_attachments,
+        )
+        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
+            session.messages[-1],
+            session.pending_user_message,
+        )
         _stream_id = stream_id_for_recheck or session.active_stream_id
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not _already_checkpointed:
+            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             _append_journaled_partial_output(
                 session,
@@ -2888,14 +2965,18 @@ def _apply_core_sync_or_error_marker(
                 _stream_id,
             )
             return True
-        if not _already_checkpointed:
+        if not _tail_user_already_checkpointed:
             _append_recovered_pending_turn(session, timestamp=_recovered_ts)
         else:
             recovered = {
                 'role': 'user',
                 'content': session.pending_user_message,
+                'timestamp': _recovered_ts,
                 '_recovered': True,
             }
+            pending_source = getattr(session, 'pending_user_source', None)
+            if pending_source and pending_source != 'webui':
+                recovered['_source'] = pending_source
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
@@ -2936,21 +3017,25 @@ def _apply_core_sync_or_error_marker(
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
             _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-            _already_checkpointed = False
-            if _pending_text and session.messages:
-                for _last_msg in reversed(session.messages):
-                    if isinstance(_last_msg, dict) and _last_msg.get('role') == 'user':
-                        _last_text = _normalize_journal_recovery_text(_last_msg.get('content'))
-                        _already_checkpointed = _last_text == _pending_text
-                        break
+            _recovered_ts = int(time.time())
+            if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+                _recovered_ts = int(session.pending_started_at)
+            _already_checkpointed = _message_matches_pending_checkpoint(
+                session.messages[-1] if session.messages else None,
+                session.pending_user_message,
+                _recovered_ts,
+                session.pending_user_source,
+                session.pending_attachments,
+            )
+            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
+                session.messages[-1] if session.messages else None,
+                session.pending_user_message,
+            )
             if (
                 _pending_text
-                and not _already_checkpointed
+                and not _tail_user_already_checkpointed
                 and _run_journal_has_visible_output(session, _stream_id)
             ):
-                _recovered_ts = int(time.time())
-                if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-                    _recovered_ts = int(session.pending_started_at)
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             recovered_output = _append_journaled_partial_output(
                 session,

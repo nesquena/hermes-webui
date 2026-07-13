@@ -910,10 +910,12 @@ function _addNamedContextBlock(text){
 
 function _removeNamedContextBlock(id){
   _pendingSelections=_pendingSelections.filter(s=>s.id!==id);
+  if(!_pendingSelections.length)_selectionIdCounter=0;
   _renderSelectionChips();
 }
 
 function _clearPendingSelections(){
+  _selectionIdCounter=0;
   if(!_pendingSelections.length)return false;
   _pendingSelections=[];
   _renderSelectionChips();
@@ -1627,7 +1629,7 @@ async function send(){
   // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
-  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
+  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
@@ -5456,7 +5458,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(d.usage){
             const _doneUsageFallback={...(S.lastUsage||{})};
             if(S.session){
-              for(const _usageField of ['context_length','threshold_tokens','last_prompt_tokens']){
+              for(const _usageField of ['context_length','threshold_tokens','last_prompt_tokens','post_compression_context_tokens_estimate']){
                 if(_doneUsageFallback[_usageField]==null&&S.session[_usageField]!=null){
                   _doneUsageFallback[_usageField]=S.session[_usageField];
                 }
@@ -6374,16 +6376,36 @@ function autoResize(){
   }
   const el=$('msg');
   const _prevComposerH=el.offsetHeight;
+  // #5514: autoResize() momentarily sets the textarea to height:'auto' (collapses
+  // a multi-row composer toward its 1-row min) before reading scrollHeight and
+  // restoring the measured height. That transient collapse GROWS the flex:1
+  // #messages viewport, and reading scrollHeight forces a synchronous reflow — so
+  // the browser CLAMPS a bottom-anchored scrollTop DOWN by the collapse delta and
+  // does NOT restore it when the height snaps back. The reader is left stranded
+  // Δpx above the bottom on EVERY keystroke while the composer is multi-row (Δ ∝
+  // composer height), and the clamp's async scroll event also sticky-unpins the
+  // reader (_messageUserUnpinned=true), dead-ending the grow-path re-pin below and
+  // stream auto-follow until they manually scroll back. #5516's net-growth gate
+  // never caught this because a steady-state keystroke has no NET height change.
+  // Root-cause fix: snapshot the transcript's scrollTop BEFORE the height
+  // round-trip and restore it AFTER, undoing the transient clamp within the same
+  // synchronous task so the poisoning scroll event never fires. This protects
+  // pinned readers AND near-bottom readers who scrolled up to re-read (their exact
+  // position is preserved), takes no _programmaticScroll latch, and is inert to
+  // iOS dynamic-toolbar reflows. A genuine NET grow/shrink still lands the reader
+  // Δnet off-bottom; the grow-gated re-pin below (and the #composerWrap
+  // ResizeObserver) then snap a still-pinned reader to the true bottom.
+  const _msgs=$('messages');
+  const _prevScrollTop=_msgs?_msgs.scrollTop:0;
   el.style.height='auto';
   el.style.height=Math.min(el.scrollHeight,200)+'px';
+  if(_msgs&&_msgs.scrollTop!==_prevScrollTop) _msgs.scrollTop=_prevScrollTop;
   updateSendBtn();
-  // #5514/#5515: growing the composer shrinks the flex:1 transcript viewport, so
-  // a reader pinned to the bottom would be stranded above it ("scrolls up 1 row
-  // per composer row"). Re-pin the transcript when it's genuinely still pinned —
-  // but only when the composer actually GREW (a shrink enlarges the viewport and
-  // can't strand a reader), so the common no-height-change keystroke skips the
-  // re-pin's DOM read entirely. The #composerWrap ResizeObserver is the safety
-  // net for any growth path that doesn't route through here.
+  // Genuine NET growth (a new row that keeps the composer taller than before)
+  // still shrinks the settled viewport, so a pinned reader must be re-pinned to
+  // the true bottom. Guarded to fire only on real growth and only when genuinely
+  // pinned (the helper no-ops for a scrolled-away reader). The #composerWrap
+  // ResizeObserver is the safety net for growth paths that don't route here.
   if(el.offsetHeight>_prevComposerH && typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
 }
 function scheduleComposerAutoResize(){
@@ -7711,7 +7733,11 @@ function showClarifyCard(pending) {
   _clarifySessionId = sid;
   _clarifyId = pending.clarify_id || null;
   _clarifySignature = sig;
-  _startClarifyCountdown(pending);
+  if (Number(pending.timeout_seconds) > 0) {
+    _startClarifyCountdown(pending);
+  } else {
+    _clearClarifyCountdownTimer();
+  }
   if (!sameClarify) {
     _clarifyVisibleSince = Date.now();
     _clearClarifyHideTimer();

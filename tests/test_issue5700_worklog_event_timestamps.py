@@ -262,6 +262,12 @@ eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_anchorSceneRowTimestampSeconds'));
 eval(extractFunc('_anchorSceneToolCallFromRow'));
+// #5966: the settled transparent render now consults _transparentToolRowHasDetail
+// to decide whether to defer a collapsed tool row's detail body. It is referenced
+// by _anchorSceneTransparentNodeForRow below, so extract it into the harness (it
+// self-guards its own _toolActionKind/_toolCardAllowsDetail deps → returns true
+// when absent, so the header — which carries the #5700 timestamp — is unaffected).
+eval(extractFunc('_transparentToolRowHasDetail'));
 eval(extractFunc('_anchorSceneTransparentNodeForRow'));
 eval(extractFunc('appendLiveToolCard'));
 function makeToolRow(ts = null, live = false){

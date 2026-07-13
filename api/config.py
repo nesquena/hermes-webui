@@ -2399,6 +2399,57 @@ def _is_local_server_provider(provider_id: str) -> bool:
     return False
 
 
+def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> bool:
+    """True when the user's own config declares ``model_id`` verbatim (full form).
+
+    This is the COLD-catalog provenance signal for #5979: when the live
+    ``/v1/models`` catalog is unbuilt (fresh process, headless client), a
+    vendor-namespaced id the user configured — ``model.default``, the
+    ``model.models`` allowlist, or the matching ``custom_providers[].models`` /
+    ``.model`` for a named ``custom:<slug>`` — is still authoritative provenance
+    that the full id is intentional and must be preserved. Config is the one
+    source available with zero network and no catalog dependency, so it survives
+    a cold restart (b3nw's ``model.default: x-ai/grok-4.5``). Checked ONLY for
+    custom providers; returns False for anything not verbatim-declared so the
+    caller falls through to the legacy family heuristic.
+    """
+    model = str(model_id or "").strip()
+    if not model:
+        return False
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, dict):
+        if str(model_cfg.get("default") or "").strip() == model:
+            return True
+        _declared = model_cfg.get("models")
+        if isinstance(_declared, dict) and model in _declared:
+            return True
+        if isinstance(_declared, list) and any(
+            (str(m.get("id") or "").strip() if isinstance(m, dict) else str(m or "").strip()) == model
+            for m in _declared
+        ):
+            return True
+    # Named custom:<slug> — scan its custom_providers[] entry for a verbatim id.
+    prov = str(config_provider or "").strip().lower()
+    if prov.startswith("custom:"):
+        raw_suffix = prov.removeprefix("custom:")
+        for entry in _custom_provider_entries():
+            slug = _custom_provider_slug_from_name(entry.get("name"))
+            entry_name = str(entry.get("name") or "").strip().lower()
+            if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
+                continue
+            if str(entry.get("model") or "").strip() == model:
+                return True
+            _em = entry.get("models")
+            if isinstance(_em, dict) and model in _em:
+                return True
+            if isinstance(_em, list) and any(
+                (str(m.get("id") or "").strip() if isinstance(m, dict) else str(m or "").strip()) == model
+                for m in _em
+            ):
+                return True
+    return False
+
+
 def _is_first_party_model(provider_id: str, model_id: str) -> bool:
     """True when ``model_id`` is listed in ``provider_id``'s own static catalog.
 
@@ -2574,7 +2625,7 @@ def _get_provider_cfg(provider_id) -> dict:
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
-def resolve_model_provider(model_id: str) -> tuple:
+def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -2594,6 +2645,16 @@ def resolve_model_provider(model_id: str) -> tuple:
     provider.
 
     Returns (model, provider, base_url) where provider and base_url may be None.
+
+    ``explicitly_picked``: True when the caller knows the user DELIBERATELY
+    selected ``model_id`` this session (persisted from an ``explicit_model_pick``
+    UI action), as opposed to it being a stale session leftover. Used ONLY for
+    the custom-proxy COLD-catalog decision (#5979): with no provenance available,
+    a deliberately-picked ``vendor/model`` is preserved verbatim (the user chose
+    it, the proxy routes on it), while an UNMARKED id (a stale cross-provider
+    leftover, e.g. #433's ``openai/gpt-5.4`` on a bare-only relay) still gets the
+    legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
+    (endpoint-advertised ids) always takes precedence over this flag.
     """
     config_provider = None
     config_base_url = None
@@ -2873,9 +2934,76 @@ def resolve_model_provider(model_id: str) -> tuple:
             # earlier by the ``prefix == config_provider`` branch.
             _cp_lower = (config_provider or "").strip().lower()
             _is_custom = _cp_lower == "custom" or _cp_lower.startswith("custom:")
-            if prefix in _PROVIDER_MODELS and (
-                not _is_custom or _is_first_party_model(prefix, bare)
-            ):
+            if _is_custom:
+                # Vendor-routing proxy: the reliable signal for whether the
+                # endpoint wants the full ``vendor/model`` id or the bare id is
+                # what its own catalog actually advertised (the ids the user
+                # picked from the dropdown, populated by the endpoint's live
+                # ``/v1/models`` probe or a ``custom_providers[].models``
+                # allowlist). The catalog-FAMILY heuristic (_is_first_party_model)
+                # is the wrong question: it answered "is this bare id a first-
+                # party model of the prefix's home vendor?" which is True for BOTH
+                # ``x-ai/grok-4.5`` (proxy advertised it whole — must preserve,
+                # #5979) and ``openai/gpt-5.4`` (a stale leftover on a relay that
+                # only serves bare ``gpt-5.4`` — must strip, #433). Those two are
+                # structurally identical to the family heuristic, so a model
+                # graduating into a first-party catalog (agent commit 62ada5175
+                # adding grok-4.5) silently flipped a working custom-proxy id from
+                # preserved to stripped. Tri-state provenance tells them apart:
+                #
+                # (1) Config declares the full id verbatim (model.default /
+                #     model.models / custom_providers[].models). Authoritative and
+                #     network-free, so #5979 survives a cold restart — preserve.
+                if _model_id_declared_in_config(model_id, config_provider):
+                    return model_id, config_provider, config_base_url
+                # (2) The endpoint's live/cached catalog advertised it.
+                _advertised = _endpoint_advertised_model_ids(config_provider)
+                if _advertised:
+                    # Full id advertised → route on it verbatim (#5979/#3872/#548).
+                    if model_id in _advertised:
+                        return model_id, config_provider, config_base_url
+                    # ONLY the bare id advertised → the prefix is a redundant
+                    # leftover the relay rejects; strip it (#433). Keep the
+                    # ``prefix in _PROVIDER_MODELS`` belt so an adversarial catalog
+                    # advertising a bare id can't strip an unknown-vendor prefix.
+                    if bare in _advertised and prefix in _PROVIDER_MODELS:
+                        return bare, config_provider, config_base_url
+                    # Advertised but neither exact shape matched → intrinsic /
+                    # unknown prefix the proxy routes on; preserve it whole.
+                    return model_id, config_provider, config_base_url
+                # (3) Provenance genuinely unavailable (cold/unbuilt or
+                #     fingerprint-mismatched catalog AND not config-declared).
+                #     Distinguish a DELIBERATE selection from a stale leftover:
+                #
+                #     * explicitly_picked → PRESERVE verbatim. The user chose this
+                #       exact ``vendor/model`` in the UI this session; the proxy
+                #       routes on it. A wrong strip destroys a namespace the proxy
+                #       needs (recurs every turn, unrepairable short of declaring
+                #       every model in config) — this is b3nw's #5979 case: a
+                #       non-default pick on a custom:<slug> proxy, cold catalog.
+                #     * NOT explicitly_picked → legacy redundant-prefix strip. An
+                #       unmarked id here is a stale cross-provider leftover (the
+                #       user switched providers and the old session model lingers,
+                #       e.g. #433's ``openai/gpt-5.4`` on a relay that only serves
+                #       bare ``gpt-5.4``); stripping keeps it routing while cold.
+                #
+                #     Warm provenance (case 2, endpoint-advertised ids) always
+                #     wins over this flag; the send path also warms provenance
+                #     network-free from the disk cache first
+                #     (warm_models_catalog_provenance_if_cold), so this branch is
+                #     reached only in the narrow no-disk-cache window. The flag
+                #     removes the data-driven flaw where a model graduating into
+                #     the static first-party catalog silently flipped routing
+                #     (exactly how #5979 regressed).
+                if explicitly_picked:
+                    return model_id, config_provider, config_base_url
+                if prefix in _PROVIDER_MODELS and _is_first_party_model(prefix, bare):
+                    return bare, config_provider, config_base_url
+                return model_id, config_provider, config_base_url
+            # Non-custom first-party provider pointed at an OpenAI-compatible
+            # proxy (e.g. provider=openai + base_url=litellm): the bare id is
+            # what it expects — "openai/gpt-5.4" → "gpt-5.4" (#433).
+            if prefix in _PROVIDER_MODELS:
                 return bare, config_provider, config_base_url
             # Intrinsic / unknown prefix — pass the full model_id through unchanged.
             return model_id, config_provider, config_base_url
@@ -3218,8 +3346,13 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
     if normalized in {"o1", "o3", "o4"} or normalized.startswith(("o1-", "o3-", "o4-")):
         return True
     if "claude" in token_set or normalized.startswith("claude"):
-        # Restrict to Claude 4+ or Claude 3.7+ (exclude Claude 3.0/3.5)
-        match = re.search(r"claude.*?(\d+)(?:\D+(\d+))?", normalized)
+        # Restrict to Claude 4+ or Claude 3.7+ (exclude Claude 3.0/3.5).
+        # The minor group is capped at 1-2 digits with a (?!\d) guard so a
+        # trailing date stamp is NOT captured as a minor version — otherwise a
+        # bare, date-stamped Claude 3.0 id ("claude-3-opus-20240229") would read
+        # minor=20240229 and wrongly satisfy the 3.7+ gate. (Same date-stamp
+        # defense _is_pre_adaptive_anthropic already uses.)
+        match = re.search(r"claude.*?(\d+)(?:\D+(\d{1,2})(?!\d))?", normalized)
         if match:
             major = int(match.group(1))
             minor = int(match.group(2)) if match.group(2) else 0
@@ -4616,6 +4749,121 @@ _available_models_cache_lock = threading.RLock()  # must be RLock: cold path ref
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
 
+# Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
+# the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
+# to answer "did this endpoint actually advertise this exact id?" in O(1) per
+# send without rebuilding. Keyed on the snapshot object identity so it is
+# recomputed exactly once per catalog publish (the cache is replaced wholesale,
+# never mutated) and can never serve stale ids from a superseded catalog.
+_advertised_model_ids_memo: tuple | None = None
+
+# Atomic provenance pair: an immutable (snapshot, publisher_fingerprint) tuple
+# published together at every catalog publish/invalidate site via
+# _sync_models_cache_provenance(). The resolver reads THIS single global with one
+# lock-free load so it can never observe a torn snapshot/fingerprint pair (the
+# two underlying globals are assigned as separate statements). Reading a tuple is
+# atomic under the GIL and, crucially, acquires NO lock — so the per-send
+# provenance check introduces no lock-ordering edge (avoids the _cfg_lock ↔
+# _available_models_cache_lock deadlock) and never waits behind a catalog rebuild.
+_models_cache_provenance: tuple | None = None
+
+
+def _sync_models_cache_provenance() -> None:
+    """Republish the atomic (snapshot, fingerprint) provenance pair.
+
+    MUST be called at every site that assigns ``_available_models_cache`` and
+    ``_available_models_cache_source_fingerprint`` (publish and invalidate),
+    AFTER both have been set. It snapshots the current pair into one immutable
+    tuple so ``_endpoint_advertised_model_ids`` reads both consistently with a
+    single lock-free load. A reader that races between an underlying assignment
+    and this call sees the PREVIOUS consistent tuple (never a torn pair); once
+    this runs, readers see the new consistent pair.
+    """
+    global _models_cache_provenance
+    snap = _available_models_cache
+    _models_cache_provenance = (
+        (snap, _available_models_cache_source_fingerprint) if snap is not None else None
+    )
+
+
+def _endpoint_advertised_model_ids(provider_id: str | None) -> frozenset | None:
+    """Model ids the given provider's group advertised in the current catalog.
+
+    Reads ONLY the already-published in-memory catalog snapshot
+    (``_available_models_cache``) — it never builds, live-probes, or touches
+    disk, so it is safe to call on the per-turn send hot path. Returns:
+
+      * a ``frozenset`` of the ids advertised by ``provider_id``'s own group
+        (bare ids for the active provider, e.g. ``x-ai/grok-4.5``), or
+      * ``None`` when the catalog is cold/unbuilt OR the provider has no group.
+
+    ``None`` means "no provenance signal available" — callers MUST treat that as
+    "preserve the model id verbatim" so a cache miss never silently strips a
+    vendor namespace off an id the user actively selected (#5979). Scoping to
+    the provider's OWN group prevents a same-named id in a sibling group (e.g.
+    an ``openai/gpt-5.4`` sitting in the OpenRouter group) from masquerading as
+    something this custom endpoint advertised.
+    """
+    global _advertised_model_ids_memo
+    # Single lock-free atomic read of the immutable (snapshot, fingerprint) pair
+    # published by _sync_models_cache_provenance(). Reading one tuple can never
+    # tear, and acquiring no lock means this per-send check adds no lock-ordering
+    # edge (no _cfg_lock ↔ _available_models_cache_lock deadlock) and never waits
+    # behind a catalog rebuild.
+    provenance = _models_cache_provenance
+    if provenance is None:
+        return None
+    snapshot, published_fp = provenance
+    if snapshot is None:
+        return None
+    # Profile-isolation fail-safe (profiles are islands): the catalog cache is a
+    # process global, so a concurrently-active profile could have published the
+    # snapshot we're now reading. Only trust it for provenance when the
+    # fingerprint captured AT PUBLISH TIME still matches the current runtime
+    # fingerprint — the ``config_yaml`` axis of that fingerprint is the
+    # PROFILE-SPECIFIC config path (_get_config_path -> get_active_hermes_home),
+    # so a match guarantees the snapshot belongs to the profile asking. Any
+    # mismatch (foreign profile, config edit, stale) returns None so the caller
+    # preserves the id verbatim rather than stripping against another profile's
+    # catalog.
+    try:
+        if published_fp != _models_cache_source_fingerprint():
+            return None
+    except Exception:
+        return None  # fingerprint unavailable → no trustworthy provenance
+    memo = _advertised_model_ids_memo
+    # Identity check (``is``), not id(): holding the snapshot reference in the
+    # memo keeps it alive, so a freed-then-reused id() can't cause a false hit.
+    if memo is None or memo[0] is not snapshot:
+        by_slug: dict[str, frozenset] = {}
+        try:
+            groups = snapshot.get("groups", []) or []
+        except AttributeError:
+            return None
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            slug = str(group.get("provider_id") or "").strip().lower()
+            if not slug:
+                continue
+            # Union BOTH catalog buckets: a provider's models can be split across
+            # ``models`` (visible) and ``extra_models`` (overflow) by the picker,
+            # so an id the endpoint genuinely advertised may live in either. Only
+            # reading ``models`` would miss it and mis-resolve (e.g. leave the
+            # #433 bare id unstripped because it sits in extra_models).
+            ids = frozenset(
+                str(m.get("id"))
+                for bucket in ("models", "extra_models")
+                for m in (group.get(bucket) or [])
+                if isinstance(m, dict) and m.get("id")
+            )
+            by_slug[slug] = by_slug.get(slug, frozenset()) | ids
+        memo = (snapshot, by_slug)
+        _advertised_model_ids_memo = memo
+    slug = str(provider_id or "").strip().lower()
+    return memo[1].get(slug)
+
+
 # Hard wall-clock budget for a COLD live provider-catalog rebuild when it is
 # run from a foreground request path. The live rebuild does one network probe
 # per detected provider (Copilot token-exchange HTTPS, OpenRouter /v1/models,
@@ -5922,6 +6170,7 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
         _available_models_cache_ts = 0.0
         _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
+        _sync_models_cache_provenance()
         return None
     if _is_valid_models_cache(_available_models_cache):
         return _annotate_fast_tier_model_groups(copy.deepcopy(_available_models_cache))
@@ -5929,6 +6178,7 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     _available_models_cache_ts = 0.0
     _available_models_live_rebuild_ts = 0.0
     _available_models_cache_source_fingerprint = None
+    _sync_models_cache_provenance()
     return None
 
 
@@ -5953,6 +6203,7 @@ def invalidate_models_cache():
         _available_models_cache_ts = 0.0
         _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
+        _sync_models_cache_provenance()
         _cache_build_in_progress = False
         _cache_build_cv.notify_all()
         # Clear the credential pool cache too (all profiles). Without this,
@@ -6012,6 +6263,7 @@ def invalidate_provider_models_cache(provider_id: str):
         _available_models_cache_ts = 0.0
         _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
+        _sync_models_cache_provenance()
         _provider_models_invalidated_ts[provider_id] = time.time()
         # Also evict the credential pool so the next cold path re-loads it.
         # Must evict both the original key and its canonical form (load_pool
@@ -7782,6 +8034,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _available_models_cache_ts = 0.0
             _available_models_live_rebuild_ts = 0.0
             _available_models_cache_source_fingerprint = None
+            _sync_models_cache_provenance()
             disk_groups = None
             stale_disk_groups = None
 
@@ -7832,6 +8085,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+            _sync_models_cache_provenance()
             return copy.deepcopy(disk_groups)
 
         # ── prefer_cache: NEVER run the live provider rebuild ────────────────
@@ -7908,6 +8162,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _available_models_cache_ts = published_at
                 _available_models_live_rebuild_ts = published_at
                 _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                _sync_models_cache_provenance()
             try:
                 _save_models_cache_to_disk(result)
             finally:
@@ -7957,6 +8212,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _available_models_cache_source_fingerprint = (
                     _models_cache_source_fingerprint()
                 )
+                _sync_models_cache_provenance()
             try:
                 _save_models_cache_to_disk(result)
             except Exception:
@@ -8066,6 +8322,82 @@ def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None
         return None
 
 
+def warm_models_catalog_provenance_if_cold() -> None:
+    """Best-effort, NON-BLOCKING, disk-only publish of catalog provenance.
+
+    The send path (``api/streaming.py``) resolves the wire model via
+    ``resolve_model_provider`` without ever building the models catalog, and the
+    #1855 chat/start fast path deliberately skips the catalog when a session
+    already carries a persisted model+provider — so "cold at send" is the
+    designed behaviour after any process restart, memory-TTL expiry, or cache
+    invalidation, not a rare race. In that state the custom-proxy provenance
+    signal (``_endpoint_advertised_model_ids``) is ``None`` and resolution falls
+    to the cold-preserve default; this helper restores the endpoint-advertised
+    signal from the durable disk cache so the #433 bare-only-strip stays exact.
+
+    Deliberately does NOT call ``get_available_models(prefer_cache=True)``: even
+    in prefer-cache mode that acquires ``_available_models_cache_lock`` and can
+    block up to ~60s waiting on an in-flight rebuild (unbounded in synchronous
+    rebuild mode) — unacceptable on the send hot path. Instead this:
+      * tries the cache lock NON-BLOCKING and returns immediately if it's busy
+        (a concurrent rebuild will publish provenance itself);
+      * reads ONLY the on-disk cache (no network, no live probe, no rebuild);
+      * publishes the snapshot + source fingerprint via the same globals the
+        real publish sites use, then ``_sync_models_cache_provenance()``.
+    Publishing the fingerprint from the CURRENT runtime is correct: the disk
+    cache is validated by schema/version/source-fingerprint on load
+    (``_is_loadable_disk_cache``), so a load success means it belongs to this
+    profile. Callers must not hold ``_cfg_lock`` (this reads config for the
+    fingerprint); the send worker satisfies that.
+
+    Profile isolation: the fast no-op is taken ONLY when the resident provenance
+    fingerprint matches the CURRENT profile's runtime fingerprint. The catalog
+    globals are process-wide, so a concurrently-active profile B could have left
+    its own (or a stale) provenance resident; an unconditional non-``None``
+    early return would let B's catalog block profile A from loading A's own valid
+    disk cache (A would then resolve against B's advertised ids). Comparing the
+    published fingerprint to the current one before short-circuiting closes that
+    hole — a mismatch falls through to load THIS profile's disk snapshot.
+    """
+    global _available_models_cache, _available_models_cache_ts
+    global _available_models_cache_source_fingerprint
+
+    def _provenance_is_current() -> bool:
+        prov = _models_cache_provenance
+        if prov is None:
+            return False
+        try:
+            return prov[1] == _models_cache_source_fingerprint()
+        except Exception:
+            return False
+
+    if _provenance_is_current():
+        return  # already warm for THIS profile — one global read, no work
+    got = _available_models_cache_lock.acquire(blocking=False)
+    if not got:
+        return  # a concurrent build/publish holds the lock; it will publish
+    try:
+        if _provenance_is_current():
+            return  # published for this profile while we waited for the lock
+        try:
+            disk_groups = _load_models_cache_from_disk()
+        except Exception:
+            disk_groups = None
+        if disk_groups is None:
+            return  # no durable cache for this profile → stay cold, preserve verbatim
+        _available_models_cache = disk_groups
+        _available_models_cache_ts = time.monotonic()
+        try:
+            _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+        except Exception:
+            _available_models_cache_source_fingerprint = None
+        _sync_models_cache_provenance()
+    except Exception:
+        logger.debug("models catalog provenance warm failed", exc_info=True)
+    finally:
+        _available_models_cache_lock.release()
+
+
 def get_available_models_for_session_visit() -> dict:
     """Return /api/models with a short session-visit freshness horizon.
 
@@ -8121,6 +8453,7 @@ def get_available_models_for_session_visit() -> dict:
                 _available_models_cache = copy.deepcopy(disk_cached)
                 _available_models_cache_ts = time.monotonic()
                 _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                _sync_models_cache_provenance()
             _mark("disk_cache_returned")
             _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
             return copy.deepcopy(disk_cached)
