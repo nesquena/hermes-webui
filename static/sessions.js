@@ -476,7 +476,7 @@ function _saveSessionViewedCounts() {
   }
 }
 
-function _setSessionViewedCount(sid, messageCount = 0) {
+function _setSessionViewedCount(sid, messageCount = 0, consumeManualOnVisit = false) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -506,9 +506,11 @@ function _setSessionViewedCount(sid, messageCount = 0) {
     }
 
     // Only an explicit visit acknowledgement should clear a manual marker after
-    // the first protective pass. Passive polling updates of an active session
-    // must not consume the user-visible unread intent.
-    if (isVisitAcknowledgment) {
+    // the first protective pass. A same-session re-select should not consume the
+    // unread intent immediately; it will be cleared on a later explicit visit.
+    // `consumeManualOnVisit` is set by _acknowledgeSessionVisit() callers that
+    // represent explicit read acknowledgements.
+    if (isVisitAcknowledgment && consumeManualOnVisit) {
       _clearSessionCompletionUnread(sid);
     }
     return;
@@ -828,11 +830,11 @@ function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt) {
 // aggregated unread state (own + children) authoritatively, so a lineage
 // PARENT keeps its own / other children's unread dot instead of being stripped
 // by ad-hoc DOM surgery (Greptile concern (b) on #4946).
-function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0) {
+function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, consumeManualOnVisit = true) {
   if (!sid) return;
   _setSessionViewedCount._inVisitDepth = (_setSessionViewedCount._inVisitDepth || 0) + 1;
   try {
-    _setSessionViewedCount(sid, messageCount);
+    _setSessionViewedCount(sid, messageCount, consumeManualOnVisit);
   } finally {
     _setSessionViewedCount._inVisitDepth = Math.max((_setSessionViewedCount._inVisitDepth || 1) - 1, 0);
   }
@@ -1710,7 +1712,8 @@ async function loadSession(sid){
       _acknowledgeSessionVisit(
         sid,
         Number(S.session.message_count || 0),
-        Number(S.session.last_message_at || S.session.updated_at || 0)
+        Number(S.session.last_message_at || S.session.updated_at || 0),
+        false
       );
     }
     return;

@@ -544,10 +544,10 @@ def test_completion_unread_clears_only_when_session_is_opened():
     )
     # The acknowledge helper is what clears completion unread on visit, via
     # _setSessionViewedCount (#3020 stale-marker clear).
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, consumeManualOnVisit = true)" in SESSIONS_JS
     ack_body_start = SESSIONS_JS.find("function _acknowledgeSessionVisit(")
     ack_body = SESSIONS_JS[ack_body_start:SESSIONS_JS.find("function _sessionVisitHasUnreadState", ack_body_start)]
-    assert "_setSessionViewedCount(sid, messageCount);" in ack_body
+    assert "_setSessionViewedCount(sid, messageCount, consumeManualOnVisit);" in ack_body
 
 
 def test_historical_sessions_are_not_marked_unread_on_list_render():
