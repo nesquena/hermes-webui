@@ -10424,7 +10424,7 @@ const LOCALES = {
     thinking: '思考过程',
     expand_all: '全部展开',
     collapse_all: '全部折叠',
-    show_earlier_step_one: '显示前1个步骤',
+    show_earlier_step_one: '显示前 1 个步骤',
     show_earlier_steps: '显示前 {0} 个步骤',
     edit_failed: '编辑失败：',
     regen_failed: '重新生成失败：',
