@@ -12432,10 +12432,10 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             if _diag: _diag.stage("t1_after_get_session_check")
-            s = get_session(
-                sid,
-                metadata_only=((not load_messages) or _tail_snapshot_candidate),
-            )
+            if _tail_snapshot_candidate:
+                s = get_session(sid, metadata_only=True)
+            else:
+                s = get_session(sid, metadata_only=(not load_messages))
             _session_profile = getattr(s, 'profile', None) or None
             if not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
@@ -12459,6 +12459,21 @@ def handle_get(handler, parsed) -> bool:
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
+            if _tail_snapshot_candidate and is_messaging_session:
+                # Messaging projections rely on the complete sidecar lineage to
+                # preserve display dedupe and state.db merge coordinates, so the
+                # metadata-only tail-candidate stub (empty messages) must be
+                # replaced with the authoritative full load before the merge.
+                # A vanished sidecar raises KeyError, handled by the existing
+                # foreign-session/404 branch below.
+                s = get_session(sid, metadata_only=False)
+                _clear_stale_stream_state(s)
+                cli_meta = (
+                    _lookup_cli_session_metadata(sid)
+                    if _session_requires_cli_metadata_lookup(s)
+                    else {}
+                )
+                is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             tail_snapshot = None
             if _tail_snapshot_candidate and not is_messaging_session:
                 candidate_snapshot = read_session_tail_cache(sid)

@@ -253,3 +253,25 @@ def test_profile_mismatch_does_not_build_or_parse_tail(isolated_session_store):
     assert captured["status"] == 409
     assert captured["data"]["code"] == "session_profile_mismatch"
     assert not models.session_tail_cache_path(session.session_id).exists()
+
+
+def test_messaging_session_tail_candidate_full_loads_before_merge(isolated_session_store):
+    """P0-C review fix: a messaging-source session with an initial msg_limit
+    request must not be served from the metadata-only tail-candidate stub
+    (whose messages array is empty by design). The route must reload the
+    authoritative full sidecar before the messaging merge/display projection,
+    otherwise the response renders an empty transcript."""
+    session = _saved_large_session("tail_route_messaging")
+    session.session_source = "messaging"
+    session.raw_source = "telegram"
+    session.save()
+    models.SESSIONS.clear()
+
+    with patch("api.routes.get_cli_session_messages", return_value=[]):
+        captured = _invoke(session.session_id)
+
+    payload = captured["data"]["session"]
+    assert captured["status"] == 200
+    assert payload["message_count"] == 400
+    assert payload["messages"] == session.messages[-30:]
+    assert payload["_messages_offset"] == 370
