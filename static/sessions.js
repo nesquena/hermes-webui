@@ -815,7 +815,8 @@ function _isSessionEffectivelyStreaming(s) {
   return Boolean(s && (
     s.is_streaming ||
     _hasPendingUserMessageSignal(s) ||
-    _isSessionLocallyStreaming(s)
+    _isSessionLocallyStreaming(s) ||
+    (typeof _activeRunSessionIds !== 'undefined' && _activeRunSessionIds.has(s.session_id))
   ));
 }
 

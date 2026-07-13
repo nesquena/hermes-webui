@@ -2258,6 +2258,13 @@
   .topbar-title{font-size:15px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .topbar-meta{font-size:11px;color:var(--muted);margin-top:3px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .topbar-chips{display:flex;gap:6px;align-items:center;flex-shrink:0;}
+  .active-run-visibility{position:relative;margin-left:auto;}
+  .active-run-pill{cursor:pointer;color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+  .active-run-tray{position:absolute;right:0;top:calc(100% + 8px);z-index:30;min-width:230px;max-width:min(320px,calc(100vw - 24px));padding:6px;border:1px solid var(--border2);border-radius:10px;background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.24);}
+  .active-run-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px;border-radius:7px;color:var(--text);font-size:12px;text-align:left;}
+  .active-run-row:hover{background:var(--accent-bg);}
+  .active-run-row button{flex:1;min-width:0;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .active-run-age{color:var(--muted);white-space:nowrap;font-size:11px;}
   .chip{font-size:11px;padding:4px 10px;border-radius:999px;background:rgba(255,255,255,0.05);border:1px solid var(--border2);color:var(--muted);font-weight:500;}
   .workspace-toggle-btn{display:inline-flex!important;align-items:center;gap:6px;cursor:pointer;}
   .workspace-toggle-btn.active{color:var(--accent-text);border-color:var(--accent-bg);background:var(--accent-bg);}
@@ -3064,6 +3071,7 @@
     .topbar-meta{display:none;}
     .topbar-chips{flex-wrap:nowrap;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
     .topbar-chips .chip,.topbar-chips .ws-chip,.topbar-chips button{font-size:11px!important;padding:4px 8px!important;white-space:nowrap;}
+    .active-run-tray{position:fixed;right:12px;top:48px;}
     .settings-main{padding:18px 16px;}
     .hermes-action-grid{grid-template-columns:1fr;}
     /* #4856: use overflow-x:clip, NOT hidden. `overflow-x:hidden` forces

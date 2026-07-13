@@ -137,6 +137,10 @@
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
   </div>
   <div class="app-titlebar-spacer" aria-hidden="true"></div>
+  <div class="topbar-chips active-run-visibility" id="activeRunVisibility" hidden>
+    <button class="chip active-run-pill" id="activeRunPill" type="button" aria-expanded="false" aria-controls="activeRunTray"></button>
+    <div class="active-run-tray" id="activeRunTray" role="menu" hidden></div>
+  </div>
   <button class="app-titlebar-new-chat" id="btnTitlebarNewChat" onclick="$('btnNewChat') && $('btnNewChat').click()" type="button" aria-label="New conversation" data-i18n-title="new_conversation" data-i18n-aria-label="new_conversation" title="New conversation">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16">
       <line x1="12" y1="5" x2="12" y2="19"/>

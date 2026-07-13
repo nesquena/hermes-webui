@@ -11444,6 +11444,63 @@ def _run_lifecycle_health() -> dict:
     return payload
 
 
+def _active_run_visibility_snapshot(handler=None, *, sidebar_source=None, project_id=None) -> dict:
+    """Return bounded active parent runs visible to the current sidebar."""
+    active_profile = _get_active_profile_name() or "default"
+    source = str(sidebar_source or "webui").strip().lower() or "webui"
+    if source not in {"webui", "cli"}:
+        source = "webui"
+    sessions = {}
+    for session in all_sessions():
+        if not isinstance(session, dict):
+            continue
+        sid = str(session.get("session_id") or "").strip()
+        if not sid or not _profiles_match(session.get("profile"), active_profile):
+            continue
+        normalized = _normalize_sidebar_source_flags(session)
+        is_cli = _is_cli_session_for_settings(normalized)
+        if source == "webui" and is_cli or source == "cli" and not is_cli:
+            continue
+        if project_id is not None:
+            if project_id == "__none__":
+                if normalized.get("project_id"):
+                    continue
+            elif normalized.get("project_id") != project_id:
+                continue
+        sessions[sid] = normalized
+
+    now = time.time()
+    visible = {}
+    from api import config as _live_config
+    with _live_config.ACTIVE_RUNS_LOCK:
+        for raw in (_live_config.ACTIVE_RUNS or {}).values():
+            if not isinstance(raw, dict):
+                continue
+            sid = str(raw.get("session_id") or "").strip()
+            if sid not in sessions:
+                continue
+            try:
+                started_at = float(raw.get("started_at"))
+            except (TypeError, ValueError):
+                started_at = now
+            phase = str(raw.get("phase") or "running").strip()[:32] or "running"
+            item = {
+                "session_id": sid,
+                "phase": phase,
+                "started_at": started_at,
+                "age_seconds": round(max(0.0, now - started_at), 1),
+            }
+            previous = visible.get(sid)
+            if previous is None or item["started_at"] < previous["started_at"]:
+                visible[sid] = item
+    runs = sorted(visible.values(), key=lambda item: (item["started_at"], item["session_id"]))[:100]
+    return {
+        "active_runs": len(runs),
+        "runs": runs,
+        "oldest_run_age_seconds": runs[0]["age_seconds"] if runs else None,
+    }
+
+
 def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
     """Run cheap probes that exercise the state paths used by the UI shell.
 
@@ -12294,6 +12351,22 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/health":
         return _handle_health(handler, parsed)
+
+    if parsed.path == "/api/activity/active-runs":
+        query = parse_qs(parsed.query or "")
+        sidebar_source = query.get("sidebar_source", [None])[0]
+        project_id = query.get("project_id", [None])[0]
+        if project_id == "":
+            project_id = None
+        return j(
+            handler,
+            _active_run_visibility_snapshot(
+                handler,
+                sidebar_source=sidebar_source,
+                project_id=project_id,
+            ),
+            pretty=False,
+        )
 
     if parsed.path == "/api/health/agent":
         payload = build_agent_health_payload()
