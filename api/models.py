@@ -801,19 +801,26 @@ def _append_recovered_turn_to_context(session, recovered: dict) -> None:
     context_messages = getattr(session, 'context_messages', None)
     if not isinstance(context_messages, list) or not context_messages:
         return
-    role = str(recovered.get('role') or '')
-    recovered_text = " ".join(str(recovered.get('content') or '').split())
+    recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if not recovered_text and not recovered.get('tool_call_id') and not recovered.get('tool_calls'):
         return
     if recovered_text:
-        for existing in reversed(context_messages[-8:]):
-            if not isinstance(existing, dict) or existing.get('role') != role:
-                continue
-            existing_text = " ".join(str(existing.get('content') or '').split())
-            if existing_text == recovered_text:
+        if recovered.get('role') == 'user':
+            if _message_matches_pending_checkpoint(
+                context_messages[-1] if context_messages else None,
+                recovered.get('content'),
+                recovered.get('timestamp'),
+                recovered.get('_source'),
+                recovered.get('attachments'),
+            ):
                 return
-    context_entry = {k: v for k, v in recovered.items() if k != 'timestamp'}
-    context_messages.append(context_entry)
+        else:
+            for existing in reversed(context_messages[-8:]):
+                if not isinstance(existing, dict) or existing.get('role') != recovered.get('role'):
+                    continue
+                if _normalize_journal_recovery_text(existing.get('content')) == recovered_text:
+                    return
+    context_messages.append(dict(recovered))
 
 
 def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
@@ -2191,6 +2198,41 @@ def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
 
 
+def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    try:
+        message_timestamp = int(message.get('timestamp'))
+        expected_timestamp = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    return (
+        _normalize_journal_recovery_text(message.get('content'))
+        == _normalize_journal_recovery_text(pending_text)
+        and message_timestamp == expected_timestamp
+        and (message.get('_source') or 'webui') == (source or 'webui')
+        and list(message.get('attachments') or []) == list(attachments or [])
+    )
+
+
+def _message_matches_pending_text(message, pending_text):
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    return (
+        _normalize_journal_recovery_text(message.get('content'))
+        == _normalize_journal_recovery_text(pending_text)
+    )
+
+
+def _latest_user_matches_pending_text(messages, pending_text):
+    if not isinstance(messages, list) or not pending_text:
+        return False
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get('role') == 'user':
+            return _message_matches_pending_text(message, pending_text)
+    return False
+
+
 def _partial_message_signature(message: dict) -> tuple:
     """Return a stable identity for partial assistant markers recovered on load."""
     if not isinstance(message, dict):
@@ -2887,21 +2929,24 @@ def _apply_core_sync_or_error_marker(
     # prompt submitted just before a server restart, so materialize it before
     # clearing runtime stream state.
     if len(session.messages) != 0:
-        _pending_text = " ".join(str(session.pending_user_message or "").split())
-        _already_checkpointed = False
-        if _pending_text and session.messages:
-            for _last_msg in reversed(session.messages):
-                if isinstance(_last_msg, dict) and _last_msg.get('role') == 'user':
-                    _last_text = " ".join(str(_last_msg.get('content') or "").split())
-                    _already_checkpointed = _last_text == _pending_text
-                    break
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
+        _already_checkpointed = _message_matches_pending_checkpoint(
+            session.messages[-1],
+            session.pending_user_message,
+            _recovered_ts,
+            session.pending_user_source,
+            session.pending_attachments,
+        )
+        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
+            session.messages[-1],
+            session.pending_user_message,
+        )
         _stream_id = stream_id_for_recheck or session.active_stream_id
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not _already_checkpointed:
+            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             _append_journaled_partial_output(
                 session,
@@ -2920,14 +2965,18 @@ def _apply_core_sync_or_error_marker(
                 _stream_id,
             )
             return True
-        if not _already_checkpointed:
+        if not _tail_user_already_checkpointed:
             _append_recovered_pending_turn(session, timestamp=_recovered_ts)
         else:
             recovered = {
                 'role': 'user',
                 'content': session.pending_user_message,
+                'timestamp': _recovered_ts,
                 '_recovered': True,
             }
+            pending_source = getattr(session, 'pending_user_source', None)
+            if pending_source and pending_source != 'webui':
+                recovered['_source'] = pending_source
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
@@ -2968,21 +3017,25 @@ def _apply_core_sync_or_error_marker(
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
             _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-            _already_checkpointed = False
-            if _pending_text and session.messages:
-                for _last_msg in reversed(session.messages):
-                    if isinstance(_last_msg, dict) and _last_msg.get('role') == 'user':
-                        _last_text = _normalize_journal_recovery_text(_last_msg.get('content'))
-                        _already_checkpointed = _last_text == _pending_text
-                        break
+            _recovered_ts = int(time.time())
+            if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+                _recovered_ts = int(session.pending_started_at)
+            _already_checkpointed = _message_matches_pending_checkpoint(
+                session.messages[-1] if session.messages else None,
+                session.pending_user_message,
+                _recovered_ts,
+                session.pending_user_source,
+                session.pending_attachments,
+            )
+            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
+                session.messages[-1] if session.messages else None,
+                session.pending_user_message,
+            )
             if (
                 _pending_text
-                and not _already_checkpointed
+                and not _tail_user_already_checkpointed
                 and _run_journal_has_visible_output(session, _stream_id)
             ):
-                _recovered_ts = int(time.time())
-                if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-                    _recovered_ts = int(session.pending_started_at)
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             recovered_output = _append_journaled_partial_output(
                 session,

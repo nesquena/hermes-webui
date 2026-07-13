@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- **Gateway provider errors are reported accurately, and your prompt survives a failed turn.** On gateway-backed sessions, a terminal provider error (bad model id, exhausted credentials, etc.) mid-turn is now classified and shown as the real error instead of a generic empty turn, the error card is bound to the correct session, and the in-flight user prompt plus any partial output is persisted so it survives a reload — even when you'd just re-sent an identical prompt (e.g. "continue"). Thanks @rodboev. (#5969, #5940)
+
 - **"Fork from here" works during an active response.** The fork button was silently dead while the agent was generating — clicking it did nothing. You can now fork from any past (already-committed) message while a response streams; only the currently-streaming message and the just-sent (not-yet-committed) prompt are blocked, with a clear toast. Thanks @kertisalex. (#5994, #5993)
 
 - **No more false "No response from provider" after a completed answer that used tools.** When an assistant turn ended with a real final answer delivered as structured content following tool calls (common with reasoning models and multi-tool turns), the completion detector could miss the final text and render a spurious "No response from provider" card under the finished reply. Final-answer detection now understands structured content parts (text after tool-use boundaries), while genuine empty completions still correctly show the no-response notice, and a real terminal provider error still surfaces as an error (never masked as a final answer). Thanks @jtstothard. (#5990, #5686)
