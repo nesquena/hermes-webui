@@ -25,6 +25,11 @@ try:  # pragma: no cover - platform-specific imports.
 except ImportError:  # pragma: no cover
     _msvcrt = None
 
+try:  # optional fast JSON codec for the session-save hotpath (big sessions)
+    import orjson as _orjson
+except ImportError:  # pragma: no cover - environment without orjson
+    _orjson = None
+
 import api.config as _cfg
 from api.compression_anchor import is_context_compression_marker
 from api.config import (
@@ -1078,6 +1083,42 @@ def _read_file_head(path: Path, max_prefix_bytes: int = 4096) -> str:
         return fp.read(max_prefix_bytes).decode('utf-8', errors='ignore')
 
 
+def _json_dumps_session(obj) -> str:
+    """Serialize a session payload compactly (big-session hotpath, 2026-07-13).
+
+    Session files used to be written with ``indent=2``; on multi-MB sessions
+    the pretty-printing alone costs hundreds of milliseconds per save and
+    inflates the file (and every subsequent parse) by ~30-40%. Compact output
+    is byte-for-byte JSON-compatible with every reader (json.loads and the
+    metadata-prefix scanner are both whitespace-agnostic).
+
+    orjson is used when available and silently falls back to the stdlib for
+    payloads it cannot encode. Note one deliberate normalization: orjson
+    writes non-finite floats (NaN/Infinity) as ``null``, which is valid JSON,
+    while the stdlib emits the non-standard ``NaN`` literal.
+    """
+    if _orjson is not None:
+        try:
+            return _orjson.dumps(obj, option=_orjson.OPT_NON_STR_KEYS).decode('utf-8')
+        except Exception:
+            pass
+    return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
+
+
+def _json_loads_session(text):
+    """Parse session JSON, preferring orjson with a stdlib fallback.
+
+    The fallback also covers legacy files containing the non-standard ``NaN``
+    literal, which the stdlib accepts but orjson rejects.
+    """
+    if _orjson is not None:
+        try:
+            return _orjson.loads(text)
+        except Exception:
+            pass
+    return json.loads(text)
+
+
 def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     """Read only the metadata portion before the large arrays.
 
@@ -1111,10 +1152,136 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     return None
 
 
+# ── Composer-draft sidecar store (big-session hotpath, 2026-07-13) ─────────
+# Keystroke autosaves used to persist the draft by rewriting the entire
+# session JSON via Session.save(); on a multi-MB session that turns every
+# debounced draft POST into a multi-second full-file parse+serialize and
+# starves the whole server. Drafts now live in a tiny per-session sidecar
+# file under SESSION_DIR/_drafts/ (mirroring the _turn_journal convention so
+# top-level '*.json' session scans never see it). The legacy composer_draft
+# field inside the session JSON remains as a read fallback for drafts saved
+# before the sidecar existed, and keeps being persisted opportunistically
+# with regular session saves.
+
+_DRAFT_SIDECAR_DIRNAME = '_drafts'
+_DRAFT_SIDECAR_CACHE: dict = {}
+_DRAFT_SIDECAR_LOCK = threading.Lock()
+_COMPOSER_DRAFT_LOCKS: dict = {}
+
+
+def get_composer_draft_lock(sid) -> threading.Lock:
+    """Per-session lock for draft read-merge-write; deliberately decoupled
+    from the session/agent locks so drafts never queue behind turn machinery."""
+    key = str(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        lock = _COMPOSER_DRAFT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _COMPOSER_DRAFT_LOCKS[key] = lock
+        return lock
+
+
+def composer_draft_sidecar_path(sid):
+    if not is_safe_session_id(str(sid or '')):
+        return None
+    return SESSION_DIR / _DRAFT_SIDECAR_DIRNAME / f'{sid}.json'
+
+
+def read_composer_draft_sidecar(sid):
+    """Return the sidecar draft dict for *sid*, or None when absent/unreadable.
+
+    None means "no sidecar" (caller falls back to the legacy in-file field);
+    an existing sidecar with an empty draft is a real, authoritative value —
+    that distinction is what lets a cleared draft win over a stale legacy one.
+    """
+    p = composer_draft_sidecar_path(sid)
+    if p is None:
+        return None
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    stat_key = (st.st_mtime_ns, st.st_size)
+    key = str(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        cached = _DRAFT_SIDECAR_CACHE.get(key)
+        if cached is not None and cached[0] == stat_key:
+            return copy.deepcopy(cached[1])
+    try:
+        data = _json_loads_session(p.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+    draft = data.get('draft') if isinstance(data, dict) else None
+    if not isinstance(draft, dict):
+        return None
+    with _DRAFT_SIDECAR_LOCK:
+        _DRAFT_SIDECAR_CACHE[key] = (stat_key, copy.deepcopy(draft))
+    return draft
+
+
+def write_composer_draft_sidecar(sid, draft) -> dict:
+    """Atomically persist *draft* to the sidecar and return the stored dict."""
+    p = composer_draft_sidecar_path(sid)
+    if p is None:
+        raise ValueError(f'Unsafe session_id {sid!r}; refusing to write draft sidecar')
+    draft = dict(draft) if isinstance(draft, dict) else {}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = _json_dumps_session({'draft': draft, 'updated_at': time.time()})
+    tmp = p.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    try:
+        st = p.stat()
+        with _DRAFT_SIDECAR_LOCK:
+            _DRAFT_SIDECAR_CACHE[str(sid)] = ((st.st_mtime_ns, st.st_size), copy.deepcopy(draft))
+    except OSError:
+        pass
+    return draft
+
+
+def delete_composer_draft_sidecar(sid) -> None:
+    p = composer_draft_sidecar_path(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        _DRAFT_SIDECAR_CACHE.pop(str(sid), None)
+    if p is None:
+        return
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
+
+
+def resolve_composer_draft(sid, legacy=None) -> dict:
+    """Sidecar draft when present, else the legacy in-file composer_draft."""
+    sidecar = read_composer_draft_sidecar(sid)
+    if sidecar is not None:
+        return sidecar
+    return legacy if isinstance(legacy, dict) else {}
+
+
+def update_cached_composer_draft(sid, draft) -> None:
+    """Keep an already-cached full Session object's composer_draft in sync so
+    code paths that still read the attribute directly see the sidecar value."""
+    with LOCK:
+        cached = SESSIONS.get(sid)
+    if cached is not None and str(getattr(cached, 'session_id', '') or '') == str(sid):
+        cached.composer_draft = dict(draft) if isinstance(draft, dict) else {}
+
+
 def _load_session_from_path(path: Path) -> "Session | None":
     """Load a session from an explicit JSON path without consulting SESSION_DIR."""
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
+        data = _json_loads_session(path.read_text(encoding='utf-8'))
     except Exception:
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
@@ -1418,7 +1585,39 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        payload = _json_dumps_session({**meta, **extra})
+
+        # ── No-op save skip (big-session hotpath, 2026-07-13) ───────────
+        # Several periodic callers re-save byte-identical content (observed
+        # as full 23 MB rewrites every ~15-30s on an idle large session).
+        # If this object produced the exact same payload it last wrote AND
+        # the on-disk file is untouched since that write (so no other
+        # writer's state can be clobbered or masked), skip the disk write.
+        # touch_updated_at=True saves always differ (updated_at changed),
+        # so recency semantics are unaffected.
+        payload_digest = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+        if payload_digest == getattr(self, '_last_saved_digest', None):
+            try:
+                st = os.stat(self.path)
+                disk_unchanged = (
+                    (st.st_mtime_ns, st.st_size) == getattr(self, '_last_saved_stat', None)
+                )
+            except OSError:
+                disk_unchanged = False
+            if disk_unchanged:
+                if not skip_index:
+                    _write_session_index(updates=[self])
+                if self.messages:
+                    try:
+                        _clear_webui_zero_message_orphan_tombstone(self.session_id)
+                        _clear_webui_deleted_session_tombstone(self.session_id)
+                    except Exception:
+                        logger.debug(
+                            "Failed to clear webui tombstone for %s",
+                            self.session_id,
+                            exc_info=True,
+                        )
+                return
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1434,13 +1633,39 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
-                try:
-                    existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(self.messages or [])
+                # Fast path (big-session hotpath, 2026-07-13): modern session
+                # files carry an accurate message_count in the metadata prefix
+                # (written by this method before the messages array). Reading
+                # that prefix costs a few KB instead of parsing the entire
+                # multi-MB file. The full read+parse only happens when the
+                # prefix is unavailable (legacy/corrupt layout) or when it
+                # signals a shrink — the case that needs existing_text for
+                # the .bak snapshot anyway.
+                existing_text = None
+                existing_msg_count = None
+                try:
+                    prefix = _read_metadata_json_prefix(self.path)
+                except Exception:
+                    prefix = None
+                if prefix:
+                    try:
+                        existing_msg_count = _parse_nonnegative_int(
+                            json.loads(prefix).get('message_count')
+                        )
+                    except (json.JSONDecodeError, ValueError):
+                        existing_msg_count = None
+                if (
+                    existing_msg_count is None
+                    or existing_msg_count > incoming_msg_count
+                    or (existing_msg_count > 0 and incoming_msg_count == 0)
+                ):
+                    existing_text = self.path.read_text(encoding='utf-8')
+                    try:
+                        existing = _json_loads_session(existing_text)
+                        existing_msg_count = len(existing.get('messages') or [])
+                    except Exception:
+                        existing_msg_count = -1  # corrupt → always back up
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1496,6 +1721,14 @@ class Session:
             except Exception:
                 pass
             raise
+        # Record what this object wrote so the no-op skip above can prove
+        # "same payload, file untouched since" on the next save.
+        self._last_saved_digest = payload_digest
+        try:
+            st = os.stat(self.path)
+            self._last_saved_stat = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            self._last_saved_stat = None
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1537,7 +1770,7 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        data = _json_loads_session(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
         if _collapsed_partials:
@@ -1772,7 +2005,13 @@ class Session:
             'source_label': self.source_label,
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
-            'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            # Sidecar draft wins over the in-file field (big-session save
+            # hotpath): draft autosaves no longer rewrite the session JSON,
+            # so the sidecar is the authoritative, freshest copy.
+            'composer_draft': resolve_composer_draft(
+                self.session_id,
+                self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            ),
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
