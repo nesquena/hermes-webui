@@ -1025,6 +1025,9 @@ def _get_cached_providers(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
 
 def _store_cached_providers(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> dict[str, Any]:
     with _providers_cache_lock:
+        # Single-entry by design: /api/providers is cacheable only for the
+        # active profile/config snapshot, so clear older snapshots to avoid
+        # retaining unbounded provider metadata across profile switches.
         _providers_cache.clear()
         _providers_cache[cache_key] = (time.monotonic(), copy.deepcopy(payload))
     return payload

@@ -170,6 +170,24 @@ class TestGetProviders:
             if hasattr(prov, "invalidate_providers_cache"):
                 prov.invalidate_providers_cache()
 
+    def test_oauth_credential_updates_invalidate_providers_cache(self, monkeypatch, tmp_path):
+        """OAuth credential updates should invalidate cached Providers responses (#6010)."""
+        from api import oauth
+        from api import providers as prov
+
+        invalidated_credentials = []
+        providers_invalidated = []
+        monkeypatch.setattr(config, "invalidate_credential_pool_cache", invalidated_credentials.append)
+        monkeypatch.setattr(prov, "invalidate_providers_cache", lambda: providers_invalidated.append(True))
+
+        oauth._persist_codex_credentials(
+            tmp_path,
+            {"access_token": "access-token", "refresh_token": "refresh-token"},
+        )
+
+        assert invalidated_credentials == ["openai-codex"]
+        assert providers_invalidated == [True]
+
     def test_returns_list_of_known_providers(self, monkeypatch, tmp_path):
         """GET /api/providers should return a list of all known providers."""
         _install_fake_hermes_cli(monkeypatch)
