@@ -6605,6 +6605,69 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
+def _builtin_toolset_names() -> set:
+    """Names the agent resolves to a static/builtin toolset (not an MCP server).
+
+    A per-session override name that collides with one of these must NOT be
+    treated as an "enable this MCP server" tick, because the static toolset
+    shadows the same-named MCP alias at resolution time. Falls back to an empty
+    set if the registry is unavailable so the classifier degrades to the
+    conservative restrict semantics.
+    """
+    try:
+        import toolsets
+        return set(getattr(toolsets, 'TOOLSETS', {}).keys())
+    except Exception:
+        return set()
+
+
+def _apply_session_toolset_override(defaults, override, mcp_server_names,
+                                    builtin_names=None):
+    """Resolve a per-session ``enabled_toolsets`` override against the profile
+    defaults.
+
+    Two intents share the one override field:
+
+    * **Additive** — the override names *only* configured MCP servers (the
+      composer toolset picker ticks a server for this chat). Keep the profile
+      defaults and append the ticked servers (dedup, order-preserving), so the
+      built-in toolsets survive. The bare server name is intentional: the CLI
+      resolver (`_resolve_cli_toolsets`) and `enabled_mcp_server_names` both
+      emit bare names, and the registry aliases ``<server>`` → ``mcp-<server>``,
+      so a bare name resolves correctly — a ``mcp-`` prefix would NOT validate.
+
+    * **Restrict** — the override names any non-MCP toolset (power-user
+      free-text): replace the defaults, as before.
+
+    A name that is *both* a configured MCP server and a builtin toolset (e.g. a
+    server literally named ``web``) is a collision: the builtin shadows the MCP
+    alias, so it must not flip the whole override into additive mode. Such names
+    are excluded from the MCP-only test, leaving the override to restrict
+    semantics — unambiguous and backward-compatible.
+    """
+    if not override:
+        return list(defaults)
+    mcp_server_names = set(mcp_server_names or ())
+    if builtin_names is None:
+        builtin_names = _builtin_toolset_names()
+    builtin_names = set(builtin_names or ())
+    # Only names that are MCP servers AND not shadowed by a builtin count as a
+    # pure "enable this server" tick.
+    pure_mcp = mcp_server_names - builtin_names
+    override_only_mcp = bool(pure_mcp) and all(
+        name in pure_mcp for name in override
+    )
+    if override_only_mcp:
+        merged = list(defaults)
+        seen = set(merged)
+        for name in override:
+            if name not in seen:
+                merged.append(name)
+                seen.add(name)
+        return merged
+    return list(override)
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -8000,7 +8063,23 @@ def _run_agent_streaming(
             _toolsets = _resolve_cli_toolsets(_cfg)
 
             # Per-session toolset override (#493): if the session has
-            # enabled_toolsets set, use that instead of the global config.
+            # enabled_toolsets set, apply it on top of the profile defaults.
+            #
+            # The per-session toolset picker lets users tick configured MCP
+            # servers for the current chat. Those checkboxes emit the bare MCP
+            # server name (e.g. "my-search"). Previously ANY override value
+            # *replaced* the profile defaults wholesale, so ticking a single MCP
+            # server dropped every built-in toolset (web, file, terminal,
+            # delegation, …). The agent then received a toolset the registry had
+            # no matching tools for (MCP tools register under "mcp-<server>"),
+            # leaving the model with an empty tool list and a broken session.
+            #
+            # Fix: treat an override that is composed *only* of configured MCP
+            # server names as an ADDITION to the profile defaults (the "enable
+            # this server for this chat" intent the checkbox UI implies). An
+            # override that names any non-MCP toolset keeps the original
+            # RESTRICT semantics (the power-user free-text "limit to these
+            # toolsets" use case).
             try:
                 from api.models import Session, SESSION_DIR
                 _session_path = SESSION_DIR / f"{session_id}.json"
@@ -8014,7 +8093,21 @@ def _run_agent_streaming(
                     # (Opus pre-release advisor finding for v0.50.257.)
                     _override = getattr(_session_meta, 'enabled_toolsets', None) if _session_meta else None
                     if _override:
-                        _toolsets = _override
+                        try:
+                            _mcp_server_names = set(
+                                (_cfg.get('mcp_servers') or {}).keys()
+                            )
+                        except Exception:
+                            _mcp_server_names = set()
+                        # Additive when the override names only configured MCP
+                        # servers (composer picker tick); restrict otherwise.
+                        # Names colliding with a builtin toolset are excluded
+                        # from the MCP-only test so a server named e.g. "web"
+                        # can't silently flip the override into additive mode
+                        # and get shadowed by the builtin.
+                        _toolsets = _apply_session_toolset_override(
+                            _toolsets, _override, _mcp_server_names
+                        )
             except Exception as _ts_err:
                 print(f"[webui] WARNING: failed to read per-session toolsets for {session_id}: {_ts_err}", flush=True)
 
