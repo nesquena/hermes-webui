@@ -251,8 +251,72 @@ console.log(JSON.stringify({{marker: _getSessionCompletionUnread().open, repaint
 """
     out = _run_node(script)
     assert out["marker"]["message_count"] == 7
+    assert out["marker"]["manual"] is True
     assert out["repaints"] == 1
     assert out["toast"] == "session_marked_unread"
+
+
+def test_manual_marked_unread_survives_active_session_visit_ack():
+    mark_unread = _extract("_markSessionUnread")
+    mark_completion = _extract("_markSessionCompletionUnread")
+    ack = _extract("_acknowledgeSessionVisit")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+    clear_unread = _extract("_clearSessionCompletionUnread")
+    sync = _extract("_syncSessionListSnapshotOnVisit")
+    set_viewed = _extract("_setSessionViewedCount")
+    get_counts = _extract("_getSessionViewedCounts")
+    save_counts = _extract("_saveSessionViewedCounts")
+
+    script = f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+const SESSION_VIEWED_COUNTS_KEY = 'v';
+let _sessionCompletionUnread = null;
+let _sessionViewedCounts = null;
+let repaints = 0;
+let S = {{ session: {{ session_id: 'open', message_count: 9 }} }};
+const _sessionListSnapshotById = new Map();
+const _sessionStreamingById = new Map();
+function _forgetObservedStreamingSession() {{}}
+function renderSessionListFromCache() {{ repaints += 1; }}
+const document = {{
+  visibilityState: 'visible',
+  hasFocus: () => true,
+}};
+function _isSessionActivelyViewedForList(sid) {{
+  if (!sid || !S.session || S.session.session_id !== sid) return false;
+  if (document.visibilityState !== 'visible') return false;
+  if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+  return true;
+}}
+function t(key) {{ return key; }}
+function showToast() {{}}
+{get_counts}
+{save_counts}
+{get_unread}
+{save_unread}
+{set_viewed}
+{mark_completion}
+{clear_unread}
+{sync}
+{ack}
+{mark_unread}
+_markSessionUnread({{session_id: 'open', message_count: 9}});
+_acknowledgeSessionVisit('open', 9, 123);
+const marker = _getSessionCompletionUnread().open;
+const counts = _getSessionViewedCounts();
+console.log(JSON.stringify({{marker_present: !!marker, marker_manual: marker && marker.manual, viewed: counts.open, repaints}}));
+"""
+    out = _run_node(script)
+    assert out["marker_present"] is True
+    assert out["marker_manual"] is True
+    assert out["viewed"] == 9
+    assert out["repaints"] >= 1
 
 
 def test_visit_snapshot_prevents_deferred_poll_from_reflagging():
