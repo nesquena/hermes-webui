@@ -4617,6 +4617,7 @@ function _formatReasoningEffortLabel(effort){
   if(effort==='high') return 'High';
   if(effort==='xhigh') return 'XHigh';
   if(effort==='max') return 'Max';
+  if(effort==='ultra') return 'Ultra';
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
