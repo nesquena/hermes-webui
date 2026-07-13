@@ -7,7 +7,9 @@ def test_webui_drains_only_matching_background_completion_events():
     assert "def _drain_webui_process_notifications(session_id: str)" in src
     assert "from tools.process_registry import process_registry" in src
     assert "proc = process_registry.get(evt_sid)" in src
-    assert "getattr(proc, 'session_key', None) != session_id" in src
+    assert "from api.background_process import _resolve_completion_target" in src
+    assert "owner_session_id = _resolve_completion_target(" in src
+    assert "if owner_session_id != session_id:" in src
     assert "skipped_events.append(evt)" in src
     assert "completion_queue.put(evt)" in src
 

@@ -33,6 +33,7 @@ tests/test_session_channel_option_x.py.
 from __future__ import annotations
 
 import importlib
+import queue
 import threading
 
 import pytest
@@ -179,6 +180,28 @@ def test_turn_identity_binder_restores_previous_value():
     assert sc._SESSION_PLATFORM.get() is sc._UNSET
 
 
+def test_turn_identity_binder_publishes_exact_ui_completion_owner():
+    """Detached terminal and subagent completions need a precise WebUI return
+    address, not only the durable/routable session key.
+
+    Hermes captures ``HERMES_UI_SESSION_ID`` into both process-completion and
+    async-delegation events. WebUI must bind that contextvar for the whole agent
+    turn so the producer can publish the exact browser-session owner.
+    """
+    streaming = importlib.import_module("api.streaming")
+    pytest.importorskip("gateway.session_context")
+    from gateway import session_context as sc
+
+    ui_var = getattr(sc, "_SESSION_UI_SESSION_ID", None)
+    if ui_var is None:
+        pytest.fail("installed hermes-agent lacks _SESSION_UI_SESSION_ID")
+
+    assert ui_var.get() is sc._UNSET
+    with streaming._bind_turn_session_identity("webui-session-a"):
+        assert sc.get_session_env("HERMES_UI_SESSION_ID", "") == "webui-session-a"
+    assert ui_var.get() is sc._UNSET
+
+
 # ---------------------------------------------------------------------------
 # Option 3 — completion-time second-check against the env-immune spawn owner
 # ---------------------------------------------------------------------------
@@ -257,3 +280,128 @@ def test_resolve_wakeup_target_passthrough_when_owner_unknown():
         session_key_resolved_sid=sid,
         proc_session=None,
     ) == sid
+
+
+# ---------------------------------------------------------------------------
+# Exact event ownership — shared by process and async-delegation completions
+# ---------------------------------------------------------------------------
+
+
+def test_exact_ui_owner_overrides_contaminated_session_key_mapping():
+    """The event producer's exact owner is authoritative.
+
+    This is the subagent contamination case: the mutable/fallback session-key
+    index points at B, while the completion event says the browser turn that
+    commissioned the child was A. The completion must return to A.
+    """
+    bp = importlib.import_module("api.background_process")
+
+    assert bp._resolve_completion_target(
+        session_key_resolved_sid="webui-session-b",
+        origin_ui_session_id="webui-session-a",
+    ) == "webui-session-a"
+
+
+def test_exact_ui_owner_routes_without_session_key_index_entry():
+    """Exact ownership still works after a stale/missing fallback-index row."""
+    bp = importlib.import_module("api.background_process")
+
+    assert bp._resolve_completion_target(
+        session_key_resolved_sid="",
+        origin_ui_session_id="webui-session-a",
+    ) == "webui-session-a"
+
+
+def test_legacy_completion_without_exact_owner_keeps_session_key_fallback():
+    """Pre-origin Agent events remain compatible while modern events can no
+    longer contaminate another session.
+    """
+    bp = importlib.import_module("api.background_process")
+
+    assert bp._resolve_completion_target(
+        session_key_resolved_sid="legacy-session",
+        origin_ui_session_id="",
+    ) == "legacy-session"
+
+
+def test_async_delegation_drain_uses_exact_owner_end_to_end(monkeypatch):
+    """Exercise the real queue-consumer routing seam, not only its helper."""
+    bp = importlib.import_module("api.background_process")
+    cfg = importlib.import_module("api.config")
+
+    monkeypatch.setattr(
+        cfg,
+        "PROCESS_SESSION_INDEX",
+        {"contaminated-key": "webui-session-b"},
+    )
+    monkeypatch.setattr(cfg, "BG_TASK_COMPLETE_EVENTS_SEEN", {})
+    monkeypatch.setattr(cfg, "PENDING_BG_TASK_COMPLETIONS", set())
+
+    emitted: list[str] = []
+    started: list[str] = []
+    monkeypatch.setattr(
+        bp,
+        "_emit_bg_task_complete_events_coalesced",
+        lambda session_id, payload: emitted.append(session_id),
+    )
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda session_id: False)
+    monkeypatch.setattr(
+        bp,
+        "_start_server_side_wakeup_turn",
+        lambda session_id, wakeup_prompt, process_id="": started.append(session_id),
+    )
+
+    bp._process_one({
+        "type": "async_delegation",
+        "delegation_id": "deleg_routing_regression",
+        "session_key": "contaminated-key",
+        "origin_ui_session_id": "webui-session-a",
+        "goal": "routing regression",
+        "result": {"status": "completed", "summary": "ok"},
+    })
+
+    assert emitted == ["webui-session-a"]
+    assert cfg.PENDING_BG_TASK_COMPLETIONS == {"webui-session-a"}
+    assert started == ["webui-session-a"]
+
+
+def test_next_turn_drain_uses_same_exact_owner_policy(monkeypatch):
+    """A later user turn in B must not adopt a process completion owned by A."""
+    from types import SimpleNamespace
+
+    streaming = importlib.import_module("api.streaming")
+    process_registry_module = importlib.import_module("tools.process_registry")
+
+    completion_queue: queue.Queue = queue.Queue()
+    completion_queue.put({
+        "type": "completion",
+        "session_id": "proc_exact_owner",
+        "session_key": "route-b",
+        "origin_ui_session_id": "webui-session-a",
+        "exit_code": 0,
+        "command": "probe",
+        "output": "ok",
+    })
+    fake_registry = SimpleNamespace(
+        completion_queue=completion_queue,
+        _lock=threading.Lock(),
+        _completion_consumed=set(),
+        is_completion_consumed=lambda _pid: False,
+        get=lambda _pid: SimpleNamespace(session_key="webui-session-b"),
+    )
+    monkeypatch.setattr(process_registry_module, "process_registry", fake_registry)
+
+    assert streaming._drain_webui_process_notifications("webui-session-b") == []
+    assert completion_queue.qsize() == 1
+
+    notifications = streaming._drain_webui_process_notifications("webui-session-a")
+    assert len(notifications) == 1
+    assert completion_queue.empty()
+    assert fake_registry._completion_consumed == {"proc_exact_owner"}
+
+
+def test_sync_chat_path_binds_exact_turn_owner():
+    """The direct fallback endpoint must use the same context-local binder."""
+    routes = importlib.import_module("api.routes")
+
+    assert "_bind_turn_session_identity" in routes._handle_chat_sync.__code__.co_names

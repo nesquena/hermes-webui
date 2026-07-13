@@ -21865,8 +21865,9 @@ def _handle_chat_sync(handler, body):
         os.environ["HERMES_SESSION_KEY"] = s.session_id
     try:
         from run_agent import AIAgent
+        from api.streaming import _bind_turn_session_identity
 
-        with CHAT_LOCK:
+        with CHAT_LOCK, _bind_turn_session_identity(s.session_id):
             from api.config import (
                 resolve_model_provider,
                 resolve_custom_provider_connection,
