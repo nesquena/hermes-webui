@@ -4,6 +4,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import ModuleType
 
+import sys
 import pytest
 
 import api.commands as commands
@@ -15,9 +16,9 @@ ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 COMMANDS_PY = (REPO_ROOT / "api" / "commands.py").read_text(encoding="utf-8")
 
 
-def _install_fake_skill_commands(monkeypatch, *, resolver=None, builder=None):
+def _install_fake_skill_commands(monkeypatch, *, resolver=None, builder=None,
+                                 stacked_builder=None, splitter=None):
     """Install a fake agent.skill_commands module for testing resolve_skill_command."""
-    import sys
 
     agent_pkg = sys.modules.get("agent") or ModuleType("agent")
     monkeypatch.setattr(agent_pkg, "__path__", [], raising=False)
@@ -25,6 +26,12 @@ def _install_fake_skill_commands(monkeypatch, *, resolver=None, builder=None):
     skill_commands.resolve_skill_command_key = resolver or (lambda name: None)
     skill_commands.build_skill_invocation_message = builder or (
         lambda key, instr="", task_id=None, runtime_note="": None
+    )
+    skill_commands.build_stacked_skill_invocation_message = stacked_builder or (
+        lambda keys, instr="", task_id=None: None
+    )
+    skill_commands.split_stacked_skill_commands = splitter or (
+        lambda rest: ([], rest)
     )
     monkeypatch.setitem(sys.modules, "agent", agent_pkg)
     monkeypatch.setitem(sys.modules, "agent.skill_commands", skill_commands)
@@ -289,3 +296,139 @@ def test_resolve_skill_command_preserves_leading_slash(monkeypatch):
 
     assert seen_slash["build"][0] == "/llm-wiki"
     assert seen_no_slash["build"][0] == "/llm-wiki"
+
+
+# ── Stacked skill invocation tests ────────────────────────────────────────
+
+
+def test_resolve_stacked_skills_detects_extra_keys(monkeypatch):
+    """``/skill-a /skill-b do X`` must detect the second skill as a stacked key
+    and call build_stacked_skill_invocation_message instead of the single
+    builder."""
+
+    @contextmanager
+    def _profile_scope(purpose):
+        yield
+
+    seen = {"type": None, "keys": None, "instr": None}
+
+    def _resolve(name):
+        return f"/{name}"
+
+    def _splitter(rest):
+        if rest and rest.startswith("/skill-b"):
+            return (["/skill-b"], "do X")
+        return ([], rest)
+
+    def _stacked_builder(keys, instr="", task_id=None):
+        seen["type"] = "stacked"
+        seen["keys"] = keys
+        seen["instr"] = instr
+        return ("stacked body: loaded!", ["skill-a", "skill-b"], [])
+
+    def _single_builder(key, instr="", task_id=None, runtime_note=""):
+        seen["type"] = "single"
+        seen["keys"] = [key]
+        seen["instr"] = instr
+        return None  # Should not be called
+
+    _install_fake_skill_commands(
+        monkeypatch,
+        resolver=_resolve,
+        builder=_single_builder,
+        stacked_builder=_stacked_builder,
+        splitter=_splitter,
+    )
+    monkeypatch.setattr(commands, "_bundle_profile_context", _profile_scope)
+
+    result = commands.resolve_skill_command("/skill-a /skill-b do X")
+
+    assert result["name"] == "skill-a"
+    assert result["source"] == "stacked_skill"
+    assert result["message"] == "stacked body: loaded!"
+    assert seen["type"] == "stacked"
+    assert seen["keys"] == ["/skill-a", "/skill-b"]
+    assert seen["instr"] == "do X"
+
+
+def test_resolve_stacked_skills_falls_back_to_single(monkeypatch):
+    """``/skill-a do X`` with no extra stacked skills must call the single
+    builder (not the stacked builder)."""
+
+    @contextmanager
+    def _profile_scope(purpose):
+        yield
+
+    seen = {"type": None}
+
+    def _resolve(name):
+        return f"/{name}"
+
+    def _splitter(rest):
+        return ([], rest)  # No extra keys
+
+    def _stacked_builder(keys, instr="", task_id=None):
+        seen["type"] = "stacked"
+        return None
+
+    def _single_builder(key, instr="", task_id=None, runtime_note=""):
+        seen["type"] = "single"
+        return "[IMPORTANT: The user has invoked the \"llm-wiki\" skill...]\nbody\nUser instruction: do X"
+
+    _install_fake_skill_commands(
+        monkeypatch,
+        resolver=_resolve,
+        builder=_single_builder,
+        stacked_builder=_stacked_builder,
+        splitter=_splitter,
+    )
+    monkeypatch.setattr(commands, "_bundle_profile_context", _profile_scope)
+
+    result = commands.resolve_skill_command("/skill-a do X")
+
+    assert result["name"] == "skill-a"
+    assert result["source"] == "skill"
+    assert seen["type"] == "single"
+
+
+def test_resolve_stacked_skills_raises_on_failure(monkeypatch):
+    """When build_stacked_skill_invocation_message returns None, the endpoint
+    must raise RuntimeError."""
+
+    @contextmanager
+    def _profile_scope(purpose):
+        yield
+
+    def _resolve(name):
+        return f"/{name}"
+
+    def _splitter(rest):
+        return (["/skill-b"], "do X")
+
+    def _stacked_builder(keys, instr="", task_id=None):
+        return None  # Simulate failure
+
+    _install_fake_skill_commands(
+        monkeypatch,
+        resolver=_resolve,
+        stacked_builder=_stacked_builder,
+        splitter=_splitter,
+    )
+    monkeypatch.setattr(commands, "_bundle_profile_context", _profile_scope)
+
+    with pytest.raises(RuntimeError, match="Failed to load stacked skills"):
+        commands.resolve_skill_command("/skill-a /skill-b do X")
+
+
+def test_resolve_skill_command_static_asserts_splitter_imported():
+    """The backend must import split_stacked_skill_commands and
+    build_stacked_skill_invocation_message from agent.skill_commands."""
+    assert "build_stacked_skill_invocation_message" in COMMANDS_PY
+    assert "split_stacked_skill_commands" in COMMANDS_PY
+
+
+def test_resolve_stacked_skills_route_unchanged():
+    """No new route is needed for stacked skills — the existing
+    /api/commands/skills/resolve endpoint handles both single and stacked
+    invocations via the same resolve_skill_command() function."""
+    assert '/api/commands/skills/resolve"' in ROUTES_PY

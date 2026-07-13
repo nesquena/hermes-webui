@@ -205,13 +205,15 @@ def resolve_bundle_command(command: str) -> dict[str, Any]:
 
 
 def resolve_skill_command(command: str) -> dict[str, Any]:
-    """Expand a single skill slash command into the backend invocation payload."""
+    """Expand a skill slash command into the backend invocation payload."""
     skill_name, user_instruction = _parse_slash_command(command)
 
     try:
         from agent.skill_commands import (
             build_skill_invocation_message,
+            build_stacked_skill_invocation_message,
             resolve_skill_command_key,
+            split_stacked_skill_commands,
         )
     except ImportError as exc:
         logger.warning("Skill command runtime unavailable", exc_info=True)
@@ -222,7 +224,23 @@ def resolve_skill_command(command: str) -> dict[str, Any]:
             cmd_key = resolve_skill_command_key(skill_name)
             if cmd_key is None:
                 raise KeyError(skill_name)
-            message = build_skill_invocation_message(cmd_key, user_instruction)
+
+            extra_keys, user_instruction = split_stacked_skill_commands(
+                user_instruction
+            )
+            if extra_keys:
+                stacked_result = build_stacked_skill_invocation_message(
+                    [cmd_key, *extra_keys],
+                    user_instruction,
+                )
+                if stacked_result:
+                    message, loaded_names, missing = stacked_result
+                else:
+                    raise RuntimeError("Failed to load stacked skills")
+            else:
+                message = build_skill_invocation_message(
+                    cmd_key, user_instruction
+                )
     except (KeyError, ValueError, RuntimeError):
         raise
     except Exception as exc:
@@ -238,7 +256,7 @@ def resolve_skill_command(command: str) -> dict[str, Any]:
 
     return {
         "name": cmd_key.lstrip("/"),
-        "source": "skill",
+        "source": "stacked_skill" if extra_keys else "skill",
         "message": resolved_message,
     }
 
