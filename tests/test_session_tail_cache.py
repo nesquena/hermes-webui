@@ -258,6 +258,21 @@ def test_opportunistic_full_load_does_not_write_foreign_profile_cache(
     assert not cache_path.exists()
 
 
+def test_source_size_gate_skips_stat_when_full_session_is_cached(
+    isolated_session_store,
+    monkeypatch,
+):
+    session = Session(session_id="tail_cached_full", messages=_messages(4))
+    models.SESSIONS[session.session_id] = session
+
+    def unexpected_stat(_path):
+        raise AssertionError("warm full-session path must not stat the sidecar")
+
+    monkeypatch.setattr(models, "_sidecar_stat_signature", unexpected_stat)
+
+    assert models.session_tail_cache_source_is_large_enough(session.session_id) is False
+
+
 def test_delete_tail_cache_is_best_effort_and_path_safe(isolated_session_store):
     session = Session(session_id="tail_delete", messages=_messages(4))
     session.save(skip_index=True)

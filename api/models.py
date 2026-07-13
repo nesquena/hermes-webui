@@ -138,6 +138,7 @@ _SESSION_TAIL_CACHE_FORMAT = 'hermes.session-tail-cache'
 _SESSION_TAIL_CACHE_VERSION = 1
 _SESSION_TAIL_CACHE_LIMIT = 300
 _SESSION_TAIL_CACHE_MAX_BYTES = 4 * 1024 * 1024
+_SESSION_TAIL_CACHE_MIN_SOURCE_BYTES = 1 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -3738,6 +3739,21 @@ def session_tail_cache_path(sid: str) -> Path:
     if not is_safe_session_id(sid):
         raise ValueError(f"Unsafe session_id {sid!r}")
     return SESSION_DIR / '_tail_cache' / 'v1' / f'{sid}.json'
+
+
+def session_tail_cache_source_is_large_enough(sid: str) -> bool:
+    """Return whether bounded-tail route setup is worthwhile for this sidecar."""
+    if not is_safe_session_id(sid):
+        return False
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if cached is not None and not getattr(cached, '_loaded_metadata_only', False):
+            return False
+    signature = _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
+    return bool(
+        signature is not None
+        and signature[2] >= _SESSION_TAIL_CACHE_MIN_SOURCE_BYTES
+    )
 
 
 def delete_session_tail_cache(sid: str) -> bool:
