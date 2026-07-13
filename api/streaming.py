@@ -6605,20 +6605,57 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
-def _builtin_toolset_names() -> set:
+def _builtin_toolset_names():
     """Names the agent resolves to a static/builtin toolset (not an MCP server).
 
     A per-session override name that collides with one of these must NOT be
     treated as an "enable this MCP server" tick, because the static toolset
-    shadows the same-named MCP alias at resolution time. Falls back to an empty
-    set if the registry is unavailable so the classifier degrades to the
-    conservative restrict semantics.
+    shadows the same-named MCP alias at resolution time.
+
+    Returns the full set of names that shadow an MCP alias: the static
+    ``TOOLSETS`` keys PLUS any registered canonical/plugin toolset names, so a
+    plugin-named MCP server can't slip past the collision guard. Returns
+    ``None`` (not an empty set) when the registry is *unavailable* — that is an
+    "I don't know" signal, distinct from "there are genuinely no builtins", and
+    the classifier must fail closed (restrict) rather than treat every name as
+    MCP-additive.
     """
     try:
         import toolsets
-        return set(getattr(toolsets, 'TOOLSETS', {}).keys())
     except Exception:
-        return set()
+        return None
+    names = set()
+    found = False
+    static = getattr(toolsets, 'TOOLSETS', None)
+    if isinstance(static, dict):
+        names.update(static.keys())
+        found = True
+    # Registered canonical / plugin toolsets also shadow same-named MCP aliases
+    # at resolution time. Cover whichever accessor this build exposes.
+    for _accessor in ('registered_toolset_names', 'all_toolset_names',
+                      'canonical_toolset_names'):
+        try:
+            _fn = getattr(toolsets, _accessor, None)
+            if callable(_fn):
+                _extra = _fn()
+                if isinstance(_extra, (set, list, tuple, dict)) and _extra:
+                    names.update(_extra)
+                    found = True
+        except Exception:
+            continue
+    for _attr in ('REGISTERED_TOOLSETS', 'CANONICAL_TOOLSETS',
+                  'PLUGIN_TOOLSETS'):
+        _val = getattr(toolsets, _attr, None)
+        if isinstance(_val, dict):
+            names.update(_val.keys())
+            found = True
+        elif isinstance(_val, (set, list, tuple)):
+            names.update(_val)
+            found = True
+    if not found:
+        # Module imported but exposed no recognizable registry → unknown.
+        return None
+    return names
 
 
 def _apply_session_toolset_override(defaults, override, mcp_server_names,
@@ -6644,13 +6681,25 @@ def _apply_session_toolset_override(defaults, override, mcp_server_names,
     alias, so it must not flip the whole override into additive mode. Such names
     are excluded from the MCP-only test, leaving the override to restrict
     semantics — unambiguous and backward-compatible.
+
+    Fail-closed: if the builtin registry is *unavailable* (``builtin_names`` is
+    ``None`` — an "I don't know" signal), we cannot prove a name is a pure MCP
+    server that isn't shadowed by a builtin, so the override falls back to the
+    conservative RESTRICT semantics. It is never treated as additive on an
+    unknown registry, because that would re-open the very collision this guard
+    exists to close.
     """
     if not override:
         return list(defaults)
     mcp_server_names = set(mcp_server_names or ())
     if builtin_names is None:
         builtin_names = _builtin_toolset_names()
-    builtin_names = set(builtin_names or ())
+    # ``None`` here means the builtin registry could not be resolved → we do not
+    # know which names are shadowed by a builtin, so we cannot safely classify
+    # any override name as a pure MCP tick. Fail closed to restrict.
+    if builtin_names is None:
+        return list(override)
+    builtin_names = set(builtin_names)
     # Only names that are MCP servers AND not shadowed by a builtin count as a
     # pure "enable this server" tick.
     pure_mcp = mcp_server_names - builtin_names
