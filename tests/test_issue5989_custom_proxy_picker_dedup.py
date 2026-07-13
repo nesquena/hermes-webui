@@ -87,6 +87,9 @@ const sameSuffix=makeSelect();
 addCatalog(sameSuffix,'vendor-a/deepseek-v4-pro');
 addCatalog(sameSuffix,'vendor-b/catalog/deepseek-v4-pro');
 sameSuffix.value='vendor-a/deepseek-v4-pro';
+const crossProviderLive=new Node('select');
+_addLiveModelsToSelect('custom:a',[{{id:'@custom:a:gpt-4o',label:'GPT-4o A'}}],crossProviderLive);
+_addLiveModelsToSelect('custom:b',[{{id:'@custom:b:gpt-4o',label:'GPT-4o B'}}],crossProviderLive);
 const unnamespaced=makeSelect();
 addCatalog(unnamespaced,'gpt-4o');
 _addLiveModelsToSelect('custom:llm-proxy',[{{id:'@custom:llm-proxy:gpt-4o',label:'GPT-4o'}}],unnamespaced);
@@ -95,6 +98,7 @@ console.log(JSON.stringify({{
   catalogFirst:snapshot(catalogFirst),
   selectedBare:snapshot(selectedBare),
   sameSuffix:snapshot(sameSuffix),
+  crossProviderLive:snapshot(crossProviderLive),
   unnamespaced:snapshot(unnamespaced),
 }}));
 """
@@ -129,6 +133,13 @@ def test_same_suffix_models_in_one_group_do_not_collapse():
     assert _run_harness()["sameSuffix"] == {
         "groups": [["vendor-a/deepseek-v4-pro", "vendor-b/catalog/deepseek-v4-pro"]],
         "selected": "vendor-a/deepseek-v4-pro",
+    }
+
+
+def test_live_models_with_same_identity_survive_in_different_provider_groups():
+    assert _run_harness()["crossProviderLive"] == {
+        "groups": [["@custom:a:gpt-4o"], ["@custom:b:gpt-4o"]],
+        "selected": "@custom:a:gpt-4o",
     }
 
 

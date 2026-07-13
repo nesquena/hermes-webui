@@ -3343,9 +3343,11 @@ function _addLiveModelsToSelect(provider, models, sel){
     const identity=optionIdentity(mid);
     if(hasExistingNorm(identity)){
       const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value)===identity);
-      const incomingRoutable=String(mid).startsWith('@');
-      const existingRoutable=sameGroup&&String(sameGroup.value||'').startsWith('@');
-      if(!(sameGroup&&!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
+      if(sameGroup){
+        const incomingRoutable=String(mid).startsWith('@');
+        const existingRoutable=String(sameGroup.value||'').startsWith('@');
+        if(!(!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
+      }
     }
     const opt=document.createElement('option');
     opt.value=mid;
