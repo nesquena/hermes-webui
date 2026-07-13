@@ -4261,6 +4261,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const parserFor = (data)=>{
       return _smdParserKey(data, el);
     };
+    const writeFadeText=(writeParent, writeData, writeText)=>{
+      if(!writeParent||_streamFadeSkipNode(writeParent)){
+        _smdAppendPlainText(writeParent, writeData, writeText, baseAddText);
+        return;
+      }
+      _streamFadeAppendText(writeParent, writeText);
+    };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
       if(!parent||_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
@@ -4273,7 +4280,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const value=String(text||'');
       const hasMediaPrefixTail=!!_smdMediaPrefixTail(value);
       if(/MEDIA:/.test(value)||hasMediaTail||hasMediaPrefixTail){
-        _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser);
+        _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser, writeFadeText);
         return;
       }
       const frag=document.createDocumentFragment();
@@ -4338,8 +4345,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Without this, streamed prose shows MEDIA:C:\... as literal text until the
   // turn settles and the full re-render swaps it for the real <img>.
   // SAFETY & CROSS-CHUNK SPLITS (Greptile #1 + #2):
-  //   1. Prose slices go back to baseAddText (which calls createTextNode),
-  //      NOT through DOMParser — mixed prose with HTML entities /
+  //   1. Prose slices go back to the owning text writer (text nodes or
+  //      fade spans), NOT through DOMParser — mixed prose with HTML entities /
   //      malicious <img onerror> stays as literal text.
   //   2. Each MEDIA token's HTML (from _inlineMediaHtmlForRef) is handed
   //      to DOMParser one at a time — only trusted markup is parsed.
@@ -4357,12 +4364,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return '';
   }
-  function _smdMediaTailSet(tailMap, parser, chunk, parent, baseAddText, data){
-    if(chunk) tailMap.set(parser, {chunk, parent, baseAddText, data});
+  function _smdAppendPlainText(parent, data, text, baseAddText){
+    const value=String(text||'');
+    if(parent&&parent.appendChild&&typeof document!=='undefined'&&document.createTextNode){
+      parent.appendChild(document.createTextNode(value));
+      return;
+    }
+    if(baseAddText) baseAddText(data,value);
+  }
+  function _smdMediaWriteText(parent, data, baseAddText, writeText, text){
+    if(writeText){
+      writeText(parent, data, String(text||''));
+      return;
+    }
+    if(baseAddText) baseAddText(data,String(text||''));
+  }
+  function _smdMediaTailSet(tailMap, parser, chunk, parent, baseAddText, data, writeText){
+    if(!tailMap||!parser) return;
+    if(chunk) tailMap.set(parser, {chunk, parent, baseAddText, data, writeText});
     else tailMap.delete(parser);
   }
   function _smdMediaTailEntryChunk(entry){
     return entry && typeof entry==='object' && Object.prototype.hasOwnProperty.call(entry,'chunk') ? entry.chunk : entry;
+  }
+  function _smdMediaTailSameOwner(entry, parent, baseAddText, writeText){
+    return !!entry && entry.parent===parent && entry.baseAddText===baseAddText && entry.writeText===writeText;
   }
   function _smdMediaRefHasReliableBoundary(rawRef){
     const raw=String(rawRef||'');
@@ -4370,44 +4396,56 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const ref=raw.split(/[?#]/,1)[0];
     return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
   }
+  function _smdMediaTailFlushEntry(entry){
+    const chunk=_smdMediaTailEntryChunk(entry);
+    if(!chunk) return;
+    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
+    if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
+  }
   function _smdMediaTailFlush(parser){
     if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
     const entry=_SMD_MEDIA_TAIL.get(parser);
-    const chunk=_smdMediaTailEntryChunk(entry);
-    if(!chunk) return;
+    if(!entry) return;
     _SMD_MEDIA_TAIL.delete(parser);
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
-    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
-    if(!emitted && entry && entry.baseAddText) entry.baseAddText(entry.data, chunk);
+    _smdMediaTailFlushEntry(entry);
   }
-  function _smdMediaAwareAddText(baseAddText, parent, data, text, tailMap, parser){
+  function _smdMediaAwareAddText(baseAddText, parent, data, text, tailMap, parser, writeText){
     const value=String(text||'');
     const tails=tailMap||(typeof _SMD_MEDIA_TAIL!=='undefined'&&_SMD_MEDIA_TAIL)||null;
+    const writeCurrent=(chunk)=>_smdMediaWriteText(parent, data, baseAddText, writeText, chunk);
     if(!value){
-      if(baseAddText) baseAddText(data,'');
+      writeCurrent('');
       return;
     }
     // Pull any pending tail from a previous (split) chunk, then clear it;
     // this call will either complete it, re-buffer it, or flush it as text.
-    const leadEntry = tails && parser && tails.get ? tails.get(parser) : null;
-    const lead = _smdMediaTailEntryChunk(leadEntry);
-    if(lead && tails && parser && tails.delete) tails.delete(parser);
+    let leadEntry = tails && parser && tails.get ? tails.get(parser) : null;
+    let lead = _smdMediaTailEntryChunk(leadEntry);
+    if(lead && !_smdMediaTailSameOwner(leadEntry, parent, baseAddText, writeText)){
+      if(tails && parser && tails.delete) tails.delete(parser);
+      _smdMediaTailFlushEntry(leadEntry);
+      leadEntry=null;
+      lead='';
+    }else if(lead && tails && parser && tails.delete){
+      tails.delete(parser);
+    }
     const combined = lead ? lead + value : value;
     // Fast path: no MEDIA tokens in the (possibly combined) string.
     if(!/MEDIA:/.test(combined)){
       const prefixTail=_smdMediaPrefixTail(combined);
       if(prefixTail && tails && parser && prefixTail.length < _MEDIA_TAIL_MAX){
         const stable=combined.slice(0, combined.length-prefixTail.length);
-        if(stable && baseAddText) baseAddText(data, stable);
-        _smdMediaTailSet(tails, parser, prefixTail, parent, baseAddText, data);
+        if(stable) writeCurrent(stable);
+        _smdMediaTailSet(tails, parser, prefixTail, parent, baseAddText, data, writeText);
         return;
       }
-      if(baseAddText) baseAddText(data, combined);
+      writeCurrent(combined);
       return;
     }
     // Walk the combined string, slicing into prose + MEDIA token runs.
-    // Prose runs go through baseAddText (text nodes). MEDIA tokens go
-    // through the single-token DOMParser helper only after a delimiter or
+    // Prose runs go through the owning text writer. MEDIA tokens go through
+    // the single-token DOMParser helper only after a delimiter or
     // reliable filename suffix proves the ref is complete.
     const re=/MEDIA:([^\s\)\]]+)/g;
     let last=0, m;
@@ -4416,19 +4454,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const matchEnd = m.index + m[0].length;
       if(m.index>last){
         const slice = combined.slice(last, m.index);
-        if(baseAddText) baseAddText(data, slice);
+        writeCurrent(slice);
       }
       if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
-        } else if(baseAddText){
-          baseAddText(data, candidate);
+        } else {
+          writeCurrent(candidate);
         }
         last = combined.length;
         break;
       }
-      if(!_smdAppendMediaNode(parent, m[1]) && baseAddText) baseAddText(data, m[0]);
+      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
       last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
@@ -4440,14 +4478,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
       if(tailValue && rest.length < _MEDIA_TAIL_MAX){
         const tailStart = tailMatch ? tailMatch.index : rest.length-prefixTail.length;
-        if(tailStart>0 && baseAddText) baseAddText(data, rest.slice(0, tailStart));
+        if(tailStart>0) writeCurrent(rest.slice(0, tailStart));
         unmatchedTail = tailValue;
-      } else if(baseAddText){
-        baseAddText(data, rest);
+      } else {
+        writeCurrent(rest);
       }
     }
     if(tails && parser){
-      _smdMediaTailSet(tails, parser, unmatchedTail, parent, baseAddText, data);
+      _smdMediaTailSet(tails, parser, unmatchedTail, parent, baseAddText, data, writeText);
     }
   }
   // Single-token DOM splice. Only ever fed the output of
@@ -4516,12 +4554,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const renderer=window.smd.default_renderer(el);
     const baseSetAttr=renderer.set_attr;
     const baseAddText=renderer.add_text;
+    const writePlainText=(writeParent, writeData, writeText)=>{
+      _smdAppendPlainText(writeParent, writeData, writeText, baseAddText);
+    };
     const parserFor = (data)=>{
       return _smdParserKey(data, el);
     };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
-      _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parserFor(data));
+      _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parserFor(data), writePlainText);
     };
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;

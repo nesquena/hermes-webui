@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import unittest
@@ -43,8 +44,11 @@ NODE = shutil.which("node")
 
 
 def _extract_js_function(src: str, name: str) -> str:
-    start = src.index(f"function {name}")
-    brace = src.index("{", start)
+    match = re.search(rf"function\s+{re.escape(name)}\s*\(", src)
+    if not match:
+        raise ValueError(f"Could not find JS function {name}")
+    start = match.start()
+    brace = src.index("{", match.end())
     depth = 1
     pos = brace + 1
     while pos < len(src) and depth:
@@ -60,9 +64,13 @@ def _run_real_smd_media_cases() -> dict:
     helpers = "\n".join(
         [
             _extract_js_function(MESSAGES_JS, "_smdMediaPrefixTail"),
+            _extract_js_function(MESSAGES_JS, "_smdAppendPlainText"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaWriteText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSet"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailSameOwner"),
             _extract_js_function(MESSAGES_JS, "_smdMediaRefHasReliableBoundary"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlush"),
             _extract_js_function(MESSAGES_JS, "_smdMediaAwareAddText"),
             _extract_js_function(MESSAGES_JS, "_smdAppendMediaNode"),
@@ -73,6 +81,7 @@ def _run_real_smd_media_cases() -> dict:
             _extract_js_function(MESSAGES_JS, "_streamFadeSkipNode"),
             _extract_js_function(MESSAGES_JS, "_streamFadeReduceMotionEnabled"),
             _extract_js_function(MESSAGES_JS, "_streamFadeBindCleanup"),
+            _extract_js_function(MESSAGES_JS, "_streamFadeAppendText"),
             _extract_js_function(MESSAGES_JS, "_streamFadeRenderer"),
             _extract_js_function(MESSAGES_JS, "_safeSmdRenderer"),
             _extract_js_function(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis"),
@@ -113,6 +122,7 @@ def _run_real_smd_media_cases() -> dict:
         "  }\n"
         "  get childNodes(){ return this.children; }\n"
         "  get firstChild(){ return this.children[0] || null; }\n"
+        "  get parentElement(){ return this.parentNode; }\n"
         "  get className(){ return this.attributes.class || ''; }\n"
         "  set className(value){ this.attributes.class=String(value); }\n"
         "  appendChild(child){\n"
@@ -131,6 +141,12 @@ def _run_real_smd_media_cases() -> dict:
         "    visit(this); return out;\n"
         "  }\n"
         "  get textContent(){ return this.nodeType===3 ? this.data : this.children.map(c=>c.textContent).join(''); }\n"
+        "  set textContent(value){\n"
+        "    if(this.nodeType===3){ this.data=String(value); return; }\n"
+        "    this.children=[];\n"
+        "    const text=String(value);\n"
+        "    if(text) this.appendChild(document.createTextNode(text));\n"
+        "  }\n"
         "  get outerHTML(){\n"
         "    if(this.nodeType===3) return esc(this.data);\n"
         "    if(this.nodeType===11) return this.children.map(c=>c.outerHTML).join('');\n"
@@ -154,6 +170,12 @@ def _run_real_smd_media_cases() -> dict:
         "  return { body: { firstChild: host } };\n"
         "} };\n"
         f"{helpers}\n"
+        "function collectTagTexts(root, tag){\n"
+        "  const out=[]; const wanted=String(tag).toLowerCase();\n"
+        "  const visit=node=>{ for(const child of node.children){ if(String(child.tagName||'').toLowerCase()===wanted) out.push(child.textContent); visit(child); } };\n"
+        "  visit(root); return out;\n"
+        "}\n"
+        "function collectClassTexts(root, cls){ return root.querySelectorAll('.'+cls).map(node=>node.textContent); }\n"
         "function renderChunks(chunks, mode){\n"
         "  postProcessCalls = 0; playbackCalls = 0;\n"
         "  const root=document.createElement('div');\n"
@@ -165,7 +187,7 @@ def _run_real_smd_media_cases() -> dict:
         "  smd.parser_end(parser);\n"
         "  _smdMediaTailFlush(parser);\n"
         "  _smdMediaTailClear(parser);\n"
-        "  return { html: root.outerHTML, text: root.textContent, postProcessCalls, playbackCalls };\n"
+        "  return { html: root.outerHTML, text: root.textContent, liTexts: collectTagTexts(root, 'li'), fadeWords: collectClassTexts(root, 'stream-fade-word'), postProcessCalls, playbackCalls };\n"
         "}\n"
         "function renderModes(chunks){ return { safe: renderChunks(chunks, 'safe'), fade: renderChunks(chunks, 'fade') }; }\n"
         "const marker='MEDIA:';\n"
@@ -174,7 +196,9 @@ def _run_real_smd_media_cases() -> dict:
         "const refSplit=renderModes(['MEDIA:C:/tmp/li', 've.png ']);\n"
         "const finalExtensionless=renderModes(['MEDIA:https://fal.media/generated']);\n"
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf}));\n"
+        "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
+        "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -272,16 +296,14 @@ class TestSmdMediaInStream(unittest.TestCase):
 
     def test_media_interceptor_falls_back_to_base_when_no_token(self):
         # Fast path: when the chunk + buffered tail carries no MEDIA token,
-        # the wrapper should delegate to the underlying add_text unchanged
-        # so the fade renderer's word-by-word animation is preserved for
-        # plain prose.
+        # the wrapper should delegate to the injected text writer so the
+        # owning renderer's semantics (plain text for safe mode, word fade for
+        # fade mode) survive for plain prose.
         idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
         block = MESSAGES_JS[idx:idx + 6500]
-        self.assertTrue(
-            "baseAddText(data,value)" in block or "baseAddText(data," in block,
-            "Interceptor must delegate to baseAddText for plain text so the "
-            "underlying renderer's semantics survive",
-        )
+        self.assertIn("const writeCurrent=", block)
+        self.assertIn("writeCurrent(combined)", block)
+        self.assertIn("function _smdMediaWriteText", MESSAGES_JS)
 
     def test_no_recursive_infinite_loop_via_baseAddText(self):
         # Regression guard: the fade renderer's add_text is itself a wrapper.
@@ -418,6 +440,29 @@ class TestSmdMediaInStream(unittest.TestCase):
             "concurrent streams don't cross-pollinate",
         )
 
+    def test_tail_entries_preserve_original_text_owner(self):
+        # A buffered MEDIA-looking suffix belongs to the parent/writer that
+        # produced it. If the next smd add_text callback is for a different
+        # parent, the scanner must flush through the original owner instead
+        # of concatenating across DOM nodes.
+        idx = MESSAGES_JS.index("function _smdMediaTailSet")
+        block = MESSAGES_JS[idx:idx + 3500]
+        self.assertIn("writeText", block)
+        self.assertIn("function _smdMediaTailSameOwner", MESSAGES_JS)
+        self.assertIn("entry.parent===parent", MESSAGES_JS)
+        self.assertIn("entry.writeText===writeText", MESSAGES_JS)
+        self.assertIn("_smdMediaTailFlushEntry(leadEntry)", MESSAGES_JS)
+
+    def test_stream_fade_media_scanner_preserves_plain_prose_fade(self):
+        # False MEDIA-prefix tails (for example "M" + "aybe") still enter
+        # the scanner. Those plain prose writes must use the non-recursive
+        # fade appender, not the raw default_renderer text writer.
+        idx = MESSAGES_JS.index("function _streamFadeRenderer")
+        block = MESSAGES_JS[idx:idx + 7000]
+        self.assertIn("const writeFadeText=", block)
+        self.assertIn("_streamFadeAppendText(writeParent, writeText)", block)
+        self.assertIn("_smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser, writeFadeText)", block)
+
     def test_smd_parser_identity_is_bound_to_real_parser(self):
         # smd's renderer.data does not expose a parser by default. Bind the
         # created parser onto both renderer.data and the owning element so every
@@ -513,6 +558,20 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                 self.assertIn('data-path="C:/tmp/report.pdf"', result["html"])
                 self.assertGreaterEqual(result["postProcessCalls"], 1)
                 self.assertGreaterEqual(result["playbackCalls"], 1)
+
+    def test_real_smd_parser_false_prefix_plain_prose_keeps_fade(self):
+        result = self.cases["falsePrefix"]["fade"]
+        self.assertEqual(result["text"], "Maybe plain prose ")
+        self.assertEqual(result["fadeWords"], ["Maybe", "plain", "prose"])
+        self.assertIn('class="stream-fade-word is-new"', result["html"])
+
+    def test_real_smd_parser_refuses_cross_parent_tail_concat(self):
+        for mode, result in self.cases["crossParent"].items():
+            with self.subTest(mode=mode):
+                self.assertEqual(result["liTexts"], ["ME", "ow"])
+                if mode == "fade":
+                    self.assertTrue(result["fadeWords"])
+                    self.assertEqual("".join(result["fadeWords"]), "MEow")
 
 
 if __name__ == "__main__":
