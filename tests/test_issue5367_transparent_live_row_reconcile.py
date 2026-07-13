@@ -726,6 +726,7 @@ global.document = { createElement:(tag)=>new FakeElement(tag), body:new FakeElem
 global.t = (key)=>key === 'copy' ? 'Copy' : key;
 global.showToast = ()=>{};
 
+eval(extractFunc('_showTransparentCopiedFeedback'));
 eval(extractFunc('_copyEventToClipboard'));
 eval(extractFunc('_attachCopyButton'));
 eval(extractFunc('_setTransparentCardOpen'));
@@ -1821,3 +1822,326 @@ process.stdout.write(JSON.stringify({
     assert data["scrollTopPreserved"] is True
     assert data["innerHTMLSetCount"] == 0
     assert data["cardOpen"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_transparent_rebound_copy_controls_report_only_confirmed_success():
+    script = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.env.UI_JS_PATH, 'utf8');
+function extractFunc(name){
+  const marker = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(marker);
+  if(start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start) + 1;
+  let depth = 1;
+  while(depth > 0 && i < src.length){
+    if(src[i] === '{') depth += 1;
+    else if(src[i] === '}') depth -= 1;
+    i += 1;
+  }
+  return src.slice(start, i);
+}
+class FakeElement {
+  constructor(tag='div'){
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.attributes = Object.create(null);
+    this.style = { color:'' };
+    this.title = '';
+    this.onclick = null;
+    this.onkeydown = null;
+    this._innerHTML = '';
+    this._textContent = '';
+    this._classes = new Set();
+    const self = this;
+    this.classList = {
+      add(...names){ names.forEach(name=>self._classes.add(name)); },
+      remove(...names){ names.forEach(name=>self._classes.delete(name)); },
+      contains(name){ return self._classes.has(name); },
+      toggle(name, force){
+        const next = force === undefined ? !self._classes.has(name) : !!force;
+        if(next) self._classes.add(name);
+        else self._classes.delete(name);
+        return next;
+      },
+    };
+  }
+  get parentElement(){ return this.parentNode; }
+  get className(){ return Array.from(this._classes).join(' '); }
+  set className(value){ this._classes = new Set(String(value).split(/\s+/).filter(Boolean)); }
+  get innerHTML(){ return this._innerHTML; }
+  set innerHTML(value){ this._innerHTML = String(value ?? ''); this._textContent = this._innerHTML; this.children = []; }
+  get textContent(){ return this.children.length ? this.children.map(child=>child.textContent).join('') : this._textContent; }
+  set textContent(value){ this._textContent = String(value ?? ''); this._innerHTML = this._textContent; this.children = []; }
+  setAttribute(name, value){
+    this.attributes[String(name)] = String(value);
+    if(name === 'title') this.title = String(value);
+  }
+  getAttribute(name){ return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
+  removeAttribute(name){ delete this.attributes[name]; if(name === 'title') this.title = ''; }
+  appendChild(child){ if(child.parentNode) child.remove(); child.parentNode = this; this.children.push(child); return child; }
+  insertBefore(child, ref){
+    if(child.parentNode) child.remove();
+    const index = this.children.indexOf(ref);
+    child.parentNode = this;
+    if(index < 0) this.children.push(child);
+    else this.children.splice(index, 0, child);
+    return child;
+  }
+  removeChild(child){ child.remove(); return child; }
+  remove(){
+    if(!this.parentNode) return;
+    const siblings = this.parentNode.children;
+    const index = siblings.indexOf(this);
+    if(index >= 0) siblings.splice(index, 1);
+    this.parentNode = null;
+  }
+  select(){}
+  querySelector(selector){ return this.querySelectorAll(selector)[0] || null; }
+  querySelectorAll(selector){
+    const found = [];
+    const walk = node=>{
+      node.children.forEach(child=>{
+        if(matches(child, selector)) found.push(child);
+        walk(child);
+      });
+    };
+    walk(this);
+    return found;
+  }
+  closest(selector){
+    let node = this;
+    while(node){ if(matches(node, selector)) return node; node = node.parentNode; }
+    return null;
+  }
+}
+function matches(node, selector){
+  return String(selector||'').split(',').map(part=>part.trim()).filter(Boolean).some(part=>{
+    const classes = part.match(/\.([A-Za-z0-9_-]+)/g) || [];
+    if(classes.some(cls=>!node.classList.contains(cls.slice(1)))) return false;
+    const attrs = part.match(/\[([^=\]]+)(?:="([^"]*)")?\]/g) || [];
+    if(attrs.some(raw=>{
+      const match = raw.match(/\[([^=\]]+)(?:="([^"]*)")?\]/);
+      const value = node.getAttribute(match[1]);
+      return value === null || (match[2] !== undefined && value !== match[2]);
+    })) return false;
+    return classes.length > 0 || attrs.length > 0;
+  });
+}
+function element(tag, classes){
+  const node = new FakeElement(tag);
+  node.className = classes || '';
+  return node;
+}
+function toolRow(){
+  const row = element('div', 'transparent-event-row');
+  row.setAttribute('data-event-type', 'tool');
+  row.setAttribute('data-expanded', '0');
+  row._tcData = { name:'shell', args:{ command:'echo secret-token' }, snippet:'tool output' };
+  const card = element('div', 'tool-card');
+  const header = element('div', 'tool-card-header');
+  const copy = element('span', 'transparent-event-copy');
+  copy.innerHTML = '<svg data-original="tool-copy"></svg>';
+  const toggle = element('span', 'tool-card-toggle');
+  header.appendChild(copy);
+  header.appendChild(toggle);
+  card.appendChild(header);
+  row.appendChild(card);
+  return { row, card, header, copy };
+}
+function thinkingRow(text){
+  const row = element('div', 'transparent-event-row transparent-thinking-event');
+  row.setAttribute('data-event-type', 'thinking');
+  row.setAttribute('data-expanded', '0');
+  const card = element('div', 'thinking-card');
+  const header = element('div', 'thinking-card-header');
+  const copy = element('button', 'thinking-copy-btn');
+  copy.innerHTML = '<svg data-original="thinking-copy"></svg>';
+  const toggle = element('span', 'thinking-card-toggle');
+  const body = element('div', 'thinking-card-body');
+  const pre = element('pre', '');
+  pre.textContent = text;
+  header.appendChild(copy);
+  header.appendChild(toggle);
+  body.appendChild(pre);
+  card.appendChild(header);
+  card.appendChild(body);
+  row.appendChild(card);
+  return { row, card, header, copy };
+}
+
+let nextTimer = 1;
+const timers = new Map();
+const clearedTimers = [];
+global.setTimeout = (fn, ms)=>{ const id=nextTimer++; timers.set(id,{ fn, ms }); return id; };
+global.clearTimeout = (id)=>{ clearedTimers.push(id); timers.delete(id); };
+function runTimer(id){ const timer=timers.get(id); timers.delete(id); timer.fn(); }
+let clipboardMode = 'success';
+let fallbackResult = true;
+const writes = [];
+const toasts = [];
+Object.defineProperty(global, 'navigator', {
+  configurable:true,
+  value:{ clipboard:{ writeText:(text)=>{
+    writes.push(text);
+    return clipboardMode === 'success' ? Promise.resolve() : Promise.reject(new Error('denied'));
+  } } },
+});
+global.document = {
+  body:new FakeElement('body'),
+  createElement:(tag)=>new FakeElement(tag),
+  execCommand:()=>fallbackResult,
+};
+global.t = key=>({ copy:'Copy', copied:'Copied', copy_failed:'Copy failed' })[key] || key;
+global.li = (name, size)=>`<svg data-icon="${name}" data-size="${size}"></svg>`;
+global.showToast = (message, duration, type)=>toasts.push({ message, duration, type:type||'' });
+global._redactToolTargetLabel = value=>String(value).replace(/secret-token/g, '[REDACTED]');
+global._wireTransparentHeaderToggle = ()=>{};
+global._setTransparentCardOpen = (card, open)=>card.classList.toggle('open', !!open);
+
+eval(extractFunc('_showTransparentCopiedFeedback'));
+eval(extractFunc('_copyEventToClipboard'));
+eval(extractFunc('_attachCopyButton'));
+eval(extractFunc('_rehydrateTransparentLiveRow'));
+
+function eventProbe(){
+  return {
+    stopped:false,
+    prevented:false,
+    stopPropagation(){ this.stopped=true; },
+    preventDefault(){ this.prevented=true; },
+  };
+}
+async function settle(){ await Promise.resolve(); await Promise.resolve(); }
+
+(async()=>{
+  const tool = toolRow();
+  _attachCopyButton(tool.header);
+  tool.copy.innerHTML = '<svg data-original="tool-copy"></svg>';
+  tool.copy.style.color = 'rgb(1, 2, 3)';
+  tool.copy.setAttribute('title', 'Original tool title');
+  tool.copy.setAttribute('aria-label', 'Original tool aria');
+  const original = {
+    html:tool.copy.innerHTML,
+    color:tool.copy.style.color,
+    title:tool.copy.title,
+    titleAttr:tool.copy.getAttribute('title'),
+    aria:tool.copy.getAttribute('aria-label'),
+  };
+  const firstEvent = eventProbe();
+  tool.copy.onclick(firstEvent);
+  await settle();
+  const firstTimerId = Array.from(timers.keys())[0];
+  const firstTimer = timers.get(firstTimerId);
+  const firstState = {
+    check:tool.copy.innerHTML.includes('data-icon="check"'),
+    title:tool.copy.title,
+    aria:tool.copy.getAttribute('aria-label'),
+    duration:firstTimer.ms,
+    stopped:firstEvent.stopped,
+    prevented:firstEvent.prevented,
+    rowExpanded:tool.row.getAttribute('data-expanded'),
+    cardOpen:tool.card.classList.contains('open'),
+  };
+  const staleCallback = firstTimer.fn;
+  tool.copy.onclick(eventProbe());
+  await settle();
+  const secondTimerId = Array.from(timers.keys())[0];
+  staleCallback();
+  const staleTimerIgnored = tool.copy.innerHTML.includes('data-icon="check"');
+  runTimer(secondTimerId);
+  const restored = {
+    html:tool.copy.innerHTML,
+    color:tool.copy.style.color,
+    title:tool.copy.title,
+    titleAttr:tool.copy.getAttribute('title'),
+    aria:tool.copy.getAttribute('aria-label'),
+  };
+
+  const thinking = thinkingRow('transparent reasoning');
+  const candidate = thinkingRow('candidate reasoning');
+  _rehydrateTransparentLiveRow(thinking.row, candidate.row, { expanded:false });
+  const thinkingControls = thinking.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn');
+  thinking.copy.onclick(eventProbe());
+  await settle();
+  const thinkingState = {
+    count:thinkingControls.length,
+    bound:typeof thinking.copy.onclick === 'function' && typeof thinking.copy.onkeydown === 'function',
+    check:thinking.copy.innerHTML.includes('data-icon="check"'),
+    copied:writes[writes.length - 1],
+  };
+  runTimer(Array.from(timers.keys())[0]);
+
+  clipboardMode = 'failure';
+  fallbackResult = true;
+  tool.copy.onclick(eventProbe());
+  await settle();
+  const fallbackSuccess = {
+    check:tool.copy.innerHTML.includes('data-icon="check"'),
+    toast:toasts[toasts.length - 1].message,
+  };
+  runTimer(Array.from(timers.keys())[0]);
+
+  fallbackResult = false;
+  const toastCountBeforeFailure = toasts.length;
+  tool.copy.onclick(eventProbe());
+  await settle();
+  const failure = {
+    check:tool.copy.innerHTML.includes('data-icon="check"'),
+    feedbackState:!!tool.copy._transparentCopiedFeedback,
+    toasts:toasts.slice(toastCountBeforeFailure).map(item=>item.message),
+  };
+
+  const empty = thinkingRow('');
+  _attachCopyButton(empty.header);
+  const writesBeforeEmpty = writes.length;
+  empty.copy.onclick(eventProbe());
+  await settle();
+
+  process.stdout.write(JSON.stringify({
+    firstState,
+    original,
+    restored,
+    firstTimerReplaced:clearedTimers.includes(firstTimerId) && secondTimerId !== firstTimerId,
+    staleTimerIgnored,
+    payload:writes[0],
+    thinkingState,
+    fallbackSuccess,
+    failure,
+    emptyCopySkipped:writes.length === writesBeforeEmpty && !empty.copy._transparentCopiedFeedback,
+  }));
+})().catch(error=>{ console.error(error); process.exit(1); });
+"""
+    data = _run_node_script(script, str(ROOT / "static" / "ui.js"))
+    assert data["firstState"] == {
+        "check": True,
+        "title": "Copied",
+        "aria": "Copied",
+        "duration": 1500,
+        "stopped": True,
+        "prevented": True,
+        "rowExpanded": "0",
+        "cardOpen": False,
+    }
+    assert data["firstTimerReplaced"] is True
+    assert data["staleTimerIgnored"] is True
+    assert data["restored"] == data["original"]
+    assert "tool: shell" in data["payload"]
+    assert "[REDACTED]" in data["payload"]
+    assert "secret-token" not in data["payload"]
+    assert "tool output" in data["payload"]
+    assert data["thinkingState"] == {
+        "count": 1,
+        "bound": True,
+        "check": True,
+        "copied": "transparent reasoning",
+    }
+    assert data["fallbackSuccess"] == {"check": True, "toast": "Copied"}
+    assert data["failure"] == {
+        "check": False,
+        "feedbackState": False,
+        "toasts": ["Copy failed"],
+    }
+    assert data["emptyCopySkipped"] is True

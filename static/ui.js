@@ -10742,7 +10742,51 @@ function _transparentToolSummary(tc){
   if(target) return target;
   return '';
 }
-function _copyEventToClipboard(row){
+function _showTransparentCopiedFeedback(control){
+  if(!control) return;
+  let state=control._transparentCopiedFeedback;
+  if(!state){
+    state={
+      innerHTML:control.innerHTML,
+      color:control.style?control.style.color:undefined,
+      styleCssText:control.style&&typeof control.style.cssText==='string'?control.style.cssText:null,
+      titleAttr:control.getAttribute?control.getAttribute('title'):null,
+      ariaLabel:control.getAttribute?control.getAttribute('aria-label'):null,
+      timer:null,
+      generation:0,
+    };
+    control._transparentCopiedFeedback=state;
+  }
+  if(state.timer) clearTimeout(state.timer);
+  state.generation+=1;
+  const generation=state.generation;
+  const copiedLabel=t('copied')||'Copied';
+  control.innerHTML=typeof li==='function'?li('check',11):'✓';
+  if(control.style) control.style.color='var(--accent)';
+  if(control.setAttribute) control.setAttribute('title',copiedLabel);
+  else control.title=copiedLabel;
+  if(control.setAttribute) control.setAttribute('aria-label',copiedLabel);
+  state.timer=setTimeout(()=>{
+    if(control._transparentCopiedFeedback!==state||state.generation!==generation) return;
+    control.innerHTML=state.innerHTML;
+    if(control.style){
+      if(state.styleCssText!==null) control.style.cssText=state.styleCssText;
+      else control.style.color=state.color||'';
+    }
+    if(state.titleAttr===null){
+      if(control.removeAttribute) control.removeAttribute('title');
+    }else{
+      if(control.setAttribute) control.setAttribute('title',state.titleAttr);
+    }
+    if(state.ariaLabel===null){
+      if(control.removeAttribute) control.removeAttribute('aria-label');
+    }else if(control.setAttribute){
+      control.setAttribute('aria-label',state.ariaLabel);
+    }
+    delete control._transparentCopiedFeedback;
+  },1500);
+}
+function _copyEventToClipboard(row,control){
   if(!row) return;
   const type=row.getAttribute('data-event-type');
   let text='';
@@ -10785,9 +10829,12 @@ function _copyEventToClipboard(row){
   }else{
     text=row.textContent||'';
   }
+  if(!text) return;
+  const copied=()=>_showTransparentCopiedFeedback(control);
   const fallback=()=>{
+    let ta=null;
     try{
-      const ta=document.createElement('textarea');
+      ta=document.createElement('textarea');
       ta.value=text;
       ta.setAttribute('readonly','');
       ta.style.position='absolute';
@@ -10795,14 +10842,17 @@ function _copyEventToClipboard(row){
       document.body.appendChild(ta);
       ta.select();
       const ok=document.execCommand('copy');
-      document.body.removeChild(ta);
+      if(ok) copied();
       if(typeof showToast==='function') showToast(ok?(t('copied')||'Copied'):(t('copy_failed')||'Copy failed'),1600);
     }catch(_){
       if(typeof showToast==='function') showToast(t('copy_failed')||'Copy failed',2000,'error');
+    }finally{
+      if(ta&&ta.parentNode) ta.parentNode.removeChild(ta);
     }
   };
   if(navigator&&navigator.clipboard&&navigator.clipboard.writeText){
     navigator.clipboard.writeText(text).then(()=>{
+      copied();
       if(typeof showToast==='function') showToast(`${t('copied')||'Copied'} ${label}`,1600);
     }).catch(fallback);
   }else{
@@ -10816,13 +10866,15 @@ function _attachCopyButton(header){
     btn.classList.add('transparent-event-copy');
     btn.setAttribute('role','button');
     btn.setAttribute('tabindex','0');
-    btn.setAttribute('aria-label',t('copy')||'Copy');
     btn.setAttribute('data-transparent-copy','1');
-    btn.title=t('copy')||'Copy';
+    if(!btn._transparentCopiedFeedback){
+      btn.setAttribute('aria-label',t('copy')||'Copy');
+      btn.title=t('copy')||'Copy';
+    }
     const handler=function(ev){
       ev.stopPropagation();
       ev.preventDefault();
-      _copyEventToClipboard(header.closest('.transparent-event-row'));
+      _copyEventToClipboard(header.closest('.transparent-event-row'),btn);
     };
     btn.onclick=handler;
     btn.onkeydown=function(ev){
