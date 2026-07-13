@@ -1050,6 +1050,53 @@ console.log(JSON.stringify(rows));
     assert "_child_sessions" not in rows[0]
 
 
+def test_fork_lineage_stays_grouped_across_reference_windows_and_rename():
+    """A transient reference window cannot detach a renamed fork or its child."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+var _allSessions = [];
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+function view(referenceRows) {{
+  return _renderSidebarRowsFromRawSessions([root, fork, delegated], referenceRows)
+    .map(row => ({{id:row.session_id, children:(row._child_sessions||[]).map(child=>child.session_id)}}));
+}}
+const root = {{session_id:'root', title:'Root', updated_at:10, last_message_at:10}};
+const fork = {{session_id:'fork', title:'Renamed fork', session_source:'fork', parent_session_id:'root', updated_at:20, last_message_at:20}};
+const delegated = {{session_id:'delegated', title:'Delegated child', parent_session_id:'fork', relationship_type:'child_session', updated_at:30, last_message_at:30}};
+_allSessions = [root, fork, delegated];
+const narrow = view([fork, delegated]);
+const complete = view([root, fork, delegated]);
+console.log(JSON.stringify({{narrow, complete}}));
+"""
+    result = json.loads(_run_node(source))
+    expected = [{"id": "root", "children": ["fork", "delegated"]}]
+    assert result["narrow"] == expected
+    assert result["complete"] == expected
+
+
 def test_pinned_fork_with_visible_parent_stays_top_level():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""

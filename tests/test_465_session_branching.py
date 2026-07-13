@@ -338,8 +338,15 @@ def test_branch_fork_sessions_nest_under_parent():
     resolve_block = resolve_fn.group(0)
     assert "row.session_source==='fork'" not in resolve_block, \
         "_resolveSessionIdFromSidebarLineage must not skip fork rows; they may now be active nested children"
+    assert "durableLineageIds instanceof Set" in block, \
+        "Fork resolution must receive one durable lineage authority"
     assert "!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList))" in block, \
         "Only unpinned resolvable fork rows should be filtered out of the top-level rows array"
+    render_fn = re.search(r'function _renderSidebarRowsFromRawSessions\(.*?\n\}', src, re.DOTALL)
+    assert render_fn, "Could not find _renderSidebarRowsFromRawSessions"
+    render_block = render_fn.group(0)
+    assert "_allSessions" in render_block and "durableLineageIds" in render_block, \
+        "Sidebar render must build fork authority from the durable session cache"
 
 
 def test_branch_nested_fork_rows_keep_session_actions():

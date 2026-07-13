@@ -6753,9 +6753,11 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
   return '';
 }
 
-function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions){
+function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions, durableLineageIds){
   const referenceSessions=Array.isArray(rawReferenceSessions)?rawReferenceSessions:(rawSessions||[]);
-  const sessionIdsInList=new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
+  const sessionIdsInList=durableLineageIds instanceof Set
+    ? durableLineageIds
+    : new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
   const rawSessionsById=new Map(referenceSessions.filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
   const cleanSidebarRow=(s)=>{
     const row={...s};
@@ -7333,9 +7335,25 @@ function _scopedSidebarReferenceRows(isCli){
   });
 }
 
-function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
+function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, lineageScope){
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
-  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
+  const durableRows=[];
+  if(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions)) durableRows.push(..._allSessions);
+  durableRows.push(...referenceRows);
+  const durableLineageIds=new Set(durableRows.filter(session=>{
+    if(!session) return false;
+    if(lineageScope&&typeof lineageScope.isCli==='boolean'
+      &&typeof _isCliSession==='function'
+      &&_isCliSession(session)!==lineageScope.isCli) return false;
+    if(lineageScope&&lineageScope.project!==undefined){
+      if(lineageScope.project===NO_PROJECT_FILTER){ if(session.project_id) return false; }
+      else if(lineageScope.project&&session.project_id!==lineageScope.project) return false;
+    }
+    if(lineageScope&&lineageScope.profile&&session.profile&&session.profile!==lineageScope.profile) return false;
+    return true;
+  }).map(session=>session&&session.session_id).filter(Boolean));
+  return _attachChildSessionsToSidebarRows(
+    _collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, durableLineageIds);
 }
 
 function _attachProjectQuickCreateButton(chip, project){
@@ -7431,16 +7449,26 @@ function renderSessionListFromCache(){
   }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
   const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  const lineageScope={
+    isCli:isCliView,
+    project:_activeProject,
+    profile:_allSessionsScope&&_allSessionsScope.profile,
+  };
+  const sessions=_renderSidebarRowsFromRawSessions(
+    sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)], lineageScope);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
   // null is a deliberate "not computed" sentinel consumed only by
   // _sessionSourceTabCount's fallback path below.
   const renderedWebuiSessionCount=_serverWebuiSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length
+    ? _renderSidebarRowsFromRawSessions(
+      webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)],
+      {...lineageScope, isCli:false}).length
     : null;
   const renderedCliSessionCount=_serverCliSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]).length
+    ? _renderSidebarRowsFromRawSessions(
+      cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)],
+      {...lineageScope, isCli:true}).length
     : null;
   const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);
   const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);
