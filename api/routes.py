@@ -9271,6 +9271,7 @@ from api.models import (
     _hide_from_default_sidebar,
     prune_session_from_index,
     delete_session_tail_cache,
+    session_tail_cache_source_is_large_enough,
     read_session_tail_cache,
     build_session_tail_cache_from_legacy_sidecar,
     agent_session_rows_existing,
@@ -12422,7 +12423,10 @@ def handle_get(handler, parsed) -> bool:
         except (ValueError, TypeError):
             msg_before = None
         _tail_snapshot_candidate = (
-            load_messages and msg_limit is not None and msg_before is None
+            load_messages
+            and msg_limit is not None
+            and msg_before is None
+            and session_tail_cache_source_is_large_enough(sid)
         )
         # ?expand_renderable=1 is retained for compatibility with older
         # frontends. msg_limit now counts visible transcript rows by default, so

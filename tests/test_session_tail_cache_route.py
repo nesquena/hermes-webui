@@ -19,6 +19,9 @@ def isolated_session_store(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "missing-state.db")
     monkeypatch.setattr(models, "_get_profile_home", lambda _profile: tmp_path / "missing-profile")
+    # Keep compact fixtures focused on route semantics; the production size
+    # threshold has its own explicit regression test below.
+    monkeypatch.setattr(models, "_SESSION_TAIL_CACHE_MIN_SOURCE_BYTES", 0)
     models.SESSIONS.clear()
     yield session_dir
     models.SESSIONS.clear()
@@ -104,6 +107,32 @@ def test_process_cold_cache_hit_skips_full_session_load(isolated_session_store):
     assert payload["_messages_offset"] == 370
     assert payload["messages"] == session.messages[-30:]
     assert payload["tool_calls"] == [{"name": "tail", "assistant_msg_idx": 29}]
+
+
+def test_small_sidecar_skips_tail_candidate_setup(isolated_session_store, monkeypatch):
+    session = _saved_large_session("tail_route_below_size_gate")
+    assert session.path.stat().st_size < 1024 * 1024
+    monkeypatch.setattr(models, "_SESSION_TAIL_CACHE_MIN_SOURCE_BYTES", 1024 * 1024)
+    models.SESSIONS.clear()
+    original_load = Session.load
+    calls = []
+
+    def tracked_load(sid, *args, **kwargs):
+        calls.append(sid)
+        return original_load(sid, *args, **kwargs)
+
+    with patch.object(Session, "load", side_effect=tracked_load), patch(
+        "api.routes.read_session_tail_cache",
+        side_effect=AssertionError("small sidecar must not read tail cache"),
+    ), patch(
+        "api.routes.build_session_tail_cache_from_legacy_sidecar",
+        side_effect=AssertionError("small sidecar must not build tail cache"),
+    ):
+        captured = _invoke(session.session_id)
+
+    assert captured["status"] == 200
+    assert calls == [session.session_id]
+    assert captured["data"]["session"]["message_count"] == 400
 
 
 def test_cache_payload_is_equivalent_to_full_fallback(isolated_session_store):
