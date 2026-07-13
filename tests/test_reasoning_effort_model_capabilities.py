@@ -19,6 +19,27 @@ def test_openai_codex_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
     assert "xhigh" in efforts
     assert "max" not in efforts
+    assert "ultra" not in efforts
+
+
+def test_openai_codex_gpt56_supports_max_and_ultra_effort_levels():
+    efforts = cfg.resolve_model_reasoning_efforts(
+        "gpt-5.6-sol",
+        provider_id="openai-codex",
+    )
+    assert "xhigh" in efforts
+    assert "max" in efforts
+    assert "ultra" in efforts
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max",
+        "gpt-5.6-sol",
+        provider_id="openai-codex",
+    ) == "max"
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra",
+        "gpt-5.6-sol",
+        provider_id="openai-codex",
+    ) == "ultra"
 
 
 def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
@@ -30,6 +51,7 @@ def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
     assert "xhigh" in efforts
     assert "max" not in efforts
+    assert "ultra" not in efforts
 
 
 def test_openai_codex_max_effort_is_clamped_before_streaming():
@@ -85,6 +107,11 @@ def test_coerce_preserves_effort_for_unrecognized_model():
     # preserve verbatim below.
     assert cfg.coerce_reasoning_effort_for_model(
         "max",
+        "brand-new-model-2099",
+        provider_id="some-custom-provider",
+    ) == "xhigh"
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra",
         "brand-new-model-2099",
         provider_id="some-custom-provider",
     ) == "xhigh"
