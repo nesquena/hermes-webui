@@ -30,12 +30,141 @@ notes head-on:
 """
 from __future__ import annotations
 
+import json
 import pathlib
+import shutil
+import subprocess
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+
+def _extract_js_function(src: str, name: str) -> str:
+    start = src.index(f"function {name}")
+    brace = src.index("{", start)
+    depth = 1
+    pos = brace + 1
+    while pos < len(src) and depth:
+        if src[pos] == "{":
+            depth += 1
+        elif src[pos] == "}":
+            depth -= 1
+        pos += 1
+    return src[start:pos]
+
+
+def _run_real_smd_media_cases() -> dict:
+    helpers = "\n".join(
+        [
+            _extract_js_function(MESSAGES_JS, "_smdMediaPrefixTail"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailSet"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaRefHasReliableBoundary"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailFlush"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaAwareAddText"),
+            _extract_js_function(MESSAGES_JS, "_smdAppendMediaNode"),
+            _extract_js_function(MESSAGES_JS, "_smdScheduleMediaPostProcess"),
+            _extract_js_function(MESSAGES_JS, "_smdParserKey"),
+            _extract_js_function(MESSAGES_JS, "_smdBindParserIdentity"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailClear"),
+        ]
+    )
+    script = (
+        "import * as smd from './static/vendor/smd.min.js';\n"
+        "globalThis.window = { smd };\n"
+        "globalThis.requestAnimationFrame = cb => cb();\n"
+        "const _MEDIA_TAIL_MAX = 4096;\n"
+        "const _SMD_MEDIA_PREFIX = 'MEDIA:';\n"
+        "const _SMD_MEDIA_TAIL = new WeakMap();\n"
+        "const __SMD_PARSER_FALLBACK = {};\n"
+        "let postProcessCalls = 0;\n"
+        "let playbackCalls = 0;\n"
+        "function _postProcessWithAnchorSuppression(root){ postProcessCalls += root.querySelectorAll('.pdf-preview-load').length; }\n"
+        "function _applyMediaPlaybackPreferences(){ playbackCalls += 1; }\n"
+        "function esc(value){ return String(value ?? '').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c])); }\n"
+        "function _inlineMediaHtmlForRef(ref){\n"
+        "  const raw = String(ref || '');\n"
+        "  if(/\\.pdf$/i.test(raw)) return `<div class=\"pdf-preview-load\" data-path=\"${esc(raw)}\">PDF</div>`;\n"
+        "  return `<span class=\"media-node\" data-ref=\"${esc(raw)}\"></span>`;\n"
+        "}\n"
+        "class FakeNode{\n"
+        "  constructor(type, tag='', text=''){ this.nodeType=type; this.tagName=tag; this.children=[]; this.parentNode=null; this.attributes={}; this.data=text; }\n"
+        "  get childNodes(){ return this.children; }\n"
+        "  get firstChild(){ return this.children[0] || null; }\n"
+        "  appendChild(child){\n"
+        "    if(child.nodeType===11){ while(child.firstChild) this.appendChild(child.firstChild); return child; }\n"
+        "    if(child.parentNode){ const old=child.parentNode.children.indexOf(child); if(old>=0) child.parentNode.children.splice(old,1); }\n"
+        "    child.parentNode=this; this.children.push(child); return child;\n"
+        "  }\n"
+        "  setAttribute(name,value){ this.attributes[name]=String(value); }\n"
+        "  getAttribute(name){ return this.attributes[name] ?? null; }\n"
+        "  querySelectorAll(selector){\n"
+        "    const cls=selector.startsWith('.') ? selector.slice(1) : '';\n"
+        "    const out=[];\n"
+        "    const visit=node=>{ for(const child of node.children){ const classes=(child.attributes.class||'').split(/\\s+/); if(cls&&classes.includes(cls)) out.push(child); visit(child); } };\n"
+        "    visit(this); return out;\n"
+        "  }\n"
+        "  get textContent(){ return this.nodeType===3 ? this.data : this.children.map(c=>c.textContent).join(''); }\n"
+        "  get outerHTML(){\n"
+        "    if(this.nodeType===3) return esc(this.data);\n"
+        "    if(this.nodeType===11) return this.children.map(c=>c.outerHTML).join('');\n"
+        "    const attrs=Object.entries(this.attributes).map(([k,v])=>` ${k}=\"${esc(v)}\"`).join('');\n"
+        "    return `<${this.tagName}${attrs}>${this.children.map(c=>c.outerHTML).join('')}</${this.tagName}>`;\n"
+        "  }\n"
+        "}\n"
+        "globalThis.document = {\n"
+        "  createElement: tag => new FakeNode(1, tag),\n"
+        "  createTextNode: text => new FakeNode(3, '#text', String(text)),\n"
+        "  createDocumentFragment: () => new FakeNode(11, '#fragment'),\n"
+        "};\n"
+        "globalThis.DOMParser = class { parseFromString(html){\n"
+        "  const host=document.createElement('div');\n"
+        "  const cls=html.includes('pdf-preview-load') ? 'pdf-preview-load' : 'media-node';\n"
+        "  const node=document.createElement(html.includes('pdf-preview-load') ? 'div' : 'span');\n"
+        "  node.setAttribute('class', cls);\n"
+        "  const ref=(html.match(/data-ref=\"([^\"]*)\"/)||html.match(/data-path=\"([^\"]*)\"/)||[])[1]||'';\n"
+        "  if(ref) node.setAttribute(cls==='pdf-preview-load' ? 'data-path' : 'data-ref', ref);\n"
+        "  host.appendChild(node);\n"
+        "  return { body: { firstChild: host } };\n"
+        "} };\n"
+        f"{helpers}\n"
+        "function renderChunks(chunks){\n"
+        "  postProcessCalls = 0; playbackCalls = 0;\n"
+        "  const root=document.createElement('div');\n"
+        "  const renderer=smd.default_renderer(root);\n"
+        "  const baseAddText=renderer.add_text;\n"
+        "  renderer.add_text=(data,text)=>{\n"
+        "    const parent=data&&data.nodes&&data.nodes[data.index];\n"
+        "    _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, _smdParserKey(data, root));\n"
+        "  };\n"
+        "  const parser=smd.parser(renderer);\n"
+        "  _smdBindParserIdentity(renderer, parser, root);\n"
+        "  for(const chunk of chunks) smd.parser_write(parser, chunk);\n"
+        "  smd.parser_end(parser);\n"
+        "  _smdMediaTailFlush(parser);\n"
+        "  _smdMediaTailClear(parser);\n"
+        "  return { html: root.outerHTML, text: root.textContent, postProcessCalls, playbackCalls };\n"
+        "}\n"
+        "const marker='MEDIA:';\n"
+        "const prefixSplits={};\n"
+        "for(let i=1;i<marker.length;i++) prefixSplits[i]=renderChunks(['\\n\\n'+marker.slice(0,i), marker.slice(i)+'C:/tmp/live.png ']);\n"
+        "const refSplit=renderChunks(['MEDIA:C:/tmp/li', 've.png ']);\n"
+        "const finalExtensionless=renderChunks(['MEDIA:https://fal.media/generated']);\n"
+        "const pdf=renderChunks(['MEDIA:C:/tmp/report.pdf ']);\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf}));\n"
+    )
+    completed = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    return json.loads(completed.stdout)
 
 
 class TestSmdMediaInStream(unittest.TestCase):
@@ -191,6 +320,18 @@ class TestSmdMediaInStream(unittest.TestCase):
                       "like an incomplete MEDIA prefix so the next add_text "
                       "call can prepend them and finish the token")
 
+    def test_media_prefix_rolls_across_chunk_boundaries(self):
+        # A split can happen inside the sentinel itself ("ME" + "DIA:foo.png"),
+        # not only after the full "MEDIA:" prefix. Keep a rolling suffix scan
+        # so the first half is buffered instead of rendered as visible prose.
+        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
+        block = MESSAGES_JS[idx:idx + 7000]
+        self.assertIn("const _SMD_MEDIA_PREFIX = 'MEDIA:'", MESSAGES_JS)
+        self.assertIn("function _smdMediaPrefixTail", MESSAGES_JS)
+        self.assertIn("_smdMediaPrefixTail(combined)", block)
+        self.assertIn("_smdMediaPrefixTail(rest)", block)
+        self.assertIn("_SMD_MEDIA_PREFIX.startsWith(suffix)", MESSAGES_JS)
+
     def test_partial_media_ref_at_chunk_end_is_buffered_until_boundary(self):
         # Greptile re-review: /MEDIA:([^\s)\]]+)/g will happily match
         # "MEDIA:fo" at the end of a chunk even if the next chunk is "o.png".
@@ -255,6 +396,26 @@ class TestSmdMediaInStream(unittest.TestCase):
             "concurrent streams don't cross-pollinate",
         )
 
+    def test_smd_parser_identity_is_bound_to_real_parser(self):
+        # smd's renderer.data does not expose a parser by default. Bind the
+        # created parser onto both renderer.data and the owning element so every
+        # add_text path uses the same key for tail set/get/flush/clear.
+        self.assertIn("function _smdParserKey", MESSAGES_JS)
+        self.assertIn("function _smdBindParserIdentity", MESSAGES_JS)
+        self.assertIn("renderer.data.parser=parser", MESSAGES_JS)
+        self.assertIn("el.__smdParser=parser", MESSAGES_JS)
+        smd_new = MESSAGES_JS[
+            MESSAGES_JS.index("function _smdNewParser"):
+            MESSAGES_JS.index("function _smdRendererWithoutUnderscoreEmphasis")
+        ].replace(" ", "")
+        self.assertIn("_smdBindParserIdentity(renderer,_smdParser,el)", smd_new)
+        anchor = MESSAGES_JS[
+            MESSAGES_JS.index("function _anchorProseIncrementalNode"):
+            MESSAGES_JS.index("function _clearAnchorProseIncrementalNode")
+        ].replace(" ", "")
+        self.assertIn("_smdBindParserIdentity(renderer,parser,body)", anchor)
+        self.assertNotIn("(data && data.nodes && data.nodes[data.index]) || __SMD_PARSER_FALLBACK", MESSAGES_JS)
+
     def test_smd_end_parser_clears_fallback_media_tail(self):
         # Greptile re-review: parserFor falls back to __SMD_PARSER_FALLBACK,
         # so stream-end cleanup must clear that sentinel key, not null.
@@ -273,6 +434,59 @@ class TestSmdMediaInStream(unittest.TestCase):
         self.assertIn("_smdMediaTailFlush(st.parser)", block)
         self.assertIn("_smdMediaTailClear(st.parser)", block)
         self.assertLess(block.index("_smdMediaTailFlush(st.parser)"), block.index("_smdMediaTailClear(st.parser)"))
+
+    def test_live_media_insertions_are_post_processed(self):
+        # Streaming MEDIA inserts PDF/HTML/diff/CSV/Excalidraw placeholders into
+        # the live DOM. They must hydrate immediately, not wait for the settled
+        # renderMessages() pass.
+        append = MESSAGES_JS[
+            MESSAGES_JS.index("function _smdAppendMediaNode"):
+            MESSAGES_JS.index("function _smdScheduleMediaPostProcess")
+        ]
+        self.assertIn("_smdScheduleMediaPostProcess(parent)", append)
+        scheduler = MESSAGES_JS[
+            MESSAGES_JS.index("function _smdScheduleMediaPostProcess"):
+            MESSAGES_JS.index("// Per-parser tail buffer")
+        ]
+        self.assertIn("_postProcessWithAnchorSuppression(root)", scheduler)
+        self.assertIn("postProcessRenderedMessages(root)", scheduler)
+        self.assertIn("_applyMediaPlaybackPreferences(root)", scheduler)
+
+
+@unittest.skipIf(NODE is None, "node not on PATH")
+class TestSmdMediaRealParserBehaviour(unittest.TestCase):
+    """Drive the actual vendored smd parser through split MEDIA chunks."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cases = _run_real_smd_media_cases()
+
+    def test_real_smd_parser_buffers_every_media_prefix_split(self):
+        for split, result in self.cases["prefixSplits"].items():
+            with self.subTest(split=split):
+                self.assertIn('class="media-node"', result["html"])
+                self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
+                self.assertNotIn("MEDIA:", result["text"])
+
+    def test_real_smd_parser_buffers_partial_ref_until_complete(self):
+        result = self.cases["refSplit"]
+        self.assertIn('class="media-node"', result["html"])
+        self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
+        self.assertNotIn("MEDIA:", result["text"])
+        self.assertNotIn("C:/tmp/li", result["text"])
+
+    def test_real_smd_parser_flushes_final_extensionless_url(self):
+        result = self.cases["finalExtensionless"]
+        self.assertIn('class="media-node"', result["html"])
+        self.assertIn('data-ref="https://fal.media/generated"', result["html"])
+        self.assertNotIn("MEDIA:", result["text"])
+
+    def test_real_smd_parser_live_pdf_placeholder_is_hydrated(self):
+        result = self.cases["pdf"]
+        self.assertIn('class="pdf-preview-load"', result["html"])
+        self.assertIn('data-path="C:/tmp/report.pdf"', result["html"])
+        self.assertGreaterEqual(result["postProcessCalls"], 1)
+        self.assertGreaterEqual(result["playbackCalls"], 1)
 
 
 if __name__ == "__main__":

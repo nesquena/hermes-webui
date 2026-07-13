@@ -3733,7 +3733,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         node.appendChild(body);
         const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body);
         const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
-        st={node,parser:window.smd.parser(renderer),writtenText:'',fade};
+        const parser=window.smd.parser(renderer);
+        _smdBindParserIdentity(renderer,parser,body);
+        st={node,parser,writtenText:'',fade};
         _anchorProseSmdCache.set(key,st);
         // Bound memory across turns: keys embed the stream id, so stale entries
         // from finished streams age out here.
@@ -4055,6 +4057,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const baseRenderer=fade ? _streamFadeRenderer(el) : _safeSmdRenderer(el);
     const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
     _smdParser=window.smd.parser(renderer);
+    _smdBindParserIdentity(renderer,_smdParser,el);
   }
   function _smdRendererWithoutUnderscoreEmphasis(renderer){
     if(!renderer||!window.smd) return renderer;
@@ -4098,6 +4101,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Clear the per-parser MEDIA tail buffer — any incomplete MEDIA
     // prefix the parser was holding is no longer relevant.
     if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(_smdParser);
+    if(typeof _smdClearParserIdentity==='function') _smdClearParserIdentity(assistantBody,_smdParser);
     _smdParser=null;
     _smdWrittenLen=0;
     _smdWrittenText='';
@@ -4256,7 +4260,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const baseAddText=renderer.add_text;
     const baseSetAttr=renderer.set_attr;
     const parserFor = (data)=>{
-      return (data && data.parser) || (el && el.__smdParser) || (data && data.nodes && data.nodes[data.index]) || __SMD_PARSER_FALLBACK;
+      return _smdParserKey(data, el);
     };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
@@ -4343,6 +4347,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   //      "foo.png") is buffered in a per-parser tail buffer and completed
   //      on the next add_text call.
   const _MEDIA_TAIL_MAX = 4096; // bytes; defensive cap on per-parser buffer
+  const _SMD_MEDIA_PREFIX = 'MEDIA:';
+  function _smdMediaPrefixTail(value){
+    const text=String(value||'');
+    const max=Math.min(_SMD_MEDIA_PREFIX.length,text.length);
+    for(let len=max;len>0;len-=1){
+      const suffix=text.slice(text.length-len);
+      if(_SMD_MEDIA_PREFIX.startsWith(suffix)) return suffix;
+    }
+    return '';
+  }
   function _smdMediaTailSet(tailMap, parser, chunk, parent, baseAddText, data){
     if(chunk) tailMap.set(parser, {chunk, parent, baseAddText, data});
     else tailMap.delete(parser);
@@ -4381,6 +4395,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const combined = lead ? lead + value : value;
     // Fast path: no MEDIA tokens in the (possibly combined) string.
     if(!/MEDIA:/.test(combined)){
+      const prefixTail=_smdMediaPrefixTail(combined);
+      if(prefixTail && tails && parser && prefixTail.length < _MEDIA_TAIL_MAX){
+        const stable=combined.slice(0, combined.length-prefixTail.length);
+        if(stable && baseAddText) baseAddText(data, stable);
+        _smdMediaTailSet(tails, parser, prefixTail, parent, baseAddText, data);
+        return;
+      }
       if(baseAddText) baseAddText(data, combined);
       return;
     }
@@ -4407,7 +4428,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         last = combined.length;
         break;
       }
-      _smdAppendMediaNode(parent, m[1]);
+      if(!_smdAppendMediaNode(parent, m[1]) && baseAddText) baseAddText(data, m[0]);
       last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
@@ -4415,10 +4436,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const rest = combined.slice(last);
     if(rest){
       const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
-      if(tailMatch && rest.length < _MEDIA_TAIL_MAX){
-        const tailStart = tailMatch.index;
+      const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
+      const tailValue = tailMatch ? tailMatch[0] : prefixTail;
+      if(tailValue && rest.length < _MEDIA_TAIL_MAX){
+        const tailStart = tailMatch ? tailMatch.index : rest.length-prefixTail.length;
         if(tailStart>0 && baseAddText) baseAddText(data, rest.slice(0, tailStart));
-        unmatchedTail = rest.slice(tailStart);
+        unmatchedTail = tailValue;
       } else if(baseAddText){
         baseAddText(data, rest);
       }
@@ -4445,7 +4468,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const frag=document.createDocumentFragment();
     while(host.firstChild) frag.appendChild(host.firstChild);
     parent.appendChild(frag);
+    _smdScheduleMediaPostProcess(parent);
     return true;
+  }
+  function _smdScheduleMediaPostProcess(root){
+    if(!root) return;
+    if(typeof _postProcessWithAnchorSuppression!=='function'
+      && typeof postProcessRenderedMessages!=='function'
+      && typeof _applyMediaPlaybackPreferences!=='function') return;
+    const run=()=>{
+      try{
+        if(typeof _postProcessWithAnchorSuppression==='function') _postProcessWithAnchorSuppression(root);
+        else if(typeof postProcessRenderedMessages==='function') postProcessRenderedMessages(root);
+        if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(root);
+      }catch(_){}
+    };
+    if(typeof requestAnimationFrame==='function') requestAnimationFrame(run);
+    else if(typeof setTimeout==='function') setTimeout(run,0);
+    else run();
   }
   // Per-parser tail buffer keyed by parser instance so concurrent
   // smd parsers (live prose + anchor-scene rows + tool-card streams)
@@ -4456,6 +4496,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // a string, so WeakMap.set doesn't throw TypeError when all three
   // parser-identity sources are unavailable (Greptile #3).
   const __SMD_PARSER_FALLBACK = {};
+  function _smdParserKey(data, el){
+    return (data && data.parser) || (el && el.__smdParser) || __SMD_PARSER_FALLBACK;
+  }
+  function _smdBindParserIdentity(renderer, parser, el){
+    if(renderer&&renderer.data) renderer.data.parser=parser;
+    if(el) el.__smdParser=parser;
+  }
+  function _smdClearParserIdentity(el, parser){
+    if(!el || (parser && el.__smdParser!==parser)) return;
+    try{delete el.__smdParser;}catch(_){el.__smdParser=null;}
+  }
   function _smdMediaTailClear(parser){
     if(_SMD_MEDIA_TAIL && parser) _SMD_MEDIA_TAIL.delete(parser);
     // Also clear the fallback key if it was ever set
@@ -4466,7 +4517,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const baseSetAttr=renderer.set_attr;
     const baseAddText=renderer.add_text;
     const parserFor = (data)=>{
-      return (data && data.parser) || (el && el.__smdParser) || (data && data.nodes && data.nodes[data.index]) || __SMD_PARSER_FALLBACK;
+      return _smdParserKey(data, el);
     };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];

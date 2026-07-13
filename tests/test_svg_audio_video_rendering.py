@@ -82,6 +82,23 @@ def test_url_svg_audio_video_handlers():
     assert url_video >= 1, "URL video handler should test extension on src"
 
 
+def test_webm_prefers_video_when_audio_and_video_regexes_overlap():
+    """Verify .webm is not shadowed by the audio regex."""
+    with open('static/ui.js', encoding="utf-8") as f:
+        src = f.read()
+    kind_start = src.find("function _mediaKindForName")
+    kind_body = src[kind_start:kind_start + 400]
+    assert "_VIDEO_EXTS.test(clean)" in kind_body
+    assert "_AUDIO_EXTS.test(clean)" in kind_body
+    assert kind_body.index("_VIDEO_EXTS.test(clean)") < kind_body.index("_AUDIO_EXTS.test(clean)"), \
+        "_mediaKindForName must check video before audio so .webm renders as video"
+    inline_start = src.find("function _inlineMediaHtmlForRef")
+    inline_body = src[inline_start:inline_start + 4500]
+    assert "const kind=_AUDIO_EXTS.test(ref)?'audio':'video';" not in inline_body, \
+        "Local MEDIA rendering must reuse _mediaKindForName instead of reintroducing audio-first .webm ordering"
+    assert "if(localKind==='audio'||localKind==='video')" in inline_body
+
+
 def test_attachment_svg_audio_video():
     """Verify file attachments for SVG/audio/video get inline previews."""
     with open('static/ui.js', encoding="utf-8") as f:

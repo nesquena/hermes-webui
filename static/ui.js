@@ -2468,8 +2468,8 @@ function _applyMediaPlaybackRate(media, rate=_getStoredMediaPlaybackRate()){
 }
 function _mediaKindForName(name=''){
   const clean=String(name||'').split('?')[0].toLowerCase();
-  if(_AUDIO_EXTS.test(clean)) return 'audio';
   if(_VIDEO_EXTS.test(clean)) return 'video';
+  if(_AUDIO_EXTS.test(clean)) return 'audio';
   if(_IMAGE_EXTS.test(clean)) return 'image';
   return '';
 }
@@ -2545,9 +2545,8 @@ function _inlineMediaHtmlForRef(ref, sessionId){
     return `<span class="msg-artifact-image"><img class="msg-media-img" src="${esc(apiUrl)}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${esc(apiUrl)}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
   }
   if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
-  if(_AUDIO_EXTS.test(ref)||_VIDEO_EXTS.test(ref)){
-    const kind=_AUDIO_EXTS.test(ref)?'audio':'video';
-    return _mediaPlayerHtml(kind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
+  if(localKind==='audio'||localKind==='video'){
+    return _mediaPlayerHtml(localKind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
   }
   if(_PDF_EXTS.test(ref)){
     const fname=esc(ref.split('/').pop()||ref);
