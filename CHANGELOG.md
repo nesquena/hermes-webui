@@ -13,6 +13,10 @@
 
 - **Deep-link straight to a profile with `?profile=<name>`.** Opening the WebUI with a `?profile=NAME` query parameter now switches to that profile on boot. The name is validated against the existing profile allowlist (a nonexistent profile boots normally, path-traversal / cross-profile attempts are rejected), the switch goes through the same access-enforced `switchToProfile`, and boot fails safe on anything invalid. Thanks @rodboev. (#5730, #5682)
 
+- **Provider list loads are cached (30s), cutting repeated settings/model-picker latency.** The provider list is now served from a short-lived, per-profile cache instead of re-reading config + probing auth on every request. The cache is profile-scoped (keyed on the profile home + `.env`/`config.yaml` mtimes + a config fingerprint) and is invalidated immediately on any provider-key change, config cleanup, or OAuth credential update (Codex/Anthropic link/unlink), so a credential change is never masked. Thanks @SeanWit. (#6013, #6010)
+
+- **WebUI-created git worktrees can now be cleaned up (no more orphan accumulation).** The agent locks every worktree it creates, and git refuses to remove a locked worktree with a single `--force`, so WebUI-created worktrees were piling up unremovable. Session-worktree removal now runs a fail-soft `git worktree unlock` right before the remove (mirroring the agent's own cleanup ordering); the existing dirty/uncommitted-changes guard still runs first, so user data stays protected. Thanks @ayxuerui. (#6028, #6023)
+
 ### Fixed
 
 - **Gateway provider errors are reported accurately, and your prompt survives a failed turn.** On gateway-backed sessions, a terminal provider error (bad model id, exhausted credentials, etc.) mid-turn is now classified and shown as the real error instead of a generic empty turn, the error card is bound to the correct session, and the in-flight user prompt plus any partial output is persisted so it survives a reload — even when you'd just re-sent an identical prompt (e.g. "continue"). Thanks @rodboev. (#5969, #5940)
