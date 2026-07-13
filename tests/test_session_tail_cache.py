@@ -16,6 +16,9 @@ def isolated_session_store(tmp_path, monkeypatch):
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    # Most storage tests exercise the cache format with compact fixtures. Source
+    # threshold behavior is covered explicitly below with the production limit.
+    monkeypatch.setattr(models, "_SESSION_TAIL_CACHE_MIN_SOURCE_BYTES", 0)
     models.SESSIONS.clear()
     yield session_dir
     models.SESSIONS.clear()
@@ -123,6 +126,41 @@ def test_save_is_fail_open_when_tail_cache_write_fails(isolated_session_store, m
     session.save(skip_index=True)
 
     assert json.loads(session.path.read_bytes())["messages"] == session.messages
+
+
+def test_save_publishes_cache_only_after_source_reaches_threshold(
+    isolated_session_store,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        models,
+        "_SESSION_TAIL_CACHE_MIN_SOURCE_BYTES",
+        1 * 1024 * 1024,
+    )
+    session = Session(
+        session_id="tail_source_threshold",
+        messages=_messages(4),
+    )
+    cache_path = models.session_tail_cache_path(session.session_id)
+
+    session.save(skip_index=True)
+
+    assert session.path.exists()
+    assert session.path.stat().st_size < models._SESSION_TAIL_CACHE_MIN_SOURCE_BYTES
+    assert not cache_path.exists()
+
+    session.messages.append(
+        {
+            "role": "assistant",
+            "content": "x" * (models._SESSION_TAIL_CACHE_MIN_SOURCE_BYTES + 1024),
+            "timestamp": 99.0,
+        }
+    )
+    session.save(skip_index=True)
+
+    assert session.path.stat().st_size >= models._SESSION_TAIL_CACHE_MIN_SOURCE_BYTES
+    assert cache_path.exists()
+    assert models.read_session_tail_cache(session.session_id) is not None
 
 
 def test_stable_full_load_opportunistically_builds_but_metadata_only_never_builds(

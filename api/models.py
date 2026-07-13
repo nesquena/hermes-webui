@@ -1440,11 +1440,16 @@ class Session:
         # The sidecar is authoritative and must land first. Tail-cache writes
         # are derived, atomic, and strictly fail-open: a cache filesystem or
         # validation failure can never roll back a successful session save.
+        # Small sidecars stay on the authoritative path; publishing a second
+        # fsync'd file on every streaming checkpoint would cost more than the
+        # bounded read can save.
         try:
-            _write_session_tail_cache(
-                self,
-                expected_signature=_sidecar_stat_signature(self.path),
-            )
+            source_signature = _sidecar_stat_signature(self.path)
+            if _session_tail_cache_signature_is_large_enough(source_signature):
+                _write_session_tail_cache(
+                    self,
+                    expected_signature=source_signature,
+                )
         except Exception:
             logger.debug(
                 "session tail-cache populate failed for %s",
@@ -1534,6 +1539,7 @@ class Session:
                     _populate_tail_cache
                     and _pre_read_sig is not None
                     and _pre_read_sig == _post_read_sig
+                    and _session_tail_cache_signature_is_large_enough(_pre_read_sig)
                     and _session_tail_cache_profile_is_active(session)
                     and not _session_tail_cache_has_signature(sid, _pre_read_sig)
                 ):
@@ -3741,6 +3747,18 @@ def session_tail_cache_path(sid: str) -> Path:
     return SESSION_DIR / '_tail_cache' / 'v1' / f'{sid}.json'
 
 
+def _session_tail_cache_signature_is_large_enough(signature) -> bool:
+    """Return whether a stable source signature justifies cache publication."""
+    if not isinstance(signature, tuple) or len(signature) != 4:
+        return False
+    size = signature[2]
+    return (
+        isinstance(size, int)
+        and not isinstance(size, bool)
+        and size >= _SESSION_TAIL_CACHE_MIN_SOURCE_BYTES
+    )
+
+
 def session_tail_cache_source_is_large_enough(sid: str) -> bool:
     """Return whether bounded-tail route setup is worthwhile for this sidecar."""
     if not is_safe_session_id(sid):
@@ -3749,10 +3767,8 @@ def session_tail_cache_source_is_large_enough(sid: str) -> bool:
         cached = SESSIONS.get(sid)
         if cached is not None and not getattr(cached, '_loaded_metadata_only', False):
             return False
-    signature = _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
-    return bool(
-        signature is not None
-        and signature[2] >= _SESSION_TAIL_CACHE_MIN_SOURCE_BYTES
+    return _session_tail_cache_signature_is_large_enough(
+        _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
     )
 
 
@@ -4328,7 +4344,7 @@ def build_session_tail_cache_from_legacy_sidecar(sid: str) -> dict | None:
             return None
     path = SESSION_DIR / f'{sid}.json'
     before = _sidecar_stat_signature(path)
-    if before is None:
+    if not _session_tail_cache_signature_is_large_enough(before):
         return None
     try:
         prefix = _read_metadata_json_prefix(path)
