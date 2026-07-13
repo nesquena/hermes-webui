@@ -308,13 +308,20 @@ function showToast() {{}}
 {mark_unread}
 _markSessionUnread({{session_id: 'open', message_count: 9}});
 _acknowledgeSessionVisit('open', 9, 123);
-const marker = _getSessionCompletionUnread().open;
+let marker = _getSessionCompletionUnread().open;
 const counts = _getSessionViewedCounts();
-console.log(JSON.stringify({{marker_present: !!marker, marker_manual: marker && marker.manual, viewed: counts.open, repaints}}));
+
+// Keep manual marker only for the first active reconcile.
+_acknowledgeSessionVisit('open', 9, 123);
+const markerAfterSecondAck = _getSessionCompletionUnread().open;
+console.log(JSON.stringify({{marker_present: !!marker, marker_manual: marker && marker.manual, marker_manual_pending: marker && marker.manual_pending, marker_after_second_ack: !!markerAfterSecondAck, viewed: counts.open, repaints}}));
 """
+
     out = _run_node(script)
     assert out["marker_present"] is True
     assert out["marker_manual"] is True
+    assert out["marker_manual_pending"] is False
+    assert out["marker_after_second_ack"] is False
     assert out["viewed"] == 9
     assert out["repaints"] >= 1
 
