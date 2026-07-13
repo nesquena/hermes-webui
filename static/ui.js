@@ -5199,13 +5199,21 @@ function _endSessionSwitchLayoutPostProcess(marker){
   _sessionSwitchLayoutPostProcessPending=Math.max(0,_sessionSwitchLayoutPostProcessPending-1);
   if(_sessionSwitchLayoutPostProcessPending===0) _scheduleSessionSwitchLayoutQuietCheck(marker.token,marker.sid,marker.loadGeneration);
 }
-function _settleSessionSwitchLayoutStabilization(sid,loadGeneration){
+function _settleSessionSwitchLayoutStabilization(sid,loadGeneration,streaming){
   if(!_sessionSwitchLayoutStabilizationSid||String(sid||'')!==_sessionSwitchLayoutStabilizationSid||loadGeneration!==_sessionSwitchLayoutLoadGeneration) return;
   const el=$('messages');
   if(!el){ _endSessionSwitchLayoutStabilization(); return; }
   const token=_sessionSwitchLayoutStabilizationToken;
   _sessionSwitchLayoutSettleRequested=true;
-  if(typeof ResizeObserver==='function'){
+  // Skip the ResizeObserver arm when switching INTO an actively-streaming
+  // session. The live turn grows continuously there, so the observer would keep
+  // firing and the quiet-check would never reach zero-pending until the stream
+  // pauses — leaving content-visibility forced on every user row for the whole
+  // stream duration and temporarily disabling #5637's off-screen-skip win. The
+  // stream's own scroll handling already owns geometry during streaming, so a
+  // single quiet-check that still waits on any pending async post-processing is
+  // enough; stabilization settles promptly instead of trailing the stream.
+  if(!streaming&&typeof ResizeObserver==='function'){
     if(_sessionSwitchLayoutStabilizationObserver) _sessionSwitchLayoutStabilizationObserver.disconnect();
     const observed=document.getElementById('msgInner')||el;
     _sessionSwitchLayoutStabilizationObserver=new ResizeObserver(()=>{

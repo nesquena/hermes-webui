@@ -103,13 +103,17 @@ def test_session_switch_wires_begin_before_reset_and_settle_after_both_render_br
     load = _function_body(SESSIONS_JS, "loadSession")
     begin = "window._beginSessionSwitchLayoutStabilization(sid, _loadGeneration);"
     reset = "window._resetScrollDirectionTracker();"
-    settle = "window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration);"
+    # The streaming branch opts out of the ResizeObserver (third arg `true`); the
+    # idle branch keeps the default. Both still settle after their render.
+    settle_streaming = "window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration, true);"
+    settle_idle = "window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration);"
     assert begin in load
     assert load.index(begin) < load.index(reset)
-    assert load.count(settle) == 2
-    for marker in (
-        "if(activeStreamId){",
-        "}else{\n      S.busy=false;",
+    assert load.count(settle_streaming) == 1
+    assert load.count(settle_idle) == 1
+    for marker, settle in (
+        ("if(activeStreamId){", settle_streaming),
+        ("}else{\n      S.busy=false;", settle_idle),
     ):
         branch = load[load.index(marker):]
         assert branch.index("renderMessages(") < branch.index(settle)
@@ -152,6 +156,28 @@ def test_live_anchor_delayed_restore_is_generation_and_session_guarded():
         guarded_identity = "const scrollRebuildIdentity=(typeof _nextLiveAnchorScrollRebuildGuard==='function')?_nextLiveAnchorScrollRebuildGuard():null;"
         assert guarded_identity in body
         assert "_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)" in body
+
+
+def test_settle_skips_observer_when_switching_into_streaming_session():
+    """Switching INTO an actively-streaming session must not arm the
+    ResizeObserver: the live turn grows continuously, so the observer would keep
+    firing and the quiet-check would never reach zero-pending until the stream
+    pauses, leaving content-visibility forced on every user row for the whole
+    stream (temporarily undoing #5637). The streaming call site passes the flag;
+    the idle branch does not (observer still arms for a static transcript).
+    """
+    settle = _function_body(UI_JS, "_settleSessionSwitchLayoutStabilization")
+    assert "function _settleSessionSwitchLayoutStabilization(sid,loadGeneration,streaming)" in settle
+    # The observer arm is gated on NOT streaming. Mutation guard: dropping the
+    # !streaming term would re-arm the observer during streaming (the bug).
+    assert "if(!streaming&&typeof ResizeObserver==='function')" in settle
+    # The streaming loadSession branch opts out of the observer; the idle branch
+    # keeps the default (no third arg).
+    assert "window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration, true);" in SESSIONS_JS
+    assert "window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration);" in SESSIONS_JS
+    # A single quiet-check is still scheduled so stabilization settles (waiting on
+    # any pending async post-processing) even without the observer.
+    assert "_scheduleSessionSwitchLayoutQuietCheck(token,sid,loadGeneration);" in settle
 
 
 def test_touch_css_forces_real_user_row_layout_only_during_switch():

@@ -2076,7 +2076,7 @@ async function loadSession(sid){
       setComposerStatus('');
       syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
       if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._settleSessionSwitchLayoutStabilization==='function'){
-        window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration);
+        window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration, true);
       }
       const restoredAnchorScene=activeStreamId&&typeof window!=='undefined'
         ? ((typeof window._renderLiveAnchorActivitySceneForStream==='function'&&window._renderLiveAnchorActivitySceneForStream(activeStreamId, sid, {mode:'compact_worklog'}))||
