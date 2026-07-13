@@ -137,7 +137,7 @@ def test_prefer_cache_serves_stale_disk_when_no_fresh_cache(monkeypatch):
     monkeypatch.setattr(
         cfg,
         "_load_stale_models_cache_from_disk",
-        lambda: _catalog("anthropic/claude-opus-4"),
+        lambda **_kw: _catalog("anthropic/claude-opus-4"),
         raising=True,
     )
     monkeypatch.setattr(
@@ -172,7 +172,7 @@ def test_session_visit_serves_stale_without_blocking(monkeypatch):
     )
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None, raising=True)
     monkeypatch.setattr(
-        cfg, "_load_stale_models_cache_from_disk", lambda: _catalog(), raising=True
+        cfg, "_load_stale_models_cache_from_disk", lambda **_kw: _catalog(), raising=True
     )
 
     spawned = {"n": 0}
@@ -217,7 +217,7 @@ def test_session_visit_cold_boot_uses_bounded_rebuild(monkeypatch):
     )
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None, raising=True)
     monkeypatch.setattr(
-        cfg, "_load_stale_models_cache_from_disk", lambda: None, raising=True
+        cfg, "_load_stale_models_cache_from_disk", lambda **_kw: None, raising=True
     )
     monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.4, raising=True)
 
@@ -288,7 +288,7 @@ def test_background_refresh_coalesces_concurrent_spawns(monkeypatch):
         release.set()
 
     assert _wait_until(
-        lambda: not cfg._session_visit_refresh_in_flight.is_set(), timeout=2.0
+        lambda: not cfg._session_visit_refresh_in_flight, timeout=2.0
     ), "in-flight guard must clear after the refresh completes"
 
 
@@ -316,7 +316,7 @@ def test_background_refresh_reuses_get_available_models_force_refresh(monkeypatc
         "background refresh must call get_available_models(force_refresh=True)"
     )
     assert _wait_until(
-        lambda: not cfg._session_visit_refresh_in_flight.is_set(), timeout=2.0
+        lambda: not cfg._session_visit_refresh_in_flight, timeout=2.0
     )
 
 
