@@ -152,17 +152,48 @@ def test_mcp_only_additive_when_some_servers_collide():
     )
 
 
-def test_real_builtin_names_default_lookup():
-    """With the default (real) builtin lookup, a genuine MCP-only override is
-    additive because a normal server name does not collide with any builtin."""
+def test_real_builtin_names_default_lookup(monkeypatch):
+    """With an *available* builtin registry, a genuine MCP-only override is
+    additive because a normal server name does not collide with any builtin.
+
+    The default lookup (``_builtin_toolset_names()``) returns ``None`` when the
+    Hermes ``toolsets`` module isn't importable (e.g. the WebUI test env in CI),
+    which correctly fails closed to RESTRICT. To assert the *additive* path we
+    stub the helper to report an available, non-colliding builtin set — that is
+    the environment this test is about.
+    """
+    import api.streaming as streaming
+
+    monkeypatch.setattr(
+        streaming, "_builtin_toolset_names",
+        lambda: {"web", "file", "terminal", "delegation"},
+    )
+
     defaults = ["web", "file"]
     override = ["my-search"]
     mcp_servers = {"my-search"}
 
-    # builtin_names=None → uses api.streaming._builtin_toolset_names()
+    # builtin_names=None → consults the (stubbed, available) helper.
     result = _apply_override(defaults, override, mcp_servers)
 
     assert "web" in result and "file" in result and "my-search" in result
+
+
+def test_default_lookup_unavailable_registry_restricts(monkeypatch):
+    """The other half of the default-lookup contract: when the real helper
+    reports the registry is unavailable (``None``), the same MCP-only override
+    fails closed to RESTRICT rather than additive. This documents that the
+    additive path depends on an available registry."""
+    import api.streaming as streaming
+
+    monkeypatch.setattr(streaming, "_builtin_toolset_names", lambda: None)
+
+    result = _apply_override(["web", "file"], ["my-search"], {"my-search"})
+
+    assert result == ["my-search"], (
+        "an unavailable registry must fail closed to restrict on the default "
+        "lookup path too"
+    )
 
 
 # ── Fail-closed: unavailable builtin registry must RESTRICT, never additive ──
