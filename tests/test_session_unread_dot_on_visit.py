@@ -50,7 +50,7 @@ def _function_block(name: str, next_marker: str) -> str:
 # ── Structural anchors ──────────────────────────────────────────────────────
 
 def test_visit_ack_helpers_exist():
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, consumeManualOnVisit = true)" in SESSIONS_JS
     assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt)" in SESSIONS_JS
     assert "function _sessionVisitHasUnreadState(sid)" in SESSIONS_JS
     assert "function _markSessionUnread(session)" in SESSIONS_JS
@@ -309,8 +309,8 @@ function showToast() {{}}
 
 _markSessionUnread({{session_id: 'open', message_count: 9}});
 
-// First active reconcile (visit) flips the manual_pending flag but keeps marker.
-_acknowledgeSessionVisit('open', 9, 123);
+// First active reconcile (non-explicit visit) flips the manual_pending flag but keeps marker.
+_acknowledgeSessionVisit('open', 9, 123, false);
 let markerAfterFirstAck = _getSessionCompletionUnread().open;
 
 // A second active-reconcile from polling should not consume manual intent.
