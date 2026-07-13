@@ -417,7 +417,16 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     stream_id = "stream-gateway-terminal-provider-error-test"
     s.active_stream_id = stream_id
     s.pending_user_message = "Say hello"
-    s.pending_attachments = []
+    s.pending_started_at = 222
+    s.pending_attachments = [{"name": "current.png"}]
+    s.messages = [
+        {"role": "user", "content": "Say hello", "timestamp": 111, "attachments": [{"name": "old.png"}]},
+        {"role": "assistant", "content": "Earlier answer"},
+    ]
+    s.context_messages = [
+        {"role": "user", "content": "Say hello", "timestamp": 111, "attachments": [{"name": "old.png"}]},
+        {"role": "assistant", "content": "Earlier answer"},
+    ]
     s.save()
     STREAMS[stream_id] = channel
 
@@ -434,6 +443,16 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert apperrors
     assert apperrors[-1]["type"] in {"model_not_found", "auth_mismatch"}
     assert apperrors[-1]["session_id"] == s.session_id
+    saved = models.get_session(s.session_id)
+    user_messages = [m for m in saved.messages if m.get("role") == "user"]
+    assert len(user_messages) == 2
+    assert user_messages[-1]["timestamp"] == 222
+    assert user_messages[-1]["attachments"] == [{"name": "current.png"}]
+    context_users = [m for m in saved.context_messages if m.get("role") == "user"]
+    assert len(context_users) == 2
+    assert context_users[-1]["timestamp"] == 222
+    assert context_users[-1]["attachments"] == [{"name": "current.png"}]
+    assert saved.messages[-1].get("_error") is True
 
     response_error[0] = ""
     empty_stream_id = "stream-gateway-empty-response-test"
