@@ -2657,6 +2657,43 @@ function _providerFromModelValue(modelId){
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
   return '';
 }
+function _modelPickerOptionIdentity(modelId){
+  let value=String(modelId||'');
+  if(value.startsWith('@')&&value.includes(':')){
+    value=value.startsWith('@custom:')
+      ? value.substring(value.lastIndexOf(':')+1)
+      : value.substring(value.indexOf(':')+1);
+  }
+  value=value.split('/').pop();
+  return value.replace(/-/g,'.').toLowerCase();
+}
+function _deduplicateModelPickerOptions(sel,selectedValue){
+  if(!sel||!sel.querySelectorAll) return 0;
+  let removed=0;
+  for(const group of sel.querySelectorAll('optgroup')){
+    const options=Array.from(group.children||[]).filter(opt=>opt&&opt.tagName==='OPTION');
+    const byIdentity=new Map();
+    for(const opt of options){
+      const identity=_modelPickerOptionIdentity(opt.value);
+      if(!identity) continue;
+      if(!byIdentity.has(identity)) byIdentity.set(identity,[]);
+      byIdentity.get(identity).push(opt);
+    }
+    for(const candidates of byIdentity.values()){
+      if(candidates.length<2) continue;
+      const selected=candidates.find(opt=>opt.value===selectedValue);
+      const routable=candidates.find(opt=>String(opt.value||'').startsWith('@'));
+      const survivor=(selected&&String(selected.value||'').startsWith('@'))
+        || !routable ? (selected||routable||candidates[0]) : routable;
+      for(const opt of candidates){
+        if(opt===survivor) continue;
+        group.removeChild(opt);
+        removed++;
+      }
+    }
+  }
+  return removed;
+}
 function _providerSkipsModelMismatchWarning(providerId){
   const p=String(providerId||'').toLowerCase();
   return !p||p==='custom'||p.startsWith('custom:')||p==='openrouter';
@@ -2945,7 +2982,9 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   }
   // 1. Normalize: lowercase, strip namespace prefix, replace hyphens→dots.
   // Also strip @provider: prefix from deduplicated model IDs (#1228, #1313).
-  const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
+  const norm=s=>typeof _modelPickerOptionIdentity==='function'
+    ? _modelPickerOptionIdentity(s)
+    : s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
   const target=norm(modelId);
   let explicitProvider='';
   const rawModel=String(modelId||'');
@@ -3047,6 +3086,7 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
 }
 function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
+  if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
   const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
   if(applied) return applied;
   const value=modelId;
@@ -3221,6 +3261,9 @@ async function populateModelDropdown(opts={}){
       }
       sel.appendChild(og);
     }
+    if(typeof _deduplicateModelPickerOptions==='function'){
+      _deduplicateModelPickerOptions(sel,previousSelection&&previousSelection.model||'');
+    }
     _reconcileModelDropdownSelection(sel,data,previousSelection,opts);
     if(typeof syncModelChip==='function') syncModelChip();
     const dd=$('composerModelDropdown');
@@ -3271,20 +3314,20 @@ function _addLiveModelsToSelect(provider, models, sel){
     providerGroup.dataset.provider=provider;
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  // Normalized dedup strips provider/custom prefixes and namespaces (#907, #3478).
-  const _normId=id=>{
-    let s=String(id||'');
-    if(s.startsWith('@')&&s.includes(':')){
-      if(s.startsWith('@custom:')){
-        s=s.substring(s.lastIndexOf(':')+1)||s;
-      }else{
-        s=s.substring(s.indexOf(':')+1);
+  const optionIdentity=typeof _modelPickerOptionIdentity==='function'
+    ? _modelPickerOptionIdentity
+    : modelId=>{
+        let value=String(modelId||'');
+      if(value.startsWith('@')&&value.includes(':')){
+        value=value.startsWith('@custom:')
+          ? value.substring(value.lastIndexOf(':')+1)
+          : value.substring(value.indexOf(':')+1);
       }
-    }
-    s=s.split('/').pop();
-    return s.replace(/-/g,'.').toLowerCase();
-  };
-  const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
+        return value.split('/').pop().replace(/-/g,'.').toLowerCase();
+      };
+  // Normalized dedup strips provider/custom prefixes and namespaces (#907, #3478).
+  const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value)));
+  const hasExistingNorm=identity=>existingNorm.has(identity);
   let added=0;
   const _ap=(window._activeProvider||'').toLowerCase();
   const _providerLower=String(provider||'').toLowerCase();
@@ -3296,7 +3339,13 @@ function _addLiveModelsToSelect(provider, models, sel){
       mid=`@${provider}:${mid}`;
     }
     if(existingIds.has(mid)) continue;
-    if(existingNorm.has(_normId(mid))) continue; // dedup cross-prefix duplicates (#907)
+    const identity=optionIdentity(mid);
+    if(hasExistingNorm(identity)){
+      const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value)===identity);
+      const incomingRoutable=String(mid).startsWith('@');
+      const existingRoutable=sameGroup&&String(sameGroup.value||'').startsWith('@');
+      if(!(sameGroup&&!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
+    }
     const opt=document.createElement('option');
     opt.value=mid;
     opt.textContent=m.label||m.id;
@@ -3308,9 +3357,12 @@ function _addLiveModelsToSelect(provider, models, sel){
       opt.dataset.fast='0';
     }
     providerGroup.appendChild(opt);
+    existingIds.add(mid);
+    existingNorm.add(identity);
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
   }
+  if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,currentVal);
   const currentState=(currentVal&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, currentVal)
     : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
@@ -3688,6 +3740,7 @@ function renderModelDropdown(){
   const dd=$(opts.dropdownId||'composerModelDropdown');
   const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
+  if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
   // Whether the search input should auto-grab focus on (re-)render. Default true
   // preserves the composer picker's behavior exactly; the settings picker passes
   // false on coarse-pointer devices so opening it doesn't pop the mobile keyboard.

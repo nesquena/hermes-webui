@@ -1,0 +1,111 @@
+"""Regression coverage for #5989's cross-source model picker duplicate."""
+
+import json
+import re
+import subprocess
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+
+
+def _function(source, name):
+    match = re.search(rf"function {name}\([^)]*\)\{{", source)
+    assert match, f"{name} not found in ui.js"
+    start = match.start()
+    depth = 0
+    for index in range(match.end() - 1, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError(f"unterminated {name}")
+
+
+def _run_harness():
+    identity = _function(UI_JS, "_modelPickerOptionIdentity")
+    helper = _function(UI_JS, "_deduplicateModelPickerOptions")
+    live_add = _function(UI_JS, "_addLiveModelsToSelect")
+    script = f"""
+{identity}
+{helper}
+{live_add}
+class Node {{
+  constructor(tag) {{ this.tagName=tag.toUpperCase(); this.children=[]; this.dataset={{}}; this.parentElement=null; }}
+  appendChild(child) {{ child.parentElement=this; this.children.push(child); return child; }}
+  removeChild(child) {{ this.children=this.children.filter(item=>item!==child); child.parentElement=null; }}
+  querySelectorAll(selector) {{
+    if(selector==='optgroup') return this.children.filter(child=>child.tagName==='OPTGROUP');
+    return [];
+  }}
+  get options() {{
+    return this.tagName==='SELECT'
+      ? this.children.flatMap(child=>child.tagName==='OPTGROUP'?child.children:[child])
+      : undefined;
+  }}
+}}
+globalThis.window={{_activeProvider:'custom:llm-proxy'}};
+globalThis.document={{createElement:tag=>new Node(tag)}};
+globalThis._dynamicModelLabels={{}};
+globalThis._modelStateForSelect=()=>({{model:'',model_provider:null}});
+globalThis._applyModelToDropdown=()=>null;
+globalThis.S={{session:null}};
+function addCatalog(select, value) {{
+  const group=select.querySelectorAll('optgroup')[0] || (()=>{{
+    const item=new Node('optgroup'); item.dataset.provider='custom:llm-proxy'; select.appendChild(item); return item;
+  }})();
+  const catalog=new Node('option'); catalog.value=value; catalog.textContent=value; group.appendChild(catalog);
+}}
+function snapshot(select) {{
+  if(!select.value && select.options[0]) select.value=select.options[0].value;
+  _deduplicateModelPickerOptions(select,select.value);
+  return {{groups:select.querySelectorAll('optgroup').map(item=>item.children.map(option=>option.value)),selected:select.value}};
+}}
+function makeSelect() {{
+  const select=new Node('select');
+  const group=new Node('optgroup'); group.dataset.provider='custom:llm-proxy'; select.appendChild(group);
+  return select;
+}}
+const liveFirst=makeSelect();
+_addLiveModelsToSelect('custom:llm-proxy',[{{id:'x-ai/grok-4.5',label:'Grok 4.5'}}],liveFirst);
+addCatalog(liveFirst,'x-ai/grok-4.5');
+liveFirst.value=liveFirst.options[0].value;
+_addLiveModelsToSelect('custom:llm-proxy',[{{id:'x-ai/grok-4.5',label:'Grok 4.5'}}],liveFirst);
+const otherGroup=new Node('optgroup'); otherGroup.dataset.provider='custom:other-proxy';
+const other=new Node('option'); other.value='x-ai/grok-4.5'; otherGroup.appendChild(other); liveFirst.appendChild(otherGroup);
+const catalogFirst=makeSelect();
+addCatalog(catalogFirst,'x-ai/grok-4.5');
+_addLiveModelsToSelect('custom:llm-proxy',[{{id:'x-ai/grok-4.5',label:'Grok 4.5'}}],catalogFirst);
+const unnamespaced=makeSelect();
+addCatalog(unnamespaced,'gpt-4o');
+_addLiveModelsToSelect('custom:llm-proxy',[{{id:'@custom:llm-proxy:gpt-4o',label:'GPT-4o'}}],unnamespaced);
+console.log(JSON.stringify({{liveFirst:snapshot(liveFirst),catalogFirst:snapshot(catalogFirst),unnamespaced:snapshot(unnamespaced)}}));
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_cross_source_proxy_and_catalog_twin_has_one_routable_row():
+    result = _run_harness()
+    assert result["liveFirst"] == {
+        "groups": [["@custom:llm-proxy:x-ai/grok-4.5"], ["x-ai/grok-4.5"]],
+        "selected": "@custom:llm-proxy:x-ai/grok-4.5",
+    }
+
+
+def test_catalog_first_keeps_the_routable_proxy_row():
+    assert _run_harness()["catalogFirst"] == {
+        "groups": [["@custom:llm-proxy:x-ai/grok-4.5"]],
+        "selected": "@custom:llm-proxy:x-ai/grok-4.5",
+    }
+
+
+def test_unnamespaced_custom_proxy_value_deduplicates_with_catalog():
+    assert _run_harness()["unnamespaced"] == {
+        "groups": [["@custom:llm-proxy:gpt-4o"]],
+        "selected": "@custom:llm-proxy:gpt-4o",
+    }
