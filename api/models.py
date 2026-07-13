@@ -8074,16 +8074,20 @@ def get_state_db_session_message_prefix_summary(
     except (TypeError, ValueError):
         return None
 
-    if isinstance(profile, str) and profile:
-        db_path = _get_profile_home(profile) / 'state.db'
-        if not db_path.exists():
-            db_path = _active_state_db_path()
-    else:
-        db_path = _active_state_db_path()
-    if not db_path.exists():
-        return {"count": 0, "null_timestamp_count": 0}
-
     try:
+        # Path resolution and existence checks must stay inside the guard:
+        # a stat/permission failure here is "unprovable", not an error the
+        # route caller should see. Callers rely on None to mean "take the
+        # authoritative full-read fallback" (fail-open contract).
+        if isinstance(profile, str) and profile:
+            db_path = _get_profile_home(profile) / 'state.db'
+            if not db_path.exists():
+                db_path = _active_state_db_path()
+        else:
+            db_path = _active_state_db_path()
+        if not db_path.exists():
+            return {"count": 0, "null_timestamp_count": 0}
+
         with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
@@ -8144,16 +8148,19 @@ def get_state_db_session_message_keys_before_timestamp(
     except (TypeError, ValueError):
         return None
 
-    if isinstance(profile, str) and profile:
-        db_path = _get_profile_home(profile) / 'state.db'
-        if not db_path.exists():
-            db_path = _active_state_db_path()
-    else:
-        db_path = _active_state_db_path()
-    if not db_path.exists():
-        return []
-
     try:
+        # Keep path resolution inside the guard for the same fail-open
+        # contract as the prefix summary helper: any resolution/stat failure
+        # is "unprovable" (None) so the caller takes the full-read fallback.
+        if isinstance(profile, str) and profile:
+            db_path = _get_profile_home(profile) / 'state.db'
+            if not db_path.exists():
+                db_path = _active_state_db_path()
+        else:
+            db_path = _active_state_db_path()
+        if not db_path.exists():
+            return []
+
         with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
@@ -8161,14 +8168,23 @@ def get_state_db_session_message_keys_before_timestamp(
             available = {str(row['name']) for row in cur.fetchall()}
             if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
                 return None
+            # Match get_state_db_session_messages / the prefix-summary helper:
+            # compacted (active=0) rows are invisible to the merge, so they
+            # must not appear in the definitive identity sequence either.
+            # Without this an exact active-row prefix looks longer than the
+            # summary count and forces a needless conservative fallback.
+            active_clause = ""
+            if 'active' in available:
+                active_clause = " AND (active IS NULL OR active != 0)"
             cur.execute(
-                """
+                f"""
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
                     tool_calls
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
+                {active_clause}
                 ORDER BY timestamp ASC, id ASC
                 """,
                 (str(sid), before_ts),
