@@ -399,6 +399,89 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(captured.get('base_url'), 'https://agent-route.example/v1')
         self.assertIsNone(captured.get('api_key'))
 
+    def test_chinese_title_ignores_workspace_and_attachment_metadata(self):
+        """Regression: internal paths must not make a Chinese prompt look Latin."""
+        from api.streaming import _generate_llm_session_title_via_aux
+
+        user_text = (
+            '[Workspace::v1: /home/lester/workspace]\n'
+            '他们怎么知道我的项目？邮件正文直显\n\n'
+            '[Attached files: /home/lester/.hermes/webui/attachments/session/screenshot.png]'
+        )
+        mock_resp = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content='邮件项目误判澄清'),
+                    finish_reason='stop',
+                )
+            ]
+        )
+
+        with _patch_tg_config({'provider': '', 'model': 'title-model', 'base_url': ''}):
+            with patch('agent.auxiliary_client.call_llm', return_value=mock_resp, create=True):
+                title, status, raw_preview = _generate_llm_session_title_via_aux(
+                    user_text,
+                    'Nakheel 并不知道 Parallel World；这只是发给业主的施工进度调查。',
+                )
+
+        self.assertEqual(title, '邮件项目误判澄清')
+        self.assertEqual(status, 'llm_aux')
+        self.assertEqual(raw_preview, '')
+
+    def test_title_prompt_does_not_send_internal_metadata_to_aux_model(self):
+        """Title models should see user text, not WebUI workspace or attachment paths."""
+        from api.streaming import generate_title_raw_via_aux
+
+        user_text = (
+            '[Workspace::v1: /home/lester/workspace]\n'
+            '他们怎么知道我的项目？邮件正文直显\n\n'
+            '[Attached files: /home/lester/.hermes/webui/attachments/session/screenshot.png]'
+        )
+        mock_resp = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content='邮件项目误判澄清'),
+                    finish_reason='stop',
+                )
+            ]
+        )
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return mock_resp
+
+        with _patch_tg_config({'provider': '', 'model': 'title-model', 'base_url': ''}):
+            with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
+                generate_title_raw_via_aux(user_text, '这是一封 Nakheel 的业主调查邮件。')
+
+        prompt = '\n'.join(str(m.get('content') or '') for m in captured.get('messages') or [])
+        self.assertIn('他们怎么知道我的项目？邮件正文直显', prompt)
+        self.assertNotIn('[Workspace::v1:', prompt)
+        self.assertNotIn('[Attached files:', prompt)
+        self.assertNotIn('/home/lester/.hermes', prompt)
+
+    def test_fallback_does_not_match_ai_inside_gmail_or_email(self):
+        """Regression: the Latin token ``ai`` must be matched as a whole word."""
+        from api.streaming import _fallback_title_from_exchange
+
+        title = _fallback_title_from_exchange(
+            '请解释“邮件项目误判”',
+            '这封 Gmail email 来自 Nakheel，不是人工智能项目。',
+        )
+
+        self.assertNotEqual(title, 'AI productivity discussion')
+
+    def test_fallback_still_matches_standalone_ai_keyword(self):
+        from api.streaming import _fallback_title_from_exchange
+
+        title = _fallback_title_from_exchange(
+            '请解释“人工智能助手”',
+            '这是一个 AI productivity workflow。',
+        )
+
+        self.assertEqual(title, 'AI productivity discussion')
+
     def test_integer_timeout_from_config(self):
         """Config timeout as int is coerced to float."""
         self._run_with_config(
@@ -948,6 +1031,42 @@ class TestAuxInvalidAuxTriggersAgentFallback(unittest.TestCase):
         title_events = [(e, d) for e, d in events if e == 'title']
         self.assertTrue(len(title_events) > 0, "Expected a 'title' event to be emitted")
         self.assertEqual(title_events[0][1]['title'], 'Weather Report')
+
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    @patch('api.streaming._generate_llm_session_title_for_agent')
+    @patch('api.streaming.get_session')
+    def test_llm_language_mismatch_aux_triggers_agent_fallback(
+        self, mock_get_session, mock_agent_title, mock_aux_title, mock_configured,
+    ):
+        """A wrong-language auxiliary result should get a second model attempt."""
+        from api.streaming import _run_background_title_update
+
+        mock_session = MagicMock()
+        mock_session.title = 'Untitled'
+        mock_session.llm_title_generated = False
+        mock_session.messages = [
+            {'role': 'user', 'content': '为什么这封邮件提到我的项目？'},
+            {'role': 'assistant', 'content': '这是发给业主的施工进度调查。'},
+        ]
+        mock_get_session.return_value = mock_session
+        mock_aux_title.return_value = (
+            None,
+            'llm_language_mismatch_aux',
+            'AI productivity discussion',
+        )
+        mock_agent_title.return_value = ('Nakheel 邮件项目澄清', 'llm', '')
+
+        _run_background_title_update(
+            session_id='test-session-mismatch',
+            user_text='为什么这封邮件提到我的项目？',
+            assistant_text='这是发给业主的施工进度调查。',
+            placeholder_title='Untitled',
+            put_event=lambda *_args: None,
+            agent=MagicMock(),
+        )
+
+        mock_agent_title.assert_called_once()
 
     @patch('api.streaming._aux_title_configured', return_value=True)
     @patch('api.streaming._generate_llm_session_title_via_aux')
