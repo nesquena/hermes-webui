@@ -70,6 +70,12 @@ def _run_real_smd_media_cases() -> dict:
             _extract_js_function(MESSAGES_JS, "_smdParserKey"),
             _extract_js_function(MESSAGES_JS, "_smdBindParserIdentity"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailClear"),
+            _extract_js_function(MESSAGES_JS, "_streamFadeSkipNode"),
+            _extract_js_function(MESSAGES_JS, "_streamFadeReduceMotionEnabled"),
+            _extract_js_function(MESSAGES_JS, "_streamFadeBindCleanup"),
+            _extract_js_function(MESSAGES_JS, "_streamFadeRenderer"),
+            _extract_js_function(MESSAGES_JS, "_safeSmdRenderer"),
+            _extract_js_function(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis"),
         ]
     )
     script = (
@@ -80,8 +86,17 @@ def _run_real_smd_media_cases() -> dict:
         "const _SMD_MEDIA_PREFIX = 'MEDIA:';\n"
         "const _SMD_MEDIA_TAIL = new WeakMap();\n"
         "const __SMD_PARSER_FALLBACK = {};\n"
+        "const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\\/|#|\\?|\\.|api|session\\/)/i;\n"
+        "const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\\/|#|\\?|\\.)/i;\n"
+        "const _STREAM_FADE_MS = 620;\n"
+        "let _streamFadeCurrentMs = _STREAM_FADE_MS;\n"
+        "let _streamFadeLatestAnimationEndAt = 0;\n"
+        "let _streamFadeReduceMotionMql = null;\n"
+        "let _streamFadeReduceMotion = false;\n"
+        "let _streamFadeReduceMotionOnChange = null;\n"
         "let postProcessCalls = 0;\n"
         "let playbackCalls = 0;\n"
+        "function _smdLinkHref(value){ return String(value || ''); }\n"
         "function _postProcessWithAnchorSuppression(root){ postProcessCalls += root.querySelectorAll('.pdf-preview-load').length; }\n"
         "function _applyMediaPlaybackPreferences(){ playbackCalls += 1; }\n"
         "function esc(value){ return String(value ?? '').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c])); }\n"
@@ -91,14 +106,22 @@ def _run_real_smd_media_cases() -> dict:
         "  return `<span class=\"media-node\" data-ref=\"${esc(raw)}\"></span>`;\n"
         "}\n"
         "class FakeNode{\n"
-        "  constructor(type, tag='', text=''){ this.nodeType=type; this.tagName=tag; this.children=[]; this.parentNode=null; this.attributes={}; this.data=text; }\n"
+        "  constructor(type, tag='', text=''){\n"
+        "    this.nodeType=type; this.tagName=tag; this.children=[]; this.parentNode=null; this.attributes={}; this.data=text;\n"
+        "    this.style={ setProperty:()=>{} };\n"
+        "    this.classList={ contains:name=>(this.attributes.class||'').split(/\\s+/).includes(name), add:name=>this.setAttribute('class', ((this.attributes.class||'')+' '+name).trim()) };\n"
+        "  }\n"
         "  get childNodes(){ return this.children; }\n"
         "  get firstChild(){ return this.children[0] || null; }\n"
+        "  get className(){ return this.attributes.class || ''; }\n"
+        "  set className(value){ this.attributes.class=String(value); }\n"
         "  appendChild(child){\n"
         "    if(child.nodeType===11){ while(child.firstChild) this.appendChild(child.firstChild); return child; }\n"
         "    if(child.parentNode){ const old=child.parentNode.children.indexOf(child); if(old>=0) child.parentNode.children.splice(old,1); }\n"
         "    child.parentNode=this; this.children.push(child); return child;\n"
         "  }\n"
+        "  addEventListener(){}\n"
+        "  replaceWith(node){ if(!this.parentNode) return; const i=this.parentNode.children.indexOf(this); if(i>=0){ node.parentNode=this.parentNode; this.parentNode.children.splice(i,1,node); this.parentNode=null; } }\n"
         "  setAttribute(name,value){ this.attributes[name]=String(value); }\n"
         "  getAttribute(name){ return this.attributes[name] ?? null; }\n"
         "  querySelectorAll(selector){\n"
@@ -131,15 +154,11 @@ def _run_real_smd_media_cases() -> dict:
         "  return { body: { firstChild: host } };\n"
         "} };\n"
         f"{helpers}\n"
-        "function renderChunks(chunks){\n"
+        "function renderChunks(chunks, mode){\n"
         "  postProcessCalls = 0; playbackCalls = 0;\n"
         "  const root=document.createElement('div');\n"
-        "  const renderer=smd.default_renderer(root);\n"
-        "  const baseAddText=renderer.add_text;\n"
-        "  renderer.add_text=(data,text)=>{\n"
-        "    const parent=data&&data.nodes&&data.nodes[data.index];\n"
-        "    _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, _smdParserKey(data, root));\n"
-        "  };\n"
+        "  const baseRenderer=mode==='fade' ? _streamFadeRenderer(root) : _safeSmdRenderer(root);\n"
+        "  const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);\n"
         "  const parser=smd.parser(renderer);\n"
         "  _smdBindParserIdentity(renderer, parser, root);\n"
         "  for(const chunk of chunks) smd.parser_write(parser, chunk);\n"
@@ -148,12 +167,13 @@ def _run_real_smd_media_cases() -> dict:
         "  _smdMediaTailClear(parser);\n"
         "  return { html: root.outerHTML, text: root.textContent, postProcessCalls, playbackCalls };\n"
         "}\n"
+        "function renderModes(chunks){ return { safe: renderChunks(chunks, 'safe'), fade: renderChunks(chunks, 'fade') }; }\n"
         "const marker='MEDIA:';\n"
         "const prefixSplits={};\n"
-        "for(let i=1;i<marker.length;i++) prefixSplits[i]=renderChunks(['\\n\\n'+marker.slice(0,i), marker.slice(i)+'C:/tmp/live.png ']);\n"
-        "const refSplit=renderChunks(['MEDIA:C:/tmp/li', 've.png ']);\n"
-        "const finalExtensionless=renderChunks(['MEDIA:https://fal.media/generated']);\n"
-        "const pdf=renderChunks(['MEDIA:C:/tmp/report.pdf ']);\n"
+        "for(let i=1;i<marker.length;i++) prefixSplits[i]=renderModes(['\\n\\n'+marker.slice(0,i), marker.slice(i)+'C:/tmp/live.png ']);\n"
+        "const refSplit=renderModes(['MEDIA:C:/tmp/li', 've.png ']);\n"
+        "const finalExtensionless=renderModes(['MEDIA:https://fal.media/generated']);\n"
+        "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
         "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf}));\n"
     )
     completed = subprocess.run(
@@ -238,6 +258,8 @@ class TestSmdMediaInStream(unittest.TestCase):
         self.assertIn("const parser=parserFor(data);", block)
         self.assertIn("_SMD_MEDIA_TAIL.has(parser)", block)
         self.assertIn("||hasMediaTail", block)
+        self.assertIn("hasMediaPrefixTail", block)
+        self.assertIn("_smdMediaPrefixTail(value)", block)
 
     def test_media_interceptor_handles_token_at_chunk_start(self):
         # The smd parser can split chunks mid-text. The fix must handle MEDIA
@@ -462,31 +484,35 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
         cls.cases = _run_real_smd_media_cases()
 
     def test_real_smd_parser_buffers_every_media_prefix_split(self):
-        for split, result in self.cases["prefixSplits"].items():
-            with self.subTest(split=split):
+        for split, modes in self.cases["prefixSplits"].items():
+            for mode, result in modes.items():
+                with self.subTest(split=split, mode=mode):
+                    self.assertIn('class="media-node"', result["html"])
+                    self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
+                    self.assertNotIn("MEDIA:", result["text"])
+
+    def test_real_smd_parser_buffers_partial_ref_until_complete(self):
+        for mode, result in self.cases["refSplit"].items():
+            with self.subTest(mode=mode):
                 self.assertIn('class="media-node"', result["html"])
                 self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
                 self.assertNotIn("MEDIA:", result["text"])
-
-    def test_real_smd_parser_buffers_partial_ref_until_complete(self):
-        result = self.cases["refSplit"]
-        self.assertIn('class="media-node"', result["html"])
-        self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
-        self.assertNotIn("MEDIA:", result["text"])
-        self.assertNotIn("C:/tmp/li", result["text"])
+                self.assertNotIn("C:/tmp/li", result["text"])
 
     def test_real_smd_parser_flushes_final_extensionless_url(self):
-        result = self.cases["finalExtensionless"]
-        self.assertIn('class="media-node"', result["html"])
-        self.assertIn('data-ref="https://fal.media/generated"', result["html"])
-        self.assertNotIn("MEDIA:", result["text"])
+        for mode, result in self.cases["finalExtensionless"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('class="media-node"', result["html"])
+                self.assertIn('data-ref="https://fal.media/generated"', result["html"])
+                self.assertNotIn("MEDIA:", result["text"])
 
     def test_real_smd_parser_live_pdf_placeholder_is_hydrated(self):
-        result = self.cases["pdf"]
-        self.assertIn('class="pdf-preview-load"', result["html"])
-        self.assertIn('data-path="C:/tmp/report.pdf"', result["html"])
-        self.assertGreaterEqual(result["postProcessCalls"], 1)
-        self.assertGreaterEqual(result["playbackCalls"], 1)
+        for mode, result in self.cases["pdf"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('class="pdf-preview-load"', result["html"])
+                self.assertIn('data-path="C:/tmp/report.pdf"', result["html"])
+                self.assertGreaterEqual(result["postProcessCalls"], 1)
+                self.assertGreaterEqual(result["playbackCalls"], 1)
 
 
 if __name__ == "__main__":

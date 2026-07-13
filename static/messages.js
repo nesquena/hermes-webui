@@ -4271,13 +4271,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // word in a stream-fade-word span, leaving MEDIA: paths visible.
       const parser=parserFor(data);
       const hasMediaTail=!!(_SMD_MEDIA_TAIL&&parser&&_SMD_MEDIA_TAIL.has&&_SMD_MEDIA_TAIL.has(parser));
-      if(/MEDIA:/.test(String(text||''))||hasMediaTail){
+      const value=String(text||'');
+      const hasMediaPrefixTail=!!_smdMediaPrefixTail(value);
+      if(/MEDIA:/.test(value)||hasMediaTail||hasMediaPrefixTail){
         _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser);
         return;
       }
       const frag=document.createDocumentFragment();
       const wordRe=/(\S+)(\s*)/g;
-      const value=String(text||'');
       const reduceMotion=_streamFadeReduceMotionEnabled();
       const appendStartedAt=performance.now();
       let last=0, match, changed=false;
