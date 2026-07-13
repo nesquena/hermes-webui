@@ -482,6 +482,23 @@ function _setSessionViewedCount(sid, messageCount = 0) {
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
   counts[sid] = next;
   _saveSessionViewedCounts();
+
+  const completionUnread = _getSessionCompletionUnread();
+  const existingMarker = completionUnread[sid];
+  const isManualUnread =
+    existingMarker &&
+    typeof existingMarker === 'object' &&
+    !Array.isArray(existingMarker) &&
+    existingMarker.manual;
+  if (
+    isManualUnread &&
+    typeof _isSessionActivelyViewedForList === 'function' &&
+    _isSessionActivelyViewedForList(sid)
+  ) {
+    // Keep explicit manual-unread markers when the session is actively viewed.
+    return;
+  }
+
   // If the viewed count is now current, any prior completion-unread marker is
   // stale — clear it so _hasUnreadForSession doesn't short-circuit (#3020).
   _clearSessionCompletionUnread(sid);
@@ -514,6 +531,7 @@ function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   // Cron markers carry source+profile so profile switches can clear only that
   // cross-profile leak without wiping ordinary chat completion unread (#5960).
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    if (meta.manual) entry.manual = true;
     if (meta.source) entry.source = String(meta.source);
     if (typeof meta.profile === 'string' && meta.profile.trim()) {
       entry.profile = meta.profile.trim();
@@ -553,7 +571,7 @@ function _markSessionUnread(session) {
   if (!Number.isFinite(count) && S.session && S.session.session_id === sid) {
     count = Number(S.session.message_count);
   }
-  _markSessionCompletionUnread(sid, Number.isFinite(count) ? count : 0);
+  _markSessionCompletionUnread(sid, Number.isFinite(count) ? count : 0, {manual: true});
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   if (typeof showToast === 'function') showToast(t('session_marked_unread'));
 }
