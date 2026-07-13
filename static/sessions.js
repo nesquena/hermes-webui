@@ -495,7 +495,15 @@ function _setSessionViewedCount(sid, messageCount = 0) {
     typeof _isSessionActivelyViewedForList === 'function' &&
     _isSessionActivelyViewedForList(sid)
   ) {
-    // Keep explicit manual-unread markers when the session is actively viewed.
+    // Keep explicit manual-unread markers for the first active-session reconcile
+    // immediately after the user marks unread, then allow explicit consume on
+    // subsequent active-session reconciles.
+    if (existingMarker.manual_pending === true) {
+      existingMarker.manual_pending = false;
+      _saveSessionCompletionUnread();
+      return;
+    }
+    _clearSessionCompletionUnread(sid);
     return;
   }
 
@@ -531,7 +539,10 @@ function _markSessionCompletionUnread(sid, messageCount = 0, meta = null) {
   // Cron markers carry source+profile so profile switches can clear only that
   // cross-profile leak without wiping ordinary chat completion unread (#5960).
   if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
-    if (meta.manual) entry.manual = true;
+    if (meta.manual) {
+      entry.manual = true;
+      entry.manual_pending = true;
+    }
     if (meta.source) entry.source = String(meta.source);
     if (typeof meta.profile === 'string' && meta.profile.trim()) {
       entry.profile = meta.profile.trim();
