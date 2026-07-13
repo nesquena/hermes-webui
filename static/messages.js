@@ -114,6 +114,83 @@ function _chatPayloadModelState(){
   return {model,model_provider:_chatPayloadModelProvider(model)};
 }
 
+const _FAST_MODE_STORAGE_KEY='hermes-webui-fast-mode-enabled';
+let _fastModeCapabilityEnabled=false;
+
+function _isFastModeEnabled(){
+  if(!_fastModeCapabilityEnabled)return false;
+  try{return localStorage.getItem(_FAST_MODE_STORAGE_KEY)==='1';}
+  catch(_){return false;}
+}
+
+async function _refreshFastModeCapability(){
+  try{
+    const data=await api('/api/fast/health');
+    _fastModeCapabilityEnabled=!!(data&&data.fast_mode&&data.fast_mode.enabled);
+  }catch(_){
+    _fastModeCapabilityEnabled=false;
+  }
+  syncFastModePill();
+}
+
+function syncFastModePill(){
+  const btn=$('fastModePill');
+  if(!btn)return;
+  const enabled=_isFastModeEnabled();
+  btn.disabled=!_fastModeCapabilityEnabled;
+  btn.classList.toggle('active',enabled);
+  btn.setAttribute('aria-pressed',enabled?'true':'false');
+  btn.setAttribute('aria-disabled',_fastModeCapabilityEnabled?'false':'true');
+  btn.title=!_fastModeCapabilityEnabled
+    ? 'Fast mode is disabled by this WebUI deployment'
+    : enabled
+      ? 'Fast mode on: sends a short foreground answer and starts a background follow-up'
+      : 'Fast mode: short foreground answer plus background follow-up';
+}
+
+function toggleFastMode(){
+  if(!_fastModeCapabilityEnabled){
+    if(typeof showToast==='function')showToast('Fast mode is disabled by this WebUI deployment',1800);
+    return;
+  }
+  const next=!_isFastModeEnabled();
+  try{localStorage.setItem(_FAST_MODE_STORAGE_KEY,next?'1':'0');}catch(_){}
+  syncFastModePill();
+  if(typeof showToast==='function')showToast(next?'Fast mode on':'Fast mode off',1800);
+}
+
+function _fastModeBackgroundPrompt(prompt){
+  return [
+    'Fast mode background follow-up for the user\'s latest message.',
+    '',
+    'User message:',
+    prompt,
+    '',
+    'Do the deeper check that was intentionally skipped by the fast foreground answer. Use tools only when they materially improve the answer. Return a concise follow-up that the parent conversation can append as a background result. If no deeper work is needed, say that briefly.',
+  ].join('\n');
+}
+
+async function _launchFastModeBackground(parentSid,prompt){
+  if(!parentSid||!String(prompt||'').trim())return;
+  try{
+    const r=await api('/api/background',{method:'POST',body:JSON.stringify({session_id:parentSid,prompt:_fastModeBackgroundPrompt(prompt)})});
+    if(r&&r.error){if(typeof showToast==='function')showToast(r.error);return;}
+    if(r&&r.task_id){
+      if(typeof showBackgroundBadge==='function')showBackgroundBadge(r.task_id);
+      if(typeof startBackgroundPolling==='function')startBackgroundPolling(parentSid,r.task_id,prompt);
+    }
+  }catch(e){
+    const label=(typeof t==='function'&&t('bg_failed'))||'Background task failed: ';
+    if(typeof showToast==='function')showToast(label+(e&&e.message||e));
+  }
+}
+
+if(typeof document!=='undefined'){
+  const _initFastModeCapability=()=>{ syncFastModePill(); void _refreshFastModeCapability(); };
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',_initFastModeCapability,{once:true});
+  else setTimeout(_initFastModeCapability,0);
+}
+
 function _deferStreamErrorIfOffline(){
   if(typeof isOfflineBannerVisible==='function' && isOfflineBannerVisible()){
     setComposerStatus(t('offline_stream_waiting'));
@@ -1623,6 +1700,8 @@ async function send(){
     }
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
+  const fastModeActive=!!(msgText&&typeof _isFastModeEnabled==='function'&&_isFastModeEnabled());
+  const fastModeOriginalPrompt=msgText;
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
   // the re-entrant double-send race AND avoid clobbering a draft typed during the
@@ -1745,6 +1824,7 @@ async function send(){
       model_provider:_modelState.model_provider,
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
+      fast_mode:fastModeActive||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined
     })});
@@ -1886,6 +1966,9 @@ async function send(){
       void renderSessionList();
     }
   });
+  if(fastModeActive){
+    void _launchFastModeBackground(activeSid,fastModeOriginalPrompt);
+  }
 
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
@@ -7230,6 +7313,9 @@ function startSessionStream(sid) {
         }
       } catch (_) {}
     });
+    es.addEventListener('background_task_updated', e => {
+      void _handleBackgroundTaskUpdatedEvent(e, sid);
+    });
     // ── Defect B: live-view of server-initiated (Option Z) turns ──────────
     // The drain thread starts the wakeup turn server-side and the server
     // fans a `server_turn_started` {stream_id} frame onto this per-session
@@ -7331,6 +7417,37 @@ function stopSessionStream() {
     _sessionEventSource = null;
   }
   _sessionStreamSessionId = null;
+}
+
+async function _reloadCurrentSessionAfterBackgroundUpdate(sid) {
+  if (!sid || !S.session || S.session.session_id !== sid) return;
+  // The persisted transcript intentionally excludes the live INFLIGHT tail.
+  // Let the normal stream-finalization/load pipeline reconcile it before a
+  // background event replaces S.messages with an older server checkpoint.
+  if (S.busy || S.activeStreamId || (typeof INFLIGHT !== 'undefined' && INFLIGHT[sid])) return;
+  try {
+    const data = await api('/api/session?session_id=' + encodeURIComponent(sid));
+    if (!S.session || S.session.session_id !== sid || !data || !data.session) return;
+    S.messages = data.session.messages || [];
+    S.session = Object.assign(S.session || {}, data.session);
+    renderMessages({preserveScroll:true});
+  } catch (_) {}
+}
+
+async function _handleBackgroundTaskUpdatedEvent(e, subscribedSid) {
+  try {
+    const d = JSON.parse((e && e.data) || '{}');
+    const sid = d.session_id || subscribedSid;
+    const taskId = d.task_id ? String(d.task_id) : '';
+    if (!sid || sid !== subscribedSid) return;
+    await _reloadCurrentSessionAfterBackgroundUpdate(sid);
+    const status = String(d.status || '').toLowerCase();
+    if (taskId && ['done','failed','cancelled','interrupted_by_restart'].includes(status)) {
+      hideBackgroundBadge(taskId);
+      if (_bgPollTimers[taskId]) { clearTimeout(_bgPollTimers[taskId]); delete _bgPollTimers[taskId]; }
+      showToast(t('bg_complete'));
+    }
+  } catch (_) {}
 }
 
 // Shared bg_task_complete handler — invoked from BOTH the in-turn STREAMS
@@ -8291,17 +8408,18 @@ function startBackgroundPolling(parentSid, taskId, prompt){
   if(_bgPollTimers[taskId]) return;
   async function _poll(){
     try{
-      const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
-      if(r&&r.results){
-        for(const res of r.results){
-          if(res.task_id===taskId){
-            hideBackgroundBadge(taskId);
-            delete _bgPollTimers[taskId];
-            const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
-            S.messages.push(msg);
-            renderMessages({preserveScroll:true});
-            showToast(t('bg_complete'));
-            return;
+      const r=await api('/api/background/tasks?session_id='+encodeURIComponent(parentSid));
+      if(r&&Array.isArray(r.tasks)){
+        for(const task of r.tasks){
+          if(task.task_id===taskId){
+            const status=String(task.status||'').toLowerCase();
+            if(['done','failed','cancelled','interrupted_by_restart'].includes(status)){
+              hideBackgroundBadge(taskId);
+              delete _bgPollTimers[taskId];
+              await _reloadCurrentSessionAfterBackgroundUpdate(parentSid);
+              showToast(t('bg_complete'));
+              return;
+            }
           }
         }
       }

@@ -1999,6 +1999,12 @@
   .yolo-pill:active{transform:translateY(0);}
   .yolo-pill-icon{font-size:12px;}
   .yolo-pill-label{font-size:10px;}
+  .fast-mode-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:rgba(59,130,246,0.10);color:var(--muted);border:1px solid var(--border2);cursor:pointer;transition:background .15s,border-color .15s,color .15s,transform .15s;line-height:1.4;white-space:nowrap;}
+  .fast-mode-pill:hover{background:rgba(59,130,246,0.18);border-color:rgba(96,165,250,0.45);color:var(--text);transform:translateY(-1px);}
+  .fast-mode-pill:active{transform:translateY(0);}
+  .fast-mode-pill.active{background:rgba(59,130,246,0.18);border-color:rgba(96,165,250,0.55);color:#60a5fa;}
+  .fast-mode-pill-icon{font-size:12px;}
+  .fast-mode-pill-label{font-size:10px;}
   /* ── Queue flyout (same slide-up pattern as approval-card) ── */
   .queue-card{position:absolute;left:0;right:0;bottom:0;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;z-index:2;}
   .queue-card.visible{pointer-events:auto;}

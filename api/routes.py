@@ -11882,6 +11882,11 @@ def handle_get(handler, parsed) -> bool:
             },
         )
 
+    if parsed.path == "/api/fast/health":
+        from api.fast_mode import health_payload
+
+        return j(handler, health_payload())
+
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
 
@@ -12797,8 +12802,20 @@ def handle_get(handler, parsed) -> bool:
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
-        from api.background import get_results
-        return j(handler, {"results": get_results(sid)})
+        from api.background import durable_background_status, get_results
+        status = durable_background_status(sid)
+        # Legacy clients expect a consumptive `results` array. Keep it for now,
+        # but durable `tasks` remains available and idempotent for Issue 39's
+        # parent-owned transcript/card migration.
+        status["results"] = get_results(sid)
+        return j(handler, status)
+
+    if parsed.path == "/api/background/tasks":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        from api.background import durable_background_status
+        return j(handler, durable_background_status(sid))
 
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
@@ -14919,6 +14936,22 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/btw":
         return _handle_btw(handler, body)
+
+    if parsed.path == "/api/background/cancel":
+        try:
+            require(body, "session_id")
+            require(body, "task_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        from api.background import cancel_background_task
+        result = cancel_background_task(
+            str(body.get("session_id") or ""),
+            str(body.get("task_id") or ""),
+            reason=str(body.get("reason") or "cancel_requested"),
+        )
+        if result.get("error") == "task not found":
+            return bad(handler, "Task not found", 404)
+        return j(handler, result)
 
     if parsed.path == "/api/background":
         return _handle_background(handler, body)
@@ -20435,7 +20468,12 @@ def _handle_background(handler, body):
 
     thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
     thr.start()
-    return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
+    return j(handler, {
+        "task_id": task_id,
+        "stream_id": stream_id,
+        "session_id": bg.session_id,
+        "parent_session_id": parent_sid,
+    })
 
 
 def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None, source: str = "webui") -> None:
@@ -20656,6 +20694,7 @@ def _start_chat_stream_for_session(
     goal_related: bool = False,
     source: str = "webui",
     moa_config=None,
+    fast_mode: bool = False,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -20778,7 +20817,7 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related, "fast_mode": bool(fast_mode)}
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(
@@ -20867,6 +20906,7 @@ def _start_run(
     route: str,
     diag=None,
     moa_config=None,
+    fast_mode: bool = False,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -20907,6 +20947,7 @@ def _start_run(
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                fast_mode=fast_mode,
             )
 
         def _legacy_adapter_factory():
@@ -20929,7 +20970,7 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata={"route": route, "fast_mode": bool(fast_mode)},
                 )
             )
         except NotImplementedError as exc:
@@ -20947,6 +20988,7 @@ def _start_run(
         diag=diag,
         source=source,
         moa_config=moa_config,
+        fast_mode=fast_mode,
     )
 
 
@@ -21721,6 +21763,8 @@ def _handle_chat_start(handler, body, diag=None):
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
         # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
+        from api.fast_mode import request_enabled as _fast_mode_request_enabled
+
         start_run_kwargs = {
             "msg": msg,
             "attachments": attachments,
@@ -21731,6 +21775,7 @@ def _handle_chat_start(handler, body, diag=None):
             "source": "webui",
             "route": "/api/chat/start",
             "diag": diag,
+            "fast_mode": _fast_mode_request_enabled(body.get("fast_mode")),
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config

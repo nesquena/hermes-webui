@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+
+def _prepare_isolated_session_store(tmp_path, monkeypatch):
+    import api.background as bg
+    import api.config as cfg
+    import api.models as models
+
+    monkeypatch.setattr(bg, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    monkeypatch.setattr(cfg, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SESSION_INDEX_FILE", tmp_path / "_index.json")
+    bg._BACKGROUND_TASKS.clear()
+    cfg.STREAMS.clear()
+    cfg.ACTIVE_RUNS.clear()
+    return bg, cfg, models
+
+
+def test_track_and_complete_background_writes_durable_sidecar(tmp_path, monkeypatch):
+    import api.background as bg
+
+    monkeypatch.setattr(bg, "SESSION_DIR", tmp_path)
+    bg._BACKGROUND_TASKS.clear()
+
+    parent = "parent-session-durable"
+    bg.track_background(parent, "bg-session", "stream-1", "task-1", "deep follow-up")
+
+    sidecar = tmp_path / f"{parent}.background_tasks.json"
+    assert sidecar.exists()
+    raw = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == 1
+    assert raw["parent_session_id"] == parent
+    assert raw["tasks"][0]["status"] == "running"
+    assert raw["tasks"][0]["prompt_preview"] == "deep follow-up"
+
+    bg.complete_background(parent, "task-1", "deeper answer")
+    durable = bg.list_durable_background_tasks(parent)
+    assert len(durable) == 1
+    assert durable[0]["task_id"] == "task-1"
+    assert durable[0]["status"] == "done"
+    assert durable[0]["answer"] == "deeper answer"
+    assert durable[0]["completed_at"] is not None
+
+    # Legacy polling still consumes the in-memory done result, but durable state
+    # remains available for the forthcoming parent-transcript/card migration.
+    assert bg.get_results(parent)[0]["answer"] == "deeper answer"
+    assert bg.get_results(parent) == []
+    assert bg.list_durable_background_tasks(parent)[0]["answer"] == "deeper answer"
+    assert bg.get_durable_background_task(parent, "task-1")["answer"] == "deeper answer"
+    assert bg.get_durable_background_task(parent, "missing") is None
+
+    status = bg.durable_background_status(parent)
+    assert status["ok"] is True
+    assert status["session_id"] == parent
+    assert len(status["tasks"]) == 1
+    assert status["tasks"][0]["status"] == "done"
+
+
+def test_durable_task_prompt_preview_is_bounded(tmp_path, monkeypatch):
+    import api.background as bg
+
+    monkeypatch.setattr(bg, "SESSION_DIR", tmp_path)
+    bg._BACKGROUND_TASKS.clear()
+
+    parent = "parent-session-preview"
+    bg.track_background(parent, "bg-session", "stream-1", "task-1", "x" * 600)
+
+    task = bg.list_durable_background_tasks(parent)[0]
+    assert len(task["prompt_preview"]) < 540
+    assert task["prompt_preview"].endswith("…(truncated)")
+
+
+def test_background_tasks_route_is_registered():
+    routes = Path("api/routes.py").read_text(encoding="utf-8")
+    assert 'parsed.path == "/api/background/tasks"' in routes
+    assert "durable_background_status" in routes
+    assert 'status["results"] = get_results(sid)' in routes
+
+
+def test_durable_task_store_rejects_unsafe_parent_session_id(tmp_path, monkeypatch):
+    import api.background as bg
+
+    monkeypatch.setattr(bg, "SESSION_DIR", tmp_path)
+    with pytest.raises(ValueError):
+        bg.track_background("../bad", "bg", "stream", "task", "prompt")
+
+
+def test_background_parent_session_card_and_result_are_idempotent(tmp_path, monkeypatch):
+    bg, _cfg, models = _prepare_isolated_session_store(tmp_path, monkeypatch)
+
+    parent = models.Session(
+        session_id="parent-session-card",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "please do a deeper pass"},
+            {"role": "assistant", "content": "Short answer first."},
+        ],
+    )
+    parent.context_messages = list(parent.messages)
+    parent.save()
+
+    bg.track_background(parent.session_id, "bg-session", "stream-1", "task-card", "deep follow-up")
+
+    reloaded = models.Session.load(parent.session_id)
+    assert reloaded is not None
+    assert [m.get("_message_id") for m in reloaded.messages if isinstance(m, dict)].count("bgcard_task-card") == 1
+    card = next(m for m in reloaded.messages if m.get("_message_id") == "bgcard_task-card")
+    assert card["_background_task"]["status"] == "running"
+    assert bg.get_durable_background_task(parent.session_id, "task-card")["parent_append_status"] == "card_written"
+
+    bg.complete_background(parent.session_id, "task-card", "deeper answer")
+    # Repeated completion/status projection must update in place, not append duplicates.
+    bg.complete_background(parent.session_id, "task-card", "deeper answer")
+
+    reloaded = models.Session.load(parent.session_id)
+    assert reloaded is not None
+    message_ids = [m.get("_message_id") for m in reloaded.messages if isinstance(m, dict)]
+    assert message_ids.count("bgcard_task-card") == 1
+    assert message_ids.count("bgresult_task-card") == 1
+    card = next(m for m in reloaded.messages if m.get("_message_id") == "bgcard_task-card")
+    result = next(m for m in reloaded.messages if m.get("_message_id") == "bgresult_task-card")
+    assert card["_background_task"]["status"] == "done"
+    assert card["_background_task"]["result_message_id"] == "bgresult_task-card"
+    assert result["_background_result"]["task_id"] == "task-card"
+    assert "deeper answer" in result["content"]
+    assert bg.get_durable_background_task(parent.session_id, "task-card")["parent_append_status"] == "result_written"
+
+
+def test_background_parent_append_defers_while_parent_stream_is_live(tmp_path, monkeypatch):
+    bg, cfg, models = _prepare_isolated_session_store(tmp_path, monkeypatch)
+
+    parent = models.Session(
+        session_id="parent-session-active",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "keep chatting"}],
+        active_stream_id="parent-live-stream",
+    )
+    parent.save()
+    cfg.STREAMS["parent-live-stream"] = object()
+
+    bg.track_background(parent.session_id, "bg-session", "stream-1", "task-live", "deep follow-up")
+    reloaded = models.Session.load(parent.session_id)
+    assert reloaded is not None
+    assert [m for m in reloaded.messages if isinstance(m, dict) and m.get("_background_task")] == []
+    assert bg.get_durable_background_task(parent.session_id, "task-live")["parent_append_status"] == "card_pending"
+
+    bg.complete_background(parent.session_id, "task-live", "deeper answer")
+    reloaded = models.Session.load(parent.session_id)
+    assert reloaded is not None
+    assert [m for m in reloaded.messages if isinstance(m, dict) and (m.get("_background_task") or m.get("_background_result"))] == []
+    assert bg.get_durable_background_task(parent.session_id, "task-live")["parent_append_status"] == "result_pending"
+
+    cfg.STREAMS.clear()
+    reloaded.active_stream_id = None
+    reloaded.save()
+    assert bg.append_or_queue_background_parent_update(parent.session_id, "task-live", "done") == "result_written"
+    reloaded = models.Session.load(parent.session_id)
+    assert reloaded is not None
+    message_ids = [m.get("_message_id") for m in reloaded.messages if isinstance(m, dict)]
+    assert "bgcard_task-live" in message_ids
+    assert "bgresult_task-live" in message_ids
+
+
+def test_background_parent_pending_drain_preserves_current_foreground_turn(tmp_path, monkeypatch):
+    bg, cfg, models = _prepare_isolated_session_store(tmp_path, monkeypatch)
+
+    parent = models.Session(
+        session_id="parent-session-drain",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "keep chatting"}],
+        active_stream_id="parent-live-stream",
+    )
+    parent.save()
+    cfg.STREAMS["parent-live-stream"] = object()
+
+    bg.track_background(parent.session_id, "bg-session", "stream-1", "task-drain", "deep follow-up")
+    bg.complete_background(parent.session_id, "task-drain", "deeper answer")
+    assert bg.get_durable_background_task(parent.session_id, "task-drain")["parent_append_status"] == "result_pending"
+
+    # Simulate the streaming finalizer's in-memory foreground merge before the
+    # final save: loading from disk inside the drain would drop this answer.
+    finalizing = models.Session.load(parent.session_id)
+    assert finalizing is not None
+    cfg.STREAMS.clear()
+    finalizing.active_stream_id = None
+    finalizing.messages.append({"role": "assistant", "content": "Foreground answer."})
+
+    assert bg.drain_pending_background_parent_updates(finalizing) == 1
+    finalizing.save()
+
+    reloaded = models.Session.load(parent.session_id)
+    assert reloaded is not None
+    contents = [m.get("content") for m in reloaded.messages if isinstance(m, dict)]
+    assert "Foreground answer." in contents
+    message_ids = [m.get("_message_id") for m in reloaded.messages if isinstance(m, dict)]
+    assert message_ids.count("bgcard_task-drain") == 1
+    assert message_ids.count("bgresult_task-drain") == 1
+    assert bg.get_durable_background_task(parent.session_id, "task-drain")["parent_append_status"] == "result_written"
+
+    assert bg.drain_pending_background_parent_updates(reloaded) == 0
+
+
+def test_background_task_updates_emit_refetch_nudges(tmp_path, monkeypatch):
+    bg, _cfg, models = _prepare_isolated_session_store(tmp_path, monkeypatch)
+    import api.background_process as background_process
+
+    emitted = []
+    monkeypatch.setattr(
+        background_process,
+        "emit_session_event",
+        lambda sid, event, payload: emitted.append((sid, event, dict(payload))) or 1,
+    )
+
+    parent = models.Session(
+        session_id="parent-session-event",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "please do a deeper pass"}],
+    )
+    parent.save()
+
+    bg.track_background(parent.session_id, "bg-session", "stream-1", "task-event", "deep follow-up")
+    bg.complete_background(parent.session_id, "task-event", "deeper answer")
+
+    assert [event for _sid, event, _payload in emitted] == [
+        "background_task_updated",
+        "background_task_updated",
+    ]
+    assert emitted[0][2]["status"] == "running"
+    assert emitted[0][2]["parent_append_status"] == "card_written"
+    assert emitted[1][2]["status"] == "done"
+    assert emitted[1][2]["parent_append_status"] == "result_written"
+    assert emitted[1][2]["parent_result_message_id"] == "bgresult_task-event"
+
+
+def test_cancel_background_task_is_durable_idempotent_and_not_overwritten(tmp_path, monkeypatch):
+    bg, _cfg, models = _prepare_isolated_session_store(tmp_path, monkeypatch)
+    import api.background_process as background_process
+    import api.streaming as streaming
+
+    emitted = []
+    cancelled_streams = []
+    monkeypatch.setattr(
+        background_process,
+        "emit_session_event",
+        lambda sid, event, payload: emitted.append((sid, event, dict(payload))) or 1,
+    )
+    monkeypatch.setattr(streaming, "cancel_stream", lambda stream_id: cancelled_streams.append(stream_id) or True)
+
+    parent = models.Session(
+        session_id="parent-session-cancel",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "please do a deeper pass"}],
+    )
+    parent.save()
+
+    bg.track_background(parent.session_id, "bg-session", "stream-cancel", "task-cancel", "deep follow-up")
+    result = bg.cancel_background_task(parent.session_id, "task-cancel")
+
+    assert result["ok"] is True
+    assert result["status"] == "cancelled"
+    assert result["cancel_requested"] is True
+    assert cancelled_streams == ["stream-cancel"]
+    durable = bg.get_durable_background_task(parent.session_id, "task-cancel")
+    assert durable["status"] == "cancelled"
+    assert durable["parent_append_status"] == "result_written"
+    assert emitted[-1][1] == "background_task_updated"
+    assert emitted[-1][2]["status"] == "cancelled"
+
+    # A late hidden-worker completion must not overwrite a cancellation.
+    bg.complete_background(parent.session_id, "task-cancel", "late answer")
+    durable = bg.get_durable_background_task(parent.session_id, "task-cancel")
+    assert durable["status"] == "cancelled"
+    assert durable["answer"] == "(background task cancelled)"
+
+    assert bg.cancel_background_task(parent.session_id, "task-cancel") == {
+        "ok": True,
+        "idempotent": True,
+        "status": "cancelled",
+        "session_id": parent.session_id,
+        "task_id": "task-cancel",
+    }
+    assert bg.get_results(parent.session_id) == []
+
+
+def test_background_cancel_route_is_registered():
+    routes = Path("api/routes.py").read_text(encoding="utf-8")
+    assert 'parsed.path == "/api/background/cancel"' in routes
+    assert "cancel_background_task" in routes
+
+
+def test_background_polling_refetches_durable_session_instead_of_appending_local_only_result():
+    src = Path("static/messages.js").read_text(encoding="utf-8")
+    idx = src.find("function startBackgroundPolling")
+    assert idx > -1
+    body = src[idx:idx + 1400]
+    assert "/api/background/tasks" in body
+    assert "/api/background/status" not in body
+    assert "S.messages.push" not in body
+    assert "_reloadCurrentSessionAfterBackgroundUpdate" in body
