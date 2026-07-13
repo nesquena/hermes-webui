@@ -435,7 +435,7 @@ class TestSmdMediaInStream(unittest.TestCase):
             MESSAGES_JS.index("function _anchorProseIncrementalNode"):
             MESSAGES_JS.index("function _clearAnchorProseIncrementalNode")
         ].replace(" ", "")
-        self.assertIn("_smdBindParserIdentity(renderer,parser,body)", anchor)
+        self.assertIn("_smdBindParserIdentity(renderer,st.parser,body)", anchor)
         self.assertNotIn("(data && data.nodes && data.nodes[data.index]) || __SMD_PARSER_FALLBACK", MESSAGES_JS)
 
     def test_smd_end_parser_clears_fallback_media_tail(self):

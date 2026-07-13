@@ -3720,7 +3720,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{
       let st=_anchorProseSmdCache.get(key);
       // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
-      // rebuild the parser+node from scratch, mirroring _smdWrite's guard.
+      // rebuild the parser+node from scratch, mirroring the _smdWrite guard.
       if(st && st.writtenText && !value.startsWith(st.writtenText)) st=null;
       if(st && st.fade!==fade) st=null;
       if(!st){
@@ -3733,9 +3733,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         node.appendChild(body);
         const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body);
         const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
-        const parser=window.smd.parser(renderer);
-        _smdBindParserIdentity(renderer,parser,body);
-        st={node,parser,writtenText:'',fade};
+        st={node,parser:window.smd.parser(renderer),writtenText:'',fade};
+        _smdBindParserIdentity(renderer,st.parser,body);
         _anchorProseSmdCache.set(key,st);
         // Bound memory across turns: keys embed the stream id, so stale entries
         // from finished streams age out here.
