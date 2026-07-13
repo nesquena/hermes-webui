@@ -26,10 +26,12 @@ def _function(source, name):
 
 
 def _run_harness():
+    provider_helper = _function(UI_JS, "_getOptionProviderId")
     identity = _function(UI_JS, "_modelPickerOptionIdentity")
     helper = _function(UI_JS, "_deduplicateModelPickerOptions")
     live_add = _function(UI_JS, "_addLiveModelsToSelect")
     script = f"""
+{provider_helper}
 {identity}
 {helper}
 {live_add}
@@ -87,6 +89,9 @@ const sameSuffix=makeSelect();
 addCatalog(sameSuffix,'vendor-a/deepseek-v4-pro');
 addCatalog(sameSuffix,'vendor-b/catalog/deepseek-v4-pro');
 sameSuffix.value='vendor-a/deepseek-v4-pro';
+const sameGroupColonSuffix=makeSelect();
+_addLiveModelsToSelect('custom:llm-proxy',[{{id:'@custom:llm-proxy:deepseek/deepseek-r1:free',label:'DeepSeek R1 Free'}}],sameGroupColonSuffix);
+_addLiveModelsToSelect('custom:llm-proxy',[{{id:'@custom:llm-proxy:meta-llama/llama-3.3:free',label:'Llama 3.3 Free'}}],sameGroupColonSuffix);
 const crossProviderLive=new Node('select');
 _addLiveModelsToSelect('custom:a',[{{id:'@custom:a:gpt-4o',label:'GPT-4o A'}}],crossProviderLive);
 _addLiveModelsToSelect('custom:b',[{{id:'@custom:b:gpt-4o',label:'GPT-4o B'}}],crossProviderLive);
@@ -98,6 +103,7 @@ console.log(JSON.stringify({{
   catalogFirst:snapshot(catalogFirst),
   selectedBare:snapshot(selectedBare),
   sameSuffix:snapshot(sameSuffix),
+  sameGroupColonSuffix:snapshot(sameGroupColonSuffix),
   crossProviderLive:snapshot(crossProviderLive),
   unnamespaced:snapshot(unnamespaced),
 }}));
@@ -133,6 +139,16 @@ def test_same_suffix_models_in_one_group_do_not_collapse():
     assert _run_harness()["sameSuffix"] == {
         "groups": [["vendor-a/deepseek-v4-pro", "vendor-b/catalog/deepseek-v4-pro"]],
         "selected": "vendor-a/deepseek-v4-pro",
+    }
+
+
+def test_same_group_colon_suffixed_proxy_models_remain_distinct():
+    assert _run_harness()["sameGroupColonSuffix"] == {
+        "groups": [[
+            "@custom:llm-proxy:deepseek/deepseek-r1:free",
+            "@custom:llm-proxy:meta-llama/llama-3.3:free",
+        ]],
+        "selected": "@custom:llm-proxy:deepseek/deepseek-r1:free",
     }
 
 

@@ -2657,12 +2657,20 @@ function _providerFromModelValue(modelId){
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
   return '';
 }
-function _modelPickerOptionIdentity(modelId){
+function _modelPickerOptionIdentity(modelId, providerId){
   let value=String(modelId||'');
+  const provider=String(providerId||'').trim();
   if(value.startsWith('@')&&value.includes(':')){
-    value=value.startsWith('@custom:')
-      ? value.substring(value.lastIndexOf(':')+1)
-      : value.substring(value.indexOf(':')+1);
+    const exactPrefix=provider ? `@${provider}:` : '';
+    if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
+      value=value.substring(exactPrefix.length);
+    }else if(value.startsWith('@custom:')){
+      const namedProvider=value.substring('@custom:'.length);
+      const splitAt=namedProvider.indexOf(':');
+      value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+    }else{
+      value=value.substring(value.indexOf(':')+1);
+    }
   }
   return value.replace(/-/g,'.').toLowerCase();
 }
@@ -2673,7 +2681,7 @@ function _deduplicateModelPickerOptions(sel,selectedValue){
     const options=Array.from(group.children||[]).filter(opt=>opt&&opt.tagName==='OPTION');
     const byIdentity=new Map();
     for(const opt of options){
-      const identity=_modelPickerOptionIdentity(opt.value);
+      const identity=_modelPickerOptionIdentity(opt.value,_getOptionProviderId(opt));
       if(!identity) continue;
       if(!byIdentity.has(identity)) byIdentity.set(identity,[]);
       byIdentity.get(identity).push(opt);
@@ -3315,34 +3323,41 @@ function _addLiveModelsToSelect(provider, models, sel){
     providerGroup.dataset.provider=provider;
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  const optionIdentity=typeof _modelPickerOptionIdentity==='function'
-    ? _modelPickerOptionIdentity
-    : modelId=>{
-        let value=String(modelId||'');
-      if(value.startsWith('@')&&value.includes(':')){
-        value=value.startsWith('@custom:')
-          ? value.substring(value.lastIndexOf(':')+1)
-          : value.substring(value.indexOf(':')+1);
-      }
-        return value.split('/').pop().replace(/-/g,'.').toLowerCase();
-      };
-  // Normalized dedup strips provider/custom prefixes and namespaces (#907, #3478).
-  const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value)));
-  const hasExistingNorm=identity=>existingNorm.has(identity);
-  let added=0;
   const _ap=(window._activeProvider||'').toLowerCase();
   const _providerLower=String(provider||'').toLowerCase();
   const _isNamedCustomActiveProvider=_ap.startsWith('custom:');
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
+  // Keep existingNorm.has( within the #907 source slice.
+  const optionIdentity=typeof _modelPickerOptionIdentity==='function'
+    ? (modelId,providerId)=>_modelPickerOptionIdentity(modelId,providerId)
+    : (modelId,providerId)=>{
+        let value=String(modelId||'');
+        const provider=String(providerId||'').trim();
+      if(value.startsWith('@')&&value.includes(':')){
+        const exactPrefix=provider ? `@${provider}:` : '';
+        if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
+          value=value.substring(exactPrefix.length);
+        }else if(value.startsWith('@custom:')){
+          const namedProvider=value.substring('@custom:'.length);
+          const splitAt=namedProvider.indexOf(':');
+          value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+        }else{
+          value=value.substring(value.indexOf(':')+1);
+        }
+      }
+        return value.split('/').pop().replace(/-/g,'.').toLowerCase();
+      };
+  const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
+  let added=0;
   for(const m of models){
     let mid=m.id;
     if(_isPortalFetch && !mid.startsWith('@')){
       mid=`@${provider}:${mid}`;
     }
     if(existingIds.has(mid)) continue;
-    const identity=optionIdentity(mid);
-    if(hasExistingNorm(identity)){
-      const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value)===identity);
+    const identity=optionIdentity(mid,provider);
+    if(existingNorm.has(identity)){
+      const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value,_getOptionProviderId(o))===identity);
       if(sameGroup){
         const incomingRoutable=String(mid).startsWith('@');
         const existingRoutable=String(sameGroup.value||'').startsWith('@');
