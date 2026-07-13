@@ -7884,6 +7884,17 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     return _state_db_session_source(sid) == "subagent"
 
 
+def _session_source_marks_subagent(s) -> bool:
+    """True when a session object's source fields tag it as a delegated
+    subagent child. Works on metadata-only stubs (the source fields live in
+    the metadata prefix), so callers on hot paths can avoid a full load."""
+    src = (
+        str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
+            or getattr(s, "session_source", "") or "").strip().lower()
+    )
+    return src == "subagent"
+
+
 def _session_is_subagent_view_only(sid: str) -> bool:
     """Return True when ``sid`` is a delegated subagent child by ANY signal —
     state.db source OR a persisted WebUI sidecar tagged subagent.
@@ -7901,11 +7912,7 @@ def _session_is_subagent_view_only(sid: str) -> bool:
         s = get_session(sid)
     except Exception:
         return False
-    src = (
-        str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
-            or getattr(s, "session_source", "") or "").strip().lower()
-    )
-    return src == "subagent"
+    return _session_source_marks_subagent(s)
 
 
 def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple[bool, str]:
@@ -9437,6 +9444,12 @@ from api.models import (
     process_wakeup_credential_state_fingerprint,
     process_wakeup_pause_credential_state_changed,
     suppress_process_wakeup_for_provider_pause,
+    resolve_composer_draft,
+    read_composer_draft_sidecar,
+    write_composer_draft_sidecar,
+    delete_composer_draft_sidecar,
+    get_composer_draft_lock,
+    update_cached_composer_draft,
 )
 
 
@@ -14425,8 +14438,11 @@ def handle_post(handler, parsed) -> bool:
                 # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
                 llm_title_generated=getattr(session, "llm_title_generated", False),
                 manual_title=getattr(session, "manual_title", False),
-                # Composer draft — preserve per-session draft state.
-                composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
+                # Composer draft — preserve per-session draft state. Resolve
+                # through the sidecar store so the freshest draft is copied.
+                composer_draft=copy.deepcopy(resolve_composer_draft(
+                    session.session_id, getattr(session, "composer_draft", None)
+                ) or {}),
                 # Context engine state — preserve so the duplicate's context engine
                 # starts from the same point as the original.
                 context_engine=getattr(session, "context_engine", None),
@@ -14710,6 +14726,14 @@ def handle_post(handler, parsed) -> bool:
         # GET ?session_id=X  → return current draft
         # POST body          → save draft { session_id, text?, files? }
         # HTTP method is in handler.command (e.g. "POST", "GET"), parsed has no .method
+        #
+        # Big-session save hotpath: drafts persist to a tiny per-session sidecar
+        # file (models.write_composer_draft_sidecar) instead of Session.save().
+        # On a multi-MB session, every 400ms-debounced keystroke autosave used to
+        # rewrite the entire session JSON (~1s CPU each) behind the session lock,
+        # and the queued POSTs made the whole server unresponsive. This route now
+        # only ever does a metadata-prefix load for validation plus a small atomic
+        # file write. The legacy in-file composer_draft remains as a read fallback.
         import time as _draft_time
         _draft_t0 = _draft_time.monotonic()
         _draft_stages = []
@@ -14723,10 +14747,10 @@ def handle_post(handler, parsed) -> bool:
             if not sid:
                 return bad(handler, "session_id is required", 400)
             try:
-                s = get_session(sid)
+                s = get_session(sid, metadata_only=True)
             except KeyError:
                 return bad(handler, "Session not found", 404)
-            draft = getattr(s, "composer_draft", {}) or {}
+            draft = resolve_composer_draft(sid, getattr(s, "composer_draft", None))
             return j(handler, {"draft": draft})
         # POST
         try:
@@ -14734,8 +14758,6 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
-        if _session_is_subagent_view_only(sid):
-            return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
         # Stage-326 hardening (per Opus advisor): size + type validation on
@@ -14753,32 +14775,42 @@ def handle_post(handler, parsed) -> bool:
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
         try:
-            s = get_session(sid)
+            s_meta = get_session(sid, metadata_only=True)
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
+        # Same #5307 view-only guard as before, evaluated on the (possibly
+        # metadata-only) session object so the check never forces a full
+        # multi-MB transcript load just to store a draft.
+        if _is_subagent_child_session_id(sid) or _session_source_marks_subagent(s_meta):
+            return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         unchanged = False
-        with _get_session_agent_lock(sid):
+        # Dedicated per-session draft lock: drafts must never queue behind the
+        # session/agent lock a running turn may hold.
+        with get_composer_draft_lock(sid):
             _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
+            sidecar_draft = read_composer_draft_sidecar(sid)
+            if sidecar_draft is not None:
+                current_draft = dict(sidecar_draft)
+            else:
+                current_draft = dict(getattr(s_meta, "composer_draft", {}) or {})
             next_draft = dict(current_draft)
             if text is not None:
                 next_draft["text"] = text
             if files is not None:
                 next_draft["files"] = files
-            if next_draft == current_draft:
+            if next_draft == current_draft and sidecar_draft is not None:
                 unchanged = True
                 saved_draft = current_draft
             else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
+                # Draft persistence is not conversation activity: the sidecar
+                # write touches neither the session JSON, its updated_at, nor
+                # the sidebar index, so active-session external-refresh polls
+                # never force-reload the chat while the user is typing.
                 _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
+                saved_draft = write_composer_draft_sidecar(sid, next_draft)
+                update_cached_composer_draft(sid, saved_draft)
                 _draft_mark("after_save")
-                saved_draft = s.composer_draft
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
@@ -14918,6 +14950,10 @@ def handle_post(handler, parsed) -> bool:
             p.with_suffix('.json.bak').unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+        try:
+            delete_composer_draft_sidecar(sid)
+        except Exception:
+            logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
         try:
             prune_session_from_index(sid)
         except Exception:
