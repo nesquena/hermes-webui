@@ -159,9 +159,11 @@ Per-request environment variables (set by chat handler, restored after):
     HERMES_EXEC_ASK      Set to "1" to enable approval gate for dangerous commands.
     HERMES_SESSION_KEY   Set to session_id. The approval tool keys pending entries
                          by this value, enabling per-session approval state.
-    HERMES_UI_SESSION_ID Bound context-locally to the browser session_id. Detached
-                         process and subagent completions capture it as their exact
-                         return address.
+    HERMES_UI_SESSION_ID Bound context-locally to the browser session_id. Async-
+                         delegation/subagent completions capture it as their exact
+                         return address. Detached terminal completions currently
+                         fall back to the context-local HERMES_SESSION_KEY until
+                         Hermes Agent stamps this field on process events.
     HERMES_HOME          Set to the active profile's directory before running agent.
                          Saved and restored around each agent run.
 
