@@ -1944,13 +1944,14 @@ def _mark_process_completion_consumed(process_registry, process_id: str) -> None
 def _drain_webui_process_notifications(session_id: str) -> list[str]:
     """Return completion notifications that belong to this WebUI session.
 
-    The agent registry completion queue is process-wide and events do not carry
-    the WebUI session key directly. Look up the live process session before
-    delivery so completions from other tabs remain queued for their owners.
+    The agent registry completion queue is process-wide. Modern events carry
+    the exact originating WebUI session; older events fall back to the live
+    process session key. Keep events for other tabs queued for their owners.
     """
     if not session_id:
         return []
     try:
+        from api.background_process import _resolve_completion_target
         from tools.process_registry import process_registry
     except Exception:
         return []
@@ -1984,7 +1985,14 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
             proc = process_registry.get(evt_sid)
         except Exception:
             proc = None
-        if getattr(proc, 'session_key', None) != session_id:
+        owner_session_id = _resolve_completion_target(
+            session_key_resolved_sid=str(getattr(proc, 'session_key', None) or ''),
+            origin_ui_session_id=(
+                str(evt.get('origin_ui_session_id') or '')
+                if isinstance(evt, dict) else ''
+            ),
+        )
+        if owner_session_id != session_id:
             skipped_events.append(evt)
             continue
 
