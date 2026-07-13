@@ -1242,3 +1242,63 @@ def test_gateway_worker_skips_runs_api_when_opt_in_absent():
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+
+
+def test_gateway_worker_routes_using_persisted_session_profile():
+    """Detached gateway workers must not fall back to ambient default config."""
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    captured = {}
+    q = MagicMock()
+    stream_id = "sid-profile-gateway-routing"
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    def fake_urlopen(req, *, timeout=None):
+        captured["url"] = req.full_url
+        response = MagicMock()
+        response.__iter__ = lambda self: iter([
+            b'data: {"choices":[{"delta":{"content":"ok"}}]}',
+            b'data: [DONE]',
+        ])
+        response.__enter__ = lambda self: self
+        response.__exit__ = lambda self, *args: None
+        return response
+
+    session = MagicMock(
+        active_stream_id=stream_id,
+        workspace="/tmp",
+        profile="aprium",
+        context_messages=[],
+        messages=[],
+    )
+    profile_config = {
+        "webui_gateway_base_url": "http://127.0.0.1:8643",
+        "webui_gateway_use_runs_api": False,
+    }
+
+    try:
+        with patch("api.gateway_chat.get_session", return_value=session), \
+             patch("api.config.get_config", side_effect=AssertionError("ambient config used")), \
+             patch("api.config.get_config_for_profile_home", return_value=profile_config) as profile_cfg, \
+             patch("api.profiles.get_hermes_home_for_profile", return_value=Path("/profiles/aprium")) as profile_home, \
+             patch("api.gateway_chat.gateway_approval_unavailable_reason", return_value=None), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _run_gateway_chat_streaming(
+                session_id="session-aprium",
+                msg_text="hello",
+                model="test",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+
+        assert profile_home.call_args_list[0].args == ("aprium",)
+        profile_cfg.assert_called_once_with(Path("/profiles/aprium"))
+        assert captured["url"].startswith("http://127.0.0.1:8643/")
+        assert "8642" not in captured["url"]
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
