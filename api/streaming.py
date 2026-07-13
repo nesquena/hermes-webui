@@ -623,6 +623,30 @@ def _clarify_timeout_seconds(default: int = 120) -> int:
         return default
 
 
+def _notify_response_complete_web_push(session_id: str, answer: str) -> None:
+    try:
+        from api.web_push import notify_response_complete
+
+        notify_response_complete(session_id, answer)
+    except Exception:
+        logger.debug("Web Push response-complete fanout failed for session %s", session_id, exc_info=True)
+
+
+def _assistant_message_text(message: dict) -> str:
+    content = message.get('content', '') if isinstance(message, dict) else ''
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get('text') or part.get('content')
+                if text:
+                    parts.append(str(text))
+            elif isinstance(part, str) and part:
+                parts.append(part)
+        return '\n'.join(parts)
+    return str(content or '')
+
+
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
 
 
@@ -8562,7 +8586,7 @@ def _run_agent_streaming(
                 _answer = ''
                 for _m in reversed(result.get('messages') or []):
                     if isinstance(_m, dict) and _m.get('role') == 'assistant':
-                        _answer = str(_m.get('content', ''))
+                        _answer = _assistant_message_text(_m)
                         break
                 put('done', {
                     'session': {'session_id': session_id, 'messages': result.get('messages', [])},
@@ -8570,6 +8594,7 @@ def _run_agent_streaming(
                     'ephemeral': True,
                     'answer': _answer,
                 })
+                # /btw sessions are intentionally silent and should not trigger closed-app push.
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
                 try:
@@ -9992,6 +10017,12 @@ def _run_agent_streaming(
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
                 put('done', _done_payload)
+                _answer = ''
+                for _m in reversed(raw_session.get('messages') or []):
+                    if isinstance(_m, dict) and _m.get('role') == 'assistant':
+                        _answer = _assistant_message_text(_m)
+                        break
+                _notify_response_complete_web_push(session_id, _answer)
                 # Emit one last metering packet for the live message-header TPS label.
                 meter_stats = meter().get_stats(stream_id)
                 meter_stats['session_id'] = session_id

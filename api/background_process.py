@@ -640,10 +640,17 @@ def _emit_bg_task_complete_events_now(session_id: str, payload: dict) -> int:
     # consumer that mutates it in place would silently corrupt all other
     # concurrent consumers' views. Shallow copies are sufficient — the payload
     # is a flat trimmed dict of scalars.
-    return (
+    emitted = (
         _emit_to_session_streams(session_id, "bg_task_complete", dict(payload))
         + _emit_to_session_streams(session_id, "process_complete", dict(payload))
     )
+    try:
+        from api.web_push import notify_bg_task_complete
+
+        notify_bg_task_complete(session_id, payload)
+    except Exception:
+        logger.debug("Web Push bg_task_complete fanout failed for session %s", session_id, exc_info=True)
+    return emitted
 
 
 def _flush_coalesced_bg_task_complete(session_id: str) -> None:

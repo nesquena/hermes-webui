@@ -456,6 +456,21 @@ def test_redact_session_data_non_sensitive_unchanged():
     assert result["tool_calls"][0]["snippet"] == "4"
 
 
+def test_redact_session_data_strips_push_owner():
+    """push_owner is an internal browser-owner capability token, not response data."""
+    from api.helpers import redact_session_data
+
+    result = redact_session_data({
+        "session_id": "push-owner-redact",
+        "title": "Hello world",
+        "messages": [],
+        "tool_calls": [],
+        "push_owner": "a" * 64,
+    })
+
+    assert "push_owner" not in result
+
+
 # ── API-level tests (require running test server started by conftest.py) ─────
 # Run via `./scripts/test.sh tests/test_security_redaction.py -v`
 

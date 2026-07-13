@@ -11751,6 +11751,21 @@ def _render_index_shell_base() -> str:
     return base
 
 
+def _request_csrf_token(handler) -> str:
+    try:
+        from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
+
+        if is_auth_enabled():
+            cookie_val = parse_cookie(handler)
+            if not cookie_val:
+                cookie_val = getattr(handler, "_trusted_auth_session_cookie_value", None)
+            if cookie_val and verify_session(cookie_val):
+                return csrf_token_for_session(cookie_val) or ""
+    except Exception:
+        pass
+    return ""
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
@@ -11777,24 +11792,11 @@ def handle_get(handler, parsed) -> bool:
         try:
             from api.extensions import inject_extension_tags
 
-            csrf_token = ""
-            try:
-                from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
-
-                if is_auth_enabled():
-                    cookie_val = parse_cookie(handler)
-                    if not cookie_val:
-                        cookie_val = getattr(handler, "_trusted_auth_session_cookie_value", None)
-                    if cookie_val and verify_session(cookie_val):
-                        csrf_token = csrf_token_for_session(cookie_val) or ""
-            except Exception:
-                csrf_token = ""
-
             # The disk read + process-constant token substitutions are cached;
             # only the per-session CSRF token and per-request extension tags are
             # applied here (see _render_index_shell_base).
             html = _render_index_shell_base().replace(
-                "__CSRF_TOKEN_JSON__", json.dumps(csrf_token)
+                "__CSRF_TOKEN_JSON__", json.dumps(_request_csrf_token(handler))
             )
             return t(
                 handler,
@@ -12259,6 +12261,12 @@ def handle_get(handler, parsed) -> bool:
         except Exception:
             pass
         return j(handler, settings)
+
+    if parsed.path == "/api/push/status":
+        return _handle_push_status(handler, parsed)
+
+    if parsed.path == "/api/push/vapid-public-key":
+        return _handle_push_vapid_public_key(handler)
 
     if parsed.path == "/api/transcribe/capability":
         return handle_transcribe_capability(handler)
@@ -14068,6 +14076,7 @@ def handle_post(handler, parsed) -> bool:
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
+        _stamp_session_push_owner_from_request(handler, s, log_label="new session")
         if worktree_info:
             publish_session_list_changed(
                 "session_new",
@@ -14120,6 +14129,7 @@ def handle_post(handler, parsed) -> bool:
                 archived=False,
                 project_id=session.project_id,
                 profile=session.profile,
+                push_owner=getattr(session, "push_owner", None),
                 input_tokens=session.input_tokens,
                 output_tokens=session.output_tokens,
                 estimated_cost=session.estimated_cost,
@@ -14924,6 +14934,7 @@ def handle_post(handler, parsed) -> bool:
             title=branch_title,
             messages=forked_messages,
             project_id=getattr(source, "project_id", None),
+            push_owner=getattr(source, "push_owner", None),
             personality=getattr(source, "personality", None),
             enabled_toolsets=getattr(source, "enabled_toolsets", None),
             context_length=getattr(source, "context_length", None),
@@ -15362,6 +15373,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, _sanitize_error(e))
         except RuntimeError as e:
             return bad(handler, str(e), 409)
+
+    if parsed.path == "/api/push/subscribe":
+        return _handle_push_subscribe(handler, body)
 
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
@@ -16330,6 +16344,9 @@ def handle_delete(handler, parsed) -> bool:
         prompts = [p for p in _load_saved_prompts() if p.get("id") != pid]
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True})
+
+    if parsed.path == "/api/push/subscribe":
+        return _handle_push_unsubscribe(handler, body)
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
@@ -20069,6 +20086,122 @@ def _handle_cron_recent(handler, parsed):
         return j(handler, {"completions": [], "since": since})
 
 
+def _handle_push_status(handler, parsed):
+    from api.profiles import get_active_hermes_home
+    from api.web_push import (
+        _PushStoreUnavailable,
+        get_push_owner,
+        web_push_client_status,
+        web_push_status,
+    )
+
+    status = dict(web_push_status())
+    endpoint = parse_qs(parsed.query).get("endpoint", [""])[0]
+    try:
+        status.update(
+            web_push_client_status(
+                get_push_owner(handler),
+                endpoint=endpoint,
+                profile_home=get_active_hermes_home(),
+            )
+        )
+    except _PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    status["csrf_token"] = _request_csrf_token(handler)
+    return j(handler, status)
+
+
+def _stamp_session_push_owner_from_request(handler, session, *, log_label: str) -> None:
+    try:
+        from api.web_push import get_push_owner
+
+        push_owner = get_push_owner(handler)
+        if push_owner:
+            session.push_owner = push_owner
+    except Exception:
+        logger.debug("Failed to stamp Web Push owner for %s", log_label, exc_info=True)
+
+
+def _handle_push_vapid_public_key(handler):
+    from api.config import web_push_public_key
+    from api.web_push import web_push_status
+
+    status = web_push_status()
+    if not status.get("enabled"):
+        return bad(handler, "Web Push is not configured", 404)
+    return j(handler, {"public_key": web_push_public_key()})
+
+
+def _handle_push_subscribe(handler, body):
+    from api.web_push import (
+        _PushStoreUnavailable,
+        _public_subscription,
+        ensure_push_owner_cookie,
+        upsert_subscription_for_owner_profiles,
+        web_push_status,
+    )
+    from api.profiles import get_active_hermes_home
+
+    if not web_push_status().get("enabled"):
+        return bad(handler, "Web Push is not configured", 409)
+    owner_key, set_cookie_header = ensure_push_owner_cookie(handler)
+    subscription = body.get("subscription") if isinstance(body, dict) else None
+    if not isinstance(subscription, dict):
+        subscription = body if isinstance(body, dict) else {}
+    previous_endpoint = str(body.get("previous_endpoint") or body.get("previousEndpoint") or "").strip() if isinstance(body, dict) else ""
+    try:
+        saved = upsert_subscription_for_owner_profiles(
+            subscription,
+            owner_key=owner_key,
+            previous_endpoint=previous_endpoint,
+            profile_home=get_active_hermes_home(),
+        )
+    except ValueError as exc:
+        return bad(handler, str(exc), 400)
+    except _PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    extra_headers = {"Set-Cookie": set_cookie_header} if set_cookie_header else None
+    return j(handler, {"ok": True, "subscription": _public_subscription(saved)}, extra_headers=extra_headers)
+
+
+def _handle_push_unsubscribe(handler, body):
+    from api.web_push import (
+        _PushStoreUnavailable,
+        get_push_owner,
+        remove_subscription,
+        remove_subscription_for_owner_profiles,
+        web_push_client_status,
+    )
+    from api.profiles import get_active_hermes_home
+
+    endpoint = ""
+    if isinstance(body, dict):
+        endpoint = str(body.get("endpoint") or "").strip()
+        if not endpoint and isinstance(body.get("subscription"), dict):
+            endpoint = str(body["subscription"].get("endpoint") or "").strip()
+    if not endpoint:
+        return bad(handler, "subscription endpoint is required", 400)
+    owner_key = get_push_owner(handler)
+    if not owner_key:
+        return bad(handler, "Web Push owner is required", 400)
+    active_home = get_active_hermes_home()
+    remove_all_profiles = bool(isinstance(body, dict) and body.get("all_profiles"))
+    try:
+        removed = (
+            remove_subscription_for_owner_profiles(endpoint, owner_key=owner_key)
+            if remove_all_profiles
+            else remove_subscription(endpoint, owner_key=owner_key, profile_home=active_home)
+        )
+        status = web_push_client_status(owner_key, endpoint=endpoint, profile_home=active_home)
+    except _PushStoreUnavailable as exc:
+        return bad(handler, str(exc), 503)
+    return j(handler, {
+        "ok": True,
+        "removed": removed,
+        "any_profile_subscribed_after": status["any_profile_subscribed"],
+    })
+
+
 _PROJECT_CONTEXT_HERMES_NAMES = (".hermes.md", "HERMES.md")
 # Mirror the agent's lowercase filename variants (agents.md / claude.md) so the
 # tab does not under-report on case-sensitive filesystems.
@@ -21451,6 +21584,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 archived=False,
                 project_id=getattr(source, "project_id", None),
                 profile=getattr(source, "profile", None),
+                push_owner=getattr(source, "push_owner", None),
                 session_source="fork",
                 personality=getattr(source, "personality", None),
                 enabled_toolsets=copy.deepcopy(getattr(source, "enabled_toolsets", None)),
@@ -21535,6 +21669,11 @@ def _handle_goal_command(handler, body):
         )
         if not has_persisted_turns:
             s.profile = requested_profile
+    _stamp_session_push_owner_from_request(
+        handler,
+        s,
+        log_label=f"goal session {body.get('session_id')}",
+    )
 
     current_stream_id = getattr(s, "active_stream_id", None)
     stream_running = False
@@ -21754,6 +21893,11 @@ def _handle_chat_start(handler, body, diag=None):
                 s.profile = requested_profile
             else:
                 return bad(handler, "Session not found", 404)
+        _stamp_session_push_owner_from_request(
+            handler,
+            s,
+            log_label=f"session {body.get('session_id')}",
+        )
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
         if not msg:
@@ -23410,9 +23554,27 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     pending = None
     found_target = False
     gateway_keys = []
+    next_head = None
+    previous_head_identity = ""
+    next_head_identity = ""
     with _lock:
         reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
+        if isinstance(queue, list) and queue:
+            previous_head = queue[0]
+            previous_head_identity = str(
+                previous_head.get("approval_id")
+                or previous_head.get("command")
+                or previous_head.get("description")
+                or ""
+            )
+        elif queue:
+            previous_head_identity = str(
+                queue.get("approval_id")
+                or queue.get("command")
+                or queue.get("description")
+                or ""
+            )
         if isinstance(queue, list):
             if approval_id:
                 # Find and remove the specific entry by approval_id.
@@ -23463,7 +23625,14 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
         # in the SSE path until the next event ever fired (the agent thread
         # would be parked indefinitely from the user's perspective).
         if isinstance(_pending.get(sid), list) and _pending[sid]:
-            _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+            next_head = _pending[sid][0]
+            next_head_identity = str(
+                next_head.get("approval_id")
+                or next_head.get("command")
+                or next_head.get("description")
+                or ""
+            )
+            _approval_sse_notify_locked(sid, next_head, len(_pending[sid]))
         else:
             _approval_sse_notify_locked(sid, None, 0)
 
@@ -23492,6 +23661,13 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
     resolved = bool(pending) or bool(gateway_resolved) or not bool(approval_id)
+    if next_head and next_head_identity and next_head_identity != previous_head_identity:
+        try:
+            from api.web_push import notify_approval_required
+
+            notify_approval_required(sid, next_head)
+        except Exception:
+            logger.debug("Web Push approval fanout failed for session %s", sid, exc_info=True)
     if resolved:
         publish_session_list_changed("attention_resolved")
     return resolved

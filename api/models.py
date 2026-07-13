@@ -1121,6 +1121,7 @@ class Session:
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
                  project_id: str=None, profile=None,
+                 push_owner=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
                  personality=None,
@@ -1187,6 +1188,7 @@ class Session:
         self.archived = bool(archived)
         self.project_id = project_id or None
         self.profile = profile
+        self.push_owner = push_owner
         self.input_tokens = input_tokens or 0
         self.output_tokens = output_tokens or 0
         self.estimated_cost = estimated_cost
@@ -1299,7 +1301,7 @@ class Session:
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
             'session_id', 'title', 'workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
-            'pinned', 'archived', 'project_id', 'profile',
+            'pinned', 'archived', 'project_id', 'profile', 'push_owner',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',

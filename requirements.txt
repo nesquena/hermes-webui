@@ -6,6 +6,9 @@
 # needs `edge-tts`. It is intentionally NOT a hard dependency — the /api/tts
 # endpoint returns 503 with an install hint when it's absent. Install it only if
 # you want server-side Microsoft neural voices:  pip install edge-tts
+# OPTIONAL: Web Push for fully closed PWAs needs `pywebpush`. It is intentionally
+# NOT a hard dependency — closed-app push stays unavailable until operators
+# install it on servers that enable Web Push:  pip install pywebpush
 #
 # OPTIONAL: macOS/non-procfs CPU/RAM system-health metrics need `psutil`.
 # Linux uses procfs without this dependency; install only if you want aggregate

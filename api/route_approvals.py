@@ -3,11 +3,14 @@
 State-extraction prelude to the routes.py split tracked in #1907.
 Extracts approval state, not handlers, by design.
 """
+import logging
 import queue
 import threading
 import uuid
 
 from api.session_events import publish_session_list_changed
+
+logger = logging.getLogger(__name__)
 
 # Approval system (optional -- graceful fallback if agent not available)
 try:
@@ -213,9 +216,28 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> None:
     """Mirror the live gateway head into WebUI polling state under a typed tag."""
     del approval  # mirror from the live gateway head under `_lock`, not from callback input
     with _lock:
+        previous_head = _pending.get(session_key)
+        previous_head = previous_head[0] if isinstance(previous_head, list) and previous_head else previous_head
+        previous_identity = str(
+            (previous_head or {}).get(_GATEWAY_MIRROR_TOKEN)
+            or (previous_head or {}).get("approval_id")
+            or ""
+        )
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_pending")
+    head_identity = str(
+        (head or {}).get(_GATEWAY_MIRROR_TOKEN)
+        or (head or {}).get("approval_id")
+        or ""
+    )
+    if head_identity and head_identity != previous_identity:
+        try:
+            from api.web_push import notify_approval_required
+
+            notify_approval_required(session_key, head)
+        except Exception:
+            logger.debug("Web Push gateway approval fanout failed for session %s", session_key, exc_info=True)
 
 
 def submit_pending(session_key: str, approval: dict) -> None:
@@ -230,16 +252,26 @@ def submit_pending(session_key: str, approval: dict) -> None:
     """
     entry = dict(approval)
     entry.setdefault("approval_id", uuid.uuid4().hex)
+    head_to_push = None
     with _lock:
         queue_list = _normalize_pending_queue_locked(session_key)
         queue_list.append(entry)
         total = len(queue_list)
         head = queue_list[0]  # /api/approval/pending always returns head
+        if total == 1:
+            head_to_push = head
         # Push to SSE subscribers from inside _lock so two parallel
         # submit_pending calls can't deliver out-of-order (T2's later
         # notify arriving before T1's earlier notify with a stale count).
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_pending")
+    if head_to_push:
+        try:
+            from api.web_push import notify_approval_required
+
+            notify_approval_required(session_key, head_to_push)
+        except Exception:
+            logger.debug("Web Push approval fanout failed for session %s", session_key, exc_info=True)
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism

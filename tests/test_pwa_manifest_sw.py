@@ -10,6 +10,8 @@ Covers:
 """
 import json
 import re
+import subprocess
+import textwrap
 from pathlib import Path
 
 
@@ -134,6 +136,185 @@ class TestServiceWorker:
         assert "return;" in src and "/api/" in src, (
             "SW fetch handler must early-return for /api/* paths (no caching)"
         )
+
+    def test_sw_push_skips_foreground_clients(self):
+        src = SW.read_text(encoding="utf-8")
+        assert "self.clients.matchAll({type: 'window', includeUncontrolled: true})" in src
+        assert "client.visibilityState === 'visible' || client.focused === true" in src
+        assert "clientUrl.pathname.startsWith(scopePath)" in src
+
+    def test_sw_push_runtime_skips_foreground_clients(self):
+        script = textwrap.dedent(
+            f"""
+            const handlers = {{}};
+            let notifications = 0;
+            global.atob = global.atob || ((value) => Buffer.from(value, 'base64').toString('binary'));
+            global.caches = {{
+              keys: async () => [],
+              open: async () => ({{ addAll: async () => {{}}, put: async () => {{}} }}),
+              match: async () => null,
+              delete: async () => true,
+            }};
+            global.fetch = async () => ({{ ok: true, status: 200, text: async () => '{{}}' }});
+            global.self = {{
+              location: {{ origin: 'https://example.com' }},
+              registration: {{
+                scope: 'https://example.com/app/',
+                showNotification: async () => {{ notifications += 1; }},
+              }},
+              clients: {{
+                claim: () => {{}},
+                matchAll: async () => ([{{ url: 'https://example.com/app/session/1', visibilityState: 'visible' }}]),
+              }},
+              addEventListener: (name, fn) => {{ handlers[name] = fn; }},
+              skipWaiting: () => {{}},
+            }};
+            eval({json.dumps(SW.read_text(encoding="utf-8"))});
+            const event = {{
+              data: {{ json: () => ({{ title: 'Hermes', options: {{ data: {{ url: './' }} }} }}) }},
+              waitUntil(promise) {{ this.promise = promise; }},
+            }};
+            handlers.push(event);
+            Promise.resolve(event.promise).then(() => {{
+              process.stdout.write(JSON.stringify({{ notifications }}));
+            }}).catch((err) => {{
+              process.stderr.write(String(err && err.stack || err));
+              process.exit(1);
+            }});
+            """
+        )
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"notifications": 0}
+
+    def test_sw_pushsubscriptionchange_runtime_rotates_all_owner_profiles(self):
+        script = textwrap.dedent(
+            f"""
+            const handlers = {{}};
+            const fetchCalls = [];
+            global.atob = global.atob || ((value) => Buffer.from(value, 'base64').toString('binary'));
+            global.caches = {{
+              keys: async () => [],
+              open: async () => ({{ addAll: async () => {{}}, put: async () => {{}} }}),
+              match: async () => null,
+              delete: async () => true,
+            }};
+            global.fetch = async (url, options = {{}}) => {{
+              fetchCalls.push({{
+                url: String(url),
+                method: options.method || 'GET',
+                body: options.body ? JSON.parse(options.body) : null,
+              }});
+              if (String(url).endsWith('/api/push/status')) {{
+                return {{ ok: true, status: 200, text: async () => JSON.stringify({{ enabled: true, csrf_token: 'csrf-token' }}) }};
+              }}
+              return {{ ok: true, status: 200, text: async () => '{{}}' }};
+            }};
+            global.self = {{
+              location: {{ origin: 'https://example.com' }},
+              registration: {{
+                scope: 'https://example.com/app/',
+                pushManager: {{
+                  subscribe: async () => {{ throw new Error('unexpected subscribe'); }},
+                }},
+                showNotification: async () => {{}},
+              }},
+              clients: {{
+                claim: () => {{}},
+                matchAll: async () => ([]),
+              }},
+              addEventListener: (name, fn) => {{ handlers[name] = fn; }},
+              skipWaiting: () => {{}},
+            }};
+            eval({json.dumps(SW.read_text(encoding="utf-8"))});
+            const event = {{
+              oldSubscription: {{ endpoint: 'https://push.example/old', toJSON: () => ({{ endpoint: 'https://push.example/old' }}) }},
+              newSubscription: {{
+                endpoint: 'https://push.example/new',
+                toJSON: () => ({{
+                  endpoint: 'https://push.example/new',
+                  keys: {{ p256dh: 'BBERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERE', auth: 'IiIiIiIiIiIiIiIiIiIiIg' }},
+                }}),
+              }},
+              waitUntil(promise) {{ this.promise = promise; }},
+            }};
+            handlers.pushsubscriptionchange(event);
+            Promise.resolve(event.promise).then(() => {{
+              process.stdout.write(JSON.stringify(fetchCalls));
+            }}).catch((err) => {{
+              process.stderr.write(String(err && err.stack || err));
+              process.exit(1);
+            }});
+            """
+        )
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        calls = json.loads(result.stdout)
+        assert [call["method"] for call in calls] == ["GET", "POST"]
+        assert calls[1]["url"].endswith("/api/push/subscribe")
+        assert calls[1]["body"]["previous_endpoint"] == "https://push.example/old"
+        assert calls[1]["body"]["subscription"]["endpoint"] == "https://push.example/new"
+
+    def test_sw_pushsubscriptionchange_runtime_cleans_disabled_subscription_across_profiles(self):
+        script = textwrap.dedent(
+            f"""
+            const handlers = {{}};
+            const fetchCalls = [];
+            global.atob = global.atob || ((value) => Buffer.from(value, 'base64').toString('binary'));
+            global.caches = {{
+              keys: async () => [],
+              open: async () => ({{ addAll: async () => {{}}, put: async () => {{}} }}),
+              match: async () => null,
+              delete: async () => true,
+            }};
+            global.fetch = async (url, options = {{}}) => {{
+              fetchCalls.push({{
+                url: String(url),
+                method: options.method || 'GET',
+                body: options.body ? JSON.parse(options.body) : null,
+              }});
+              if (String(url).endsWith('/api/push/status')) {{
+                return {{ ok: true, status: 200, text: async () => JSON.stringify({{ enabled: false, csrf_token: 'csrf-token' }}) }};
+              }}
+              return {{ ok: true, status: 200, text: async () => '{{}}' }};
+            }};
+            global.self = {{
+              location: {{ origin: 'https://example.com' }},
+              registration: {{
+                scope: 'https://example.com/app/',
+                pushManager: {{ subscribe: async () => {{ throw new Error('unexpected subscribe'); }} }},
+                showNotification: async () => {{}},
+              }},
+              clients: {{
+                claim: () => {{}},
+                matchAll: async () => ([]),
+              }},
+              addEventListener: (name, fn) => {{ handlers[name] = fn; }},
+              skipWaiting: () => {{}},
+            }};
+            eval({json.dumps(SW.read_text(encoding="utf-8"))});
+            const event = {{
+              oldSubscription: {{ endpoint: 'https://push.example/old' }},
+              newSubscription: null,
+              waitUntil(promise) {{ this.promise = promise; }},
+            }};
+            handlers.pushsubscriptionchange(event);
+            Promise.resolve(event.promise).then(() => {{
+              process.stdout.write(JSON.stringify(fetchCalls));
+            }}).catch((err) => {{
+              process.stderr.write(String(err && err.stack || err));
+              process.exit(1);
+            }});
+            """
+        )
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        calls = json.loads(result.stdout)
+        assert [call["method"] for call in calls] == ["GET", "DELETE"]
+        assert calls[1]["body"] == {
+            "endpoint": "https://push.example/old",
+            "all_profiles": True,
+        }
 
 
 class TestPWARoutes:

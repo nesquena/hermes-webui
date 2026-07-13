@@ -6,6 +6,7 @@ clarification string instead of an approval decision.
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
@@ -16,6 +17,7 @@ from api.session_events import publish_session_list_changed
 
 
 DEFAULT_TIMEOUT_SECONDS = 120
+logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _gateway_queues: dict[str, list] = {}
@@ -167,6 +169,12 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
         # Notify SSE subscribers from inside _lock for ordering guarantees.
         _clarify_sse_notify(session_key, dict(gw_queue[0].data), len(gw_queue))
     publish_session_list_changed("attention_pending")
+    try:
+        from api.web_push import notify_clarify_required
+
+        notify_clarify_required(session_key, entry.data)
+    except Exception:
+        logger.debug("Web Push clarify fanout failed for session %s", session_key, exc_info=True)
     if cb:
         try:
             cb(data)
