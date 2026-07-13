@@ -7856,6 +7856,43 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     elif force_refresh:
         stale_disk_groups = _load_stale_models_cache_from_disk()
 
+    # ── prefer_cache: resolve WITHOUT ever blocking ──────────────────────────
+    # The docstring promises prefer_cache "resolves WITHOUT ever triggering a
+    # live provider probe ... so a cold catalog can never block." The pre-fix
+    # code broke that promise: a prefer_cache caller still fell through to the
+    # ``should_wait`` condition-variable wait (up to 60s) AND the blocking
+    # ``_available_models_cache_lock`` acquire below — and the cold path holds
+    # that lock across its up-to-_LIVE_REBUILD_BUDGET_SECONDS ``build_done``
+    # wait. A latency-sensitive caller (session-open model resolution, Option-Z
+    # wakeup) therefore blocked multiple seconds on a catalog already cached on
+    # disk. Resolve here, before the lock, and NEVER wait:
+    #   1. warm in-memory cache — read under a NON-BLOCKING lock acquire
+    #      (skipped entirely if a rebuild currently holds the lock);
+    #   2. the on-disk cache (loaded above; lock-free file I/O);
+    #   3. a shape-valid stale on-disk cache;
+    #   4. a network-free minimal static catalog (last resort, as before).
+    # This never sets or clears _cache_build_in_progress (Greptile P1): a
+    # concurrent cold-path rebuild keeps its serialization intact.
+    if prefer_cache:
+        if _available_models_cache_lock.acquire(blocking=False):
+            try:
+                _pc_cached = _get_fresh_memory_models_cache(time.monotonic())
+            finally:
+                _available_models_cache_lock.release()
+            if _pc_cached is not None:
+                return _pc_cached
+        _pc_disk = disk_groups if disk_groups is not None else _load_models_cache_from_disk()
+        if _pc_disk is not None:
+            return copy.deepcopy(_pc_disk)
+        _pc_stale = (
+            stale_disk_groups
+            if stale_disk_groups is not None
+            else _load_stale_models_cache_from_disk()
+        )
+        if _pc_stale is not None:
+            return copy.deepcopy(_pc_stale)
+        return copy.deepcopy(_minimal_static_models_catalog())
+
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
@@ -8265,6 +8302,78 @@ def warm_models_catalog_provenance_if_cold() -> None:
         _available_models_cache_lock.release()
 
 
+_session_visit_refresh_in_flight = threading.Event()
+_session_visit_refresh_lock = threading.Lock()
+
+
+def _spawn_session_visit_background_refresh() -> bool:
+    """Kick a live catalog refresh onto a detached daemon; never block the caller.
+
+    Stale-while-revalidate helper for ``get_available_models_for_session_visit``:
+    a user-facing session-open serves the (possibly stale) disk cache instantly
+    and calls this to freshen the catalog out-of-band. The refresh reuses the one
+    source of truth — ``get_available_models(force_refresh=True)`` — so all of the
+    thundering-herd coalescing, bounded-rebuild, and single-publisher machinery is
+    shared, not reimplemented.
+
+    Returns True if THIS call started the worker, False if a refresh was already
+    in flight (coalesced) — the ``_session_visit_refresh_in_flight`` guard keeps a
+    burst of session-opens from spawning N redundant rebuild daemons.
+
+    Profile isolation (#3957): the detached worker inherits neither the request
+    profile TLS nor os.environ, so the active profile name is captured HERE (on
+    the request thread) and re-bound inside the worker via
+    ``profile_scope_for_detached_worker`` — identical to the bounded-rebuild path.
+    """
+    # threading.Event has no atomic test-and-set, so claim the "spawn" right
+    # under a lock: exactly one caller wins and starts the worker; the rest
+    # coalesce onto that in-flight refresh.
+    with _session_visit_refresh_lock:
+        if _session_visit_refresh_in_flight.is_set():
+            return False
+        _session_visit_refresh_in_flight.set()
+
+    from contextlib import nullcontext as _nullcontext
+
+    _active_profile_name = ""
+    _prof_scope_worker = None
+    try:
+        from api.profiles import (
+            get_active_profile_name as _gapn,
+            profile_scope_for_detached_worker as _prof_scope_worker,
+        )
+        _active_profile_name = (_gapn() or "").strip()
+    except Exception:
+        _prof_scope_worker = None
+
+    def _worker() -> None:
+        _scope = (
+            _prof_scope_worker(_active_profile_name, "session-visit refresh (worker)")
+            if _prof_scope_worker is not None
+            else _nullcontext()
+        )
+        try:
+            with _scope:
+                get_available_models(force_refresh=True)
+        except Exception:
+            logger.debug("session-visit background refresh failed", exc_info=True)
+        finally:
+            _session_visit_refresh_in_flight.clear()
+
+    try:
+        threading.Thread(
+            target=_worker,
+            name="models-session-visit-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
+        # Never leave the guard latched if the thread failed to even start,
+        # or the catalog would never refresh again for the process lifetime.
+        _session_visit_refresh_in_flight.clear()
+        raise
+    return True
+
+
 def get_available_models_for_session_visit() -> dict:
     """Return /api/models with a short session-visit freshness horizon.
 
@@ -8328,19 +8437,37 @@ def get_available_models_for_session_visit() -> dict:
     _mark("cache_age_stale_or_missing")
     stale_cached = disk_cached or _load_stale_models_cache_from_disk()
     _mark(f"stale_cached_loaded:{bool(stale_cached)}")
+
+    # ── Stale-while-revalidate ──────────────────────────────────────────────
+    # A user-facing session-open must NEVER block on a live provider probe.
+    # Before this fix, a cache older than the freshness horizon fell through to
+    # get_available_models(force_refresh=True), which blocks the request thread
+    # up to _LIVE_REBUILD_BUDGET_SECONDS on per-provider network calls (the
+    # anthropic /models fetch et al.) — the proven source of the multi-second
+    # /api/session and /api/models?freshness=session_visit latency on session
+    # open. Instead: if ANY shape-valid cache exists, serve it immediately and
+    # freshen the catalog on a detached daemon. The next session-open gets the
+    # warm result; this one pays ~0ms.
+    if stale_cached is not None:
+        _spawn_session_visit_background_refresh()
+        _mark("stale_served_background_refresh")
+        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+        return copy.deepcopy(stale_cached)
+
+    # True cold boot: no cache on disk at all (first run, or cache cleared).
+    # There is nothing to serve, so fall back to the bounded rebuild — itself
+    # capped at _LIVE_REBUILD_BUDGET_SECONDS and never unbounded — and, failing
+    # that, the network-free minimal catalog. This is the ONLY branch that can
+    # wait, and only when there is literally no cached catalog to return.
     try:
-        _mark("force_refresh_start")
+        _mark("cold_boot_bounded_rebuild_start")
         result = get_available_models(force_refresh=True)
-        _mark("force_refresh_done")
+        _mark("cold_boot_bounded_rebuild_done")
         _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
         return result
     except Exception:
-        _mark("force_refresh_failed")
+        _mark("cold_boot_rebuild_failed")
         logger.debug("session-visit models refresh failed", exc_info=True)
-        if stale_cached is not None:
-            _mark("stale_fallback_return")
-            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-            return copy.deepcopy(stale_cached)
         _mark("prefer_cache_fallback")
         _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
         return get_available_models(prefer_cache=True)
