@@ -1463,10 +1463,19 @@ def _canonicalise_provider_id(name: object) -> str:
     # _PROVIDER_MODELS but not _PROVIDER_DISPLAY, so a _DISPLAY-only check
     # rejected valid aliases like `google-gemini`→`gemini`, leaving the id
     # uncanonicalised and silently breaking provider-ownership checks (#5511).
-    # This still blocks aliases that point at non-canonical/legacy strings.
+    # Some agent aliases resolve to a core slug the WebUI does not key by
+    # directly, such as x.ai/xai -> xai while WebUI's static provider key is
+    # x-ai. In that case, prefer a known static alias-equivalent key.
     resolved = _resolve_provider_alias(raw)
     if resolved and (resolved.lower() in _PROVIDER_DISPLAY or resolved.lower() in _PROVIDER_MODELS):
         return resolved.lower()
+    if resolved:
+        resolved = resolved.lower()
+        for alias, target in _PROVIDER_ALIASES.items():
+            alias = str(alias or "").strip().lower()
+            target = str(target or "").strip().lower()
+            if target == resolved and (alias in _PROVIDER_DISPLAY or alias in _PROVIDER_MODELS):
+                return alias
     return raw
 
 
@@ -2361,11 +2370,12 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     ``/v1/models`` catalog is unbuilt (fresh process, headless client), a
     vendor-namespaced id the user configured — ``model.default``, the
     ``model.models`` allowlist, or the matching ``custom_providers[].models`` /
-    ``.model`` for a named ``custom:<slug>`` — is still authoritative provenance
-    that the full id is intentional and must be preserved. Config is the one
+    ``.model`` for a named ``custom:<slug>`` or user-defined ``providers.<slug>``
+    entry — is still authoritative provenance that the full id is intentional
+    and must be preserved. Config is the one
     source available with zero network and no catalog dependency, so it survives
     a cold restart (b3nw's ``model.default: x-ai/grok-4.5``). Checked ONLY for
-    custom providers; returns False for anything not verbatim-declared so the
+    proxy providers; returns False for anything not verbatim-declared so the
     caller falls through to the legacy family heuristic.
     """
     model = str(model_id or "").strip()
@@ -2402,7 +2412,38 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
                 for m in _em
             ):
                 return True
+    providers = cfg.get("providers", {})
+    if isinstance(providers, dict):
+        for provider_name, entry in providers.items():
+            if (
+                not isinstance(entry, dict)
+                or _canonicalise_provider_id(provider_name) != _canonicalise_provider_id(prov)
+            ):
+                continue
+            if str(entry.get("model") or "").strip() == model:
+                return True
+            declared = entry.get("models")
+            if isinstance(declared, dict) and model in declared:
+                return True
+            if isinstance(declared, list) and any(
+                (str(item.get("id") or "").strip() if isinstance(item, dict) else str(item or "").strip()) == model
+                for item in declared
+            ):
+                return True
     return False
+
+
+def _is_user_defined_proxy_provider(provider_id: str | None) -> bool:
+    """True for a non-static provider configured in ``providers:``."""
+    provider = _canonicalise_provider_id(provider_id)
+    if not provider or provider in _PROVIDER_MODELS:
+        return False
+    providers = cfg.get("providers", {})
+    return isinstance(providers, dict) and any(
+        isinstance(entry, dict)
+        and _canonicalise_provider_id(name) == provider
+        for name, entry in providers.items()
+    )
 
 
 def _is_first_party_model(provider_id: str, model_id: str) -> bool:
@@ -2592,6 +2633,8 @@ def resolve_model_provider(model_id: str) -> tuple:
             base_url=config_base_url,
             resolve_alias=False,
         )
+    if not config_base_url and config_provider:
+        config_base_url = _get_provider_base_url(config_provider)
 
     # Heal legacy ``provider: local`` entries (written by WebUI < v0.50.252)
     # at read time. ``local`` is not a registered provider, so passing it
@@ -2791,7 +2834,17 @@ def resolve_model_provider(model_id: str) -> tuple:
             return model_id, config_provider, config_base_url
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
-        if config_provider and prefix == config_provider:
+        if (
+            config_provider
+            and (
+                prefix == config_provider
+                or (
+                    _canonicalise_provider_id(prefix)
+                    and _canonicalise_provider_id(prefix) == _canonicalise_provider_id(config_provider)
+                    and _canonicalise_provider_id(prefix) in _PROVIDER_MODELS
+                )
+            )
+        ):
             return bare, config_provider, config_base_url
         # The OpenAI Codex provider uses a real base_url, but its default
         # ChatGPT endpoint cannot serve OpenRouter-style provider/model IDs.
@@ -2859,7 +2912,8 @@ def resolve_model_provider(model_id: str) -> tuple:
             # earlier by the ``prefix == config_provider`` branch.
             _cp_lower = (config_provider or "").strip().lower()
             _is_custom = _cp_lower == "custom" or _cp_lower.startswith("custom:")
-            if _is_custom:
+            _is_proxy = _is_custom or _is_user_defined_proxy_provider(config_provider)
+            if _is_proxy:
                 # Vendor-routing proxy: the reliable signal for whether the
                 # endpoint wants the full ``vendor/model`` id or the bare id is
                 # what its own catalog actually advertised (the ids the user

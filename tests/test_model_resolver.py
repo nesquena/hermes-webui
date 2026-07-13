@@ -300,6 +300,47 @@ def test_named_custom_slug_preserves_advertised_full_id_5979():
     assert model == 'x-ai/grok-4.5', f"full id must be preserved for custom:slug, got {model!r}"
 
 
+def test_user_defined_proxy_default_preserves_namespaced_model_5979():
+    """#5979: a providers.<slug> proxy must keep its configured wire model whole."""
+    old_cfg = dict(config.cfg)
+    config.cfg['model'] = {
+        'provider': 'llm-proxy',
+        'default': 'x-ai/grok-composer-2.5-fast',
+    }
+    config.cfg['providers'] = {
+        'llm-proxy': {
+            'base_url': 'https://proxy.example.com/v1',
+        },
+    }
+    try:
+        model, provider, base_url = config.resolve_model_provider(
+            'x-ai/grok-composer-2.5-fast'
+        )
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+    assert model == 'x-ai/grok-composer-2.5-fast'
+    assert provider == 'llm-proxy'
+    assert base_url == 'https://proxy.example.com/v1'
+
+
+def test_x_dot_ai_alias_routes_as_first_party_provider_5979():
+    """#5979 follow-up: direct x.ai must canonicalise to the static x-ai family,
+    so a first-party Grok model strips to the bare wire id instead of being
+    treated like a user-defined proxy route."""
+    assert config._canonicalise_provider_id('x.ai') == 'x-ai'
+    assert config._canonicalise_provider_id('xai') == 'x-ai'
+    model, provider, base_url = _resolve_with_config(
+        'x-ai/grok-4.20',
+        provider='x.ai',
+    )
+    assert model == 'grok-4.20', (
+        f"direct x.ai must send the bare first-party model id, got {model!r}"
+    )
+    assert provider == 'x.ai'
+    assert base_url is None
+
+
 def test_custom_remote_cold_catalog_falls_back_to_legacy_heuristic_5979():
     """#5979 tri-state: with a COLD/unbuilt catalog AND no config declaration
     (no provenance at all), resolution falls back to the LEGACY family heuristic
