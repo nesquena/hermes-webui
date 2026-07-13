@@ -6077,30 +6077,43 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     pending_text = str(getattr(session, 'pending_user_message', None) or '')
     if not pending_text:
         return False
-    normalized_pending = " ".join(pending_text.split())
-    if normalized_pending:
-        for existing in reversed(list(getattr(session, 'messages', None) or [])[-8:]):
-            if not isinstance(existing, dict) or existing.get('role') != 'user':
-                continue
-            existing_text = " ".join(str(existing.get('content') or '').split())
-            if existing_text == normalized_pending:
-                return False
     recovered_ts = int(time.time())
     pending_started_at = getattr(session, 'pending_started_at', None)
     if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
         recovered_ts = int(pending_started_at)
+    pending_source = getattr(session, 'pending_user_source', None) or 'webui'
+    pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
+
+    def is_exact_checkpoint(messages):
+        if not isinstance(messages, list) or not messages:
+            return False
+        existing = messages[-1]
+        if not isinstance(existing, dict) or existing.get('role') != 'user':
+            return False
+        existing_source = existing.get('_source') or 'webui'
+        try:
+            existing_ts = int(existing.get('timestamp'))
+        except (TypeError, ValueError):
+            return False
+        return (
+            _normalize_user_text(existing.get('content')) == _normalize_user_text(pending_text)
+            and existing_ts == recovered_ts
+            and existing_source == pending_source
+            and list(existing.get('attachments') or []) == pending_attachments
+        )
+
+    if is_exact_checkpoint(getattr(session, 'messages', None)):
+        return False
     recovered = {
         'role': 'user',
         'content': pending_text,
         'timestamp': recovered_ts,
         '_recovered': True,
     }
-    pending_source = getattr(session, 'pending_user_source', None)
-    if pending_source and pending_source != 'webui':
+    if pending_source != 'webui':
         recovered['_source'] = pending_source
-    pending_attachments = getattr(session, 'pending_attachments', None)
     if pending_attachments:
-        recovered['attachments'] = list(pending_attachments)
+        recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
     # Mirror to context_messages so the _recovered flag survives the state.db
     # round-trip (#4283).  state.db has no _recovered column, so without this
@@ -6111,14 +6124,8 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     # Placing the mirror here (rather than in _persist_cancelled_turn) covers
     # all three callers: cancel, provider-error, and exception paths.
     ctx = getattr(session, 'context_messages', None)
-    if isinstance(ctx, list) and ctx:
-        rec_text = " ".join(str(recovered.get('content') or '').split())
-        if not any(
-            isinstance(e, dict) and e.get('role') == 'user'
-            and " ".join(str(e.get('content') or '').split()) == rec_text
-            for e in ctx[-8:]
-        ):
-            ctx.append({k: v for k, v in recovered.items() if k != 'timestamp'})
+    if isinstance(ctx, list) and ctx and not is_exact_checkpoint(ctx):
+        ctx.append(dict(recovered))
     # The new user turn is now committed to messages (#3831): advance a positive
     # truncation watermark left over from a prior retry/undo/edit so that
     # merge_session_messages_append_only() still filters out replaced pre-edit
