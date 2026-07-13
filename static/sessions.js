@@ -3778,6 +3778,7 @@ let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
 let _sessionActionMenuId = 0;
+let _sessionActionPreviousFocus = null;
 const _expandedChildSessionKeys = new Set();
 const _expandedLineageKeys = new Set();
 const _lineageReportCache = new Map();
@@ -4176,8 +4177,15 @@ function _showBatchProjectPicker(){
   setTimeout(()=>document.addEventListener('click',close),0);
 }
 
+function _focusSessionActionMenuRestoreTarget(target){
+  if(!target||!target.isConnected||typeof target.focus!=='function') return false;
+  try{target.focus({preventScroll:true});}catch(_){target.focus();}
+  return document.activeElement===target;
+}
+
 function closeSessionActionMenu({restoreFocus=false}={}){
   const focusTarget=restoreFocus?_sessionActionAnchor:null;
+  const fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;
   if(_sessionActionMenu){
     _sessionActionMenu.remove();
     _sessionActionMenu = null;
@@ -4193,9 +4201,8 @@ function closeSessionActionMenu({restoreFocus=false}={}){
     _sessionActionAnchor = null;
   }
   _sessionActionSessionId = null;
-  if(focusTarget&&focusTarget.isConnected&&typeof focusTarget.focus==='function'){
-    try{focusTarget.focus({preventScroll:true});}catch(_){focusTarget.focus();}
-  }
+  _sessionActionPreviousFocus = null;
+  if(!_focusSessionActionMenuRestoreTarget(focusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
 }
 
 function _sessionActionMenuShouldIgnoreScrollTarget(target){
@@ -4317,6 +4324,7 @@ async function _copySessionLink(session){
 }
 
 function _mountSessionActionMenu(menu, session, anchorEl){
+  _sessionActionPreviousFocus=document.activeElement;
   document.body.appendChild(menu);
   _sessionActionMenu = menu;
   _sessionActionAnchor = anchorEl;

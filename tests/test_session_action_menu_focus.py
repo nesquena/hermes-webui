@@ -41,9 +41,11 @@ def _fixture_script() -> str:
             "let _sessionActionMenu = null;",
             "let _sessionActionAnchor = null;",
             "let _sessionActionSessionId = null;",
+            "let _sessionActionPreviousFocus = null;",
             "const esc = value => String(value);",
             "function _positionSessionActionMenu(){}",
             "function _playSessionActionMenuEntrance(){}",
+            _function_source("_focusSessionActionMenuRestoreTarget"),
             _function_source("closeSessionActionMenu"),
             _function_source("_buildSessionAction"),
             _function_source("_mountSessionActionMenu"),
@@ -89,6 +91,33 @@ def _fixture_script() -> str:
               row.remove();
               return result;
             };
+
+            window.__sessionActionMenuNonFocusableOpenerResult = () => {
+              const priorFocus = document.createElement('button');
+              priorFocus.textContent = 'Prior keyboard focus';
+              const row = document.createElement('div');
+              row.className = 'session-item';
+              row.textContent = 'Non-focusable session row';
+              document.body.append(priorFocus, row);
+              priorFocus.focus();
+
+              const menu = document.createElement('div');
+              menu.className = 'session-action-menu';
+              menu.id = 'sessionActionMenu-nonfocusable-opener-test';
+              menu.setAttribute('role', 'menu');
+              menu.setAttribute('aria-label', 'Conversation actions');
+              menu.appendChild(_buildSessionAction('Rename conversation', '', '', () => {}));
+              _mountSessionActionMenu(menu, {session_id: 'nonfocusable-opener-test'}, row);
+              menu.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+
+              const result = {
+                menuRemovedOnEscape: !document.querySelector('.session-action-menu'),
+                focusReturnedToPreviousControl: document.activeElement === priorFocus,
+              };
+              priorFocus.remove();
+              row.remove();
+              return result;
+            };
             """,
         ]
     )
@@ -123,4 +152,27 @@ def test_session_action_menu_focus_lifecycle_in_browser():
         "focusRestoredOnEscape": True,
         "expandedAfterEscape": "false",
         "controlsAfterEscape": None,
+    }
+
+
+def test_session_action_menu_returns_to_prior_focus_for_nonfocusable_opener_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page()
+        page.set_content("<!doctype html><html><body></body></html>")
+        page.add_script_tag(content=_fixture_script())
+        result = page.evaluate("window.__sessionActionMenuNonFocusableOpenerResult()")
+        browser.close()
+
+    assert result == {
+        "menuRemovedOnEscape": True,
+        "focusReturnedToPreviousControl": True,
     }
