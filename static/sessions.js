@@ -6758,6 +6758,26 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   const sessionIdsInList=durableLineageIds instanceof Set
     ? durableLineageIds
     : new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
+  const normalizedProfileForScope=(profile)=>{
+    const name=(typeof profile==='string'&&profile.trim())?profile.trim():'default';
+    if(name==='default') return 'default';
+    if(typeof _cronProfileNameIsRootAlias==='function'&&_cronProfileNameIsRootAlias(name)) return 'default';
+    return name;
+  };
+  const scopeKeyForSession=(session)=>{
+    if(!session) return null;
+    const isCli=typeof _isCliSession==='function'&&_isCliSession(session);
+    const project=session.project_id||'';
+    return `${isCli?'cli':'webui'}\u0000${project}\u0000${normalizedProfileForScope(session.profile)}`;
+  };
+  const sessionIdsFor=(session)=>{
+    if(durableLineageIds instanceof Map){
+      const key=scopeKeyForSession(session);
+      const scopedIds=key&&durableLineageIds.get(key);
+      if(scopedIds instanceof Set) return scopedIds;
+    }
+    return sessionIdsInList;
+  };
   const rawSessionsById=new Map(referenceSessions.filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
   const cleanSidebarRow=(s)=>{
     const row={...s};
@@ -6774,7 +6794,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     return row;
   };
   const rows=(collapsedRows||[])
-    .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList)))
+    .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsFor(s))))
     .map(cleanSidebarRow);
   const isChildStreaming=(childRow)=>typeof _isSessionEffectivelyStreaming==='function'
     ? _isSessionEffectivelyStreaming(childRow)
@@ -6815,7 +6835,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     seen.add(session.session_id);
     const parent=session.parent_session_id&&rawSessionsById.get(session.parent_session_id);
     let depth=0;
-    if(parent&&(_isChildSession(session)||(_isForkWithResolvableParent(session, sessionIdsInList)&&!(session&&session.pinned)))){
+    if(parent&&(_isChildSession(session)||(_isForkWithResolvableParent(session, sessionIdsFor(session))&&!(session&&session.pinned)))){
       depth=1+attachDepthFor(parent, seen);
     }
     attachDepthCache.set(session.session_id, depth);
@@ -6856,7 +6876,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   for(const child of attachQueue){
     const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
     if(child&&child.session_id&&visibleBySid.has(child.session_id)) continue;
-    const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
+    const isForkChild=_isForkWithResolvableParent(child, sessionIdsFor(child))&&!(child&&child.pinned);
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
@@ -7340,20 +7360,37 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, li
   const durableRows=[];
   if(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions)) durableRows.push(..._allSessions);
   durableRows.push(...referenceRows);
-  const durableLineageIds=new Set(durableRows.filter(session=>{
-    if(!session) return false;
+  const normalizedProfileForScope=(profile)=>{
+    const name=(typeof profile==='string'&&profile.trim())?profile.trim():'default';
+    if(name==='default') return 'default';
+    if(typeof _cronProfileNameIsRootAlias==='function'&&_cronProfileNameIsRootAlias(name)) return 'default';
+    return name;
+  };
+  const scopeKeyForSession=(session)=>{
+    if(!session) return null;
+    const isCli=typeof _isCliSession==='function'
+      ? !!_isCliSession(session)
+      : !!(lineageScope&&lineageScope.isCli);
+    const project=session.project_id||'';
+    return `${isCli?'cli':'webui'}\u0000${project}\u0000${normalizedProfileForScope(session.profile)}`;
+  };
+  const durableLineageIdsByScope=new Map();
+  for(const session of durableRows){
+    if(!session) continue;
     if(lineageScope&&typeof lineageScope.isCli==='boolean'
       &&typeof _isCliSession==='function'
-      &&_isCliSession(session)!==lineageScope.isCli) return false;
+      &&_isCliSession(session)!==lineageScope.isCli) continue;
     if(lineageScope&&lineageScope.project!==undefined){
-      if(lineageScope.project===NO_PROJECT_FILTER){ if(session.project_id) return false; }
-      else if(lineageScope.project&&session.project_id!==lineageScope.project) return false;
+      if(lineageScope.project===NO_PROJECT_FILTER){ if(session.project_id) continue; }
+      else if(lineageScope.project&&session.project_id!==lineageScope.project) continue;
     }
-    if(lineageScope&&lineageScope.profile&&session.profile&&session.profile!==lineageScope.profile) return false;
-    return true;
-  }).map(session=>session&&session.session_id).filter(Boolean));
+    const key=scopeKeyForSession(session);
+    if(!key||!session.session_id) continue;
+    if(!durableLineageIdsByScope.has(key)) durableLineageIdsByScope.set(key,new Set());
+    durableLineageIdsByScope.get(key).add(session.session_id);
+  }
   return _attachChildSessionsToSidebarRows(
-    _collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, durableLineageIds);
+    _collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, durableLineageIdsByScope);
 }
 
 function _attachProjectQuickCreateButton(chip, project){

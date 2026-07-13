@@ -83,8 +83,10 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
     assert "{...lineageScope, isCli:true}).length" in render_body
     assert "function _countRenderedSidebarRowsFromRawSessions" not in SESSIONS_JS
     assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, lineageScope){" in SESSIONS_JS
+    assert "const durableLineageIdsByScope=new Map();" in SESSIONS_JS
+    assert "lineageScope&&lineageScope.profile&&session.profile&&session.profile!==lineageScope.profile" not in SESSIONS_JS
     assert "_attachChildSessionsToSidebarRows(" in SESSIONS_JS
-    assert "_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, durableLineageIds)" in SESSIONS_JS
+    assert "_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, durableLineageIdsByScope)" in SESSIONS_JS
 
 
 def test_archive_load_more_uses_source_wide_loaded_count_and_hides_under_filters():

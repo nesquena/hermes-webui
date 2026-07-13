@@ -885,9 +885,10 @@ console.log(JSON.stringify({{correctRows, wrongRows}}));
     result = json.loads(_run_node(source))
     assert [row["session_id"] for row in result["correctRows"]] == ["fork"]
     assert "_orphan_child_session" not in result["correctRows"][0]
-    # This documents why render references must be active-project scoped: a
-    # cross-project archived parent would make the active-project fork vanish.
-    assert result["wrongRows"] == []
+    # Scope-keyed durable lineage must ignore archived parents that live in a
+    # different project, even if a bad caller passes them in the reference set.
+    assert [row["session_id"] for row in result["wrongRows"]] == ["fork"]
+    assert "_orphan_child_session" not in result["wrongRows"][0]
 
 
 def test_inactive_source_tab_count_uses_its_own_archived_parent_references():
@@ -1050,8 +1051,8 @@ console.log(JSON.stringify(rows));
     assert "_child_sessions" not in rows[0]
 
 
-def test_fork_lineage_stays_grouped_across_reference_windows_and_rename():
-    """A transient reference window cannot detach a renamed fork or its child."""
+def test_lineage_scope_keeps_all_profile_fork_grouped_across_rebuilds():
+    """All-profiles renders must resolve fork lineage by the row's own scope."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -1070,6 +1071,12 @@ function extractFunc(name) {{
 }}
 var _showArchived = false;
 var _allSessions = [];
+function _isCliSession(session) {{
+  return !!(session && session.is_cli_session);
+}}
+function _isSessionEffectivelyStreaming(session) {{
+  return !!(session && session.active_stream_id);
+}}
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1079,22 +1086,90 @@ eval(extractFunc('_sessionDisplayTitle'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 eval(extractFunc('_renderSidebarRowsFromRawSessions'));
-function view(referenceRows) {{
-  return _renderSidebarRowsFromRawSessions([root, fork, delegated], referenceRows)
-    .map(row => ({{id:row.session_id, children:(row._child_sessions||[]).map(child=>child.session_id)}}));
+function snapshot(referenceRows, delegatedStreaming) {{
+  delegated.active_stream_id = delegatedStreaming ? 'stream-1' : '';
+  return _renderSidebarRowsFromRawSessions(
+    [activeRoot, foreignRoot, foreignFork, delegated],
+    referenceRows,
+    {{isCli:false, profile:'a'}}
+  )
+    .map(row => ({{
+      id: row.session_id,
+      childStreaming: !!row._child_session_streaming,
+      children: (row._child_sessions||[]).map(child=>child.session_id),
+    }}))
+    .sort((a,b)=>a.id.localeCompare(b.id));
 }}
-const root = {{session_id:'root', title:'Root', updated_at:10, last_message_at:10}};
-const fork = {{session_id:'fork', title:'Renamed fork', session_source:'fork', parent_session_id:'root', updated_at:20, last_message_at:20}};
-const delegated = {{session_id:'delegated', title:'Delegated child', parent_session_id:'fork', relationship_type:'child_session', updated_at:30, last_message_at:30}};
-_allSessions = [root, fork, delegated];
-const narrow = view([fork, delegated]);
-const complete = view([root, fork, delegated]);
+const activeRoot = {{session_id:'a-root', title:'Active root', profile:'a', updated_at:5, last_message_at:5}};
+const foreignRoot = {{session_id:'b-root', title:'Renamed root', profile:'b', updated_at:10, last_message_at:10}};
+const foreignFork = {{session_id:'b-fork', title:'Fork B', profile:'b', session_source:'fork', parent_session_id:'b-root', updated_at:20, last_message_at:20}};
+const delegated = {{session_id:'b-child', title:'Delegated child', profile:'b', parent_session_id:'b-fork', relationship_type:'child_session', updated_at:30, last_message_at:30}};
+_allSessions = [activeRoot, foreignRoot, foreignFork, delegated];
+const narrow = snapshot([foreignFork, delegated], true);
+const complete = snapshot([foreignRoot, foreignFork, delegated], false);
 console.log(JSON.stringify({{narrow, complete}}));
 """
     result = json.loads(_run_node(source))
-    expected = [{"id": "root", "children": ["fork", "delegated"]}]
-    assert result["narrow"] == expected
-    assert result["complete"] == expected
+    assert result["narrow"] == [
+        {"id": "a-root", "childStreaming": False, "children": []},
+        {"id": "b-root", "childStreaming": True, "children": ["b-fork", "b-child"]},
+    ]
+    assert result["complete"] == [
+        {"id": "a-root", "childStreaming": False, "children": []},
+        {"id": "b-root", "childStreaming": False, "children": ["b-fork", "b-child"]},
+    ]
+    for key in ("narrow", "complete"):
+        flattened = [
+            item
+            for row in result[key]
+            for item in [row["id"], *row["children"]]
+        ]
+        assert sorted(flattened) == ["a-root", "b-child", "b-fork", "b-root"]
+        assert len(flattened) == len(set(flattened))
+
+
+def test_default_and_renamed_root_profiles_share_lineage_scope():
+    """Default-profile children should attach under a renamed-root parent."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+var _allSessions = [];
+var _profilesCache = {{profiles:[{{name:'Renamed root', is_default:true}}]}};
+function _isCliSession() {{
+  return false;
+}}
+eval(extractFunc('_cronProfileNameIsRootAlias'));
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+const root = {{session_id:'root', title:'Renamed root', profile:'Renamed root', updated_at:10, last_message_at:10}};
+const fork = {{session_id:'fork', title:'Fork', profile:'default', session_source:'fork', parent_session_id:'root', updated_at:20, last_message_at:20}};
+_allSessions = [root, fork];
+const rows = _renderSidebarRowsFromRawSessions([root, fork], [fork], {{isCli:false, profile:'default'}})
+  .map(row => ({{id:row.session_id, children:(row._child_sessions||[]).map(child=>child.session_id)}}));
+console.log(JSON.stringify(rows));
+"""
+    assert json.loads(_run_node(source)) == [{"id": "root", "children": ["fork"]}]
 
 
 def test_pinned_fork_with_visible_parent_stays_top_level():
