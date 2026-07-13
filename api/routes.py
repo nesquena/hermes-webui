@@ -23432,6 +23432,7 @@ def _handle_approval_respond(handler, body):
     # stream pointer has already been cleared.
     try:
         from api.gateway_chat import (
+            _APPROVAL_RUN_IDS,
             _STREAM_RUN_IDS,
             _gateway_base_url,
             _gateway_api_key,
@@ -23445,7 +23446,7 @@ def _handle_approval_respond(handler, body):
             if active_sid:
                 _run_id = _STREAM_RUN_IDS.get(active_sid)
             if not _run_id and approval_id:
-                _run_id = _gateway_mirrored_pending_run_id(sid, approval_id)
+                _run_id = _APPROVAL_RUN_IDS.get((sid, approval_id)) or _gateway_mirrored_pending_run_id(sid, approval_id)
         if _run_id:
             if not approval_id:
                 return bad(handler, "approval_id is required for gateway approvals")
@@ -23457,6 +23458,7 @@ def _handle_approval_respond(handler, body):
                 HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(_run_id, approval_id, choice)
             except (RunnerClientError, ValueError) as exc:
                 return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
+            _APPROVAL_RUN_IDS.pop((sid, approval_id), None)
             # The outbound relay only resumes the remote run; the local mirror
             # still needs the same cleanup path so the parked entry, mirrored
             # card, and agent signal all settle here too.

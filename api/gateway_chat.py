@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
 
 from api.config import (
@@ -37,6 +38,25 @@ logger = logging.getLogger(__name__)
 
 # Maps stream_id -> gateway run_id for approval response relay.
 _STREAM_RUN_IDS: dict[str, str] = {}
+
+# Maps (session_id, approval_id) -> gateway run_id so approve/deny can still be
+# relayed after the stream worker exits (e.g. a run parked on approval past the
+# read timeout): _STREAM_RUN_IDS is popped in the worker's finally block and
+# the gateway pending mirror never holds runs-API approvals (it rebuilds only
+# from the in-process _gateway_queues, which the remote runs API never
+# populates), so without this map a click on a still-rendered card would find
+# no run_id and fail with ok:false (#6008). Entries are popped on successful
+# relay; the cap bounds growth from approvals that are never answered.
+_APPROVAL_RUN_IDS: dict[tuple[str, str], str] = {}
+_APPROVAL_RUN_IDS_MAX = 256
+
+
+def _register_approval_run_id(session_id: str, approval_id: str, run_id: str) -> None:
+    if not (session_id and approval_id and run_id):
+        return
+    _APPROVAL_RUN_IDS[(session_id, approval_id)] = run_id
+    while len(_APPROVAL_RUN_IDS) > _APPROVAL_RUN_IDS_MAX:
+        del _APPROVAL_RUN_IDS[next(iter(_APPROVAL_RUN_IDS))]
 
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
@@ -334,6 +354,20 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
     approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    if not approval_id:
+        # The runs-API approval.request payload carries run_id but no
+        # approval_id, and this card is streamed straight to the frontend
+        # without passing through submit_pending (which would have assigned a
+        # uuid). An empty id fails the frontend dismissed-card guard and is
+        # rejected by _handle_approval_respond, so the card can never be
+        # approved or denied and the run stays blocked (#6008). Synthesize a
+        # WebUI-local uuid — unique per event, so a repeat approval for the
+        # same command in one run can't inherit an earlier card's dismissal.
+        # The gateway resolves the parked run FIFO by the URL run_id and
+        # ignores the relayed approval_id; the stream loops record the id in
+        # _APPROVAL_RUN_IDS so the respond endpoint can recover the run_id
+        # even after the stream pointer is gone.
+        approval_id = "gw-" + uuid.uuid4().hex
     risk = str(payload.get("risk_level") or "high").strip()
     choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
     allow_permanent = payload.get("allow_permanent")
@@ -472,6 +506,7 @@ def _run_gateway_runs_api_streaming(
                 approval_data = _gateway_runs_approval_event(payload)
                 if approval_data:
                     approval_data["run_id"] = run_id
+                    _register_approval_run_id(session_id, approval_data["approval_id"], run_id)
                     put_gateway_event("approval", approval_data)
                 sse_event = "message"
                 continue
@@ -898,6 +933,7 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
+                                _register_approval_run_id(session_id, approval_data["approval_id"], _approval_run_id)
                             put_gateway_event("approval", approval_data)
                             try:
                                 from api.route_approvals import submit_gateway_pending_mirror

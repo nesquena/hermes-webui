@@ -313,9 +313,39 @@ def test_gateway_approval_event_translation():
     assert downgraded is not None
     assert downgraded["allow_permanent"] is False
 
+    # Only `id` present (no approval_id) is used verbatim, not synthesized.
+    id_only = _gateway_runs_approval_event({
+        "command": "rm -rf /tmp/x",
+        "id": "appr-from-id",
+    })
+    assert id_only is not None
+    assert id_only["approval_id"] == "appr-from-id"
+
     # Missing command/description/tool should return None.
     assert _gateway_runs_approval_event({"risk_level": "high"}) is None
     assert _gateway_runs_approval_event({}) is None
+
+
+def test_gateway_approval_event_synthesizes_id_when_missing():
+    """Runs-API approval payloads without approval_id/id get a unique gw- id (#6008)."""
+    from api.gateway_chat import _gateway_runs_approval_event
+
+    payload = {
+        "command": "rm -rf /tmp/x",
+        "description": "Dangerous command approval",
+        "pattern_key": "dangerous_command",
+        "run_id": "run-6008",
+    }
+    result = _gateway_runs_approval_event(payload)
+    assert result is not None
+    assert result["approval_id"].startswith("gw-")
+    assert result["approval_id"] != "gw-"
+
+    # Unique per event: a repeat approval for the same command in the same run
+    # must get its own id, or dismissing the first card would make the
+    # frontend dismissed-guard suppress the second one and block the run.
+    repeat = _gateway_runs_approval_event(dict(payload))
+    assert repeat["approval_id"] != result["approval_id"]
 
 
 def test_gateway_runs_api_streaming_parses_real_run_events():
@@ -578,6 +608,97 @@ def test_gateway_approval_response_relay():
 
     # Cleanup.
     _STREAM_RUN_IDS.pop("sid-relay", None)
+
+
+def test_gateway_approval_response_relay_synthesized_id():
+    """A synthesized gw- approval id relays end to end through the gateway branch (#6008)."""
+    from api.gateway_chat import _STREAM_RUN_IDS, _gateway_runs_approval_event
+
+    # Translate a runs-API payload that omits approval_id, then relay the
+    # synthesized id the frontend echoes back on the approve/deny click.
+    approval = _gateway_runs_approval_event({
+        "command": "rm -rf /tmp/x",
+        "description": "Dangerous command approval",
+        "pattern_key": "dangerous_command",
+        "run_id": "run-6008",
+    })
+    approval_id = approval["approval_id"]
+    assert approval_id.startswith("gw-")
+
+    _STREAM_RUN_IDS["sid-relay-synth"] = "run-6008"
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = "sid-relay-synth"
+
+    captured = {}
+
+    def fake_request_json(self, req):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return {"ok": True}
+
+    handler = MagicMock()
+    handler.wfile = io.BytesIO()
+
+    body = {"session_id": "sess-relay", "choice": "session", "approval_id": approval_id}
+
+    with patch("api.routes.get_session", return_value=mock_session), \
+         patch("api.runner_client.HttpRunnerClient._request_json", new=fake_request_json), \
+         patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+         patch("api.gateway_chat._gateway_api_key", return_value=""):
+        from api.routes import _handle_approval_respond
+        _handle_approval_respond(handler, body)
+
+    assert captured.get("url", "") == "http://gw:8642/v1/runs/run-6008/approval"
+    assert captured["body"] == {"choice": "session", "approval_id": approval_id}
+    handler.send_response.assert_called_with(200)
+
+    _STREAM_RUN_IDS.pop("sid-relay-synth", None)
+
+
+def test_gateway_approval_response_relay_recovers_run_id_without_stream():
+    """Approve/deny still relays after the stream pointer is gone (#6008).
+
+    A run parked on approval past the SSE read timeout loses its stream worker
+    (_STREAM_RUN_IDS is popped in the finally block) and the gateway pending
+    mirror never holds runs-API approvals, so the respond endpoint must
+    recover the run_id from _APPROVAL_RUN_IDS.
+    """
+    from api.gateway_chat import _APPROVAL_RUN_IDS, _register_approval_run_id
+
+    _register_approval_run_id("sess-recover", "gw-recover", "run-recover")
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = None
+
+    captured = {}
+
+    def fake_request_json(self, req):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return {"ok": True}
+
+    handler = MagicMock()
+    handler.wfile = io.BytesIO()
+
+    body = {"session_id": "sess-recover", "choice": "once", "approval_id": "gw-recover"}
+
+    try:
+        with patch("api.routes.get_session", return_value=mock_session), \
+             patch("api.runner_client.HttpRunnerClient._request_json", new=fake_request_json), \
+             patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+             patch("api.gateway_chat._gateway_api_key", return_value=""):
+            from api.routes import _handle_approval_respond
+            _handle_approval_respond(handler, body)
+
+        assert captured.get("url", "") == "http://gw:8642/v1/runs/run-recover/approval"
+        assert captured["body"] == {"choice": "once", "approval_id": "gw-recover"}
+        handler.send_response.assert_called_with(200)
+
+        # A successful relay retires the mapping.
+        assert ("sess-recover", "gw-recover") not in _APPROVAL_RUN_IDS
+    finally:
+        _APPROVAL_RUN_IDS.pop(("sess-recover", "gw-recover"), None)
 
 
 def test_gateway_approval_response_relay_failure_returns_502():
