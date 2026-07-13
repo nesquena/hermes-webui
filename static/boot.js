@@ -303,7 +303,10 @@ async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
   if(_workspacePanelMode!=='browse') return false;
   if(!S._profileDefaultWorkspace) return false;
   try{
-    await newSession(false, {awaitWorkspaceLoad: true});
+    // worktree:false is explicit and load-bearing — this auto-bind runs on
+    // page load, and a config-level worktree default must never leak a fresh
+    // worktree + branch from simply opening the UI (#6022).
+    await newSession(false, {awaitWorkspaceLoad: true, worktree: false});
     return true;
   }catch(e){
     console.warn('[hermes] failed to bind fresh default workspace session', e);
