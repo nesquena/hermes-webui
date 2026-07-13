@@ -77,11 +77,13 @@ def test_draft_files_type_coerced_to_list():
 
 
 def test_draft_validation_appears_before_persist():
-    """The validation must run BEFORE the lock acquire / save, not after."""
+    """The validation must run BEFORE the sidecar persist, not after."""
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     # Anchor on the unique POST-validation comment marker.
     marker_idx = src.find("Stage-326 hardening (per Opus advisor)")
-    persist_idx = src.find("s.composer_draft = next_draft\n                # Draft persistence is not conversation activity")
+    # Big-session hotpath (2026-07-13): drafts persist to a sidecar file,
+    # not via Session.save() — the persist site is the sidecar write.
+    persist_idx = src.find("saved_draft = write_composer_draft_sidecar(sid, next_draft)")
     assert marker_idx != -1 and persist_idx != -1, (
         "could not locate validation marker or persist site"
     )
@@ -96,23 +98,35 @@ def test_draft_save_does_not_touch_session_updated_at():
     If POST /api/session/draft bumps updated_at, the frontend's active-session
     external refresh poll treats every keystroke autosave as a remote session
     update and force-reloads the current chat a few seconds later.
+
+    Big-session hotpath (2026-07-13): the guarantee got stronger — the draft
+    POST must not call Session.save() AT ALL (which used to rewrite the whole
+    multi-MB session JSON per keystroke autosave). Drafts go to a tiny sidecar
+    file that touches neither the session JSON, its updated_at, nor the index.
     """
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    persist_idx = src.find("s.composer_draft = next_draft")
-    assert persist_idx != -1, "could not locate composer draft persist site"
-    save_idx = src.find("s.save(touch_updated_at=False, skip_index=True)", persist_idx)
-    assert save_idx != -1, "composer draft save must preserve session updated_at and skip index churn"
+    route_idx = src.find('if parsed.path == "/api/session/draft":')
+    assert route_idx != -1, "could not locate draft route"
+    end_idx = src.find('payload = {"ok": True, "draft": saved_draft}', route_idx)
+    assert end_idx != -1, "could not locate draft route response site"
+    route_body = src[route_idx:end_idx]
+    assert "write_composer_draft_sidecar" in route_body, (
+        "draft POST must persist via the sidecar store"
+    )
+    assert "s.save(" not in route_body and "s_meta.save(" not in route_body, (
+        "draft POST must never rewrite the session JSON via Session.save()"
+    )
 
 
 def test_draft_save_skips_unchanged_payload_before_persist():
-    """Duplicate debounced draft POSTs should not rewrite the full session JSON."""
+    """Duplicate debounced draft POSTs should not rewrite the draft sidecar."""
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    draft_idx = src.find('current_draft = dict(getattr(s, "composer_draft", {}) or {})')
-    unchanged_idx = src.find("if next_draft == current_draft", draft_idx)
-    save_idx = src.find("s.save(touch_updated_at=False, skip_index=True)", draft_idx)
+    draft_idx = src.find("sidecar_draft = read_composer_draft_sidecar(sid)")
+    unchanged_idx = src.find("if next_draft == current_draft and sidecar_draft is not None", draft_idx)
+    save_idx = src.find("saved_draft = write_composer_draft_sidecar(sid, next_draft)", draft_idx)
 
-    assert draft_idx != -1, "draft route should snapshot current composer_draft"
+    assert draft_idx != -1, "draft route should snapshot the current sidecar draft"
     assert unchanged_idx != -1, "draft route should no-op unchanged normalized payloads"
-    assert save_idx != -1, "draft route should still save changed drafts"
-    assert unchanged_idx < save_idx, "unchanged guard must run before full session save"
+    assert save_idx != -1, "draft route should still persist changed drafts"
+    assert unchanged_idx < save_idx, "unchanged guard must run before the sidecar persist"
     assert 'payload["unchanged"] = True' in src
