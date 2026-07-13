@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- **Background/subagent completions no longer surface in the wrong session.** A detached terminal or subagent completion event now carries its exact origin browser-session id, so a finished background task routes only to the session that started it — instead of possibly waking a *different* open session through a stale/contaminated routing key. Events without an owner id keep their previous same-session delivery and are never broadcast to a wrong session; the identity binding is per-turn and reset on exit (no leak across concurrent sessions). Thanks @soria-clawd-bot. (#6002)
+
 - **Gateway provider errors are reported accurately, and your prompt survives a failed turn.** On gateway-backed sessions, a terminal provider error (bad model id, exhausted credentials, etc.) mid-turn is now classified and shown as the real error instead of a generic empty turn, the error card is bound to the correct session, and the in-flight user prompt plus any partial output is persisted so it survives a reload — even when you'd just re-sent an identical prompt (e.g. "continue"). Thanks @rodboev. (#5969, #5940)
 
 - **"Fork from here" works during an active response.** The fork button was silently dead while the agent was generating — clicking it did nothing. You can now fork from any past (already-committed) message while a response streams; only the currently-streaming message and the just-sent (not-yet-committed) prompt are blocked, with a clear toast. Thanks @kertisalex. (#5994, #5993)
