@@ -79,10 +79,24 @@ const other=new Node('option'); other.value='x-ai/grok-4.5'; otherGroup.appendCh
 const catalogFirst=makeSelect();
 addCatalog(catalogFirst,'x-ai/grok-4.5');
 _addLiveModelsToSelect('custom:llm-proxy',[{{id:'x-ai/grok-4.5',label:'Grok 4.5'}}],catalogFirst);
+const selectedBare=makeSelect();
+addCatalog(selectedBare,'x-ai/grok-4.5');
+selectedBare.value='x-ai/grok-4.5';
+_addLiveModelsToSelect('custom:llm-proxy',[{{id:'x-ai/grok-4.5',label:'Grok 4.5'}}],selectedBare);
+const sameSuffix=makeSelect();
+addCatalog(sameSuffix,'vendor-a/deepseek-v4-pro');
+addCatalog(sameSuffix,'vendor-b/catalog/deepseek-v4-pro');
+sameSuffix.value='vendor-a/deepseek-v4-pro';
 const unnamespaced=makeSelect();
 addCatalog(unnamespaced,'gpt-4o');
 _addLiveModelsToSelect('custom:llm-proxy',[{{id:'@custom:llm-proxy:gpt-4o',label:'GPT-4o'}}],unnamespaced);
-console.log(JSON.stringify({{liveFirst:snapshot(liveFirst),catalogFirst:snapshot(catalogFirst),unnamespaced:snapshot(unnamespaced)}}));
+console.log(JSON.stringify({{
+  liveFirst:snapshot(liveFirst),
+  catalogFirst:snapshot(catalogFirst),
+  selectedBare:snapshot(selectedBare),
+  sameSuffix:snapshot(sameSuffix),
+  unnamespaced:snapshot(unnamespaced),
+}}));
 """
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -101,6 +115,20 @@ def test_catalog_first_keeps_the_routable_proxy_row():
     assert _run_harness()["catalogFirst"] == {
         "groups": [["@custom:llm-proxy:x-ai/grok-4.5"]],
         "selected": "@custom:llm-proxy:x-ai/grok-4.5",
+    }
+
+
+def test_selected_bare_occurrence_survives_same_group_dedup():
+    assert _run_harness()["selectedBare"] == {
+        "groups": [["x-ai/grok-4.5"]],
+        "selected": "x-ai/grok-4.5",
+    }
+
+
+def test_same_suffix_models_in_one_group_do_not_collapse():
+    assert _run_harness()["sameSuffix"] == {
+        "groups": [["vendor-a/deepseek-v4-pro", "vendor-b/catalog/deepseek-v4-pro"]],
+        "selected": "vendor-a/deepseek-v4-pro",
     }
 
 

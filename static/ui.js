@@ -2664,7 +2664,6 @@ function _modelPickerOptionIdentity(modelId){
       ? value.substring(value.lastIndexOf(':')+1)
       : value.substring(value.indexOf(':')+1);
   }
-  value=value.split('/').pop();
   return value.replace(/-/g,'.').toLowerCase();
 }
 function _deduplicateModelPickerOptions(sel,selectedValue){
@@ -2683,8 +2682,7 @@ function _deduplicateModelPickerOptions(sel,selectedValue){
       if(candidates.length<2) continue;
       const selected=candidates.find(opt=>opt.value===selectedValue);
       const routable=candidates.find(opt=>String(opt.value||'').startsWith('@'));
-      const survivor=(selected&&String(selected.value||'').startsWith('@'))
-        || !routable ? (selected||routable||candidates[0]) : routable;
+      const survivor=selected||routable||candidates[0];
       for(const opt of candidates){
         if(opt===survivor) continue;
         group.removeChild(opt);
@@ -2980,11 +2978,14 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     const pref=String(preferredProviderId||'').toLowerCase();
     if(!pref || !exactProv || exactProv===pref) return modelId;
   }
-  // 1. Normalize: lowercase, strip namespace prefix, replace hyphens→dots.
-  // Also strip @provider: prefix from deduplicated model IDs (#1228, #1313).
-  const norm=s=>typeof _modelPickerOptionIdentity==='function'
-    ? _modelPickerOptionIdentity(s)
-    : s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
+  // 1. Restore lookup keeps the older hierarchy-preserving matcher instead of
+  // the picker-dedup identity, so missing qualified models do not substitute a
+  // different suffix-sharing sibling.
+  const norm=s=>String(s||'')
+    .toLowerCase()
+    .replace(/^@([^:]+:)+/,'')
+    .replace(/^[^/]+\//,'')
+    .replace(/-/g,'.');
   const target=norm(modelId);
   let explicitProvider='';
   const rawModel=String(modelId||'');
