@@ -53,6 +53,7 @@ def test_visit_ack_helpers_exist():
     assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
     assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt)" in SESSIONS_JS
     assert "function _sessionVisitHasUnreadState(sid)" in SESSIONS_JS
+    assert "function _markSessionUnread(session)" in SESSIONS_JS
 
 
 def test_acknowledge_visit_syncs_viewed_snapshot_and_repaints():
@@ -110,6 +111,12 @@ def test_same_session_reselect_clears_stale_unread():
         "re-selecting the already-open session must acknowledge the visit (clearing "
         "the stale dot) before returning"
     )
+
+
+def test_session_action_menu_exposes_mark_as_unread():
+    block = _function_block("_openSessionActionMenu", "document.addEventListener('click'")
+    assert "t('session_mark_unread')" in block
+    assert "_markSessionUnread(session);" in block
 
 
 def test_completion_paths_keep_focus_gate_for_hidden_tab_completions():
@@ -212,6 +219,40 @@ console.log(JSON.stringify({{before, after, repaints, viewed: _getSessionViewedC
     assert out["snap"] == {"message_count": 5, "last_message_at": 10}, (
         "polling snapshot must be synced so a deferred list poll cannot re-flag the session"
     )
+
+
+def test_mark_session_unread_sets_completion_marker_and_repaints():
+    mark_unread = _extract("_markSessionUnread")
+    mark_completion = _extract("_markSessionCompletionUnread")
+    get_unread = _extract("_getSessionCompletionUnread")
+    save_unread = _extract("_saveSessionCompletionUnread")
+
+    script = f"""
+const _store = {{}};
+const localStorage = {{
+  getItem: (k) => (k in _store ? _store[k] : null),
+  setItem: (k, v) => {{ _store[k] = String(v); }},
+}};
+const SESSION_COMPLETION_UNREAD_KEY = 'u';
+let _sessionCompletionUnread = null;
+const _allSessions = [];
+let S = {{ session: {{ session_id: 'open', message_count: 7 }} }};
+let repaints = 0;
+let toast = '';
+function renderSessionListFromCache() {{ repaints += 1; }}
+function showToast(msg) {{ toast = msg; }}
+function t(key) {{ return key; }}
+{get_unread}
+{save_unread}
+{mark_completion}
+{mark_unread}
+_markSessionUnread({{session_id: 'open'}});
+console.log(JSON.stringify({{marker: _getSessionCompletionUnread().open, repaints, toast}}));
+"""
+    out = _run_node(script)
+    assert out["marker"]["message_count"] == 7
+    assert out["repaints"] == 1
+    assert out["toast"] == "session_marked_unread"
 
 
 def test_visit_snapshot_prevents_deferred_poll_from_reflagging():
