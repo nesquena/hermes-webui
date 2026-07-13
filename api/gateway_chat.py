@@ -49,14 +49,21 @@ _STREAM_RUN_IDS: dict[str, str] = {}
 # relay; the cap bounds growth from approvals that are never answered.
 _APPROVAL_RUN_IDS: dict[tuple[str, str], str] = {}
 _APPROVAL_RUN_IDS_MAX = 256
+# Guards the eviction loop below and the respond endpoint's pop: each run
+# streams on its own worker thread, and the read-then-delete pair in eviction
+# is not atomic under the GIL — two writers can pick the same oldest key
+# (KeyError), or a concurrent pop can mutate the dict between iter() and
+# next() (RuntimeError), killing that run's stream mid-loop.
+_APPROVAL_RUN_IDS_LOCK = threading.Lock()
 
 
 def _register_approval_run_id(session_id: str, approval_id: str, run_id: str) -> None:
     if not (session_id and approval_id and run_id):
         return
-    _APPROVAL_RUN_IDS[(session_id, approval_id)] = run_id
-    while len(_APPROVAL_RUN_IDS) > _APPROVAL_RUN_IDS_MAX:
-        del _APPROVAL_RUN_IDS[next(iter(_APPROVAL_RUN_IDS))]
+    with _APPROVAL_RUN_IDS_LOCK:
+        _APPROVAL_RUN_IDS[(session_id, approval_id)] = run_id
+        while len(_APPROVAL_RUN_IDS) > _APPROVAL_RUN_IDS_MAX:
+            del _APPROVAL_RUN_IDS[next(iter(_APPROVAL_RUN_IDS))]
 
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"

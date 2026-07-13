@@ -701,6 +701,49 @@ def test_gateway_approval_response_relay_recovers_run_id_without_stream():
         _APPROVAL_RUN_IDS.pop(("sess-recover", "gw-recover"), None)
 
 
+def test_gateway_approval_response_relay_prefers_card_run_over_active_stream():
+    """A stale card's choice relays to its own run, not the newer active run.
+
+    The gateway resolves approvals FIFO per run and ignores the posted
+    approval_id, so routing a stale card through the session's active stream
+    could approve a pending action the user never saw.
+    """
+    from api.gateway_chat import _APPROVAL_RUN_IDS, _STREAM_RUN_IDS, _register_approval_run_id
+
+    _register_approval_run_id("sess-stale", "gw-stale", "run-old")
+    _STREAM_RUN_IDS["sid-newer"] = "run-new"
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = "sid-newer"
+
+    captured = {}
+
+    def fake_request_json(self, req):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return {"ok": True}
+
+    handler = MagicMock()
+    handler.wfile = io.BytesIO()
+
+    body = {"session_id": "sess-stale", "choice": "deny", "approval_id": "gw-stale"}
+
+    try:
+        with patch("api.routes.get_session", return_value=mock_session), \
+             patch("api.runner_client.HttpRunnerClient._request_json", new=fake_request_json), \
+             patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+             patch("api.gateway_chat._gateway_api_key", return_value=""):
+            from api.routes import _handle_approval_respond
+            _handle_approval_respond(handler, body)
+
+        assert captured.get("url", "") == "http://gw:8642/v1/runs/run-old/approval"
+        assert captured["body"] == {"choice": "deny", "approval_id": "gw-stale"}
+        handler.send_response.assert_called_with(200)
+    finally:
+        _APPROVAL_RUN_IDS.pop(("sess-stale", "gw-stale"), None)
+        _STREAM_RUN_IDS.pop("sid-newer", None)
+
+
 def test_gateway_approval_response_relay_failure_returns_502():
     """Gateway relay failures must surface as HTTP errors to the frontend."""
     from api.gateway_chat import _STREAM_RUN_IDS
