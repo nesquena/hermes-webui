@@ -6,6 +6,7 @@ const ICONS={
   folder:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4.5h4l1.5 1.5H14v7H2z"/></svg>',
   archive:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="13" height="3" rx="1"/><path d="M2.5 5v8h11V5"/><line x1="6" y1="8.5" x2="10" y2="8.5"/></svg>',
   unarchive:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="13" height="3" rx="1"/><path d="M2.5 5v8h11V5"/><polyline points="6.5,7 8,5.5 9.5,7"/></svg>',
+  unread:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="4.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>',
   dup:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="4.5" y="4.5" width="8.5" height="8.5" rx="1.5"/><path d="M3 11.5V3h8.5"/></svg>',
   trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
@@ -539,6 +540,22 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
   _markSessionCompletionUnread(sid, count, meta);
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   return true;
+}
+
+function _markSessionUnread(session) {
+  const sid = session && session.session_id;
+  if (!sid) return;
+  let count = Number(session.message_count);
+  if (!Number.isFinite(count) && Array.isArray(_allSessions)) {
+    const cached = _allSessions.find(s => s && s.session_id === sid);
+    count = Number(cached && cached.message_count);
+  }
+  if (!Number.isFinite(count) && S.session && S.session.session_id === sid) {
+    count = Number(S.session.message_count);
+  }
+  _markSessionCompletionUnread(sid, Number.isFinite(count) ? count : 0);
+  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+  if (typeof showToast === 'function') showToast(t('session_marked_unread'));
 }
 
 function _clearSessionCompletionUnread(sid) {
@@ -4623,6 +4640,15 @@ function _openSessionActionMenu(session, anchorEl){
   const menu=document.createElement('div');
   menu.className='session-action-menu';
   _appendSessionCopyLinkAction(menu, session);
+  menu.appendChild(_buildSessionAction(
+    t('session_mark_unread'),
+    t('session_mark_unread_desc'),
+    ICONS.unread,
+    ()=>{
+      closeSessionActionMenu();
+      _markSessionUnread(session);
+    }
+  ));
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
     _mountSessionActionMenu(menu, session, anchorEl);
