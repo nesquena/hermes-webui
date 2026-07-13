@@ -1629,7 +1629,7 @@ async function send(){
   // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
   // set there; nothing to re-declare here.
   const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
-  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
+  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
@@ -7965,7 +7965,11 @@ function showClarifyCard(pending) {
   _clarifySessionId = sid;
   _clarifyId = pending.clarify_id || null;
   _clarifySignature = sig;
-  _startClarifyCountdown(pending);
+  if (Number(pending.timeout_seconds) > 0) {
+    _startClarifyCountdown(pending);
+  } else {
+    _clearClarifyCountdownTimer();
+  }
   if (!sameClarify) {
     _clarifyVisibleSince = Date.now();
     _clearClarifyHideTimer();

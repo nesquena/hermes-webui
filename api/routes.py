@@ -21680,6 +21680,20 @@ def _handle_chat_start(handler, body, diag=None):
             profile_config=_pp_cfg,
             explicit_model_pick=explicit_model_pick,
         )
+        # #5979: record a SIGNATURE of the deliberately-picked model+provider so
+        # the streaming resolver can preserve a custom-proxy vendor namespace on a
+        # cold catalog — but ONLY while the routing context still matches. On a
+        # fresh explicit pick, stamp the signature of the resolved model+provider;
+        # otherwise leave any prior signature in place (it self-invalidates when
+        # the model/provider changes, since the streaming side recomputes and
+        # compares). This survives same-model follow-up sends (the onchange marker
+        # is one-shot) yet can't outlive a real switch.
+        try:
+            if explicit_model_pick:
+                from api.models import model_explicit_pick_signature as _mk_sig
+                s.model_explicit_pick_signature = _mk_sig(model, model_provider)
+        except Exception:
+            pass
         catalog_profile_provider = _pp_provider
         if catalog_profile_provider is None and isinstance(_pp_cfg, dict):
             profile_model_config = _pp_cfg.get("model") or {}

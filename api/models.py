@@ -1081,6 +1081,21 @@ def _parse_nonnegative_int(value):
     return parsed if parsed >= 0 else None
 
 
+def model_explicit_pick_signature(model, model_provider) -> str:
+    """Stable signature of a (model, provider) selection for #5979 explicit-pick
+    provenance. The persisted ``Session.model_explicit_pick_signature`` is set to
+    this when the user deliberately picks a model; the streaming resolver only
+    treats a selection as deliberate when the CURRENT routing context produces
+    the same signature. Any model/provider change (chat-start, session-update,
+    normalization, provider repair) yields a different signature and thus
+    invalidates the stale pick — so a #433 first-party leftover is never wrongly
+    preserved. Uses \\x1f (unit separator) so it can't collide with model ids.
+    """
+    _m = str(model or "").strip()
+    _p = str(model_provider or "").strip().lower()
+    return f"{_m}\x1f{_p}"
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
@@ -1136,6 +1151,16 @@ class Session:
         self.workspace = str(Path(workspace).expanduser().resolve())
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
+        # #5979: signature of the model the user DELIBERATELY picked this session
+        # (``"<model>\x1f<provider>"``), or None. Used by the streaming resolver
+        # to preserve a custom-proxy vendor namespace on a COLD catalog ONLY when
+        # the current routing context still matches what was picked. Storing a
+        # SIGNATURE (not a bare bool) means any later model/provider change — via
+        # /api/chat/start, /api/session/update, normalization, or provider repair
+        # — automatically invalidates the pick (the signatures no longer match),
+        # so a stale first-party leftover (#433) is never wrongly preserved.
+        # Restored from persisted metadata on load (arrives via **kwargs).
+        self.model_explicit_pick_signature = kwargs.get('model_explicit_pick_signature') or None
         self.messages = messages or []
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
@@ -1255,7 +1280,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'model', 'model_provider', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
