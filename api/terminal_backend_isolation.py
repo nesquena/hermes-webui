@@ -55,6 +55,7 @@ probe layer here shrink to a single verified call.
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import threading
@@ -68,6 +69,12 @@ logger = logging.getLogger(__name__)
 _AGENT_DEFAULT_IMAGE = "nikolaik/python-nodejs:python3.11-nodejs20"
 _AGENT_DEFAULT_SSH_PORT = "22"
 _AGENT_DEFAULT_MODAL_MODE = "auto"
+_AGENT_DEFAULT_CONTAINER_CPU = "1"
+_AGENT_DEFAULT_CONTAINER_MEMORY = "5120"
+_AGENT_DEFAULT_CONTAINER_DISK = "51200"
+
+# Truthy set mirrored from the agent's env parsing.
+_AGENT_TRUTHY = frozenset({"true", "1", "yes"})
 
 # Backends whose cached environment is a container the agent can reattach by
 # labels without comparing image (persistent Docker). Cleanup on a transition
@@ -122,15 +129,38 @@ def _env_value(runtime_env: Mapping[str, str], key: str, default: str = "") -> s
     return text or default
 
 
+def _env_flag(runtime_env: Mapping[str, str], key: str, default: str) -> str:
+    """Normalize a boolean-ish setting the way the agent parses it, so
+    ``"true"``, ``"1"`` and ``"yes"`` (and an absent key with a truthy
+    default) all produce one identity token."""
+    return "1" if _env_value(runtime_env, key, default).lower() in _AGENT_TRUTHY else "0"
+
+
+def _env_json(runtime_env: Mapping[str, str], key: str, default: str) -> str:
+    """Canonicalize a JSON-valued setting (volumes, extra args, env maps) so
+    formatting differences don't split identities. Unparseable values keep
+    their raw text — two different broken strings must stay different."""
+    raw = _env_value(runtime_env, key, default)
+    try:
+        return json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"))
+    except (ValueError, TypeError):
+        return raw
+
+
 def terminal_backend_identity(runtime_env: Mapping[str, str]) -> tuple[str, ...]:
     """Return a stable identity for the terminal backend encoded in *runtime_env*.
 
-    Only the settings the agent actually uses to create the *active* backend
-    participate — an SSH host left over in env must not change a local
-    backend's identity, and vice versa. Absent keys are normalized to the
-    agent's defaults so ``{}`` and ``{"TERMINAL_SSH_PORT": "22"}`` cannot
-    disagree. CWD is intentionally excluded so two same-backend sessions with
-    different workspaces still share one cache slot.
+    Every setting the agent's ``get_config()`` feeds into creating the
+    *active* backend's environment participates (#5988 round 4: two turns are
+    same-identity only when environment creation would consume identical
+    inputs). Inactive backends' settings are excluded — an SSH host left over
+    in env must not change a local backend's identity. Absent keys are
+    normalized to the agent's defaults so ``{}`` and
+    ``{"TERMINAL_SSH_PORT": "22"}`` cannot disagree. Deliberately excluded:
+    CWD (two same-backend sessions with different workspaces share one cache
+    slot by design) and per-command knobs that don't shape the environment
+    object (TERMINAL_TIMEOUT, TERMINAL_MAX_FOREGROUND_TIMEOUT,
+    TERMINAL_DISK_WARNING_GB, TERMINAL_LIFETIME_SECONDS).
     """
     env_type = _env_value(runtime_env, "TERMINAL_ENV", "local").lower()
     if env_type == "ssh":
@@ -140,11 +170,38 @@ def terminal_backend_identity(runtime_env: Mapping[str, str]) -> tuple[str, ...]
             _env_value(runtime_env, "TERMINAL_SSH_USER"),
             _env_value(runtime_env, "TERMINAL_SSH_PORT", _AGENT_DEFAULT_SSH_PORT),
             _env_value(runtime_env, "TERMINAL_SSH_KEY"),
+            _env_flag(
+                runtime_env,
+                "TERMINAL_SSH_PERSISTENT",
+                _env_value(runtime_env, "TERMINAL_PERSISTENT_SHELL", "true"),
+            ),
         )
     if env_type == "docker":
         return (
             "docker",
             _env_value(runtime_env, "TERMINAL_DOCKER_IMAGE", _AGENT_DEFAULT_IMAGE),
+            _env_value(
+                runtime_env, "TERMINAL_CONTAINER_CPU", _AGENT_DEFAULT_CONTAINER_CPU
+            ),
+            _env_value(
+                runtime_env,
+                "TERMINAL_CONTAINER_MEMORY",
+                _AGENT_DEFAULT_CONTAINER_MEMORY,
+            ),
+            _env_value(
+                runtime_env, "TERMINAL_CONTAINER_DISK", _AGENT_DEFAULT_CONTAINER_DISK
+            ),
+            _env_json(runtime_env, "TERMINAL_DOCKER_FORWARD_ENV", "[]"),
+            _env_json(runtime_env, "TERMINAL_DOCKER_VOLUMES", "[]"),
+            _env_json(runtime_env, "TERMINAL_DOCKER_ENV", "{}"),
+            _env_json(runtime_env, "TERMINAL_DOCKER_EXTRA_ARGS", "[]"),
+            _env_flag(runtime_env, "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false"),
+            _env_flag(runtime_env, "TERMINAL_DOCKER_RUN_AS_HOST_USER", "false"),
+            _env_flag(runtime_env, "TERMINAL_DOCKER_NETWORK", "true"),
+            _env_flag(runtime_env, "TERMINAL_CONTAINER_PERSISTENT", "true"),
+            _env_flag(
+                runtime_env, "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES", "true"
+            ),
         )
     if env_type == "modal":
         return (
@@ -153,6 +210,17 @@ def terminal_backend_identity(runtime_env: Mapping[str, str]) -> tuple[str, ...]
             _env_value(
                 runtime_env, "TERMINAL_MODAL_MODE", _AGENT_DEFAULT_MODAL_MODE
             ).lower(),
+            _env_value(
+                runtime_env, "TERMINAL_CONTAINER_CPU", _AGENT_DEFAULT_CONTAINER_CPU
+            ),
+            _env_value(
+                runtime_env,
+                "TERMINAL_CONTAINER_MEMORY",
+                _AGENT_DEFAULT_CONTAINER_MEMORY,
+            ),
+            _env_value(
+                runtime_env, "TERMINAL_CONTAINER_DISK", _AGENT_DEFAULT_CONTAINER_DISK
+            ),
         )
     if env_type == "singularity":
         return (
@@ -167,6 +235,11 @@ def terminal_backend_identity(runtime_env: Mapping[str, str]) -> tuple[str, ...]
         return (
             "daytona",
             _env_value(runtime_env, "TERMINAL_DAYTONA_IMAGE", _AGENT_DEFAULT_IMAGE),
+        )
+    if env_type == "local":
+        return (
+            "local",
+            _env_flag(runtime_env, "TERMINAL_LOCAL_PERSISTENT", "false"),
         )
     return (env_type,)
 
@@ -225,11 +298,22 @@ def _resolve_terminal_tool():
         return _AGENT_RUNTIME_ABSENT
 
 
+# docker/podman `inspect` prints this (modulo case) when — and only when —
+# the daemon answered and the object is definitively absent. Any other
+# nonzero outcome (daemon unreachable, permission denied, TLS error, ...)
+# proves nothing about the container.
+_PROBE_ABSENT_MARKER = "no such object"
+
+
 def _container_exists(container_id: str, docker_exe: str) -> bool:
     """Probe whether *container_id* still exists (running or stopped).
 
-    Raises on probe failure (missing docker binary, timeout) so the caller
-    treats "cannot verify" as "not verified" — fail closed.
+    Tri-state, fail closed (#5988 round 4): exit 0 means the container
+    exists; a nonzero exit is treated as ABSENT only when the daemon
+    positively reported "no such object". Every other failure (daemon
+    unreachable, missing binary, timeout, permission error) RAISES so the
+    caller treats "cannot verify" as "not verified" — a dead Docker daemon
+    must never read as "container removed".
     """
     proc = subprocess.run(
         [docker_exe or "docker", "inspect", "--format", "{{.Id}}", container_id],
@@ -237,7 +321,16 @@ def _container_exists(container_id: str, docker_exe: str) -> bool:
         timeout=_PROBE_TIMEOUT_SECONDS,
         stdin=subprocess.DEVNULL,
     )
-    return proc.returncode == 0
+    if proc.returncode == 0:
+        return True
+    stderr = (proc.stderr or b"").decode("utf-8", "replace")
+    if _PROBE_ABSENT_MARKER in stderr.lower():
+        return False
+    raise RuntimeError(
+        "docker inspect probe for container %s failed without a definitive "
+        "absence report (exit %s): %s"
+        % (container_id[:12], proc.returncode, stderr.strip()[:300] or "<no stderr>")
+    )
 
 
 def _force_remove_container(container_id: str, docker_exe: str) -> None:
@@ -302,13 +395,24 @@ def _verify_pending_container_removals(wait_seconds: Optional[float] = None) -> 
     return all_verified
 
 
-def _invalidate_default_env(previous, identity, cleanup_vm, get_active_env) -> bool:
+def _invalidate_default_env(
+    previous, identity, cleanup_vm, get_active_env
+) -> tuple[bool, bool]:
     """Verifiably invalidate the agent ``"default"`` slot for previous->identity.
 
-    Returns True only when the postconditions are OBSERVED (slot gone; any
-    outgoing containers gone). ``cleanup_vm`` returning is never treated as
-    success by itself: the real agent contract swallows backend-teardown
-    exceptions and returns None, and Docker force-removal runs asynchronously.
+    Returns ``(committed, invalidated)``. ``committed`` is True only when the
+    postconditions are OBSERVED (slot gone; any outgoing containers gone) —
+    ``cleanup_vm`` returning is never treated as success by itself: the real
+    agent contract swallows backend-teardown exceptions and returns None, and
+    Docker force-removal runs asynchronously. ``invalidated`` reports whether
+    an actual invalidation happened (False for a first-use commit that PROVED
+    the slot empty and had nothing to clean).
+
+    ``previous is None`` is the first-use case (#5988 round 4): the slot's
+    state is unproven — tool-capable code outside the lease discipline (or a
+    prior failed first-use attempt) may already have populated it. First use
+    therefore commits only after OBSERVING the slot absent, or after a full
+    verified cleanup when it is populated.
     """
     if cleanup_vm is None or get_active_env is None:
         terminal_tool = _resolve_terminal_tool()
@@ -324,10 +428,10 @@ def _invalidate_default_env(previous, identity, cleanup_vm, get_active_env) -> b
                     previous,
                     identity,
                 )
-                return True
+                return True, previous is not None
             # Partial injection with an absent runtime is ambiguous — the
             # caller believes an env layer exists that we cannot verify.
-            return False
+            return False, False
         if cleanup_vm is None:
             cleanup_vm = getattr(terminal_tool, "cleanup_vm", None)
         if get_active_env is None:
@@ -343,27 +447,53 @@ def _invalidate_default_env(previous, identity, cleanup_vm, get_active_env) -> b
                 "hermes-agent terminal runtime is present but cleanup_vm/"
                 "get_active_env could not be resolved (#5937); failing closed",
             )
-            return False
+            return False, False
 
-    force_remove = previous[0] in _FORCE_REMOVE_ENV_TYPES
-
-    # Ledger the outgoing container BEFORE cleanup: cleanup_vm pops the slot
+    # Observe the outgoing env BEFORE cleanup: cleanup_vm pops the slot
     # unconditionally, so this is the last moment its container id is
     # reachable. If anything below fails, the ledger survives into the retry.
-    outgoing_env = None
     try:
         outgoing_env = get_active_env("default")
     except Exception:
         logger.warning(
             "get_active_env('default') failed pre-cleanup (#5937)", exc_info=True
         )
-        return False
-    if force_remove and outgoing_env is not None:
-        container_id = getattr(outgoing_env, "_container_id", None)
-        if container_id:
-            docker_exe = getattr(outgoing_env, "_docker_exe", None) or "docker"
-            with _COND:
-                _pending_container_removals.setdefault(str(container_id), docker_exe)
+        return False, False
+
+    if previous is None and outgoing_env is None:
+        # First use with the slot OBSERVED absent. Still require the pending
+        # ledger empty: a prior failed first-use attempt may have popped the
+        # slot but left its container unverified — committing here would
+        # forget that leak.
+        if not _verify_pending_container_removals():
+            logger.warning(
+                "first-use commit blocked: ledgered container removals remain "
+                "unverified (#5937) identity=%s",
+                identity,
+            )
+            return False, False
+        logger.info(
+            "first terminal backend identity %s committed after observing the "
+            "default env slot absent (#5937)",
+            identity,
+        )
+        return True, False
+
+    # Force-removal is required when the OUTGOING env is a reattachable
+    # container. The previous identity type says so for known transitions;
+    # for first-use (previous unknown) the env object itself is the evidence.
+    container_id = (
+        getattr(outgoing_env, "_container_id", None)
+        if outgoing_env is not None
+        else None
+    )
+    force_remove = bool(container_id) or (
+        previous is not None and previous[0] in _FORCE_REMOVE_ENV_TYPES
+    )
+    if container_id:
+        docker_exe = getattr(outgoing_env, "_docker_exe", None) or "docker"
+        with _COND:
+            _pending_container_removals.setdefault(str(container_id), docker_exe)
 
     try:
         if force_remove:
@@ -379,7 +509,7 @@ def _invalidate_default_env(previous, identity, cleanup_vm, get_active_env) -> b
             identity,
             exc_info=True,
         )
-        return False
+        return False, False
 
     # Postcondition 1: the "default" slot is actually gone. The current agent
     # contract pops it before teardown, so this also guards contract drift.
@@ -392,12 +522,12 @@ def _invalidate_default_env(previous, identity, cleanup_vm, get_active_env) -> b
                 previous,
                 identity,
             )
-            return False
+            return False, False
     except Exception:
         logger.warning(
             "get_active_env('default') failed post-cleanup (#5937)", exc_info=True
         )
-        return False
+        return False, False
 
     # Postcondition 2: every ledgered outgoing container is verifiably gone.
     # DockerEnvironment.cleanup(force_remove=True) stops/removes on a daemon
@@ -419,7 +549,7 @@ def _invalidate_default_env(previous, identity, cleanup_vm, get_active_env) -> b
             previous,
             identity,
         )
-        return False
+        return False, False
 
     logger.info(
         "Invalidated agent default terminal env after backend identity change "
@@ -429,7 +559,7 @@ def _invalidate_default_env(previous, identity, cleanup_vm, get_active_env) -> b
         identity,
         force_remove,
     )
-    return True
+    return True, True
 
 
 def acquire_terminal_backend_turn_lease(
@@ -447,7 +577,11 @@ def acquire_terminal_backend_turn_lease(
     Admission rules (fail closed — a turn is never admitted against a slot
     that may belong to a different backend):
 
-    - First turn in the process records the identity without cleanup.
+    - First turn in the process VERIFIES the slot state before committing its
+      identity (#5988 round 4): commit-without-cleanup only after observing
+      the agent ``"default"`` slot absent; a populated slot (created by code
+      outside the lease discipline, or surviving a prior failed attempt) gets
+      the full verified cleanup first.
     - Same identity as the last committed turn, no transition in progress:
       admitted immediately, runs concurrently with other same-identity turns.
     - While a transition's cleanup/verification is in flight, EVERY arrival
@@ -476,15 +610,15 @@ def acquire_terminal_backend_turn_lease(
         while True:
             if _transition_identity is None:
                 previous = _last_backend_identity
-                if previous is None or previous == identity:
-                    if previous is None:
-                        _last_backend_identity = identity
+                if previous is not None and previous == identity:
                     _active_turn_counts[identity] = (
                         _active_turn_counts.get(identity, 0) + 1
                     )
                     return TerminalBackendTurnLease(identity), False
-                # Differing identity: all active turns necessarily run on the
-                # committed identity, so becoming leader requires full drain.
+                # First use (previous None: slot state unproven, verify it
+                # outside the lock) or differing identity: all active turns
+                # necessarily run on the committed identity, so becoming
+                # leader requires full drain.
                 if not any(count > 0 for count in _active_turn_counts.values()):
                     _transition_identity = identity
                     break
@@ -499,10 +633,11 @@ def acquire_terminal_backend_turn_lease(
             _COND.wait(remaining)
         previous = _last_backend_identity
 
+    committed = False
     invalidated = False
     try:
         try:
-            invalidated = _invalidate_default_env(
+            committed, invalidated = _invalidate_default_env(
                 previous, identity, cleanup_vm, get_active_env
             )
         except Exception:
@@ -512,25 +647,67 @@ def acquire_terminal_backend_turn_lease(
                 "unexpected error during terminal backend invalidation (#5937)",
                 exc_info=True,
             )
+            committed = False
             invalidated = False
     finally:
         with _COND:
             _transition_identity = None
-            if invalidated:
+            if committed:
                 _last_backend_identity = identity
                 _active_turn_counts[identity] = (
                     _active_turn_counts.get(identity, 0) + 1
                 )
             _COND.notify_all()
 
-    if not invalidated:
+    if not committed:
         raise TerminalBackendInvalidationFailed(
             "The previous terminal backend environment could not be verifiably "
             "removed; this turn was not started to avoid running tools against "
             "a stale backend. It will be retried on the next turn — see server "
             "logs for the cleanup failure. (#5937)"
         )
-    return TerminalBackendTurnLease(identity), True
+    return TerminalBackendTurnLease(identity), invalidated
+
+
+def acquire_turn_lease_failclosed(
+    runtime_env: Mapping[str, str],
+    *,
+    cleanup_vm=None,
+    get_active_env=None,
+    wait_seconds: Optional[float] = None,
+) -> tuple[TerminalBackendTurnLease, bool]:
+    """Acquire the turn lease, converting ANY unexpected internal error into a
+    typed fail-closed rejection (#5988 round 4).
+
+    This is the entry point every in-process tool-capable turn must use. A
+    cross-profile security boundary must fail closed even against bugs in the
+    boundary itself: if acquisition breaks in an unforeseen way, the turn is
+    REJECTED (``TerminalBackendIsolationError`` propagates and blocks agent
+    construction + tool execution) rather than proceeding without a lease
+    against an unverified slot. The deliberate trade: an isolation-module bug
+    now aborts backend-switching turns loudly instead of silently running
+    them open.
+    """
+    try:
+        return acquire_terminal_backend_turn_lease(
+            runtime_env,
+            cleanup_vm=cleanup_vm,
+            get_active_env=get_active_env,
+            wait_seconds=wait_seconds,
+        )
+    except TerminalBackendIsolationError:
+        raise
+    except Exception as exc:
+        logger.error(
+            "terminal backend isolation failed unexpectedly (#5937); failing "
+            "closed — this turn will NOT run without a verified backend lease",
+            exc_info=True,
+        )
+        raise TerminalBackendIsolationError(
+            "Terminal backend isolation failed unexpectedly; this turn was not "
+            "started to avoid running tools against an unverified backend. "
+            "Please retry; see server logs for the underlying error. (#5937)"
+        ) from exc
 
 
 def maybe_invalidate_default_terminal_env(

@@ -7181,33 +7181,23 @@ def _run_agent_streaming(
         # with this profile's runtime env, i.e. what os.environ.update below
         # produces — not the profile env alone, so env applied by other layers
         # is reflected. The lease is released in the turn's finally block.
-        try:
-            from api.terminal_backend_isolation import (
-                TerminalBackendIsolationError,
-                acquire_terminal_backend_turn_lease,
-            )
-            _effective_turn_env = dict(os.environ)
-            _effective_turn_env.update(_safe_profile_runtime_env)
-            _terminal_backend_lease, _ = acquire_terminal_backend_turn_lease(
-                _effective_turn_env
-            )
-        except TerminalBackendIsolationError:
-            # Fail CLOSED: the module rejected this turn (bounded wait timed
-            # out, or the previous backend env could not be verifiably
-            # removed). Running the turn anyway would execute tools against a
-            # slot that may belong to a different profile's backend — abort
-            # the turn instead; the exception's message is user-readable and
-            # surfaces through the standard stream error path below.
-            raise
-        except Exception:
-            # An UNEXPECTED bug in the isolation module itself must not brick
-            # every chat turn; log loudly and proceed (matches the module's
-            # pre-#5988 posture for internal errors only — deliberate
-            # rejections are re-raised above).
-            logger.warning(
-                "terminal backend isolation lease failed unexpectedly (#5937)",
-                exc_info=True,
-            )
+        # Fail CLOSED on EVERY acquisition outcome that is not a verified
+        # lease (#5988 round 4): deliberate rejections (bounded wait timed
+        # out, previous backend env not verifiably removed) AND unexpected
+        # internal errors both abort the turn before AIAgent construction —
+        # `acquire_turn_lease_failclosed` converts the latter into the same
+        # typed `TerminalBackendIsolationError`, which surfaces through the
+        # standard stream error path below. Running the turn anyway would
+        # execute tools against a slot that may belong to a different
+        # profile's backend; for a cross-profile security boundary an
+        # isolation bug must brick the switching turn, not run it open.
+        from api.terminal_backend_isolation import acquire_turn_lease_failclosed
+
+        _effective_turn_env = dict(os.environ)
+        _effective_turn_env.update(_safe_profile_runtime_env)
+        _terminal_backend_lease, _ = acquire_turn_lease_failclosed(
+            _effective_turn_env
+        )
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short

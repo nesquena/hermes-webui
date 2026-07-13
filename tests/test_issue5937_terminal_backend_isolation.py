@@ -5,24 +5,37 @@ selected profile's backend identity changes (e.g. SSH → local), without
 evicting on same-backend consecutive turns — and must FAIL CLOSED: no turn is
 ever admitted against a slot that may belong to a different backend.
 
-The fakes here mirror the REAL hermes-agent cleanup contract
-(tools/terminal_tool.cleanup_vm), which the #5988 round-2 gate found the
-previous mocks were hiding:
+Two layers of coverage:
 
-* ``cleanup_vm`` pops the cache slot FIRST, then swallows backend-teardown
-  exceptions and returns ``None`` either way — it NEVER signals failure.
-* ``DockerEnvironment.cleanup(force_remove=True)`` performs ``docker stop`` /
-  ``docker rm -f`` asynchronously; returning proves nothing about the
-  container actually being removed.
+* Fakes faithful to the REAL hermes-agent cleanup contract
+  (tools/terminal_tool.cleanup_vm), which the #5988 round-2 gate found the
+  previous mocks were hiding:
 
-Success must therefore be established by observed postconditions (slot gone,
-container gone), and these tests assert that an incompatible turn is NEVER
-admitted on timeout or on unverified cleanup.
+  - ``cleanup_vm`` pops the cache slot FIRST, then swallows backend-teardown
+    exceptions and returns ``None`` either way — it NEVER signals failure.
+  - ``DockerEnvironment.cleanup(force_remove=True)`` performs ``docker stop``
+    / ``docker rm -f`` asynchronously; returning proves nothing about the
+    container actually being removed.
+
+* The INSTALLED ``tools.terminal_tool`` module itself (#5988 round 4): the
+  real ``cleanup_vm`` seeded through the real module cache, with the module's
+  own helper resolution, driven against scripted ``docker`` executables so
+  the actual subprocess probe path is exercised — including the reproduced
+  false-commit where a Docker daemon failure used to read as "container
+  removed". These tests skip when hermes-agent is not installed (upstream
+  webui CI); the fake-based suite keeps the logic covered there, and the
+  agent-installed lane (run before every push) exercises the real contract.
+
+Success must be established by observed postconditions (slot gone, container
+gone), "cannot verify" must never count as "verified", and these tests assert
+that an incompatible turn is NEVER admitted on timeout, on unverified
+cleanup, on daemon-failure probes, or on unexpected isolation-module errors.
 """
 
 from __future__ import annotations
 
 import inspect
+import sys
 import threading
 import time
 from pathlib import Path
@@ -34,6 +47,7 @@ import api.terminal_backend_isolation as isolation
 
 REPO_ROOT = Path(__file__).parent.parent
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 
 SSH = {"TERMINAL_ENV": "ssh", "TERMINAL_SSH_HOST": "box.example", "TERMINAL_SSH_USER": "deploy"}
 LOCAL = {"TERMINAL_ENV": "local"}
@@ -212,10 +226,75 @@ def test_identity_excludes_inactive_backend_settings():
     ) == isolation.terminal_backend_identity(SSH)
 
 
+def test_identity_fingerprints_all_docker_creation_inputs():
+    """Gate #5988 round 4: every setting the agent's get_config() feeds into
+    Docker environment creation must split the identity — volumes, env maps,
+    network, extra args, resources, user mode, forwarded env, persistence."""
+    base = isolation.terminal_backend_identity(DOCKER_A)
+    for key, val in [
+        ("TERMINAL_DOCKER_VOLUMES", '["/data:/data"]'),
+        ("TERMINAL_DOCKER_ENV", '{"X": "1"}'),
+        ("TERMINAL_DOCKER_EXTRA_ARGS", '["--privileged"]'),
+        ("TERMINAL_DOCKER_FORWARD_ENV", '["PATH"]'),
+        ("TERMINAL_DOCKER_NETWORK", "false"),
+        ("TERMINAL_DOCKER_RUN_AS_HOST_USER", "true"),
+        ("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true"),
+        ("TERMINAL_CONTAINER_CPU", "4"),
+        ("TERMINAL_CONTAINER_MEMORY", "8192"),
+        ("TERMINAL_CONTAINER_DISK", "10240"),
+        ("TERMINAL_CONTAINER_PERSISTENT", "false"),
+        ("TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES", "false"),
+    ]:
+        changed = isolation.terminal_backend_identity({**DOCKER_A, key: val})
+        assert changed != base, f"{key} must participate in the docker identity"
+
+
+def test_identity_fingerprints_ssh_local_and_modal_creation_inputs():
+    assert isolation.terminal_backend_identity(
+        {**SSH, "TERMINAL_SSH_PERSISTENT": "false"}
+    ) != isolation.terminal_backend_identity(SSH)
+    assert isolation.terminal_backend_identity(
+        {"TERMINAL_ENV": "local", "TERMINAL_LOCAL_PERSISTENT": "true"}
+    ) != isolation.terminal_backend_identity(LOCAL)
+    assert isolation.terminal_backend_identity(
+        {"TERMINAL_ENV": "modal", "TERMINAL_CONTAINER_MEMORY": "8192"}
+    ) != isolation.terminal_backend_identity({"TERMINAL_ENV": "modal"})
+
+
+def test_identity_normalizes_json_and_flag_formatting():
+    """Formatting-only differences in JSON/boolean settings must not split
+    identities (and thereby force spurious verified transitions)."""
+    a = isolation.terminal_backend_identity(
+        {**DOCKER_A, "TERMINAL_DOCKER_ENV": '{"A": "1", "B": "2"}'}
+    )
+    b = isolation.terminal_backend_identity(
+        {**DOCKER_A, "TERMINAL_DOCKER_ENV": '{"B":"2","A":"1"}'}
+    )
+    assert a == b
+    assert isolation.terminal_backend_identity(
+        {**DOCKER_A, "TERMINAL_DOCKER_NETWORK": "yes"}
+    ) == isolation.terminal_backend_identity(DOCKER_A)  # default is true
+    assert isolation.terminal_backend_identity(
+        {**SSH, "TERMINAL_SSH_PERSISTENT": "1"}
+    ) == isolation.terminal_backend_identity(SSH)  # default is true
+    assert isolation.terminal_backend_identity(
+        {"TERMINAL_ENV": "local", "TERMINAL_LOCAL_PERSISTENT": "false"}
+    ) == isolation.terminal_backend_identity(LOCAL)
+    # Unparseable JSON stays raw: two different broken values differ.
+    broken_a = isolation.terminal_backend_identity(
+        {**DOCKER_A, "TERMINAL_DOCKER_VOLUMES": "[not json"}
+    )
+    broken_b = isolation.terminal_backend_identity(
+        {**DOCKER_A, "TERMINAL_DOCKER_VOLUMES": "[also not json"}
+    )
+    assert broken_a != broken_b
+
+
 # ── Nominal admission / invalidation ─────────────────────────────────────────
 
 
 def test_first_turn_records_identity_without_cleanup():
+    """First use with the slot OBSERVED absent: commit, nothing to clean."""
     agent = FakeAgent()
     assert one_shot(agent, SSH) is False
     assert agent.cleanup_calls == []
@@ -230,8 +309,8 @@ def test_same_backend_consecutive_turns_do_not_cleanup():
 
 def test_ssh_then_local_invalidates_default_slot():
     agent = FakeAgent()
-    agent.seed_generic()
     assert one_shot(agent, SSH) is False
+    agent.seed_generic()  # env created during the SSH era
     assert one_shot(agent, LOCAL) is True
     assert agent.cleanup_calls == [("default", False)]
     assert agent.get_active_env("default") is None
@@ -242,18 +321,117 @@ def test_ssh_then_local_invalidates_default_slot():
 
 def test_local_then_ssh_invalidates_default_slot():
     agent = FakeAgent()
-    agent.seed_generic()
     assert one_shot(agent, LOCAL) is False
+    agent.seed_generic()
     assert one_shot(agent, SSH) is True
     assert agent.cleanup_calls == [("default", False)]
 
 
 def test_ssh_host_change_invalidates():
     agent = FakeAgent()
-    agent.seed_generic()
     one_shot(agent, SSH)
+    agent.seed_generic()
     assert one_shot(agent, {**SSH, "TERMINAL_SSH_HOST": "b.example"}) is True
     assert agent.cleanup_calls == [("default", False)]
+
+
+# ── First-use slot verification (#5988 round 4) ──────────────────────────────
+
+
+def test_first_use_with_populated_slot_performs_verified_cleanup():
+    """The first lease in the process must not blindly record its identity:
+    tool-capable code outside the lease discipline may already have created
+    the "default" env. A populated slot gets the full verified cleanup."""
+    agent = FakeAgent()
+    agent.seed_generic()
+    assert one_shot(agent, SSH) is True  # invalidated, not merely recorded
+    assert agent.cleanup_calls == [("default", False)]
+    assert agent.get_active_env("default") is None
+    with isolation._COND:
+        assert isolation._last_backend_identity == isolation.terminal_backend_identity(SSH)
+
+
+def test_first_use_with_populated_container_slot_fails_closed(monkeypatch):
+    """First use finding a container-backed env whose removal cannot be
+    verified must REJECT the turn — committing would let the very first turn
+    run against a container nobody proved gone."""
+    agent = FakeAgent()
+    patch_probes(monkeypatch, agent)
+    cid = agent.seed_docker()
+    agent.rm_silently_fails = True
+    agent.direct_rm_results = [False]
+    with pytest.raises(isolation.TerminalBackendInvalidationFailed):
+        one_shot(agent, DOCKER_A)
+    # Force-removal was requested off the env object's own evidence, even
+    # though there is no previous identity to consult.
+    assert agent.cleanup_calls == [("default", True)]
+    with isolation._COND:
+        assert isolation._last_backend_identity is None  # never committed
+        assert isolation._pending_container_removals == {cid: "docker"}
+    assert active_turn_count() == 0
+
+    # The slot was already popped by the failed attempt (real pop-first
+    # contract) — the retry goes through the observed-absent path and must
+    # STILL refuse to commit while the container stays ledgered.
+    assert agent.get_active_env("default") is None
+    agent.direct_rm_results = [False]
+    with pytest.raises(isolation.TerminalBackendInvalidationFailed):
+        one_shot(agent, DOCKER_A)
+    with isolation._COND:
+        assert isolation._last_backend_identity is None
+
+    # Removal finally verifies: first use commits.
+    agent.direct_rm_results = None
+    assert one_shot(agent, DOCKER_A) is False  # nothing left to clean
+    assert cid not in agent.containers
+    with isolation._COND:
+        assert isolation._pending_container_removals == {}
+        assert isolation._last_backend_identity == isolation.terminal_backend_identity(DOCKER_A)
+
+
+def test_concurrent_first_use_arrivals_serialize_through_the_transition():
+    """Two racing first arrivals: one verifies, the other waits and is then
+    admitted on the committed identity — never both probing concurrently."""
+    agent = FakeAgent()
+    in_probe = threading.Event()
+    release_probe = threading.Event()
+
+    def held_get_active_env(task_id):
+        in_probe.set()
+        release_probe.wait(timeout=10)
+        return agent.get_active_env(task_id)
+
+    leader_result = {}
+
+    def _leader():
+        lease, did = isolation.acquire_terminal_backend_turn_lease(
+            SSH, cleanup_vm=agent.cleanup_vm, get_active_env=held_get_active_env
+        )
+        leader_result["invalidated"] = did
+        lease.release()
+
+    leader = threading.Thread(target=_leader, daemon=True)
+    leader.start()
+    assert in_probe.wait(timeout=5)
+
+    follower_result = {}
+
+    def _follower():
+        lease, did = turn(agent, SSH, wait_seconds=10)
+        follower_result["invalidated"] = did
+        lease.release()
+
+    follower = threading.Thread(target=_follower, daemon=True)
+    follower.start()
+    follower.join(timeout=0.3)
+    assert follower.is_alive(), "second first-use arrival must wait for the leader"
+
+    release_probe.set()
+    leader.join(timeout=10)
+    follower.join(timeout=10)
+    assert leader_result["invalidated"] is False
+    assert follower_result["invalidated"] is False
+    assert agent.cleanup_calls == []
 
 
 # ── Docker force-remove + verified removal ───────────────────────────────────
@@ -265,8 +443,8 @@ def test_docker_transition_force_removes_and_verifies_container(monkeypatch):
     cleanup_vm returning."""
     agent = FakeAgent()
     patch_probes(monkeypatch, agent)
-    cid = agent.seed_docker()
     assert one_shot(agent, DOCKER_A) is False
+    cid = agent.seed_docker()
     assert one_shot(agent, LOCAL) is True
     assert agent.cleanup_calls == [("default", True)]
     assert cid not in agent.containers
@@ -277,16 +455,16 @@ def test_docker_transition_force_removes_and_verifies_container(monkeypatch):
 def test_docker_image_change_invalidates_with_force_remove(monkeypatch):
     agent = FakeAgent()
     patch_probes(monkeypatch, agent)
-    agent.seed_docker()
     one_shot(agent, DOCKER_A)
+    agent.seed_docker()
     assert one_shot(agent, DOCKER_B) is True
     assert agent.cleanup_calls == [("default", True)]
 
 
 def test_non_docker_transition_does_not_force_remove():
     agent = FakeAgent()
-    agent.seed_generic()
     one_shot(agent, SSH)
+    agent.seed_generic()
     assert one_shot(agent, {"TERMINAL_ENV": "docker"}) is True
     assert agent.cleanup_calls == [("default", False)]
 
@@ -300,12 +478,12 @@ def test_silent_docker_rm_failure_is_caught_and_turn_rejected(monkeypatch):
     uncommitted, turn NOT admitted, container ledgered for retry."""
     agent = FakeAgent()
     patch_probes(monkeypatch, agent)
-    cid = agent.seed_docker()
-    agent.rm_silently_fails = True
-    agent.direct_rm_results = [False]  # direct fallback also fails this round
     docker_identity = isolation.terminal_backend_identity(DOCKER_A)
 
     assert one_shot(agent, DOCKER_A) is False
+    cid = agent.seed_docker()
+    agent.rm_silently_fails = True
+    agent.direct_rm_results = [False]  # direct fallback also fails this round
     with pytest.raises(isolation.TerminalBackendInvalidationFailed):
         one_shot(agent, LOCAL)
 
@@ -332,9 +510,9 @@ def test_backend_cleanup_exception_swallowed_by_agent_is_still_a_failure(monkeyp
     the container survives and the transition must not commit."""
     agent = FakeAgent()
     patch_probes(monkeypatch, agent)
+    one_shot(agent, DOCKER_A)
     cid = agent.seed_docker()
     agent.backend_cleanup_error = RuntimeError("docker daemon unreachable")
-    one_shot(agent, DOCKER_A)
     agent.direct_rm_results = [False]
     with pytest.raises(isolation.TerminalBackendInvalidationFailed):
         one_shot(agent, LOCAL)
@@ -352,6 +530,7 @@ def test_async_docker_removal_is_awaited_not_assumed(monkeypatch):
     agent = FakeAgent()
     patch_probes(monkeypatch, agent)
     monkeypatch.setattr(isolation, "_CONTAINER_REMOVAL_WAIT_SECONDS", 5.0)
+    one_shot(agent, DOCKER_A)
     cid = agent.seed_docker()
     env = agent.active["default"]
 
@@ -364,7 +543,6 @@ def test_async_docker_removal_is_awaited_not_assumed(monkeypatch):
         env._cleanup_thread = t
 
     env.cleanup = _async_cleanup
-    one_shot(agent, DOCKER_A)
     assert one_shot(agent, LOCAL) is True
     assert cid not in agent.containers
 
@@ -373,9 +551,9 @@ def test_unremoved_default_slot_fails_the_transition():
     """Contract-drift guard: if cleanup_vm stops popping the slot, committing
     would hand the new identity a live stale env — must fail closed."""
     agent = FakeAgent()
+    one_shot(agent, SSH)
     agent.seed_generic()
     agent.pop_slot = False
-    one_shot(agent, SSH)
     with pytest.raises(isolation.TerminalBackendInvalidationFailed):
         one_shot(agent, LOCAL)
     assert active_turn_count() == 0
@@ -399,8 +577,8 @@ def test_present_runtime_with_unresolvable_helpers_fails_closed(monkeypatch):
     """A present-but-broken runtime is NOT the vacuous case: the cache may
     exist and we cannot verify it — reject the turn."""
     agent = FakeAgent()
-    agent.seed_generic()
     assert one_shot(agent, SSH) is False
+    agent.seed_generic()
 
     class _BrokenModule:
         pass
@@ -415,15 +593,247 @@ def test_present_runtime_with_unresolvable_helpers_fails_closed(monkeypatch):
     assert agent.cleanup_calls == [("default", False)]
 
 
+# ── Honest Docker probe (#5988 round 4: daemon failure ≠ removed) ────────────
+
+
+def _write_fake_docker(tmp_path, name, stderr_text, exit_code, stdout_text=""):
+    script = tmp_path / name
+    script.write_text(
+        "#!/bin/sh\n"
+        + (f"printf '%s\\n' \"{stdout_text}\"\n" if stdout_text else "")
+        + (f"printf '%s\\n' \"{stderr_text}\" >&2\n" if stderr_text else "")
+        + f"exit {exit_code}\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return str(script)
+
+
+needs_sh = pytest.mark.skipif(
+    sys.platform == "win32", reason="scripted docker executables need a POSIX sh"
+)
+
+
+@needs_sh
+def test_probe_exit_zero_means_container_exists(tmp_path):
+    exe = _write_fake_docker(tmp_path, "docker-up", "", 0, stdout_text="sha256:abc")
+    assert isolation._container_exists("cid-1234", exe) is True
+
+
+@needs_sh
+def test_probe_no_such_object_means_container_gone(tmp_path):
+    exe = _write_fake_docker(
+        tmp_path, "docker-gone", "Error: No such object: cid-1234", 1
+    )
+    assert isolation._container_exists("cid-1234", exe) is False
+
+
+@needs_sh
+def test_probe_daemon_failure_raises_instead_of_reporting_gone(tmp_path):
+    """The reproduced round-4 false-commit: a dead daemon exits nonzero, which
+    the old probe read as "container removed". It must raise (unverifiable)."""
+    exe = _write_fake_docker(
+        tmp_path,
+        "docker-down",
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+        "Is the docker daemon running?",
+        1,
+    )
+    with pytest.raises(RuntimeError):
+        isolation._container_exists("cid-1234", exe)
+
+
+@needs_sh
+def test_daemon_failure_keeps_container_ledgered_and_blocks_commit(tmp_path, monkeypatch):
+    """Through the verification layer (real probe subprocess, no probe mocks):
+    a daemon failure keeps the removal unverified — the entry stays ledgered
+    and the transition that depends on it is rejected."""
+    monkeypatch.setattr(isolation, "_CONTAINER_REMOVAL_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(isolation, "_CONTAINER_REMOVAL_POLL_SECONDS", 0.05)
+    daemon_down = _write_fake_docker(
+        tmp_path, "docker-down", "Cannot connect to the Docker daemon", 1
+    )
+    with isolation._COND:
+        isolation._pending_container_removals["cid-9999"] = daemon_down
+    assert isolation._verify_pending_container_removals() is False
+    with isolation._COND:
+        assert isolation._pending_container_removals == {"cid-9999": daemon_down}
+
+    # Daemon comes back and reports the object definitively absent: verified.
+    Path(daemon_down).write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'Error: No such object: cid-9999' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    assert isolation._verify_pending_container_removals() is True
+    with isolation._COND:
+        assert isolation._pending_container_removals == {}
+
+
+# ── REAL installed agent contract (#5988 round 4) ────────────────────────────
+#
+# These drive the module's OWN helper resolution against the installed
+# tools.terminal_tool: the real cleanup_vm (pop-first, swallow, return None)
+# seeded through the real module cache, with scripted docker executables so
+# the actual subprocess probe path decides the outcome. Skipped when
+# hermes-agent is not installed (upstream webui CI); run on the
+# agent-installed verification lane.
+
+
+def _real_terminal_tool_or_skip():
+    terminal_tool = pytest.importorskip(
+        "tools.terminal_tool",
+        reason="hermes-agent not installed; real-contract lane runs agent-installed",
+    )
+    if "force_remove" not in inspect.signature(terminal_tool.cleanup_vm).parameters:
+        pytest.skip("installed hermes-agent predates cleanup_vm(force_remove=...)")
+    return terminal_tool
+
+
+class _SeededContainerEnv:
+    """Container-shaped env seeded into the REAL module cache. cleanup()
+    raising mirrors a daemon-unreachable teardown — which the real cleanup_vm
+    swallows."""
+
+    def __init__(self, container_id, docker_exe, cleanup_error=None):
+        self._container_id = container_id
+        self._docker_exe = docker_exe
+        self._cleanup_thread = None
+        self._cleanup_error = cleanup_error
+        self.cleanup_calls = []
+
+    def cleanup(self, force_remove=False):
+        self.cleanup_calls.append(force_remove)
+        if self._cleanup_error is not None:
+            raise self._cleanup_error
+
+
+@needs_sh
+def test_real_cleanup_vm_daemon_failure_is_rejected_not_admitted(tmp_path, monkeypatch):
+    """THE reproduced round-4 scenario, against the real contract end to end:
+    committed local identity, a container-backed env appears in the REAL
+    module cache, an incompatible turn arrives while the Docker daemon is
+    down. The real cleanup_vm pops the slot, swallows the teardown error and
+    returns None; the probe cannot verify removal — the turn must be
+    REJECTED and the identity left uncommitted (it used to be ADMITTED with
+    committed=('local',))."""
+    terminal_tool = _real_terminal_tool_or_skip()
+    monkeypatch.setattr(terminal_tool, "_active_environments", {}, raising=True)
+    monkeypatch.setattr(isolation, "_CONTAINER_REMOVAL_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(isolation, "_CONTAINER_REMOVAL_POLL_SECONDS", 0.05)
+
+    # Commit an initial local identity through the module's own resolution
+    # (empty real cache → observed-absent first use).
+    lease, invalidated = isolation.acquire_terminal_backend_turn_lease(LOCAL)
+    assert invalidated is False
+    lease.release()
+    local_identity = isolation.terminal_backend_identity(LOCAL)
+
+    daemon_down = _write_fake_docker(
+        tmp_path, "docker-down", "Cannot connect to the Docker daemon", 1
+    )
+    env = _SeededContainerEnv(
+        "cid-real-1", daemon_down, cleanup_error=RuntimeError("daemon unreachable")
+    )
+    terminal_tool._active_environments["default"] = env
+
+    with pytest.raises(isolation.TerminalBackendInvalidationFailed):
+        isolation.acquire_terminal_backend_turn_lease(DOCKER_A)
+
+    # Real pop-first contract happened...
+    assert env.cleanup_calls == [True]  # force-removal requested
+    assert terminal_tool._active_environments.get("default") is None
+    # ...and none of it was inferred as success.
+    with isolation._COND:
+        assert isolation._last_backend_identity == local_identity  # uncommitted
+        assert isolation._pending_container_removals == {"cid-real-1": daemon_down}
+    assert active_turn_count() == 0
+
+    # Daemon recovers and reports the container definitively gone: the retry
+    # verifies through the ledger and commits.
+    Path(daemon_down).write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'Error: No such object: cid-real-1' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    lease, invalidated = isolation.acquire_terminal_backend_turn_lease(DOCKER_A)
+    assert invalidated is True
+    lease.release()
+    with isolation._COND:
+        assert isolation._pending_container_removals == {}
+        assert isolation._last_backend_identity == isolation.terminal_backend_identity(DOCKER_A)
+
+
+@needs_sh
+def test_real_cleanup_vm_swallowed_teardown_with_verified_removal_commits(
+    tmp_path, monkeypatch
+):
+    """Counterpart: the real cleanup_vm swallows a teardown error, but the
+    probe POSITIVELY verifies the container absent — the transition commits.
+    Proves the fail-closed layer keys on observed state, not on exceptions."""
+    terminal_tool = _real_terminal_tool_or_skip()
+    monkeypatch.setattr(terminal_tool, "_active_environments", {}, raising=True)
+    monkeypatch.setattr(isolation, "_CONTAINER_REMOVAL_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(isolation, "_CONTAINER_REMOVAL_POLL_SECONDS", 0.05)
+
+    lease, _ = isolation.acquire_terminal_backend_turn_lease(LOCAL)
+    lease.release()
+
+    gone = _write_fake_docker(
+        tmp_path, "docker-gone", "Error: No such object: cid-real-2", 1
+    )
+    env = _SeededContainerEnv(
+        "cid-real-2", gone, cleanup_error=RuntimeError("teardown hiccup")
+    )
+    terminal_tool._active_environments["default"] = env
+
+    lease, invalidated = isolation.acquire_terminal_backend_turn_lease(DOCKER_A)
+    assert invalidated is True
+    lease.release()
+    assert env.cleanup_calls == [True]
+    with isolation._COND:
+        assert isolation._pending_container_removals == {}
+        assert isolation._last_backend_identity == isolation.terminal_backend_identity(DOCKER_A)
+
+
+@needs_sh
+def test_real_first_use_with_populated_cache_verifies_before_commit(tmp_path, monkeypatch):
+    """First lease in the process finds a container env already in the REAL
+    cache (created by code outside the lease discipline): it must be
+    verifiably cleaned before ANY identity commits."""
+    terminal_tool = _real_terminal_tool_or_skip()
+    monkeypatch.setattr(terminal_tool, "_active_environments", {}, raising=True)
+    monkeypatch.setattr(isolation, "_CONTAINER_REMOVAL_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(isolation, "_CONTAINER_REMOVAL_POLL_SECONDS", 0.05)
+
+    daemon_down = _write_fake_docker(
+        tmp_path, "docker-down", "Cannot connect to the Docker daemon", 1
+    )
+    env = _SeededContainerEnv("cid-real-3", daemon_down)
+    terminal_tool._active_environments["default"] = env
+
+    with pytest.raises(isolation.TerminalBackendInvalidationFailed):
+        isolation.acquire_terminal_backend_turn_lease(LOCAL)
+    with isolation._COND:
+        assert isolation._last_backend_identity is None  # nothing committed
+
+    Path(daemon_down).write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'Error: No such object: cid-real-3' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    lease, _ = isolation.acquire_terminal_backend_turn_lease(LOCAL)
+    lease.release()
+    with isolation._COND:
+        assert isolation._last_backend_identity == isolation.terminal_backend_identity(LOCAL)
+
+
 # ── Fail closed: admission control ───────────────────────────────────────────
 
 
 def test_differing_backend_turn_waits_for_active_lease():
     """A differing-backend turn must not evict an in-use env."""
     agent = FakeAgent()
-    agent.seed_generic()
     first, invalidated = turn(agent, SSH)
     assert invalidated is False
+    agent.seed_generic()
 
     entered = threading.Event()
     result = {}
@@ -452,9 +862,9 @@ def test_lease_wait_timeout_rejects_turn_without_admitting_it():
     """Gate #5988 CORE: on timeout the incoming turn must be REJECTED — never
     admitted alongside the still-active previous identity."""
     agent = FakeAgent()
-    agent.seed_generic()
     ssh_identity = isolation.terminal_backend_identity(SSH)
     first, _ = turn(agent, SSH)
+    agent.seed_generic()
     with pytest.raises(isolation.TerminalBackendTransitionTimeout):
         turn(agent, LOCAL, wait_seconds=0.05)
     assert agent.cleanup_calls == []
@@ -473,9 +883,9 @@ def test_no_turn_is_admitted_while_transition_cleanup_is_in_flight():
     """Same-new-identity arrivals must WAIT on the transition — no piggyback
     on an unproven cleanup."""
     agent = FakeAgent()
-    agent.seed_generic()
     seed, _ = turn(agent, SSH)
     seed.release()
+    agent.seed_generic()
 
     in_cleanup = threading.Event()
     release_cleanup = threading.Event()
@@ -527,11 +937,11 @@ def test_waiter_retries_invalidation_itself_when_leader_cleanup_fails(monkeypatc
     verified invalidation instead of running against the stale slot."""
     agent = FakeAgent()
     patch_probes(monkeypatch, agent)
+    seed, _ = turn(agent, DOCKER_A)
+    seed.release()
     cid = agent.seed_docker()
     agent.rm_silently_fails = True
     agent.direct_rm_results = [False, True]  # leader's fallback fails; waiter's works
-    seed, _ = turn(agent, DOCKER_A)
-    seed.release()
 
     in_cleanup = threading.Event()
     release_cleanup = threading.Event()
@@ -586,9 +996,9 @@ def test_previous_identity_arrival_also_waits_during_transition():
     """During a transition even previous-identity turns wait: the slot is
     mid-destruction and admitting them would recreate under a moving target."""
     agent = FakeAgent()
-    agent.seed_generic()
     seed, _ = turn(agent, SSH)
     seed.release()
+    agent.seed_generic()
 
     in_cleanup = threading.Event()
     release_cleanup = threading.Event()
@@ -635,20 +1045,68 @@ def test_lease_release_is_idempotent():
     assert active_turn_count() == 0
 
 
-# ── Streaming integration source guard ───────────────────────────────────────
+# ── Fail closed: unexpected isolation-module errors (#5988 round 4) ──────────
+
+
+def test_failclosed_helper_converts_unexpected_errors_to_typed_rejection(monkeypatch):
+    """Gate #5988 CORE: an UNEXPECTED failure during acquisition must not let
+    the turn proceed without a lease. The turn entry point converts it to the
+    same typed rejection that blocks AIAgent construction + tool execution."""
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("isolation module bug")
+
+    monkeypatch.setattr(isolation, "acquire_terminal_backend_turn_lease", _boom)
+    with pytest.raises(isolation.TerminalBackendIsolationError) as excinfo:
+        isolation.acquire_turn_lease_failclosed(LOCAL)
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    # No lease was registered for the rejected turn.
+    assert active_turn_count() == 0
+
+
+def test_failclosed_helper_passes_deliberate_rejections_through(monkeypatch):
+    """Typed rejections keep their subtype (callers/tests distinguish timeout
+    from invalidation failure) — the helper only converts UNEXPECTED errors."""
+    agent = FakeAgent()
+    first, _ = isolation.acquire_turn_lease_failclosed(
+        SSH, cleanup_vm=agent.cleanup_vm, get_active_env=agent.get_active_env
+    )
+    with pytest.raises(isolation.TerminalBackendTransitionTimeout):
+        isolation.acquire_turn_lease_failclosed(
+            LOCAL,
+            cleanup_vm=agent.cleanup_vm,
+            get_active_env=agent.get_active_env,
+            wait_seconds=0.05,
+        )
+    first.release()
+
+
+def test_failclosed_helper_returns_lease_on_success():
+    agent = FakeAgent()
+    lease, invalidated = isolation.acquire_turn_lease_failclosed(
+        LOCAL, cleanup_vm=agent.cleanup_vm, get_active_env=agent.get_active_env
+    )
+    assert invalidated is False
+    assert active_turn_count() == 1
+    lease.release()
+    assert active_turn_count() == 0
+
+
+# ── Turn-path integration source guards ──────────────────────────────────────
 
 
 def test_streaming_acquires_full_turn_lease_on_effective_env():
-    """Source guard: the turn path leases the identity for the whole turn.
+    """Source guard: the streaming turn path leases the identity for the whole
+    turn, fail-closed on EVERY acquisition outcome.
 
     Identity must come from the effective post-merge environment (process env
     overlaid with the profile runtime env), the lease must be acquired BEFORE
-    _ENV_LOCK (waiters must not block other turns' env restore), it must be
-    released in the turn's finally after the env restore, and deliberate
-    isolation rejections must ABORT the turn (fail closed) rather than being
-    swallowed.
+    _ENV_LOCK (waiters must not block other turns' env restore) via the
+    fail-closed entry point (#5988 round 4: unexpected acquisition errors must
+    abort the turn, not run it open), and it must be released in the turn's
+    finally after the env restore.
     """
-    assert "acquire_terminal_backend_turn_lease" in STREAMING_PY
+    assert "acquire_turn_lease_failclosed" in STREAMING_PY
     # Effective env = os.environ overlaid with the profile runtime env.
     merged_idx = STREAMING_PY.find("_effective_turn_env = dict(os.environ)")
     assert merged_idx >= 0
@@ -656,22 +1114,17 @@ def test_streaming_acquires_full_turn_lease_on_effective_env():
         "_effective_turn_env.update(_safe_profile_runtime_env)", merged_idx
     )
     assert overlay_idx > merged_idx
-    acquire_idx = STREAMING_PY.find(
-        "acquire_terminal_backend_turn_lease(", overlay_idx
-    )
+    acquire_idx = STREAMING_PY.find("acquire_turn_lease_failclosed(", overlay_idx)
     assert acquire_idx > overlay_idx
     # Lease acquisition happens before the env-mutation critical section.
     update_idx = STREAMING_PY.find("os.environ.update(_safe_profile_runtime_env)")
     assert update_idx >= 0
     assert acquire_idx < update_idx
-    # Deliberate rejections fail closed: the typed error is imported and
-    # re-raised (turn aborts); only unexpected module bugs fall through open.
-    assert "TerminalBackendIsolationError" in STREAMING_PY
-    reject_idx = STREAMING_PY.find("except TerminalBackendIsolationError:")
-    assert reject_idx > 0
-    raise_idx = STREAMING_PY.find("raise", reject_idx)
-    generic_idx = STREAMING_PY.find("except Exception:", reject_idx)
-    assert 0 < raise_idx < generic_idx
+    # No fail-open remnant: the turn path must not swallow acquisition errors
+    # (the pre-round-4 "log loudly and proceed" posture) and must not bypass
+    # the fail-closed wrapper by calling the raw acquisition function.
+    assert "log loudly and proceed" not in STREAMING_PY
+    assert "acquire_terminal_backend_turn_lease(" not in STREAMING_PY
     # Released in the finally, after the profile env restore loop.
     restore_idx = STREAMING_PY.find("for _key, _old_value in old_profile_env.items()")
     release_idx = STREAMING_PY.find("_terminal_backend_lease.release()")
@@ -685,5 +1138,32 @@ def test_streaming_acquires_full_turn_lease_on_effective_env():
     metering_teardown_idx = STREAMING_PY.find("meter().end_session(stream_id, 0)")
     assert metering_teardown_idx > 0
     assert backstop_idx > metering_teardown_idx
-    # Point-in-time invalidation is no longer called from the turn path.
-    assert "maybe_invalidate_default_terminal_env(_safe_profile_runtime_env)" not in STREAMING_PY
+
+
+def test_api_chat_sync_handler_is_under_the_same_lease():
+    """Source guard (#5988 round 4): the fallback POST /api/chat handler
+    constructs a tool-capable AIAgent and must hold the same full-turn
+    backend-identity lease — acquired fail-closed BEFORE its TERMINAL_* env
+    mutation and AIAgent construction, rejected turns surfaced as a
+    retryable error instead of running, and released in its finally after
+    the env restore."""
+    start = ROUTES_PY.find("def _handle_chat_sync(")
+    assert start >= 0
+    end = ROUTES_PY.find("\ndef ", start + 1)
+    handler_src = ROUTES_PY[start:end]
+    acquire_idx = handler_src.find("acquire_turn_lease_failclosed(")
+    assert acquire_idx > 0, "/api/chat must acquire the backend-identity lease"
+    # Fail closed: deliberate rejections return an error response...
+    reject_idx = handler_src.find("except TerminalBackendIsolationError", acquire_idx)
+    assert reject_idx > acquire_idx
+    assert "status=503" in handler_src[reject_idx : reject_idx + 300]
+    # ...and the raw (non-fail-closed) acquisition function is never used.
+    assert "acquire_terminal_backend_turn_lease(" not in handler_src
+    # Ordering: lease before the env mutation, env mutation before the agent.
+    env_mutation_idx = handler_src.find('os.environ["TERMINAL_CWD"]')
+    agent_idx = handler_src.find("AIAgent(")
+    assert 0 < acquire_idx < env_mutation_idx < agent_idx
+    # Released in the finally after the env restore (idempotent release).
+    restore_idx = handler_src.find('os.environ["HERMES_SESSION_KEY"] = old_session_key')
+    release_idx = handler_src.find("_terminal_backend_lease.release()")
+    assert 0 < restore_idx < release_idx

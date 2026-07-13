@@ -21841,6 +21841,25 @@ def _handle_chat_sync(handler, body):
         s.model = model
         s.model_provider = model_provider
     from api.streaming import _ENV_LOCK
+    from api.terminal_backend_isolation import (
+        TerminalBackendIsolationError,
+        acquire_turn_lease_failclosed,
+    )
+
+    # #5937/#5988 round 4: this fallback endpoint constructs a tool-capable
+    # AIAgent, so it must hold the same full-turn backend-identity lease as
+    # the streaming path — otherwise it can create/use the agent "default"
+    # env slot concurrently with (or across) a backend transition. This
+    # handler applies no profile runtime env overlay, so the effective turn
+    # environment is the process env itself (identity ignores TERMINAL_CWD,
+    # which is the only terminal key mutated below). Acquired BEFORE the
+    # _ENV_LOCK mutation, released in the turn's finally; rejections fail
+    # closed as a retryable 503 instead of running against an unverified
+    # slot.
+    try:
+        _terminal_backend_lease, _ = acquire_turn_lease_failclosed(dict(os.environ))
+    except TerminalBackendIsolationError as e:
+        return j(handler, {"error": str(e)}, status=503)
 
     with _ENV_LOCK:
         old_cwd = os.environ.get("TERMINAL_CWD")
@@ -21961,6 +21980,10 @@ def _handle_chat_sync(handler, body):
                 os.environ.pop("HERMES_SESSION_KEY", None)
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
+        # Release AFTER the env restore: a waiter admitted by this release
+        # must never observe this turn's TERMINAL_* mutations. release() is
+        # idempotent (#5937).
+        _terminal_backend_lease.release()
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(
