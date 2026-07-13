@@ -21749,6 +21749,8 @@ def _handle_chat_start(handler, body, diag=None):
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
         # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
+        from api.fast_mode import request_enabled as _fast_mode_request_enabled
+
         start_run_kwargs = {
             "msg": msg,
             "attachments": attachments,
@@ -21759,7 +21761,7 @@ def _handle_chat_start(handler, body, diag=None):
             "source": "webui",
             "route": "/api/chat/start",
             "diag": diag,
-            "fast_mode": bool(body.get("fast_mode")),
+            "fast_mode": _fast_mode_request_enabled(body.get("fast_mode")),
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config

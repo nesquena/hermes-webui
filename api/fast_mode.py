@@ -30,6 +30,20 @@ def _env_flag(name: str) -> bool:
     return str(os.getenv(name, "")).strip().lower() in _TRUE_VALUES
 
 
+def request_enabled(value: Any) -> bool:
+    """Return whether one request may activate Fast mode.
+
+    The deployment capability is authoritative, and string values use the same
+    narrow truthy vocabulary as environment flags. This avoids Python's
+    surprising ``bool("false") is True`` behavior on JSON clients.
+    """
+    if not _env_flag("HERMES_WEBUI_FAST_MODE"):
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUE_VALUES
+    return value is True or value == 1
+
+
 def _safe_mode(raw: str | None, *, enabled: bool) -> str:
     value = str(raw or "").strip().lower()
     if value in _ALLOWED_MODES:

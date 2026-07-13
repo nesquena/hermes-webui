@@ -57,6 +57,20 @@ def test_fast_health_enabled_mode_is_enum_limited(monkeypatch):
     assert payload["fast_mode"]["mode"] == "host_smoke"
 
 
+def test_fast_request_requires_capability_and_strict_truthy_value(monkeypatch):
+    from api.fast_mode import request_enabled
+
+    monkeypatch.delenv("HERMES_WEBUI_FAST_MODE", raising=False)
+    assert request_enabled(True) is False
+    assert request_enabled("true") is False
+
+    monkeypatch.setenv("HERMES_WEBUI_FAST_MODE", "1")
+    for value in (True, 1, "1", "true", "yes", "on", " TRUE "):
+        assert request_enabled(value) is True
+    for value in (False, 0, None, "", "0", "false", "off", "no", [], {}):
+        assert request_enabled(value) is False
+
+
 def test_fast_health_route_is_registered():
     from pathlib import Path
 
@@ -78,6 +92,11 @@ def test_fast_mode_composer_surface_and_background_launch_are_registered():
     assert "fast_mode:fastModeActive||undefined" in messages
     assert "void _launchFastModeBackground(activeSid,fastModeOriginalPrompt)" in messages
     assert "api('/api/background'" in messages
+    assert "const fastModeActive=!!(msgText&&" in messages
+    assert "S.busy || S.activeStreamId || (typeof INFLIGHT !== 'undefined' && INFLIGHT[sid])" in messages
+    assert "const data=await api('/api/fast/health')" in messages
+    assert "if(!_fastModeCapabilityEnabled)return false" in messages
+    assert "btn.disabled=!_fastModeCapabilityEnabled" in messages
 
 
 def test_fast_mode_foreground_guidance_is_ephemeral_not_user_message():
@@ -88,7 +107,7 @@ def test_fast_mode_foreground_guidance_is_ephemeral_not_user_message():
     gateway = Path("api/gateway_chat.py").read_text(encoding="utf-8")
     messages = Path("static/messages.js").read_text(encoding="utf-8")
 
-    assert '"fast_mode": bool(body.get("fast_mode"))' in routes
+    assert '"fast_mode": _fast_mode_request_enabled(body.get("fast_mode"))' in routes
     assert "FAST_MODE_FOREGROUND_GUIDANCE" in streaming
     assert "FAST_MODE_FOREGROUND_GUIDANCE" in gateway
     assert "_fastModeForegroundPrompt" not in messages

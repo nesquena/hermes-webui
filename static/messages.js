@@ -115,24 +115,44 @@ function _chatPayloadModelState(){
 }
 
 const _FAST_MODE_STORAGE_KEY='hermes-webui-fast-mode-enabled';
+let _fastModeCapabilityEnabled=false;
 
 function _isFastModeEnabled(){
+  if(!_fastModeCapabilityEnabled)return false;
   try{return localStorage.getItem(_FAST_MODE_STORAGE_KEY)==='1';}
   catch(_){return false;}
+}
+
+async function _refreshFastModeCapability(){
+  try{
+    const data=await api('/api/fast/health');
+    _fastModeCapabilityEnabled=!!(data&&data.fast_mode&&data.fast_mode.enabled);
+  }catch(_){
+    _fastModeCapabilityEnabled=false;
+  }
+  syncFastModePill();
 }
 
 function syncFastModePill(){
   const btn=$('fastModePill');
   if(!btn)return;
   const enabled=_isFastModeEnabled();
+  btn.disabled=!_fastModeCapabilityEnabled;
   btn.classList.toggle('active',enabled);
   btn.setAttribute('aria-pressed',enabled?'true':'false');
-  btn.title=enabled
-    ? 'Fast mode on: sends a short foreground answer and starts a background follow-up'
-    : 'Fast mode: short foreground answer plus background follow-up';
+  btn.setAttribute('aria-disabled',_fastModeCapabilityEnabled?'false':'true');
+  btn.title=!_fastModeCapabilityEnabled
+    ? 'Fast mode is disabled by this WebUI deployment'
+    : enabled
+      ? 'Fast mode on: sends a short foreground answer and starts a background follow-up'
+      : 'Fast mode: short foreground answer plus background follow-up';
 }
 
 function toggleFastMode(){
+  if(!_fastModeCapabilityEnabled){
+    if(typeof showToast==='function')showToast('Fast mode is disabled by this WebUI deployment',1800);
+    return;
+  }
   const next=!_isFastModeEnabled();
   try{localStorage.setItem(_FAST_MODE_STORAGE_KEY,next?'1':'0');}catch(_){}
   syncFastModePill();
@@ -166,8 +186,9 @@ async function _launchFastModeBackground(parentSid,prompt){
 }
 
 if(typeof document!=='undefined'){
-  document.addEventListener('DOMContentLoaded',syncFastModePill);
-  setTimeout(syncFastModePill,0);
+  const _initFastModeCapability=()=>{ syncFastModePill(); void _refreshFastModeCapability(); };
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',_initFastModeCapability,{once:true});
+  else setTimeout(_initFastModeCapability,0);
 }
 
 function _deferStreamErrorIfOffline(){
@@ -1679,7 +1700,7 @@ async function send(){
     }
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
-  const fastModeActive=!!(text&&typeof _isFastModeEnabled==='function'&&_isFastModeEnabled());
+  const fastModeActive=!!(msgText&&typeof _isFastModeEnabled==='function'&&_isFastModeEnabled());
   const fastModeOriginalPrompt=msgText;
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
@@ -7400,6 +7421,10 @@ function stopSessionStream() {
 
 async function _reloadCurrentSessionAfterBackgroundUpdate(sid) {
   if (!sid || !S.session || S.session.session_id !== sid) return;
+  // The persisted transcript intentionally excludes the live INFLIGHT tail.
+  // Let the normal stream-finalization/load pipeline reconcile it before a
+  // background event replaces S.messages with an older server checkpoint.
+  if (S.busy || S.activeStreamId || (typeof INFLIGHT !== 'undefined' && INFLIGHT[sid])) return;
   try {
     const data = await api('/api/session?session_id=' + encodeURIComponent(sid));
     if (!S.session || S.session.session_id !== sid || !data || !data.session) return;
