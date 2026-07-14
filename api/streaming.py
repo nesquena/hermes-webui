@@ -3565,7 +3565,6 @@ def generate_title_raw_via_aux(
     configured = _get_aux_title_config()
     caller_supplied_route = bool(provider or model or base_url)
     provider = provider or configured.get('provider', '') or ''
-    route_provider = provider
     if str(provider).strip().lower() == 'auto':
         provider = ''
     model = model or configured.get('model', '') or ''
@@ -3586,7 +3585,7 @@ def generate_title_raw_via_aux(
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
     gate_provider, gate_model, gate_base_url = _effective_aux_title_route(
-        route_provider, model, base_url,
+        provider, model, base_url,
     )
     reasoning_extra = {}
     if _route_accepts_reasoning_extra(gate_provider, gate_model, gate_base_url):

@@ -80,6 +80,24 @@ class TestAuxReasoningExtraRouteContract:
             expected = {'reasoning': {'enabled': False}} if accepted else None
             assert captured[-1]['extra_body'] == expected
 
+    @pytest.mark.parametrize('model', (
+        '@openai:gpt-5.5',
+        '@openrouter:anthropic/claude-sonnet-4.6',
+    ))
+    def test_auto_provider_qualified_reject_routes_omit_suppression(self, model):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'auto', 'model': model, 'base_url': '',
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        assert captured[-1]['extra_body'] is None
+
     @pytest.mark.parametrize('url', (
         '(https://USER MARKER:PASSWORD MARKER@relay.example/v1)?api_key=(KEY MARKER)&token=[TOKEN MARKER]',
         '["https://USER [MARKER] : PASSWORD (MARKER) @relay.example/v1"?token="TOKEN MARKER"&key=\'KEY MARKER\']',
