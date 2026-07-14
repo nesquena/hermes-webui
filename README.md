@@ -219,7 +219,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Create, rename, duplicate, delete, search by title and message content
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
-- Archive sessions (hide without deleting, toggle to show)
+- Archive sessions (hide without deleting, toggle to show); archiving a parent conversation also archives its direct delegated subagent sessions, and restoring it restores that group
 - Session projects -- named groups with colors for organizing sessions
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)

@@ -15680,6 +15680,10 @@ def handle_post(handler, parsed) -> bool:
                     model=cli_meta.get("model") or "unknown",
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
+                    # Messaging sessions are state.db-backed. Carry their
+                    # recorded owner into the sidecar so archive group sync
+                    # cannot confuse a named profile with root/default.
+                    profile=cli_meta.get("profile") or get_active_profile_name() or "default",
                 )
                 s.is_cli_session = is_cli_session_row(cli_meta)
                 s.source_tag = cli_meta.get("source_tag")
@@ -15718,14 +15722,45 @@ def handle_post(handler, parsed) -> bool:
                 s.session_key = cli_meta.get("session_key")
                 s.platform = cli_meta.get("platform")
         with _get_session_agent_lock(sid):
-            s.archived = bool(body.get("archived", True))
+            archived = bool(body.get("archived", True))
+            # A profile-less sidecar is canonically a legacy root/default
+            # session (see api.profiles._profiles_match). Persist that explicit
+            # owner before state-db work; request/ambient profile is not evidence
+            # of ownership and must not select the synchronization target.
+            session_profile = getattr(s, "profile", None) or "default"
+            s.profile = session_profile
+            s.archived = archived
             s.save(touch_updated_at=False)
+            try:
+                from api.state_sync import sync_session_archive_group
+
+                # Delegated children remain read-only in WebUI. A parent archive
+                # is the sole group operation: this transaction mirrors the
+                # parent's reversible archive flag to direct state.db children
+                # whose source is exactly ``subagent``.
+                subagent_archive_synced, subagent_child_ids = sync_session_archive_group(
+                    getattr(s, "session_id", sid),
+                    archived,
+                    profile=session_profile,
+                )
+            except Exception:
+                subagent_archive_synced, subagent_child_ids = False, []
+                logger.debug("Failed to sync session archive group to state.db", exc_info=True)
         publish_session_list_changed(
             "session_archive",
             profile=getattr(s, "profile", None),
             session_id=getattr(s, "session_id", sid),
         )
-        return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session": s.compact(),
+                "subagent_archive_synced": subagent_archive_synced,
+                "subagent_child_count": len(subagent_child_ids),
+                **_worktree_retained_payload(s),
+            },
+        )
 
     # ── Session move to project (POST) ──
     if parsed.path == "/api/session/move":
