@@ -51,6 +51,7 @@ This gives you nearly **1:1 parity with Hermes CLI from a convenient web UI** wh
 - [Quick start](#quick-start) — clone + `bootstrap.py` / `start.sh` / `ctl.sh`
 - [Features](#features) — chat, sessions, workspace, voice, profiles, security, themes, panels, mobile
 - [Configuration & access](#configuration--access) — auto-discovery, overrides, remote/Tailscale/phone, manual launch
+- [Local Ollama setup](#local-ollama-setup) — context window, browser tool, display settings
 - [Docker](#docker) — single- and multi-container deploys
 - [Running tests](#running-tests)
 - [Architecture](#architecture) — backend/frontend layout, state dir
@@ -394,6 +395,121 @@ Health check:
 ```bash
 curl http://127.0.0.1:8787/health
 ```
+
+---
+
+## Local Ollama setup
+
+This section covers the practical knobs for running Hermes WebUI against a
+local [Ollama](https://ollama.com) server. Nothing here is Ollama-specific in
+architecture — the same points apply to any OpenAI-compatible local endpoint
+(LM Studio, llama.cpp server, etc.).
+
+### Context window requirements
+
+Hermes Agent enforces a **64,000-token minimum context window** for tool use
+(browsing, file ops, code execution, etc.). The check reads both the configured
+`context_length` value and the runtime window that Ollama actually loaded. Both
+must be ≥ 64 K, otherwise the agent refuses to start the tool loop.
+
+Set both in `~/.hermes/config.yaml`:
+
+```yaml
+model:
+  context_length: 65536   # capability declared to Hermes — must be >= 64000 for tools
+  ollama_num_ctx: 65536   # KV-cache size passed to Ollama at inference time
+```
+
+And bake `num_ctx` into the Modelfile so it persists across Ollama restarts:
+
+```bash
+# export current Modelfile, append parameter, re-create
+ollama show <model> --modelfile > /tmp/Modelfile
+echo 'PARAMETER num_ctx 65536' >> /tmp/Modelfile
+ollama create <model> -f /tmp/Modelfile
+```
+
+> **Speed vs. tool-use tradeoff.** A smaller `ollama_num_ctx` (e.g. 16384)
+> reduces the KV-cache and gives roughly 4× faster generation for pure chat.
+> However, Hermes rejects any `ollama_num_ctx` below 64000 when tools are
+> enabled. Use 65536 (or higher) when you need browsing, file ops, or any
+> other tool; drop to 16384 only for lightweight chat-only sessions after
+> disabling the tool toolsets in Settings → Toolsets.
+
+### Browser tool (Playwright)
+
+The `browser` tool is powered by [Playwright](https://playwright.dev). It is
+not installed by default — Playwright is a large optional dependency (~300 MB
+for Chromium).
+
+Install into the Hermes agent virtualenv:
+
+```bash
+# Bootstrap pip if missing from the venv
+<agent-venv>/bin/python -m ensurepip --upgrade
+
+# Install Playwright and download the Chromium browser binary
+<agent-venv>/bin/python -m pip install playwright
+<agent-venv>/bin/python -m playwright install chromium
+```
+
+Replace `<agent-venv>` with the path shown by `hermes --version` (typically
+`~/.hermes/hermes-agent/venv`). After installation restart the WebUI server;
+the `browser` tool will appear in the tool list automatically.
+
+Quick test:
+
+```bash
+hermes -z "Browse https://example.com and summarize the page in one sentence."
+```
+
+### Reducing model verbosity
+
+Small reasoning models (Qwen3, DeepSeek-R1, etc.) often over-explain. Two
+Modelfile parameters that help without changing response quality:
+
+```
+PARAMETER repeat_penalty  1.3   # penalises repeated phrases and padding
+PARAMETER presence_penalty 1.5  # discourages re-introducing already-covered topics
+```
+
+You can also add a conciseness directive in `~/.hermes/SOUL.md` so it applies
+to every session without touching the model:
+
+```markdown
+**Be brief.** Default to short, direct answers. Only go long for code,
+step-by-step instructions, or explicit analysis requests.
+```
+
+### Enabling tool-call and reasoning display
+
+By default the WebUI uses a compact activity view. To see full tool-call cards
+(name, args, result) and reasoning blocks expanded on every turn, open
+**Settings → Preferences** and enable:
+
+- **Show thinking** — displays the model's reasoning trace before the reply
+- **Show TPS** — tokens-per-second indicator in the response header
+- **Worklog expanded by default** — tool-call cards open without a click
+- Disable **Simplified tool calling** — shows full argument and result detail
+
+Or set them directly in `~/.hermes/webui/settings.json`:
+
+```json
+{
+  "show_thinking": true,
+  "show_tps": true,
+  "worklog_details_expanded_default": true,
+  "simplified_tool_calling": false
+}
+```
+
+### Interrupted task behaviour
+
+When you click **Stop** or send `/interrupt` mid-response, the WebUI discards
+the in-flight turn entirely — no partial response, no "Task cancelled" banner,
+no user prompt bubble. The session rolls back to its state before you sent
+the message. This is intentional: starting over from a clean slate is usually
+more useful than a fragment.
 
 ---
 
