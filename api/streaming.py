@@ -3226,7 +3226,7 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
     return 'minimax' in text or 'minimaxi.com' in text
 
 
-def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
+def _route_accepts_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
     """Routes known to reject an ``extra_body`` ``reasoning`` parameter with HTTP 400.
 
     Title generation injects ``extra_body={"reasoning": {"enabled": False}}`` to
@@ -3241,6 +3241,10 @@ def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url
     """
     provider_lower = str(provider or '').strip().lower()
     model_lower = str(model or '').strip().lower()
+    if not (provider_lower and model_lower and str(base_url or '').strip()):
+        return False
+    if provider_lower not in {'anthropic', 'deepseek', 'gemini', 'google', 'kimi', 'minimax', 'moonshot', 'qwen'}:
+        return False
     # Hostname-based match (not substring) so a proxy URL that merely *contains*
     # one of these strings in a path segment isn't mis-classified.
     host = ''
@@ -3250,22 +3254,22 @@ def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url
     except Exception:
         host = ''
     if host == 'api.openai.com' or host.endswith('.openai.azure.com'):
-        return True
+        return False
     # Azure AI Foundry chat-completions hosts (also reject the reasoning param).
     if host.endswith('.services.ai.azure.com') or host.endswith('.cognitiveservices.azure.com'):
-        return True
+        return False
     if provider_lower in ('openai', 'openai-api', 'openai-codex'):
-        return True
+        return False
     if (
         provider_lower in ('azure', 'azure-foundry', 'azure-ai-foundry', 'azure-ai')
         or provider_lower.startswith('azure/')
         or provider_lower.startswith('azure-')
     ):
-        return True
+        return False
     if (host == 'openrouter.ai' or host.endswith('.openrouter.ai')) and model_lower.startswith('anthropic/'):
         # Anthropic on OpenRouter: mandatory-reasoning families reject a disable.
-        return True
-    return False
+        return False
+    return True
 
 
 def _get_aux_title_config() -> dict:
@@ -3450,7 +3454,7 @@ def generate_title_raw_via_aux(
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
     reasoning_extra = {}
-    if not _route_rejects_reasoning_extra(provider, model, base_url):
+    if _route_accepts_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
@@ -3484,9 +3488,9 @@ def generate_title_raw_via_aux(
                     last_status = empty_status or 'llm_empty_aux'
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(provider, model, base_url))
-            except Exception as e:
+            except Exception:
                 last_status = 'llm_error_aux'
-                logger.debug("Aux title generation attempt %s failed: %s", idx + 1, e)
+                logger.exception("Aux title generation attempt %s failed (route=%s provider=%s model=%s)", idx + 1, base_url, provider, model)
             # If the model just burned its budget on hidden reasoning, retrying
             # the next prompt against the same model produces the same shape.
             # Short-circuit to the local fallback path (#2083).
@@ -3497,8 +3501,8 @@ def generate_title_raw_via_aux(
                 )
                 break
         return None, last_status
-    except Exception as e:
-        logger.debug("Aux title generation failed: %s", e)
+    except Exception:
+        logger.exception("Aux title generation failed (route=%s provider=%s model=%s)", base_url, provider, model)
         return None, 'llm_error_aux'
 
 
