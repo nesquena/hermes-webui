@@ -3276,7 +3276,10 @@ def _route_accepts_reasoning_extra(provider: str = '', model: str = '', base_url
     # client.  Do not mistake an implicit URL for an unresolved custom route.
     builtin_providers = set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY)
     provider_canonical = str(_resolve_provider_alias(provider_lower) or '').strip().lower()
-    if provider_canonical in builtin_providers:
+    # Some catalog entries intentionally use their user-facing ID (notably
+    # ``x-ai`` and ``ollama``), while aliases such as ``google-gemini`` resolve
+    # to their canonical catalog ID.  Both names describe a known route.
+    if provider_lower in builtin_providers or provider_canonical in builtin_providers:
         return True
 
     # Provider can be omitted for an implicit MiniMax configuration.  Its
@@ -3312,23 +3315,64 @@ def _safe_aux_route_for_log(base_url: str = '') -> str:
 
 def _redact_urls_for_log(text: str) -> str:
     """Remove credentials carried by any HTTP(S) URL in exception text."""
-    return re.sub(
-        r"https?://[^\s'\"<>()\[\]{}]+",
+    redacted = re.sub(
+        # Do not let punctuation which commonly wraps an exception value bound
+        # this match.  _safe_aux_route_for_log drops a trailing delimiter along
+        # with any URL credentials it encounters.
+        r"https?://[^\s'\"<>{}]+",
         lambda match: _safe_aux_route_for_log(match.group(0)),
         str(text or ''),
+    )
+    # Exception text is not guaranteed to contain a URL that parses cleanly:
+    # clients can quote, delimit, or otherwise mangle it.  Scrub the complete
+    # rendered message as a final defense, rather than trusting URL parsing.
+    redacted = re.sub(
+        r"(?i)(https?://)[^/\s@<>\[\]{}()]+@",
+        r"\1<redacted>@",
+        redacted,
+    )
+    redacted = re.sub(
+        # Also cover a userinfo fragment which an exception formatter has
+        # separated from its scheme (for example, ``)user:secret@host``).
+        r"(?i)[^\s@:/<>\[\]{}()]+:[^\s@/<>\[\]{}()]+@",
+        "<redacted>@",
+        redacted,
+    )
+    return re.sub(
+        r"(?i)([?&](?:api_key|token|key|secret)=)[^&#\s'\"<>()\[\]{}]+",
+        r"\1<redacted>",
+        redacted,
     )
 
 
 def _log_aux_title_failure(message: str, base_url: str, provider: str, model: str) -> None:
     """Log auxiliary failure context without exposing URL-carried credentials."""
-    logger.error(
-        '%s (route=%s provider=%s model=%s)\n%s',
+    rendered = '%s (route=%s provider=%s model=%s)\n%s' % (
         message,
         _safe_aux_route_for_log(base_url),
         provider,
         model,
         _redact_urls_for_log(traceback.format_exc()),
     )
+    # Run the forced scrub over *all* fields, including the route diagnostic,
+    # because callers and tracebacks may contain delimiter-wrapped URLs.
+    logger.error('%s', _redact_urls_for_log(rendered))
+
+
+def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tuple[str, str, str]:
+    """Resolve auto/local auxiliary routes before compatibility classification."""
+    if str(provider or '').strip().lower() not in {'auto', 'local'}:
+        return provider, model, base_url
+    try:
+        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
+        return (
+            str(resolved_provider or provider or ''),
+            str(resolved_model or model or ''),
+            str(base_url or resolved_base_url or ''),
+        )
+    except Exception:
+        # A failed resolution is deliberately treated as unknown by the gate.
+        return provider, model, base_url
 
 
 def _get_aux_title_config() -> dict:
@@ -3493,6 +3537,7 @@ def generate_title_raw_via_aux(
     configured = _get_aux_title_config()
     caller_supplied_route = bool(provider or model or base_url)
     provider = provider or configured.get('provider', '') or ''
+    route_provider = provider
     if str(provider).strip().lower() == 'auto':
         provider = ''
     model = model or configured.get('model', '') or ''
@@ -3512,8 +3557,11 @@ def generate_title_raw_via_aux(
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
+    gate_provider, gate_model, gate_base_url = _effective_aux_title_route(
+        route_provider, model, base_url,
+    )
     reasoning_extra = {}
-    if _route_accepts_reasoning_extra(provider, model, base_url):
+    if _route_accepts_reasoning_extra(gate_provider, gate_model, gate_base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
