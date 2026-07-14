@@ -8368,7 +8368,15 @@ def _spawn_session_visit_background_refresh() -> bool:
         )
         _active_profile_name = (_gapn() or "").strip()
     except Exception:
+        # profiles module unavailable (pathological): the worker rebuilds under
+        # nullcontext() with no profile rebind, and _active_profile_name stays ""
+        # — so every such spawn coalesces under the empty key rather than per
+        # profile. Re-assigned explicitly here (not just left at the init default)
+        # so the degradation is visible at the failure site instead of implied by
+        # omission. Self-correcting: the enforce-fingerprint read side rejects a
+        # mismatched publish on the next visit.
         _prof_scope_worker = None
+        _active_profile_name = ""
 
     # Claim the per-profile spawn right under the lock: exactly one caller per
     # profile wins and starts the worker; the rest coalesce onto it.
