@@ -1437,7 +1437,17 @@ window.renderTranscript=function(container, messages, opts){
   for(var i=0;i<messages.length;i++){
     var msg=messages[i];
     if(!msg||!msg.role||msg.role==='tool') continue;
-    var content=(typeof msg.content==='string')?msg.content:(msg.content==null?'':String(msg.content));
+    var content;
+    if(typeof msg.content==='string'){
+      content=msg.content;
+    }else if(msg.content==null){
+      content='';
+    }else if(Array.isArray(msg.content)){
+      // Multi-part content (OpenAI/Anthropic API style) — concatenate text parts.
+      content=msg.content.map(function(p){return (p&&typeof p.text==='string')?p.text:''}).join('');
+    }else{
+      content=String(msg.content);
+    }
     if(!content&&opts.skipEmpty) continue;
     var row=document.createElement('div');
     row.className='msg-row';
