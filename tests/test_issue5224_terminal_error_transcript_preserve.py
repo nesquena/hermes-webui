@@ -89,6 +89,10 @@ function buildRuntime() {
   if (!Object.prototype.hasOwnProperty.call(globalThis.S, 'activeStreamId')) {
     globalThis.S.activeStreamId = streamId;
   }
+  globalThis.setWorkspaceSearchSession = (session) => {
+    globalThis.S.session = session;
+    return true;
+  };
   globalThis.INFLIGHT = {};
   globalThis._EPHEMERAL_TURN_FIELDS = [
     '_turnUsage',

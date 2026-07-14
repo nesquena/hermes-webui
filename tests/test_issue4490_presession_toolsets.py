@@ -90,7 +90,7 @@ def test_new_session_request_consumes_pending_toolsets_once():
 
     post_start = compact.index("api('/api/session/new'")
     before_post = compact[:post_start]
-    after_assignment = compact[compact.index("S.session=data.session") :]
+    after_assignment = compact[compact.index("setWorkspaceSearchSession(data.session)") :]
 
     assert "Array.isArray(S._pendingSessionToolsets)" in before_post
     assert "reqBody.enabled_toolsets=S._pendingSessionToolsets" in before_post
@@ -113,12 +113,13 @@ def test_pending_toolsets_only_forwarded_from_empty_composer():
 def test_load_existing_session_clears_staged_toolsets():
     """Loading a real existing session must clear any abandoned staged override.
 
-    loadSession() assigns S.session=data.session on the success path; the staged
-    value is cleared there so a subsequent New Chat does not inherit it (#4490).
+    loadSession() accepts the loaded session through setWorkspaceSearchSession()
+    on the success path; the staged value is cleared there so a subsequent New
+    Chat does not inherit it (#4490).
     """
     body = _function_body(SESSIONS_JS, "async function loadSession")
     compact = body.replace(" ", "")
-    assign = compact.index("S.session=data.session")
+    assign = compact.index("setWorkspaceSearchSession(data.session)")
     # The clear must accompany the real-session assignment, not only the create path.
     assert "S._pendingSessionToolsets=null" in compact[assign : assign + 400]
 

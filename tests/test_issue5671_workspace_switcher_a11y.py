@@ -126,7 +126,7 @@ def test_new_session_announces_started_workspace_without_leaving_stale_browse_te
     assert "t('new_session_workspace_announce',name)" in helper
     assert "typeof requestAnimationFrame==='function'" in helper
     assert "if(typeof _announceNewSessionWorkspace==='function') _announceNewSessionWorkspace(S.session);" in new_session
-    assert new_session.index("S.session=data.session") < new_session.index("_announceNewSessionWorkspace(S.session);")
+    assert new_session.index("setWorkspaceSearchSession(data.session)") < new_session.index("_announceNewSessionWorkspace(S.session);")
 
 
 def test_workspace_a11y_i18n_keys_exist_in_english_locale():
