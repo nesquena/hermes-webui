@@ -10,9 +10,11 @@ Per PR #1439, `ja` is inserted between `en` and `ru` in the LOCALES object.
 from collections import Counter
 from pathlib import Path
 import re
+from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
+PROFILE_CONCEPT_FALLBACK_KEYS = set(PROFILE_CONCEPT_KEYS)
 
 
 def read(path: Path) -> str:
@@ -111,15 +113,15 @@ def test_japanese_locale_covers_english_keys():
     """The ja locale must define every translation key that en defines.
 
     JS object semantics: missing keys at runtime fall through to LOCALES.en[key]
-    via the i18n.js fallback path, but parity is the contract — a missing key
-    means a half-translated UI surface for ja users.
+    via the i18n.js fallback path. The profile-concept help copy intentionally
+    stays English-owned so other locales inherit it through that path.
     """
     src = read(REPO / "static" / "i18n.js")
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
     en_keys = set(key_pattern.findall(extract_locale_block(src, "en")))
     ja_keys = set(key_pattern.findall(extract_locale_block(src, "ja")))
 
-    missing = sorted(en_keys - ja_keys)
+    missing = sorted((en_keys - ja_keys) - PROFILE_CONCEPT_FALLBACK_KEYS)
     assert not missing, f"Japanese locale missing keys: {missing}"
 
 
