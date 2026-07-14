@@ -1362,7 +1362,11 @@ async function newSession(flash, options={}){
       profile:S.activeProfile||'default',
     };
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
-    if(options&&options.worktree) reqBody.worktree=true;
+    // Three-value worktree contract (#6022): explicit true/false is forwarded
+    // verbatim; an ABSENT key lets the server apply the agent's config-level
+    // `worktree:` default. Auto-bind paths pass worktree:false explicitly so a
+    // config default can never mint a worktree (+ branch) on mere page load.
+    if(options&&Object.prototype.hasOwnProperty.call(options,'worktree')) reqBody.worktree=!!options.worktree;
     if(Object.prototype.hasOwnProperty.call(options,'project_id')){
       reqBody.project_id=options.project_id;
     } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
@@ -4161,6 +4165,7 @@ function _renderBatchActionBar(){
         return {response,session:sessionsById.get(sid)||null};
       }));
       const retainedCount=_worktreeResponseCount(results);
+      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
@@ -4169,7 +4174,9 @@ function _renderBatchActionBar(){
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
-      showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');exitSessionSelectMode();await renderSessionList();
+      if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
+      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+      exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
@@ -8906,6 +8913,7 @@ async function deleteSession(sid, beforeDelete=null){
     return false;
   }
   const response=deleteResult&&deleteResult.response;
+  const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;
@@ -8929,10 +8937,11 @@ async function deleteSession(sid, beforeDelete=null){
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     }
   }
-  showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
+  if(cleanupFailed) showToast(t('delete_failed'),0,'error');
+  else showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
   if(optimisticRendered) void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(sid));
   else await renderSessionList();
-  return true;
+  return !cleanupFailed;
 }
 
 // ── Project helpers ─────────────────────────────────────────────────────

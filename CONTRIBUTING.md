@@ -8,6 +8,8 @@ Hermes WebUI is intentionally simple to work on: Python on the server, vanilla J
 
 - Read [`AGENTS.md`](AGENTS.md) if an AI assistant is doing or helping with the
   change.
+- Read [`docs/GUIDELINES.md`](docs/GUIDELINES.md) — the change guidelines that get a PR
+  merged in one review round instead of several (what "complete and verified" means here).
 - Read [`docs/CONTRACTS.md`](docs/CONTRACTS.md) and any linked contract/RFC for
   the subsystem you will touch.
 - For UI or UX work, read [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md)

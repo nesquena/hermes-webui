@@ -95,12 +95,13 @@ def test_delete_worktree_session_reports_retained_worktree_without_cleanup(tmp_p
     captured = _capture_post(monkeypatch, {"session_id": session.session_id})
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {})
     monkeypatch.setattr(routes, "_is_messaging_session_id", lambda sid: False)
-    monkeypatch.setattr(models, "delete_cli_session", lambda sid: None)
+    monkeypatch.setattr(models, "delete_cli_session", lambda sid: True)
 
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
 
     assert captured["status"] == 200
     assert captured["payload"]["ok"] is True
+    assert captured["payload"]["state_db_cleanup_failed"] is False
     assert captured["payload"]["worktree_retained"] is True
     assert captured["payload"]["worktree_path"] == str(worktree.resolve())
     assert captured["payload"]["worktree_branch"] == "hermes/wtdelete1"
@@ -139,6 +140,7 @@ def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, m
 
     assert captured["status"] == 200
     assert captured["payload"]["ok"] is True
+    assert captured["payload"]["state_db_cleanup_failed"] is True
     assert not (session_dir / f"{sid}.json").exists()
     assert sid in models._load_webui_deleted_session_tombstone()
 
@@ -170,6 +172,7 @@ def test_delete_messaging_session_reopens_read_only_without_deleted_webui_tombst
 
     assert captured["status"] == 200
     assert captured["payload"]["ok"] is True
+    assert captured["payload"]["state_db_cleanup_failed"] is False
     assert not (session_dir / f"{sid}.json").exists()
     assert sid not in models._load_webui_deleted_session_tombstone()
     assert delete_calls == []

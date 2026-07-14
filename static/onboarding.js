@@ -527,7 +527,9 @@ async function _finishOnboarding(){
   await loadWorkspaceList();
   if(typeof renderSessionList==='function') await renderSessionList();
   if(!S.session && typeof newSession==='function'){
-    await newSession(true);
+    // System-minted session (no deliberate New Chat intent) — like the boot
+    // auto-bind, it must not inherit a config-level worktree default (#6022).
+    await newSession(true, {worktree: false});
     await renderSessionList();
   }
 }
