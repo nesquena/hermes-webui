@@ -15,16 +15,20 @@ PROFILE_CONCEPT_KEYS = [
     "profile_concept_desc_together",
     "profile_concept_example",
     "profile_concept_workspace_binding",
+    "profile_concept_label_together",
+    "profile_concept_label_example",
+    "profile_concept_label_binding",
 ]
 
 
-def _english_locale_block():
-    """Extract the `en: { ... }` locale block from static/i18n.js."""
-    start = I18N_JS.index("\n  en: {")
-    # The next top-level locale block starts the next "\n  <lang>: {" at the same
-    # two-space indent; `it:` is the next locale after `en:` in this file.
-    end = I18N_JS.index("\n  it: {", start)
-    return I18N_JS[start:end]
+def _locale_blocks():
+    """Extract every top-level locale block from static/i18n.js."""
+    matches = list(re.finditer(r"^  ('[^']+'|[A-Za-z][A-Za-z0-9-]*): \{$", I18N_JS, re.MULTILINE))
+    end = I18N_JS.index("\n};", matches[-1].start())
+    return {
+        match.group(1).strip("'"): I18N_JS[match.start() : (matches[index + 1].start() if index + 1 < len(matches) else end)]
+        for index, match in enumerate(matches)
+    }
 
 
 def _render_profiles_panel_body():
@@ -39,13 +43,22 @@ def _render_profile_concept_help_body():
     return PANELS_JS[start:end]
 
 
-def test_i18n_keys_defined():
-    """All 7 profile_concept_* keys must be present in the English locale block."""
-    en_block = _english_locale_block()
+def test_i18n_keys_are_english_fallback_owned():
+    """Profile concept keys live in English and fall back from every other locale."""
+    locale_blocks = _locale_blocks()
+    en_block = locale_blocks["en"]
     for key in PROFILE_CONCEPT_KEYS:
         assert re.search(rf"\b{re.escape(key)}:\s*'", en_block), (
             f"missing key {key!r} in en locale block"
         )
+    for locale, block in locale_blocks.items():
+        if locale == "en":
+            continue
+        for key in PROFILE_CONCEPT_KEYS:
+            assert not re.search(rf"\b{re.escape(key)}:\s*'", block), (
+                f"key {key!r} must be absent from non-English locale {locale!r}"
+            )
+    assert "_locale[key] ?? LOCALES.en[key]" in I18N_JS
 
 
 def test_help_card_uses_i18n_keys():
