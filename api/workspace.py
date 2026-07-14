@@ -1430,6 +1430,180 @@ def list_dir(workspace: Path, rel: str='.'):
     return entries
 
 
+_WORKSPACE_HIDDEN_FILE_NAMES = {
+    '.DS_Store', '._.DS_Store', '.AppleDouble', '.Spotlight-V100', '.Trashes',
+    '.fseventsd', 'Thumbs.db', 'Desktop.ini', 'ehthumbs.db', '$RECYCLE.BIN',
+    '.directory', '.git', '.svn', '.hg', 'node_modules', '__pycache__',
+    '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.venv', 'venv',
+}
+_WORKSPACE_HIDDEN_FILE_PREFIXES = ('._', '.Trash-')
+_WORKSPACE_SEARCH_MAX_ENTRIES = 5000
+_WORKSPACE_SEARCH_MAX_RESULTS = 200
+_WORKSPACE_SEARCH_MAX_DEPTH = 32
+_WORKSPACE_SEARCH_MAX_SECONDS = 30.0
+_WORKSPACE_SEARCH_MAX_DIRECTORY_ENTRIES = 1000
+
+
+def _is_workspace_hidden_name(name: str) -> bool:
+    return name.startswith('.') or name in _WORKSPACE_HIDDEN_FILE_NAMES or any(
+        name.startswith(prefix) for prefix in _WORKSPACE_HIDDEN_FILE_PREFIXES
+    )
+
+
+def search_workspace(
+    workspace: Path,
+    query: str,
+    *,
+    include_hidden: bool = False,
+    max_entries: int = _WORKSPACE_SEARCH_MAX_ENTRIES,
+    max_results: int = _WORKSPACE_SEARCH_MAX_RESULTS,
+    max_depth: int = _WORKSPACE_SEARCH_MAX_DEPTH,
+    max_seconds: float = _WORKSPACE_SEARCH_MAX_SECONDS,
+    max_directory_entries: int = _WORKSPACE_SEARCH_MAX_DIRECTORY_ENTRIES,
+) -> dict:
+    """Return bounded, workspace-relative recursive name/path matches."""
+    root = safe_resolve_ws(workspace, '.')
+    needle = str(query or '').strip().casefold()
+    if len(needle) < 2:
+        return {'results': [], 'truncated': False}
+    max_entries = max(1, min(int(max_entries), _WORKSPACE_SEARCH_MAX_ENTRIES))
+    max_results = max(1, min(int(max_results), _WORKSPACE_SEARCH_MAX_RESULTS))
+    max_depth = max(0, min(int(max_depth), _WORKSPACE_SEARCH_MAX_DEPTH))
+    max_seconds = max(0.0, min(float(max_seconds), _WORKSPACE_SEARCH_MAX_SECONDS))
+    max_directory_entries = max(
+        1, min(int(max_directory_entries), _WORKSPACE_SEARCH_MAX_DIRECTORY_ENTRIES)
+    )
+
+    started = time.monotonic()
+    pending = [('.', 0)]
+    results = []
+    visited = 0
+    truncated = False
+    visited_dirs = set()
+    while pending and not truncated:
+        if time.monotonic() - started >= max_seconds:
+            truncated = True
+            break
+        rel_dir, depth = pending.pop(0)
+        directory = safe_resolve_ws(root, rel_dir)
+        dir_fd = None
+        try:
+            if _DIR_FD_OK:
+                dir_fd = open_anchored_fd(root, directory, want_dir=True)
+                dir_stat = os.fstat(dir_fd)
+            else:
+                dir_stat = directory.stat()
+            dir_key = (getattr(dir_stat, 'st_dev', None), getattr(dir_stat, 'st_ino', None))
+            if None in dir_key:
+                dir_key = str(directory)
+            if dir_key in visited_dirs:
+                if dir_fd is not None:
+                    os.close(dir_fd)
+                continue
+            visited_dirs.add(dir_key)
+            scan = os.scandir(dir_fd if _DIR_FD_OK and dir_fd is not None else directory)
+        except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
+            if dir_fd is not None:
+                try:
+                    os.close(dir_fd)
+                except OSError:
+                    pass
+            truncated = True
+            continue
+        try:
+            with scan:
+                directory_count = 0
+                for item in scan:
+                    if time.monotonic() - started >= max_seconds:
+                        truncated = True
+                        break
+                    directory_count += 1
+                    if directory_count > max_directory_entries:
+                        truncated = True
+                        break
+                    visited += 1
+                    if visited > max_entries:
+                        truncated = True
+                        break
+                    name = item.name
+                    if not include_hidden and _is_workspace_hidden_name(name):
+                        continue
+                    rel_path = name if rel_dir == '.' else f'{rel_dir}/{name}'
+                    try:
+                        if _DIR_FD_OK and dir_fd is not None:
+                            lstat_result = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                            is_symlink = stat.S_ISLNK(lstat_result.st_mode)
+                        else:
+                            lstat_result = item.stat(follow_symlinks=False)
+                            is_symlink = item.is_symlink()
+                        if is_symlink:
+                            if _DIR_FD_OK and dir_fd is not None:
+                                target_stat = os.stat(name, dir_fd=dir_fd, follow_symlinks=True)
+                            else:
+                                target_stat = item.stat(follow_symlinks=True)
+                            try:
+                                resolved = safe_resolve_ws(root, rel_path)
+                            except (OSError, RuntimeError, ValueError):
+                                continue
+                            if _DIR_FD_OK and dir_fd is not None:
+                                final_lstat = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                            else:
+                                final_lstat = item.stat(follow_symlinks=False)
+                            if (
+                                (lstat_result.st_dev, lstat_result.st_ino, lstat_result.st_mode)
+                                != (final_lstat.st_dev, final_lstat.st_ino, final_lstat.st_mode)
+                            ):
+                                truncated = True
+                                continue
+                            try:
+                                if safe_resolve_ws(root, rel_path) != resolved:
+                                    truncated = True
+                                    continue
+                            except (OSError, RuntimeError, ValueError):
+                                truncated = True
+                                continue
+                            entry_type = 'symlink'
+                            display_is_dir = stat.S_ISDIR(target_stat.st_mode)
+                            size = None
+                        else:
+                            resolved = safe_resolve_ws(root, rel_path)
+                            is_dir = stat.S_ISDIR(lstat_result.st_mode)
+                            entry_type = 'dir' if is_dir else 'file'
+                            display_is_dir = is_dir
+                            size = lstat_result.st_size if stat.S_ISREG(lstat_result.st_mode) else None
+                        mtime_ns = lstat_result.st_mtime_ns
+                    except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                        truncated = True
+                        continue
+                    entry = {
+                        'name': name,
+                        'path': rel_path,
+                        'type': entry_type,
+                        'is_dir': display_is_dir,
+                        'size': size,
+                        'mtime_ns': mtime_ns,
+                    }
+                    if needle in name.casefold() or needle in rel_path.casefold():
+                        results.append(entry)
+                        if len(results) >= max_results:
+                            truncated = True
+                            break
+                    if entry_type == 'dir':
+                        if depth >= max_depth:
+                            truncated = True
+                            break
+                        pending.append((rel_path, depth + 1))
+                if truncated:
+                    break
+        finally:
+            if dir_fd is not None:
+                try:
+                    os.close(dir_fd)
+                except OSError:
+                    pass
+    return {'results': results[:max_results], 'truncated': truncated}
+
+
 def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = None) -> str:
     """Return a cheap, stable signature for a listed workspace directory.
 

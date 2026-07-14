@@ -6404,6 +6404,7 @@ async function switchToWorkspace(path,name){
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
     S.session.workspace=path;
+    if (typeof bumpWorkspaceTreeGen === 'function') bumpWorkspaceTreeGen();
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -7111,6 +7112,7 @@ async function switchToProfile(name) {
             model_provider: S.session.model_provider||null,
           })});
           S.session.workspace = data.default_workspace;
+          if (typeof bumpWorkspaceTreeGen === 'function') bumpWorkspaceTreeGen();
         } catch (_) {}
       }
     }

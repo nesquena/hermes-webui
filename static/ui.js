@@ -18653,6 +18653,7 @@ function _workspaceShouldHideEntry(item){
   if(!item||S.showHiddenWorkspaceFiles)return false;
   const name=String(item.name||'');
   if(!name)return false;
+  if(name.startsWith('.'))return true;
   if(WORKSPACE_HIDDEN_FILE_NAMES.has(name))return true;
   return WORKSPACE_HIDDEN_FILE_PREFIXES.some(prefix=>name.startsWith(prefix));
 }
@@ -18681,6 +18682,7 @@ function toggleWorkspaceHiddenFiles(value){
   S.showHiddenWorkspaceFiles=!!value;
   try{localStorage.setItem('hermes-workspace-show-hidden-files',S.showHiddenWorkspaceFiles?'1':'0');}catch(_){}
   _syncWorkspaceHiddenToggle();
+  if(typeof requestWorkspaceSearch==='function'&&_workspaceSearchQuery) requestWorkspaceSearch(_workspaceSearchQuery);
   renderFileTree();
 }
 try{S.showHiddenWorkspaceFiles=localStorage.getItem('hermes-workspace-show-hidden-files')==='1';}catch(_){}
@@ -18934,8 +18936,6 @@ function renderFileTree(){
   // getBoundingClientRect anchor delta needed — that's only for prepend-above cases).
   const prevScrollTop=box?box.scrollTop:0;
   box.innerHTML='';
-  // Cache current dir entries
-  S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
   const emptyEl=$('wsEmptyState');
   const hasWorkspace=!!(S.session&&S.session.workspace);
@@ -18946,7 +18946,17 @@ function renderFileTree(){
   }
   if(emptyEl) emptyEl.style.display='none';
   box.style.display='';
-  const visibleEntries=_visibleWorkspaceEntries(S.entries);
+  if(typeof _workspaceSearchActive==='function'&&_workspaceSearchActive()&&!S._workspaceSearchPending){
+    _renderWorkspaceSearchResults(box);
+    return;
+  }
+  // Cache current dir entries only for normal tree mode.
+  S._dirCache[S.currentDir||'.']=S.entries;
+  const localQuery=typeof _workspaceSearchQuery==='string'?_workspaceSearchQuery.toLowerCase():'';
+  const localEntries=localQuery
+    ? (S.entries||[]).filter(item=>String(item.name||'').toLowerCase().includes(localQuery)||String(item.path||'').toLowerCase().includes(localQuery))
+    : S.entries;
+  const visibleEntries=_visibleWorkspaceEntries(localEntries);
   if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
     return;
@@ -18954,6 +18964,32 @@ function renderFileTree(){
   _renderTreeItems(box, visibleEntries, 0);
   // #5657: restore the pre-wipe scroll position now that the tree is tall again.
   if(box) box.scrollTop=prevScrollTop;
+}
+
+function _renderWorkspaceSearchResults(box){
+  const results=_visibleWorkspaceEntries(S._workspaceSearchResults||[]);
+  if(!results.length){
+    box.innerHTML='<div class="workspace-search-empty">'+esc(t('workspace_search_no_results')||'No matching files or folders.')+'</div>';
+  }else{
+    for(const item of results){
+      const row=document.createElement('button');
+      row.type='button'; row.className='workspace-search-result';
+      const isDir=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
+      row.innerHTML='<span class="file-icon">'+li(isDir?'folder':'file',14)+'</span><span class="workspace-search-result-path">'+esc(item.path)+'</span>';
+      row.onclick=()=>{
+        if(isDir){
+          if(typeof _clearWorkspaceSearch==='function') _clearWorkspaceSearch();
+          loadDir(item.path);
+        }else openFile(item.path);
+      };
+      box.appendChild(row);
+    }
+  }
+  if(S._workspaceSearchTruncated){
+    const note=document.createElement('div'); note.className='workspace-search-truncated';
+    note.textContent=t('workspace_search_truncated')||'Search stopped early. Refine your search.';
+    box.appendChild(note);
+  }
 }
 
 let _wsActiveDragPath=null;
