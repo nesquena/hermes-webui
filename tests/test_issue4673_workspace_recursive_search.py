@@ -154,8 +154,34 @@ def test_search_drops_symlink_swapped_after_held_fd_open(tmp_path, monkeypatch):
         return result
 
     monkeypatch.setattr(workspace_module.os, "stat", stat_entry)
-    assert search_workspace(root, "needle")["results"] == []
+    rows = search_workspace(root, "needle")["results"]
+    assert [row["path"] for row in rows] == ["needle-alias"]
+    assert rows[0]["type"] == "symlink"
+    assert rows[0]["target_outside_workspace"] is True
+    assert rows[0]["is_dir"] is False
+    assert "size" not in rows[0]
+    assert "target" not in rows[0]
     assert swapped is True
+
+
+@descriptor_search
+def test_search_does_not_traverse_visible_symlink_into_hidden_directory(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    hidden = root / ".private"
+    hidden.mkdir()
+    (hidden / "needle.txt").write_text("secret", encoding="utf-8")
+    try:
+        (root / "alias").symlink_to(hidden, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        return
+
+    assert search_workspace(root, "needle")["results"] == []
+    alias_rows = search_workspace(root, "alias")["results"]
+    assert [row["path"] for row in alias_rows] == ["alias"]
+    assert [row["path"] for row in search_workspace(root, "needle", include_hidden=True)["results"]] == [
+        ".private/needle.txt"
+    ]
 
 
 @descriptor_search
