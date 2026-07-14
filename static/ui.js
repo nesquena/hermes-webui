@@ -10738,7 +10738,7 @@ function _transparentToolSummary(tc){
   // with only {workdir} or an unknown tool with {mode:"dry-run"}) must yield an
   // EMPTY collapsed preview rather than dumping a raw arg snippet — that keeps the
   // collapsed row quiet and consistent with the no-args case (#4658 review).
-  const target=typeof _toolVisibleTargetLabel==='function'?_toolVisibleTargetLabel(tc,{limit:160}):'';
+  const target=typeof _toolVisibleTargetLabel==='function'?_toolVisibleTargetLabel(tc,{limit:160,rangeFirst:true}):'';
   if(target) return target;
   return '';
 }
@@ -16719,6 +16719,17 @@ function _toolTargetLabel(tc){
   else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
   return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
 }
+function _toolReadRangeLabel(tc){
+  const name=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  if(name!=='read_file') return '';
+  const args=tc&&tc.args||{};
+  const offset=args.offset;
+  if(!Number.isSafeInteger(offset)||offset<=0) return '';
+  const limit=args.limit;
+  if(!Number.isSafeInteger(limit)||limit<=1) return `L${offset}`;
+  const end=offset+limit-1;
+  return Number.isSafeInteger(end)?`L${offset}-${end}`:`L${offset}`;
+}
 function _toolFullCommandLabel(tc){
   // Full (multi-line) shell command for the EXPANDED detail lead. Mirrors the
   // shell raw-extraction in _toolTargetLabel but WITHOUT the .split('\n')[0]
@@ -16733,7 +16744,12 @@ function _toolVisibleTargetLabel(tc, opts){
   const target=_toolTargetLabel(tc);
   if(!target) return '';
   const kind=_toolActionKind(tc);
-  if(kind==='read'||kind==='write') return _shortToolLabel(_toolPathBasename(target)||target, opts.limit||112);
+  if(kind==='read'||kind==='write'){
+    let text=_toolPathBasename(target)||target;
+    const range=kind==='read'?_toolReadRangeLabel(tc):'';
+    if(range) text=opts.rangeFirst?`${range} · ${text}`:`${text} · ${range}`;
+    return _shortToolLabel(text, opts.limit||112);
+  }
   if(kind==='skill'){
     const suffix=_toolI18n('tool_target_skill_suffix', 'skill');
     const text=target.toLowerCase().endsWith(String(suffix).toLowerCase())?target:`${target} ${suffix}`;

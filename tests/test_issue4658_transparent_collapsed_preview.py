@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 _FN_NAMES = [
     '_toolDisplayName', '_toolActionKind', '_toolKindIcon', '_toolPathBasename',
     '_decodeToolLabelEntities', '_redactToolTargetLabel', '_shortToolLabel', '_toolI18n',
-    '_toolTargetLabel', '_toolVisibleTargetLabel', '_toolCommandTitle', '_toolQueryTitle',
+    '_toolTargetLabel', '_toolReadRangeLabel', '_toolVisibleTargetLabel', '_toolCommandTitle', '_toolQueryTitle',
     '_toolActionLabelText', '_toolArgPreviewValue', '_toolArgPreviewKeyIsHidden',
     '_formatToolArgPreview', '_toolResultOneLiner', '_toolCardPreviewText', '_toolCardAllowsDetail',
     '_toolDetailLeadLabel', '_toolDetailLeadText', '_toolShortName', '_transparentEventPreview',
@@ -178,7 +178,11 @@ function previewFor(tc){
   const header=card?card.querySelector('.tool-card-header'):null;
   const preview=header?header.querySelector('.tool-card-preview'):null;
   const name=header?header.querySelector('.tool-card-name'):null;
-  return { preview: preview?preview.textContent:null, name: name?name.textContent:null };
+  return {
+    preview: preview?preview.textContent:null,
+    name: name?name.textContent:null,
+    actionLabel: row.dataset.toolActionLabel||null,
+  };
 }
 
 const cases = JSON.parse(process.argv[2]);
@@ -190,6 +194,9 @@ process.stdout.write(JSON.stringify(out));
 
 CASES = {
     "read_file": {"name": "read_file", "args": {"path": "/home/x/api/config.py"}, "snippet": '{"content":"1|import os"}', "done": True},
+    "read_file_range": {"name": "read_file", "args": {"path": "/home/x/api/hermes_constants.py", "offset": 321, "limit": 160}, "done": True},
+    "read_file_offset_only": {"name": "read_file", "args": {"path": "/home/x/api/hermes_constants.py", "offset": 42}, "done": True},
+    "read_file_invalid_range": {"name": "read_file", "args": {"path": "/home/x/api/hermes_constants.py", "offset": "321", "limit": 160}, "done": True},
     "terminal": {"name": "terminal", "args": {"command": "git fetch origin --quiet"}, "snippet": "275 /opt/...", "done": True},
     "search_files": {"name": "search_files", "args": {"pattern": "buildToolCard", "path": "/tmp"}, "snippet": '{"total_count": 0}', "done": True},
     "skill_view": {"name": "skill_view", "args": {"name": "opencode-review-agents"}, "snippet": '{"success": true}', "done": True},
@@ -224,6 +231,27 @@ def test_read_file_row_shows_file_target(results):
     assert "config.py" in (r["preview"] or ""), (
         f"collapsed read_file row must show the file target inline, not be blank: {r}"
     )
+
+
+def test_read_file_row_shows_requested_line_range(results):
+    r = results["read_file_range"]
+    assert r["preview"] == "L321-480 · hermes_constants.py"
+    assert r["actionLabel"] == "Read hermes_constants.py · L321-480"
+
+
+def test_read_file_offset_without_limit_shows_start_line(results):
+    r = results["read_file_offset_only"]
+    assert r["preview"] == "L42 · hermes_constants.py"
+    assert r["actionLabel"] == "Read hermes_constants.py · L42"
+
+
+def test_read_file_without_trustworthy_numeric_range_keeps_old_label(results):
+    no_range = results["read_file"]
+    invalid_range = results["read_file_invalid_range"]
+    assert no_range["preview"] == "config.py"
+    assert no_range["actionLabel"] == "Read config.py"
+    assert invalid_range["preview"] == "hermes_constants.py"
+    assert invalid_range["actionLabel"] == "Read hermes_constants.py"
 
 
 def test_terminal_row_shows_command(results):
