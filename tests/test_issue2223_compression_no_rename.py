@@ -164,6 +164,7 @@ class TestNoRenameDuringCompression:
             "child_messages_digest": models._compression_child_messages_digest(
                 disjoint_child.messages
             ),
+            "canonical_parent_proof": True,
         }
 
         replay_parent = Session(session_id="replay_parent", messages=parent_messages)
@@ -180,6 +181,26 @@ class TestNoRenameDuringCompression:
         assert streaming._preserve_pre_compression_snapshot(
             suffix_replay_child,
             "replay_parent",
+        ) is None
+
+        noncanonical_messages = list(parent_messages[:-1])
+        noncanonical_messages.insert(470, dict(noncanonical_messages[470]))
+        noncanonical_parent = Session(
+            session_id="noncanonical_parent",
+            messages=noncanonical_messages,
+        )
+        noncanonical_parent.save(touch_updated_at=False)
+        canonical_child = Session(
+            session_id="canonical_child",
+            messages=[
+                {"role": "assistant", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+                for idx in range(500)
+            ],
+        )
+
+        assert streaming._preserve_pre_compression_snapshot(
+            canonical_child,
+            "noncanonical_parent",
         ) is None
 
 

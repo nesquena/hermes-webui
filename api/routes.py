@@ -8534,6 +8534,10 @@ def _compression_parent_lineage_metadata_count(session, *, max_hops: int = 20) -
     parent = Session.load_metadata_only(parent_id)
     if not parent or not getattr(parent, "pre_compression_snapshot", False):
         return None
+    if getattr(parent, "truncation_watermark", None) not in (None, ""):
+        return None
+    if getattr(parent, "truncation_boundary", None) not in (None, ""):
+        return None
     parent_parent_id = str(getattr(parent, "parent_session_id", "") or "").strip()
     if parent_parent_id:
         return None
@@ -8634,6 +8638,8 @@ def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages
         not parent
         or not getattr(parent, "pre_compression_snapshot", False)
         or not getattr(parent, "_todo_state_metadata_available", False)
+        or getattr(parent, "truncation_watermark", None) not in (None, "")
+        or getattr(parent, "truncation_boundary", None) not in (None, "")
     ):
         return None
     parent_count = _metadata_message_count_for_display(parent)
@@ -8649,6 +8655,7 @@ def _direct_sidecar_limited_display_base_offset(session, direct_sidecar_messages
         return None
     if (
         str(boundary.get("parent_session_id") or "") != parent_id
+        or boundary.get("canonical_parent_proof") is not True
         or parent_count is None
         or marker_count != parent_count
         or marker_updated_at <= 0

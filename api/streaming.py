@@ -3622,7 +3622,13 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _disjoint_compression_parent_message_count(parent_messages, child_messages) -> int | None:
+def _disjoint_compression_parent_message_count(
+    parent_messages,
+    child_messages,
+    *,
+    parent_truncation_watermark=None,
+    parent_truncation_boundary=None,
+) -> int | None:
     """Return the parent length only when the child is provably disjoint.
 
     This check runs once at compression rotation, where both arrays are already
@@ -3633,14 +3639,30 @@ def _disjoint_compression_parent_message_count(parent_messages, child_messages) 
     child_messages = list(child_messages or [])
     if not parent_messages or not child_messages:
         return None
-    merged = merge_session_messages_append_only(
+
+    # The display-lineage reader canonicalizes its first segment by merging it
+    # into an empty transcript. A raw parent containing duplicate or truncated
+    # rows can therefore have a different count/order from the coordinates the
+    # endpoint later publishes. Mint a marker only when canonicalization leaves
+    # the persisted parent sequence exactly unchanged.
+    canonical_parent = merge_session_messages_append_only(
+        [],
         parent_messages,
+        truncation_watermark=parent_truncation_watermark,
+        truncation_boundary=parent_truncation_boundary,
+    )
+    if canonical_parent != parent_messages:
+        return None
+
+    expected = canonical_parent + child_messages
+    merged = merge_session_messages_append_only(
+        canonical_parent,
         child_messages,
         truncation_watermark=None,
     )
-    if len(merged) != len(parent_messages) + len(child_messages):
+    if merged != expected:
         return None
-    return len(parent_messages)
+    return len(canonical_parent)
 
 
 def _preserve_pre_compression_snapshot(s, old_sid: str) -> dict | None:
@@ -3742,6 +3764,8 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> dict | None:
             parent_count = _disjoint_compression_parent_message_count(
                 snapshot.messages,
                 s.messages,
+                parent_truncation_watermark=getattr(snapshot, 'truncation_watermark', None),
+                parent_truncation_boundary=getattr(snapshot, 'truncation_boundary', None),
             )
             try:
                 parent_updated_at = float(getattr(snapshot, 'updated_at', 0) or 0)
@@ -3755,6 +3779,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> dict | None:
                 'parent_updated_at': parent_updated_at,
                 'child_message_count': len(s.messages or []),
                 'child_messages_digest': _compression_child_messages_digest(s.messages),
+                'canonical_parent_proof': True,
             }
     except OSError:
         logger.debug("Could not read old session file before preservation")

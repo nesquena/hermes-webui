@@ -103,6 +103,7 @@ def _disjoint_parent_boundary(parent, child_messages):
         "parent_updated_at": parent.updated_at,
         "child_message_count": len(child_messages),
         "child_messages_digest": _compression_child_messages_digest(child_messages),
+        "canonical_parent_proof": True,
     }
 
 
@@ -759,6 +760,151 @@ def test_msg_limit_partial_parent_suffix_replay_falls_back_with_contiguous_pagin
     assert second_payload["_messages_offset"] == 1340
     assert [msg["content"] for msg in second_payload["messages"]] == [
         f"child {idx}" for idx in range(340, 370)
+    ]
+
+
+def test_msg_limit_canonicalized_parent_falls_back_with_contiguous_pagination(
+    monkeypatch,
+    tmp_path,
+):
+    """A raw parent that canonicalizes shorter must never mint a fast-path offset."""
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_canonicalized"
+    child_sid = "continuation_child_canonicalized"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(999)
+    ]
+    parent_messages.insert(470, dict(parent_messages[470]))
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+        for idx in range(500)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 800.0
+    parent.save(touch_updated_at=False)
+
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary={
+            key: value
+            for key, value in _disjoint_parent_boundary(parent, child_messages).items()
+            if key != "canonical_parent_proof"
+        },
+        created_at=1000.0,
+        updated_at=1600.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    captured = {"lineage_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+
+    first = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(first, urlparse(first.path))
+
+    assert first.status == 200
+    assert captured["lineage_loads"] >= 1
+    first_payload = first.response_json["session"]
+    assert first_payload["message_count"] == 1499
+    assert first_payload["_messages_offset"] == 1469
+    assert [msg["content"] for msg in first_payload["messages"]] == [
+        f"child {idx}" for idx in range(470, 500)
+    ]
+
+    second = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0"
+        f"&msg_limit=30&msg_before={first_payload['_messages_offset']}"
+    )
+    routes.handle_get(second, urlparse(second.path))
+
+    assert second.status == 200
+    second_payload = second.response_json["session"]
+    assert second_payload["message_count"] == 1499
+    assert second_payload["_messages_offset"] == 1439
+    first_contents = {msg["content"] for msg in first_payload["messages"]}
+    second_contents = {msg["content"] for msg in second_payload["messages"]}
+    assert not first_contents.intersection(second_contents)
+    assert [msg["content"] for msg in second_payload["messages"]] == [
+        f"child {idx}" for idx in range(440, 470)
+    ]
+
+
+def test_msg_limit_truncated_parent_metadata_falls_back_to_full_lineage(
+    monkeypatch,
+    tmp_path,
+):
+    """A truncated metadata-only parent cannot supply canonical display coordinates."""
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_truncated"
+    child_sid = "continuation_child_truncated_parent"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.truncation_watermark = 50.0
+    parent.truncation_boundary = 50.0
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    captured = {"lineage_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+
+    first = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(first, urlparse(first.path))
+
+    assert first.status == 200
+    assert captured["lineage_loads"] >= 1
+    payload = first.response_json["session"]
+    assert payload["message_count"] == 551
+    assert payload["_messages_offset"] == 521
+    assert [msg["content"] for msg in payload["messages"]] == [
+        f"child {idx}" for idx in range(470, 500)
     ]
 
 
