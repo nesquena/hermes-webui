@@ -1708,3 +1708,29 @@ def test_mobile_enter_does_not_affect_desktop_logic():
     # The else branch (desktop, sends on Enter without Shift) must still be present
     assert "if(!e.shiftKey){e.preventDefault();send();" in boot_js, \
         "Desktop Enter-to-send logic (else branch) must still be present in boot.js"
+
+
+def test_mobile_model_dropdown_uses_visual_viewport_safe_positioning():
+    """The phone picker must stay inside the visual viewport while browser chrome moves."""
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    position_body = _js_function_body(ui_js, "_positionModelDropdown")
+    assert "visualViewport" in position_body, \
+        "mobile model picker positioning must account for the visual viewport"
+    assert "style.top" in position_body and "style.maxHeight" in position_body, \
+        "mobile model picker positioning must clamp both its top edge and height"
+    assert "viewportBottom" in position_body and "anchorRect.bottom" in position_body, \
+        "mobile model picker must choose an available side of its touch anchor"
+    assert "scrollHeight" in position_body, \
+        "mobile model picker must size from full menu content before clamping"
+
+    mobile_css = _composer_phone_media_block()
+    dropdown = _declarations(_rule_body(mobile_css, "#composerModelDropdown"))
+    assert dropdown.get("position") == "fixed", \
+        "phone model picker must escape composer stacking/overflow geometry"
+    assert dropdown.get("bottom") == "auto", \
+        "phone model picker must use the computed visual-viewport top position"
+
+    base_rule = CSS.find(".model-dropdown{display:none;position:absolute;")
+    mobile_override = CSS.rfind("#composerModelDropdown{position:fixed;")
+    assert base_rule >= 0 and mobile_override > base_rule, \
+        "the mobile fixed override must come after the base dropdown CSS"
