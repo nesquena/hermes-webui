@@ -1362,7 +1362,11 @@ async function newSession(flash, options={}){
       profile:S.activeProfile||'default',
     };
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
-    if(options&&options.worktree) reqBody.worktree=true;
+    // Three-value worktree contract (#6022): explicit true/false is forwarded
+    // verbatim; an ABSENT key lets the server apply the agent's config-level
+    // `worktree:` default. Auto-bind paths pass worktree:false explicitly so a
+    // config default can never mint a worktree (+ branch) on mere page load.
+    if(options&&Object.prototype.hasOwnProperty.call(options,'worktree')) reqBody.worktree=!!options.worktree;
     if(Object.prototype.hasOwnProperty.call(options,'project_id')){
       reqBody.project_id=options.project_id;
     } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){

@@ -1,4 +1,4 @@
-﻿// ── i18n: locale bundles and t() helper ──────────────────────────────────────
+// ── i18n: locale bundles and t() helper ──────────────────────────────────────
 // To add a new language: add an entry to LOCALES below with all keys translated.
 // The language code must match a valid BCP 47 tag (used for speech recognition).
 // Keys missing in a non-English locale fall back to English automatically.
@@ -1586,6 +1586,14 @@ const LOCALES = {
     profile_switch_title: 'Switch to this profile',
     profile_delete_title: 'Delete this profile',
     profile_default_label: '(default)',
+    profile_concept_title: 'Profiles vs workspaces',
+    profile_concept_subtitle: 'Use profiles for how the agent works; use workspaces for what files it works on.',
+    profile_concept_desc_profiles: 'Agent identity, memory, skills, model/provider config, and connected tools. Create profiles for roles like researcher, writer, marketer, or developer when those roles should carry different context or capabilities.',
+    profile_concept_desc_workspaces: 'Project or product folders on disk. Use one workspace per repo/product so chat, terminal, and file browsing point at the right files.',
+    profile_concept_desc_together: 'A profile can have a default workspace, but you can switch workspaces any time. Profiles answer "who is working?"; workspaces answer "where are they working?"',
+    profile_concept_example: 'Example: create a "researcher" profile with web-search skills enabled and a "my-app" workspace pointing at your project folder. The researcher profile remembers your research preferences; the workspace keeps chat, terminal, and file browsing pointed at that project.',
+    profile_concept_label_together: 'Together',
+    profile_concept_label_example: 'Example',
     profile_name_placeholder: 'Profile name (lowercase, a-z 0-9 hyphens)',
     profile_clone_label: 'Clone config from active profile',
     profile_model_label: 'Model / provider',

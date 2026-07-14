@@ -801,7 +801,9 @@ async function cmdTerminal(){
       const first=(data&&data.workspaces||[])[0];
       S._profileSwitchWorkspace=(data&&data.last)||(first&&first.path)||null;
     }
-    await newSession();
+    // System-minted session (#6022): opening the terminal auto-creates a
+    // session — explicit worktree:false so the config default can't leak.
+    await newSession(false, {worktree: false});
     if(typeof renderSessionList==='function') await renderSessionList();
   }
   if(!S.session||!S.session.workspace){
