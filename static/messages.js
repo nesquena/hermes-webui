@@ -3792,10 +3792,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _upsertAnchorReasoning(text, options={}){
     const clean=String(text||'').trim();
-    if(!clean||!_anchorRegistry||window._showThinking===false) return null;
     const placement=_liveThinkingPlacement();
     const segmentSeq=Number(options.segmentSeq||placement.segmentSeq||_anchorSegmentSeq());
     const localId=String(options.localId||`live-reasoning:${streamId}:${segmentSeq}`);
+    if(options&&typeof options==='object'){
+      options.anchorReasoningLocalId=localId;
+      options.segmentSeq=segmentSeq;
+      if(options.burstId===undefined) options.burstId=_currentActivityBurstId;
+    }
+    if(!clean||!_anchorRegistry||window._showThinking===false) return null;
     const existing=_findAnchorActivityEventByLocalId(localId,'reasoning');
     if(existing){
       const replaced=_replaceAnchorActivityEventByLocalId(localId,'reasoning',{
@@ -5356,8 +5361,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       syncInflightAssistantMessage();
       if(text&&S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId){
         const liveThinkingText=_liveThinkingText();
-        if(!_upsertAnchorReasoning(liveThinkingText)){
-          _updateLiveThinkingCard(liveThinkingText,{anchorRenderFallback:true,sessionId:activeSid,streamId});
+        const anchorReasoningFallback={};
+        if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){
+          _updateLiveThinkingCard(liveThinkingText,{
+            ...anchorReasoningFallback,
+            anchorRenderFallback:true,
+            sessionId:activeSid,
+            streamId,
+          });
         }
       }
     });

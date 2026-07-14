@@ -20,6 +20,7 @@ def _run_reasoning_scene(
     activity_mode: str = "transparent_stream",
     fail_first_anchor_render: bool = False,
     fail_anchor_render_on: int | None = None,
+    multi_segment_fallback: bool = False,
     stale_active_stream: bool = False,
     stale_live_turn: bool = False,
     show_thinking: bool = True,
@@ -37,6 +38,8 @@ def _run_reasoning_scene(
         env["ISSUE5720_FAIL_FIRST_ANCHOR_RENDER"] = "1"
     if fail_anchor_render_on is not None:
         env["ISSUE5720_FAIL_ANCHOR_RENDER_ON"] = str(fail_anchor_render_on)
+    if multi_segment_fallback:
+        env["ISSUE5720_MULTI_SEGMENT_FALLBACK"] = "1"
     if stale_active_stream:
         env["ISSUE5720_STALE_ACTIVE_STREAM"] = "1"
     if stale_live_turn:
@@ -156,6 +159,24 @@ def test_later_deferred_anchor_paint_updates_existing_reasoning_owner(activity_m
     assert result["anchor_reasoning_events"] == 1
     assert result["anchor_reasoning_text"] == "Plan step"
     assert result["inflight_reasoning_text"] == "Plan step"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("activity_mode", ["transparent_stream", "compact_worklog"])
+def test_later_deferred_anchor_paint_updates_exact_reasoning_owner(activity_mode):
+    result = _run_reasoning_scene(
+        activity_mode=activity_mode,
+        multi_segment_fallback=True,
+    )
+    exact = result["multi_segment_exact_fallback"]
+
+    assert exact["first_before"] == "Plan step"
+    assert exact["first_after"] == "Plan step"
+    assert exact["second_before"] == "Second draft"
+    assert exact["second_after"] == "Second updated"
+    assert exact["legacy_after"] == "Legacy unkeyed"
+    assert exact["live_reasoning_rows"] == 2
+    assert exact["fallback_rows"] == 0
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -405,6 +426,7 @@ global.ensureActivityGroup=(blocks,opts)=>{
   blocks.appendChild(group);
   return group;
 };
+global.ensureLiveWorklogContainer=(blocks,opts)=>ensureActivityGroup(blocks,opts);
 global._thinkingActivityNode=text=>{
   const row=new FakeElement('div');
   row.className='agent-activity-thinking transparent-thinking-event';
@@ -526,6 +548,47 @@ function reasoningText(row){
   const pre=row.querySelector&&row.querySelector('pre');
   return pre?pre.textContent:row.textContent;
 }
+function appendSyntheticAnchorReasoningRow(rowId, text){
+  const row=_thinkingActivityNode(text, false, rowId);
+  row.setAttribute('data-anchor-scene-row','1');
+  row.setAttribute('data-anchor-row-id',rowId);
+  row.setAttribute('data-anchor-row-role','thinking');
+  row.setAttribute('data-anchor-source-event-type','reasoning');
+  row.setAttribute('data-anchor-stream-id','stream-1');
+  row.setAttribute('data-session-id','sid-1');
+  if(isTransparentStream()){
+    _decorateTransparentEventRow(row,{
+      type:'thinking',
+      text,
+      preview:text,
+      live:true,
+      segmentSeq:'2',
+      burstId:'0',
+    });
+    row.setAttribute('data-anchor-live-scene-row','1');
+    row.setAttribute('data-live-stream-owned','1');
+    turn.appendChild(row);
+  }else{
+    const group=ensureActivityGroup(turn,{activityKey:'live:stream-1'});
+    const list=_toolWorklogListEl(group);
+    (list||group||turn).appendChild(row);
+  }
+  return row;
+}
+function appendUnkeyedLegacyReasonRow(text){
+  const row=new FakeElement('div');
+  row.className='wl-reason';
+  row.setAttribute('data-worklog-anchor-reason','1');
+  row.textContent=text;
+  if(isTransparentStream()){
+    turn.appendChild(row);
+  }else{
+    const group=ensureActivityGroup(turn,{activityKey:'live:stream-1'});
+    const list=_toolWorklogListEl(group);
+    (list||group||turn).appendChild(row);
+  }
+  return row;
+}
 
 source.emit('reasoning',{text:'Plan '});
 const first=anchorReasoningRows()[0]||null;
@@ -542,6 +605,34 @@ const registry=window._liveAnchorRegistries&&window._liveAnchorRegistries.get('s
 const anchorReasoningEvents=registry&&registry.anchor&&Array.isArray(registry.anchor.activity_events)
   ? registry.anchor.activity_events.filter(event=>event&&event.source_event_type==='reasoning')
   : [];
+let multiSegmentExactFallback=null;
+if(process.env.ISSUE5720_MULTI_SEGMENT_FALLBACK==='1'){
+  const firstReasoningRow=anchorReasoningRows()[0]||null;
+  const firstBefore=reasoningText(firstReasoningRow);
+  const secondId='live-reasoning:stream-1:2';
+  const secondReasoningRow=appendSyntheticAnchorReasoningRow(`${secondId}:reasoning:1`,'Second draft');
+  const secondBefore=reasoningText(secondReasoningRow);
+  const legacyRow=appendUnkeyedLegacyReasonRow('Legacy unkeyed');
+  appendThinking('Second updated',{
+    anchorRenderFallback:true,
+    sessionId:'sid-1',
+    streamId:'stream-1',
+    anchorReasoningLocalId:secondId,
+    segmentSeq:2,
+    burstId:0,
+  });
+  multiSegmentExactFallback={
+    first_row_id:firstReasoningRow&&firstReasoningRow.getAttribute('data-anchor-row-id'),
+    first_before:firstBefore,
+    first_after:reasoningText(firstReasoningRow),
+    second_row_id:secondReasoningRow.getAttribute('data-anchor-row-id'),
+    second_before:secondBefore,
+    second_after:reasoningText(secondReasoningRow),
+    legacy_after:reasoningText(legacyRow),
+    live_reasoning_rows:anchorReasoningRows().length,
+    fallback_rows:fallbackReasoningRows().length,
+  };
+}
 
 process.stdout.write(JSON.stringify({
   first_text:firstText,
@@ -558,5 +649,6 @@ process.stdout.write(JSON.stringify({
     ? String(anchorReasoningEvents[anchorReasoningEvents.length-1].payload&&anchorReasoningEvents[anchorReasoningEvents.length-1].payload.text||'')
     : null,
   inflight_reasoning_text:String(INFLIGHT['sid-1']&&INFLIGHT['sid-1'].lastReasoningText||''),
+  multi_segment_exact_fallback:multiSegmentExactFallback,
 }));
 """

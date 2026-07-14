@@ -12366,12 +12366,21 @@ function _liveAnchorReasoningRowForFallback(turn, opts){
   if(!turn||!blocks||!blocks.querySelectorAll) return null;
   const streamId=String(opts.streamId||S.activeStreamId||'');
   const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
+  const segmentSeq=opts.segmentSeq!==undefined&&opts.segmentSeq!==null
+    ? String(opts.segmentSeq).trim()
+    : '';
+  const localId=String(opts.anchorReasoningLocalId||opts.localId||'').trim();
+  const rowKey=localId||(streamId&&segmentSeq?`live-reasoning:${streamId}:${segmentSeq}`:'');
+  if(!rowKey) return null;
   const rows=blocks.querySelectorAll(
-    '[data-anchor-scene-row="1"][data-anchor-source-event-type="reasoning"],'+
-    '[data-anchor-scene-row="1"][data-anchor-row-role="thinking"],'+
-    '.wl-reason[data-worklog-anchor-reason="1"]'
+    '[data-anchor-scene-row="1"][data-anchor-row-id]'
   );
   for(const row of Array.from(rows)){
+    const anchorRowId=String(row.getAttribute&&row.getAttribute('data-anchor-row-id')||'');
+    if(anchorRowId!==rowKey&&!anchorRowId.startsWith(`${rowKey}:`)) continue;
+    const rowRole=String(row.getAttribute&&row.getAttribute('data-anchor-row-role')||'');
+    const rowSource=String(row.getAttribute&&row.getAttribute('data-anchor-source-event-type')||'');
+    if(rowRole!=='thinking'&&rowSource!=='reasoning') continue;
     const rowStreamId=String(row.getAttribute&&row.getAttribute('data-anchor-stream-id')||'');
     if(rowStreamId&&streamId&&rowStreamId!==streamId) continue;
     const rowSessionId=String(row.getAttribute&&row.getAttribute('data-session-id')||'');
