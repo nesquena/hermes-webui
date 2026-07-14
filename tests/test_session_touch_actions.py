@@ -33,6 +33,43 @@ def test_session_menu_respects_motion_preferences():
     assert ".session-action-menu{animation:none;will-change:auto;}" in STYLE_CSS
 
 
+def test_session_action_menu_exposes_popup_state_and_focus_contract():
+    """A portaled menu must stay discoverable from its sidebar trigger.
+
+    The fixed-position menu intentionally lives under document.body to avoid
+    clipping, so a screen reader cannot rely on DOM proximity. Opening it must
+    expose the popup relationship and move focus to an actionable item; Escape
+    must return focus to the trigger.
+    """
+    assert SESSIONS_JS.count("menuBtn.setAttribute('aria-expanded','false');") == 2
+    assert "menu.setAttribute('role','menu');" in SESSIONS_JS
+    assert "menu.setAttribute('aria-label', 'Conversation actions');" in SESSIONS_JS
+    assert "opt.setAttribute('role','menuitem');" in SESSIONS_JS
+
+    mount = _sessions_block("function _mountSessionActionMenu(menu, session, anchorEl){", "function _findSessionRenameRow")
+    assert "anchorEl.setAttribute('aria-expanded','true');" in mount
+    assert "anchorEl.setAttribute('aria-controls',menu.id);" in mount
+    assert "firstAction.focus({preventScroll:true});" in mount
+
+    close = _sessions_block("function closeSessionActionMenu", "function _sessionActionMenuShouldIgnoreScrollTarget")
+    assert "_sessionActionAnchor.setAttribute('aria-expanded','false');" in close
+    assert "_sessionActionAnchor.removeAttribute('aria-controls');" in close
+    assert "restoreFocus" in close
+    assert "fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;" in close
+    assert "_focusSessionActionMenuRestoreTarget(focusTarget)" in close
+    assert "_focusSessionActionMenuRestoreTarget(fallbackFocusTarget)" in close
+
+    escape_handler = _sessions_block("document.addEventListener('keydown',e=>{", "window.addEventListener('resize'")
+    assert "closeSessionActionMenu({restoreFocus:true});" in escape_handler
+
+
+def test_session_action_menu_supports_arrow_key_navigation():
+    mount = _sessions_block("function _mountSessionActionMenu(menu, session, anchorEl){", "function _findSessionRenameRow")
+    for key in ("'ArrowDown'", "'ArrowUp'", "'Home'", "'End'"):
+        assert key in mount
+    assert "menu.addEventListener('keydown'" in mount
+
+
 def test_mobile_session_menu_opens_from_long_press_and_hides_dots():
     assert "const SESSION_LONG_PRESS_DELAY_MS = 400;" in SESSIONS_JS
     assert "el.classList.add('long-pressing')" in SESSIONS_JS

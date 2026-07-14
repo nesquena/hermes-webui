@@ -6972,7 +6972,7 @@ def _run_agent_streaming(
                 break  # nothing active — stop the ticker
             if _metering_stop.wait(interval):
                 break  # stream was cancelled or ended — exit
-            stats = meter().get_stats()
+            stats = meter().get_stats(stream_id)
             stats['session_id'] = session_id
             stats['usage'] = _live_usage_snapshot()
             put('metering', stats)
@@ -7409,7 +7409,7 @@ def _run_agent_streaming(
                 if now - _metering_last_emit[0] < 0.1:
                     return
                 _metering_last_emit[0] = now
-                stats = meter().get_stats()
+                stats = meter().get_stats(stream_id)
                 stats['session_id'] = session_id
                 stats['usage'] = _live_usage_snapshot()
                 stats.setdefault('tps_available', False)
@@ -7702,7 +7702,7 @@ def _run_agent_streaming(
                         'preview': preview,
                         'args': args_snap,
                     })
-                    _tool_stats = meter().get_stats()
+                    _tool_stats = meter().get_stats(stream_id)
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
@@ -7801,7 +7801,7 @@ def _run_agent_streaming(
                         session_id=session_id,
                         stream_id=stream_id,
                     )
-                    _tool_stats = meter().get_stats()
+                    _tool_stats = meter().get_stats(stream_id)
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
@@ -7833,7 +7833,7 @@ def _run_agent_streaming(
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
                         })
-                    _tool_stats = meter().get_stats()
+                    _tool_stats = meter().get_stats(stream_id)
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
@@ -7884,7 +7884,7 @@ def _run_agent_streaming(
                             session_id=session_id,
                             stream_id=stream_id,
                         )
-                    _tool_stats = meter().get_stats()
+                    _tool_stats = meter().get_stats(stream_id)
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
@@ -8434,6 +8434,7 @@ def _run_agent_streaming(
                 config_data=_cfg,
             )
             _pending_started_at = getattr(s, 'pending_started_at', None)
+            meter().set_pending_started_at(stream_id, _pending_started_at)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
@@ -9381,6 +9382,9 @@ def _run_agent_streaming(
                                 _dm['_turnTps'] = _turn_tps
                             if _gateway_routing:
                                 _dm['_gatewayRouting'] = _gateway_routing
+                            _ttft_ms = meter().get_ttft_ms(stream_id)
+                            if _ttft_ms is not None:
+                                _dm['_firstTokenMs'] = _ttft_ms
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -9765,6 +9769,9 @@ def _run_agent_streaming(
                 usage['tps'] = _turn_tps
             if _gateway_routing:
                 usage['gateway_routing'] = _gateway_routing
+            _ttft_ms = meter().get_ttft_ms(stream_id)
+            if _ttft_ms is not None:
+                usage['ttft_ms'] = _ttft_ms
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.
@@ -9986,7 +9993,7 @@ def _run_agent_streaming(
                     _done_payload['terminal_reason'] = 'max_iterations'
                 put('done', _done_payload)
                 # Emit one last metering packet for the live message-header TPS label.
-                meter_stats = meter().get_stats()
+                meter_stats = meter().get_stats(stream_id)
                 meter_stats['session_id'] = session_id
                 meter_stats.setdefault('tps_available', False)
                 meter_stats.setdefault('estimated', False)

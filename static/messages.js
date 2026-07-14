@@ -3720,7 +3720,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{
       let st=_anchorProseSmdCache.get(key);
       // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
-      // rebuild the parser+node from scratch, mirroring _smdWrite's guard.
+      // rebuild the parser+node from scratch, mirroring the _smdWrite guard.
       if(st && st.writtenText && !value.startsWith(st.writtenText)) st=null;
       if(st && st.fade!==fade) st=null;
       if(!st){
@@ -3734,6 +3734,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body);
         const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
         st={node,parser:window.smd.parser(renderer),writtenText:'',fade};
+        _smdBindParserIdentity(renderer,st.parser,body);
         _anchorProseSmdCache.set(key,st);
         // Bound memory across turns: keys embed the stream id, so stale entries
         // from finished streams age out here.
@@ -3759,6 +3760,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   window.__anchorProseIncrementalNode=_anchorProseIncrementalNode;
   function _clearAnchorProseIncrementalNode(){
     if(typeof window!=='undefined'&&window.__anchorProseIncrementalNode===_anchorProseIncrementalNode) window.__anchorProseIncrementalNode=null;
+    // Clear the per-parser MEDIA tail for each cached smd parser.
+    // _anchorProseSmdCache is a Map<key, {parser, ...}>; we can't
+    // iterate a WeakMap to clean up, but WeakMap keys become eligible
+    // for GC once the parser objects are released by the cache clear
+    // below, so the WeakMap entries are automatically removed. The
+    // explicit _smdMediaTailClear per-parser is a best-effort guard
+    // for cache entries that may hold the last strong reference.
+    if(typeof _anchorProseSmdCache!=='undefined'&&_anchorProseSmdCache.size){
+      _anchorProseSmdCache.forEach(function(st){
+        if(st&&st.parser&&typeof _smdMediaTailFlush==='function'){
+          _smdMediaTailFlush(st.parser);
+        }
+        if(st&&st.parser&&typeof _smdMediaTailClear==='function'){
+          _smdMediaTailClear(st.parser);
+        }
+      });
+    }
     _anchorProseSmdCache.clear();
   }
   function _anchorHasReasoningEvents(){
@@ -4038,6 +4056,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const baseRenderer=fade ? _streamFadeRenderer(el) : _safeSmdRenderer(el);
     const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
     _smdParser=window.smd.parser(renderer);
+    _smdBindParserIdentity(renderer,_smdParser,el);
   }
   function _smdRendererWithoutUnderscoreEmphasis(renderer){
     if(!renderer||!window.smd) return renderer;
@@ -4070,13 +4089,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_streamingKatexTimer){clearTimeout(_streamingKatexTimer);_streamingKatexTimer=null;}
     if(_smdParser&&window.smd){
       try{window.smd.parser_end(_smdParser);}catch(_){}
-      // parser_end may flush remaining markdown that creates new links/images —
-      // re-sanitize the body before the DOM is handed off to highlightCode / renderMessages.
-      if(assistantBody){_sanitizeSmdLinks(assistantBody);enhanceMarkdownTables(assistantBody);}
     }
+    // parser_end may emit one final add_text chunk; flush MEDIA tails after it
+    // so a final extensionless URL is rendered before the settled re-render.
+    if(typeof _smdMediaTailFlush==='function') _smdMediaTailFlush(_smdParser);
+    if(typeof _smdMediaTailFlush==='function') _smdMediaTailFlush(__SMD_PARSER_FALLBACK);
+    // parser_end / tail flush may create new links/images — re-sanitize the
+    // body before the DOM is handed off to highlightCode / renderMessages.
+    if(assistantBody){_sanitizeSmdLinks(assistantBody);enhanceMarkdownTables(assistantBody);}
+    // Clear the per-parser MEDIA tail buffer — any incomplete MEDIA
+    // prefix the parser was holding is no longer relevant.
+    if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(_smdParser);
+    if(typeof _smdClearParserIdentity==='function') _smdClearParserIdentity(assistantBody,_smdParser);
     _smdParser=null;
     _smdWrittenLen=0;
     _smdWrittenText='';
+    // Clear the fallback MEDIA tail buffer too; fallback chunks are keyed
+    // by __SMD_PARSER_FALLBACK, not null.
+    if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(__SMD_PARSER_FALLBACK);
   }
   function _scheduleStreamingKatex(){
     if(_streamingKatexTimer) return;
@@ -4228,12 +4258,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const renderer=window.smd.default_renderer(el);
     const baseAddText=renderer.add_text;
     const baseSetAttr=renderer.set_attr;
+    const parserFor = (data)=>{
+      return _smdParserKey(data, el);
+    };
+    const writeFadeText=(writeParent, writeData, writeText)=>{
+      if(!writeParent||_streamFadeSkipNode(writeParent)){
+        _smdAppendPlainText(writeParent, writeData, writeText, baseAddText);
+        return;
+      }
+      _streamFadeAppendText(writeParent, writeText);
+    };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
       if(!parent||_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
+      // MEDIA-in-stream: if this chunk carries a MEDIA:<ref> token, defer to
+      // the shared interceptor so the token becomes a real media element
+      // instead of plain text. The fade renderer would otherwise wrap every
+      // word in a stream-fade-word span, leaving MEDIA: paths visible.
+      const parser=parserFor(data);
+      const hasMediaTail=!!(_SMD_MEDIA_TAIL&&parser&&_SMD_MEDIA_TAIL.has&&_SMD_MEDIA_TAIL.has(parser));
+      const value=String(text||'');
+      const hasMediaPrefixTail=!!_smdMediaPrefixTail(value);
+      if(/MEDIA:/.test(value)||hasMediaTail||hasMediaPrefixTail){
+        _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser, writeFadeText);
+        return;
+      }
       const frag=document.createDocumentFragment();
       const wordRe=/(\S+)(\s*)/g;
-      const value=String(text||'');
       const reduceMotion=_streamFadeReduceMotionEnabled();
       const appendStartedAt=performance.now();
       let last=0, match, changed=false;
@@ -4288,9 +4339,231 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // DOM nodes as plain text nodes (no animation spans). Used on the non-fade
   // streaming path to eliminate _sanitizeSmdLinks(assistantBody) O(DOM) scans
   // on every token event (#WebUI-perf).
+  // MEDIA-in-stream fix: also wraps add_text so MEDIA:<ref> tokens that arrive
+  // mid-turn are converted to inline media elements at insert time, matching
+  // what the full renderMd() pipeline does on the settled assistant message.
+  // Without this, streamed prose shows MEDIA:C:\... as literal text until the
+  // turn settles and the full re-render swaps it for the real <img>.
+  // SAFETY & CROSS-CHUNK SPLITS (Greptile #1 + #2):
+  //   1. Prose slices go back to the owning text writer (text nodes or
+  //      fade spans), NOT through DOMParser — mixed prose with HTML entities /
+  //      malicious <img onerror> stays as literal text.
+  //   2. Each MEDIA token's HTML (from _inlineMediaHtmlForRef) is handed
+  //      to DOMParser one at a time — only trusted markup is parsed.
+  //   3. A MEDIA prefix split across smd flushes (e.g. "MEDIA:" then
+  //      "foo.png") is buffered in a per-parser tail buffer and completed
+  //      on the next add_text call.
+  const _MEDIA_TAIL_MAX = 4096; // bytes; defensive cap on per-parser buffer
+  const _SMD_MEDIA_PREFIX = 'MEDIA:';
+  function _smdMediaPrefixTail(value){
+    const text=String(value||'');
+    const max=Math.min(_SMD_MEDIA_PREFIX.length,text.length);
+    for(let len=max;len>0;len-=1){
+      const suffix=text.slice(text.length-len);
+      if(_SMD_MEDIA_PREFIX.startsWith(suffix)) return suffix;
+    }
+    return '';
+  }
+  function _smdAppendPlainText(parent, data, text, baseAddText){
+    const value=String(text||'');
+    if(parent&&parent.appendChild&&typeof document!=='undefined'&&document.createTextNode){
+      parent.appendChild(document.createTextNode(value));
+      return;
+    }
+    if(baseAddText) baseAddText(data,value);
+  }
+  function _smdMediaWriteText(parent, data, baseAddText, writeText, text){
+    if(writeText){
+      writeText(parent, data, String(text||''));
+      return;
+    }
+    if(baseAddText) baseAddText(data,String(text||''));
+  }
+  function _smdMediaTailSet(tailMap, parser, chunk, parent, baseAddText, data, writeText){
+    if(!tailMap||!parser) return;
+    if(chunk) tailMap.set(parser, {chunk, parent, baseAddText, data, writeText});
+    else tailMap.delete(parser);
+  }
+  function _smdMediaTailEntryChunk(entry){
+    return entry && typeof entry==='object' && Object.prototype.hasOwnProperty.call(entry,'chunk') ? entry.chunk : entry;
+  }
+  function _smdMediaTailSameOwner(entry, parent, baseAddText, writeText){
+    return !!entry && entry.parent===parent && entry.baseAddText===baseAddText && entry.writeText===writeText;
+  }
+  function _smdMediaRefHasReliableBoundary(rawRef){
+    const raw=String(rawRef||'');
+    if(/[?#]$/.test(raw)) return false;
+    const ref=raw.split(/[?#]/,1)[0];
+    return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
+  }
+  function _smdMediaTailFlushEntry(entry){
+    const chunk=_smdMediaTailEntryChunk(entry);
+    if(!chunk) return;
+    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
+    if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
+  }
+  function _smdMediaTailFlush(parser){
+    if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
+    const entry=_SMD_MEDIA_TAIL.get(parser);
+    if(!entry) return;
+    _SMD_MEDIA_TAIL.delete(parser);
+    _smdMediaTailFlushEntry(entry);
+  }
+  function _smdMediaAwareAddText(baseAddText, parent, data, text, tailMap, parser, writeText){
+    const value=String(text||'');
+    const tails=tailMap||(typeof _SMD_MEDIA_TAIL!=='undefined'&&_SMD_MEDIA_TAIL)||null;
+    const writeCurrent=(chunk)=>_smdMediaWriteText(parent, data, baseAddText, writeText, chunk);
+    if(!value){
+      writeCurrent('');
+      return;
+    }
+    // Pull any pending tail from a previous (split) chunk, then clear it;
+    // this call will either complete it, re-buffer it, or flush it as text.
+    let leadEntry = tails && parser && tails.get ? tails.get(parser) : null;
+    let lead = _smdMediaTailEntryChunk(leadEntry);
+    if(lead && !_smdMediaTailSameOwner(leadEntry, parent, baseAddText, writeText)){
+      if(tails && parser && tails.delete) tails.delete(parser);
+      _smdMediaTailFlushEntry(leadEntry);
+      leadEntry=null;
+      lead='';
+    }else if(lead && tails && parser && tails.delete){
+      tails.delete(parser);
+    }
+    const combined = lead ? lead + value : value;
+    // Fast path: no MEDIA tokens in the (possibly combined) string.
+    if(!/MEDIA:/.test(combined)){
+      const prefixTail=_smdMediaPrefixTail(combined);
+      if(prefixTail && tails && parser && prefixTail.length < _MEDIA_TAIL_MAX){
+        const stable=combined.slice(0, combined.length-prefixTail.length);
+        if(stable) writeCurrent(stable);
+        _smdMediaTailSet(tails, parser, prefixTail, parent, baseAddText, data, writeText);
+        return;
+      }
+      writeCurrent(combined);
+      return;
+    }
+    // Walk the combined string, slicing into prose + MEDIA token runs.
+    // Prose runs go through the owning text writer. MEDIA tokens go through
+    // the single-token DOMParser helper only after a delimiter or
+    // reliable filename suffix proves the ref is complete.
+    const re=/MEDIA:([^\s\)\]]+)/g;
+    let last=0, m;
+    let unmatchedTail=null;
+    while((m=re.exec(combined))){
+      const matchEnd = m.index + m[0].length;
+      if(m.index>last){
+        const slice = combined.slice(last, m.index);
+        writeCurrent(slice);
+      }
+      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+        const candidate = combined.slice(m.index);
+        if(candidate.length < _MEDIA_TAIL_MAX){
+          unmatchedTail = candidate;
+        } else {
+          writeCurrent(candidate);
+        }
+        last = combined.length;
+        break;
+      }
+      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
+      last = matchEnd;
+    }
+    // Tail buffer — hold trailing bytes that look like an unterminated
+    // MEDIA prefix; flush any prose before the partial MEDIA suffix.
+    const rest = combined.slice(last);
+    if(rest){
+      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
+      const tailValue = tailMatch ? tailMatch[0] : prefixTail;
+      if(tailValue && rest.length < _MEDIA_TAIL_MAX){
+        const tailStart = tailMatch ? tailMatch.index : rest.length-prefixTail.length;
+        if(tailStart>0) writeCurrent(rest.slice(0, tailStart));
+        unmatchedTail = tailValue;
+      } else {
+        writeCurrent(rest);
+      }
+    }
+    if(tails && parser){
+      _smdMediaTailSet(tails, parser, unmatchedTail, parent, baseAddText, data, writeText);
+    }
+  }
+  // Single-token DOM splice. Only ever fed the output of
+  // _inlineMediaHtmlForRef (trusted markup fragment). Plain text
+  // goes through baseAddText → createTextNode — NEVER here.
+  function _smdAppendMediaNode(parent, rawRef){
+    if(!parent||!rawRef) return false;
+    const mediaHtml = (typeof _inlineMediaHtmlForRef==='function')
+      ? _inlineMediaHtmlForRef(String(rawRef))
+      : '';
+    if(!mediaHtml) return false;
+    let host=null;
+    try{
+      const doc=new DOMParser().parseFromString('<div>'+mediaHtml+'</div>','text/html');
+      host=doc.body&&doc.body.firstChild;
+    }catch(_){ host=null; }
+    if(!host||!host.childNodes||!host.childNodes.length) return false;
+    const frag=document.createDocumentFragment();
+    while(host.firstChild) frag.appendChild(host.firstChild);
+    parent.appendChild(frag);
+    _smdScheduleMediaPostProcess(parent);
+    return true;
+  }
+  function _smdScheduleMediaPostProcess(root){
+    if(!root) return;
+    if(typeof _postProcessWithAnchorSuppression!=='function'
+      && typeof postProcessRenderedMessages!=='function'
+      && typeof _applyMediaPlaybackPreferences!=='function') return;
+    const run=()=>{
+      try{
+        if(typeof _postProcessWithAnchorSuppression==='function') _postProcessWithAnchorSuppression(root);
+        else if(typeof postProcessRenderedMessages==='function') postProcessRenderedMessages(root);
+        if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(root);
+      }catch(_){}
+    };
+    if(typeof requestAnimationFrame==='function') requestAnimationFrame(run);
+    else if(typeof setTimeout==='function') setTimeout(run,0);
+    else run();
+  }
+  // Per-parser tail buffer keyed by parser instance so concurrent
+  // smd parsers (live prose + anchor-scene rows + tool-card streams)
+  // keep their own pending bytes. Cleared inside _smdEndParser /
+  // _clearAnchorProseIncrementalNode on stream end.
+  const _SMD_MEDIA_TAIL = (typeof WeakMap!=='undefined') ? new WeakMap() : new Map();
+  // Sentinel for parserFor fallback — a dedicated object instead of
+  // a string, so WeakMap.set doesn't throw TypeError when all three
+  // parser-identity sources are unavailable (Greptile #3).
+  const __SMD_PARSER_FALLBACK = {};
+  function _smdParserKey(data, el){
+    return (data && data.parser) || (el && el.__smdParser) || __SMD_PARSER_FALLBACK;
+  }
+  function _smdBindParserIdentity(renderer, parser, el){
+    if(renderer&&renderer.data) renderer.data.parser=parser;
+    if(el) el.__smdParser=parser;
+  }
+  function _smdClearParserIdentity(el, parser){
+    if(!el || (parser && el.__smdParser!==parser)) return;
+    try{delete el.__smdParser;}catch(_){el.__smdParser=null;}
+  }
+  function _smdMediaTailClear(parser){
+    if(_SMD_MEDIA_TAIL && parser) _SMD_MEDIA_TAIL.delete(parser);
+    // Also clear the fallback key if it was ever set
+    if(_SMD_MEDIA_TAIL && parser === __SMD_PARSER_FALLBACK) _SMD_MEDIA_TAIL.delete(parser);
+  }
   function _safeSmdRenderer(el){
     const renderer=window.smd.default_renderer(el);
     const baseSetAttr=renderer.set_attr;
+    const baseAddText=renderer.add_text;
+    const writePlainText=(writeParent, writeData, writeText)=>{
+      _smdAppendPlainText(writeParent, writeData, writeText, baseAddText);
+    };
+    const parserFor = (data)=>{
+      return _smdParserKey(data, el);
+    };
+    renderer.add_text=(data,text)=>{
+      const parent=data&&data.nodes&&data.nodes[data.index];
+      _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parserFor(data), writePlainText);
+    };
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;

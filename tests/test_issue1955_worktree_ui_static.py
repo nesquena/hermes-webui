@@ -18,7 +18,9 @@ def test_session_new_route_accepts_worktree_flag_and_uses_worktree_info():
 def test_new_session_request_can_include_worktree_flag():
     src = read("static/sessions.js")
     assert "async function newSession(flash, options={})" in src
-    assert "reqBody.worktree=true" in src
+    # Three-value contract (#6022): explicit true/false forwarded verbatim,
+    # absent key omitted so the server applies the config default.
+    assert "reqBody.worktree=!!options.worktree" in src
 
 
 def test_workspace_dropdown_exposes_new_worktree_conversation_action():
