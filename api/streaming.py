@@ -46,6 +46,8 @@ from api.config import (
     coerce_reasoning_effort_for_model,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
+    _PROVIDER_MODELS,
+    _PROVIDER_DISPLAY,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -3227,23 +3229,18 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
 
 
 def _route_accepts_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
-    """Routes known to reject an ``extra_body`` ``reasoning`` parameter with HTTP 400.
+    """Whether an auxiliary title route can receive reasoning suppression.
 
-    Title generation injects ``extra_body={"reasoning": {"enabled": False}}`` to
-    suppress thinking on reasoning-capable models (#2083). But OpenAI Chat
-    Completions (and Azure OpenAI) reject unknown top-level params with a 400, so
-    that inject silently fails the title call and falls back to a low-quality
-    heuristic title (#4161). Skip the inject for those routes.
-
-    OpenRouter Anthropic mandatory-reasoning models (Claude Sonnet 4.6 / Opus 4.8)
-    are reasoning-capable but reject a reasoning *disable* — title gen only needs
-    reasoning off, so skip the inject for them too rather than risk the same 400.
+    Known built-in routes are resolved even when their URL is implicit, and keep
+    ``extra_body={"reasoning": {"enabled": False}}`` so title generation does
+    not spend its budget on hidden reasoning.  The known reject set (OpenAI,
+    Azure/Azure AI Foundry, and OpenRouter Anthropic) is excluded.  A route is
+    otherwise fail-safe: an unknown provider backed by a custom URL is omitted
+    until it has an explicit compatibility classification.
     """
     provider_lower = str(provider or '').strip().lower()
     model_lower = str(model or '').strip().lower()
-    if not (provider_lower and model_lower and str(base_url or '').strip()):
-        return False
-    if provider_lower not in {'anthropic', 'deepseek', 'gemini', 'google', 'kimi', 'minimax', 'moonshot', 'qwen'}:
+    if not model_lower:
         return False
     # Hostname-based match (not substring) so a proxy URL that merely *contains*
     # one of these strings in a path segment isn't mis-classified.
@@ -3266,10 +3263,70 @@ def _route_accepts_reasoning_extra(provider: str = '', model: str = '', base_url
         or provider_lower.startswith('azure-')
     ):
         return False
-    if (host == 'openrouter.ai' or host.endswith('.openrouter.ai')) and model_lower.startswith('anthropic/'):
+    if (
+        provider_lower == 'openrouter'
+        or host == 'openrouter.ai'
+        or host.endswith('.openrouter.ai')
+    ) and model_lower.startswith('anthropic/'):
         # Anthropic on OpenRouter: mandatory-reasoning families reject a disable.
         return False
-    return True
+
+    # Provider IDs from the built-in catalog resolve their endpoint in the
+    # client.  Do not mistake an implicit URL for an unresolved custom route.
+    builtin_providers = set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY)
+    if provider_lower in builtin_providers:
+        return True
+
+    # Provider can be omitted for an implicit MiniMax configuration.  Its
+    # canonical endpoint still makes this an effective, known route.
+    if host == 'api.minimaxi.com' or host.endswith('.minimaxi.com'):
+        return True
+    return False
+
+
+def _safe_aux_route_for_log(base_url: str = '') -> str:
+    """Return a route diagnostic without URL userinfo, query, or fragment."""
+    raw = str(base_url or '').strip()
+    if not raw:
+        return '<implicit>'
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parsed = urlsplit(raw)
+        if not parsed.scheme or not parsed.hostname:
+            return '<unparseable>'
+        host = parsed.hostname
+        if ':' in host and not host.startswith('['):
+            host = f'[{host}]'
+        try:
+            if parsed.port is not None:
+                host = f'{host}:{parsed.port}'
+        except ValueError:
+            return '<unparseable>'
+        return urlunsplit((parsed.scheme, host, parsed.path, '', ''))
+    except Exception:
+        return '<unparseable>'
+
+
+def _redact_urls_for_log(text: str) -> str:
+    """Remove credentials carried by any HTTP(S) URL in exception text."""
+    return re.sub(
+        r"https?://[^\s'\"<>()\[\]{}]+",
+        lambda match: _safe_aux_route_for_log(match.group(0)),
+        str(text or ''),
+    )
+
+
+def _log_aux_title_failure(message: str, base_url: str, provider: str, model: str) -> None:
+    """Log auxiliary failure context without exposing URL-carried credentials."""
+    logger.error(
+        '%s (route=%s provider=%s model=%s)\n%s',
+        message,
+        _safe_aux_route_for_log(base_url),
+        provider,
+        model,
+        _redact_urls_for_log(traceback.format_exc()),
+    )
 
 
 def _get_aux_title_config() -> dict:
@@ -3490,7 +3547,12 @@ def generate_title_raw_via_aux(
                         budgets.append(_title_retry_completion_budget(provider, model, base_url))
             except Exception:
                 last_status = 'llm_error_aux'
-                logger.exception("Aux title generation attempt %s failed (route=%s provider=%s model=%s)", idx + 1, base_url, provider, model)
+                _log_aux_title_failure(
+                    f'Aux title generation attempt {idx + 1} failed',
+                    base_url,
+                    provider,
+                    model,
+                )
             # If the model just burned its budget on hidden reasoning, retrying
             # the next prompt against the same model produces the same shape.
             # Short-circuit to the local fallback path (#2083).
@@ -3502,7 +3564,7 @@ def generate_title_raw_via_aux(
                 break
         return None, last_status
     except Exception:
-        logger.exception("Aux title generation failed (route=%s provider=%s model=%s)", base_url, provider, model)
+        _log_aux_title_failure('Aux title generation failed', base_url, provider, model)
         return None, 'llm_error_aux'
 
 
