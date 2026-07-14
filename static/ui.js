@@ -1014,6 +1014,30 @@ function _captureMessageViewportAnchor(){
 // test is more robust than a matchMedia('(hover:hover) and (pointer:fine)')
 // check because it reflects the real resting value, including any inline
 // override, not just the viewport media state.
+// Ownership-safe wipe-guard for #msgInner.minHeight (maintainer gate #1).
+// Multiple render paths can pin/clear it; mint a unique token on each pin and
+// allow only the current owner to restore the recorded baseline.
+let _wipeGuardSeq=0;
+function _pinWipeMinHeight(inner, height){
+  if(!inner||!inner.style||!inner.dataset||!(height>0)) return null;
+  const token=String(++_wipeGuardSeq);
+  const prev=inner.style.minHeight||'';
+  if(!inner.dataset.wipeGuardToken) inner.dataset.wipeGuardPrevMinHeight=prev;
+  inner.dataset.wipeGuardToken=token;
+  let target=Math.round(height);
+  const prevPx=parseFloat(prev)||0;
+  if(prevPx>target) target=Math.round(prevPx);
+  inner.style.minHeight=target+'px';
+  return token;
+}
+function _releaseWipeMinHeight(inner, token){
+  if(!inner||!inner.style||!inner.dataset||!token) return;
+  if(inner.dataset.wipeGuardToken!==String(token)) return;
+  inner.style.minHeight=inner.dataset.wipeGuardPrevMinHeight||'';
+  delete inner.dataset.wipeGuardToken;
+  delete inner.dataset.wipeGuardPrevMinHeight;
+}
+
 function _browserOverflowAnchorActive(el){
   if(!el) return false;
   try{ return getComputedStyle(el).overflowAnchor==='auto'; }catch(_){ return false; }
@@ -1070,7 +1094,12 @@ function _isTouchLikeMessageViewport(el){
   // refusal's premise fails — treat it like desktop (keep the semantic realign).
   if(_isIOSWebKit()) return false;
   try{
-    if(typeof matchMedia==='function' && matchMedia('(pointer:coarse)').matches) return true;
+    if(typeof matchMedia==='function'){
+      // Mirror CSS: any precise pointer or hover-capable input disables native
+      // anchoring, even when the primary pointer on a hybrid laptop is coarse.
+      if(matchMedia('(any-pointer:fine)').matches || matchMedia('(any-hover:hover)').matches) return false;
+      if(matchMedia('(pointer:coarse)').matches) return true;
+    }
   }catch(_){}
   // Best-effort fallback for the (today essentially non-existent) no-matchMedia
   // environment: the computed-anchor probe can transiently read 'none' during a
@@ -1108,13 +1137,28 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   // offset and never degrade this sentinel to message rawIdx 0 when it disappears.
   if(anchor.special==='load-older'||anchor.key==='__load_older_indicator__'){
     const button=container.querySelector('#loadOlderIndicator');
-    if(!button||typeof button.getBoundingClientRect!=='function') return false;
-    const rect=button.getBoundingClientRect();
-    const targetTop=Number(anchor.topOffset)||0;
-    _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-    container.scrollTop+=(rect.top-containerRect.top)-targetTop;
-    if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
-    else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
+    if(button&&typeof button.getBoundingClientRect==='function'){
+      const rect=button.getBoundingClientRect();
+      const targetTop=Number(anchor.topOffset)||0;
+      _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+      container.scrollTop+=(rect.top-containerRect.top)-targetTop;
+      if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+      else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
+      return true;
+    }
+    // The sentinel disappeared mid-render. Compensate by the prepend-height delta
+    // and treat it as fully handled; never fall through to generic message remounting.
+    const _shAtCap=Number(anchor.scrollHeightAtCapture);
+    if(Number.isFinite(_shAtCap)){
+      const _grew=container.scrollHeight-_shAtCap;
+      if(Math.abs(_grew)>=2){
+        _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+        container.scrollTop=Math.max(0,container.scrollTop+_grew);
+        _lastScrollTop=container.scrollTop;
+        if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+        else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
+      }
+    }
     return true;
   }
   const anchorKey=String(anchor.key||'');
@@ -1197,6 +1241,9 @@ let _messageViewportAnchorRemounting=false;
 function _remountMessageViewportAnchor(anchor){
   const container=$('messages');
   if(!container||!anchor||_messageViewportAnchorRemounting) return false;
+  // A load-older sentinel is not a message row. Its restore path fully handles
+  // both the present-button and disappeared-button cases.
+  if(anchor.special==='load-older'||anchor.key==='__load_older_indicator__') return false;
   const anchorKey=String(anchor.key||'');
   const visibleKeyNode=anchorKey
     ? Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(node=>node&&node.dataset&&node.dataset.messageAnchorKey===anchorKey&&(!node.getClientRects||node.getClientRects().length>0))
@@ -1254,15 +1301,27 @@ function _compensateScrollForMeasurementDelta(renderFn){
   // clamp never fires; release on the next frame after compensation lands.
   const _inner=$('msgInner');
   const _guardH=(_inner&&Number.isFinite(_inner.scrollHeight))?_inner.scrollHeight:0;
-  const _hadInlineMinH=_inner&&_inner.style?(_inner.style.minHeight||''):'';
-  if(_inner&&_inner.style&&_guardH>0) _inner.style.minHeight=_guardH+'px';
-  const _releaseGuard=()=>{ if(_inner&&_inner.style&&_inner.style.minHeight&&_inner.style.minHeight!==_hadInlineMinH){ _inner.style.minHeight=_hadInlineMinH; } };
+  // Only unpinned readers need height held against browser clamping. Pinned
+  // readers must leave scrollHeight free so auto-follow can land at the true tail.
+  const _compUnpinned=(typeof _messageUserUnpinned!=='undefined')&&_messageUserUnpinned;
+  if(_compUnpinned) _pinWipeMinHeight(_inner,_guardH);
   container.classList.add('vscroll-measuring');
   try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
-  // Release the wipe-guard on the next frame, AFTER any synchronous scrollTop
-  // compensation below has landed against the guarded (non-collapsed) height.
-  // Scheduling it once here covers every early-return path in the rest of the fn.
-  if(typeof requestAnimationFrame==='function') requestAnimationFrame(_releaseGuard); else _releaseGuard();
+  // The inner render supersedes the outer token. Re-pin after renderFn as the final
+  // owner, hold through two frames, then release and restore the semantic anchor.
+  const _settleH=Math.max(_guardH,(_inner&&Number.isFinite(_inner.scrollHeight))?_inner.scrollHeight:0);
+  const _settleToken=_compUnpinned?_pinWipeMinHeight(_inner,_settleH):null;
+  const _releaseSettledGuard=()=>{
+    if(!_settleToken) return;
+    _releaseWipeMinHeight(_inner,_settleToken);
+    void container.scrollHeight;
+    if(anchorBefore) _restoreMessageViewportAnchor(anchorBefore);
+  };
+  if(typeof requestAnimationFrame==='function'){
+    requestAnimationFrame(()=>requestAnimationFrame(_releaseSettledGuard));
+  }else{
+    _releaseSettledGuard();
+  }
   if(!anchorBefore){
     return;
   }
@@ -15099,11 +15158,12 @@ function renderMessages(options){
   // renderMessages() in this window. Keep the existing loading placeholder.
   if(_loadingSessionId===sid&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
-  // Self-heal any orphaned wipe-guard minHeight from a prior render that returned
-  // early between the innerHTML='' wipe and its release (the scroll snapshot is
-  // already captured above, so clearing here cannot clamp the reader). Keeps a
-  // stuck placeholder from freezing the transcript height across renders.
-  if(inner&&inner.style&&inner.style.minHeight){ inner.style.minHeight=''; }
+  // Self-heal only a tokenized orphan and restore its recorded baseline; never
+  // unconditionally clear a minHeight owned by another feature.
+  if(inner&&inner.dataset&&inner.dataset.wipeGuardToken){
+    _releaseWipeMinHeight(inner,inner.dataset.wipeGuardToken);
+  }
+  let _mainWipeGuardToken=null;
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
@@ -15144,6 +15204,9 @@ function renderMessages(options){
     cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
+      const _cachePrewipeH=(inner&&Number.isFinite(inner.scrollHeight))?inner.scrollHeight:0;
+      const _cacheReaderUnpinned=!!(scrollSnapshot&&(scrollSnapshot.userUnpinned===true||scrollSnapshot.pinned===false))||_messageUserUnpinned;
+      const _cacheGuardToken=_cacheReaderUnpinned?_pinWipeMinHeight(inner,_cachePrewipeH):null;
       inner.innerHTML=cached.html;
       _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
@@ -15152,8 +15215,22 @@ function renderMessages(options){
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
+      if(_cacheGuardToken){
+        const _innerRel=inner;
+        const _releaseCacheGuard=()=>{
+          _releaseWipeMinHeight(_innerRel,_cacheGuardToken);
+          void $('messages').scrollHeight;
+          if((preserveScroll||_messageUserUnpinned)&&scrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
+            _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+          }else if(typeof scrollToBottom==='function'){
+            scrollToBottom();
+          }
+        };
+        if(typeof requestAnimationFrame==='function') requestAnimationFrame(()=>requestAnimationFrame(_releaseCacheGuard));
+        else _releaseCacheGuard();
+      }
+      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
@@ -15271,9 +15348,8 @@ function renderMessages(options){
   // (Desktop-safe: no-op visually — the placeholder height is immediately
   // superseded by real rows in the same synchronous render stack.)
   const _prewipeScrollHeight=(inner&&Number.isFinite(inner.scrollHeight))?inner.scrollHeight:0;
-  if(inner&&_prewipeScrollHeight>0){
-    inner.style.minHeight=_prewipeScrollHeight+'px';
-  }
+  const _readerUnpinnedForGuard=!!(scrollSnapshot&&(scrollSnapshot.userUnpinned===true||scrollSnapshot.pinned===false))||_messageUserUnpinned;
+  _mainWipeGuardToken=_readerUnpinnedForGuard?_pinWipeMinHeight(inner,_prewipeScrollHeight):null;
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
@@ -16644,12 +16720,15 @@ function renderMessages(options){
   // the placeholder so any excess height collapses BELOW the settled viewport,
   // which never moves an already-anchored reader above it.
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-  if(inner&&inner.style&&inner.style.minHeight){
+  // Measure while the owner guard still holds; measured rows may settle shorter.
+  _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
+  if(_mainWipeGuardToken){
     const _innerToRelease=inner;
+    const _tokenToRelease=_mainWipeGuardToken;
     if(typeof requestAnimationFrame==='function'){
-      requestAnimationFrame(()=>{ if(_innerToRelease&&_innerToRelease.style){ _innerToRelease.style.minHeight=''; } });
+      requestAnimationFrame(()=>{ _releaseWipeMinHeight(_innerToRelease,_tokenToRelease); });
     }else{
-      _innerToRelease.style.minHeight='';
+      _releaseWipeMinHeight(_innerToRelease,_tokenToRelease);
     }
   }
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
@@ -16680,7 +16759,6 @@ function renderMessages(options){
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
-  _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
   // not synchronously: inside this render sync stack the browser still reports a transient
   // scrollHeight (layout is batched), so a synchronous re-anchor would read the SAME short

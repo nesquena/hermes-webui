@@ -887,6 +887,8 @@ let _programmaticScroll = false;
 let _lastScrollTop = 0;
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+function _pinWipeMinHeight(inner,h){ if(!inner||!inner.style||!inner.dataset||!(h>0)) return null; inner.dataset.wipeGuardToken='1'; inner.style.minHeight=Math.round(h)+'px'; return '1'; }
+function _releaseWipeMinHeight(inner,t){ if(!inner||!inner.style||!inner.dataset||!t) return; if(inner.dataset.wipeGuardToken!==String(t)) return; inner.style.minHeight=inner.dataset.wipeGuardPrevMinHeight||''; delete inner.dataset.wipeGuardToken; }
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -937,6 +939,8 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+function _pinWipeMinHeight(inner,h){ if(!inner||!inner.style||!inner.dataset||!(h>0)) return null; inner.dataset.wipeGuardToken='1'; inner.style.minHeight=Math.round(h)+'px'; return '1'; }
+function _releaseWipeMinHeight(inner,t){ if(!inner||!inner.style||!inner.dataset||!t) return; if(inner.dataset.wipeGuardToken!==String(t)) return; inner.style.minHeight=inner.dataset.wipeGuardPrevMinHeight||''; delete inner.dataset.wipeGuardToken; }
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -989,6 +993,8 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+function _pinWipeMinHeight(inner,h){ if(!inner||!inner.style||!inner.dataset||!(h>0)) return null; inner.dataset.wipeGuardToken='1'; inner.style.minHeight=Math.round(h)+'px'; return '1'; }
+function _releaseWipeMinHeight(inner,t){ if(!inner||!inner.style||!inner.dataset||!t) return; if(inner.dataset.wipeGuardToken!==String(t)) return; inner.style.minHeight=inner.dataset.wipeGuardPrevMinHeight||''; delete inner.dataset.wipeGuardToken; }
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -1041,6 +1047,8 @@ function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
 function requestAnimationFrame(cb){ cb(); }
 function setTimeout(cb, delay){ cb(); return 1; }
+function _pinWipeMinHeight(inner,h){ if(!inner||!inner.style||!inner.dataset||!(h>0)) return null; inner.dataset.wipeGuardToken='1'; inner.style.minHeight=Math.round(h)+'px'; return '1'; }
+function _releaseWipeMinHeight(inner,t){ if(!inner||!inner.style||!inner.dataset||!t) return; if(inner.dataset.wipeGuardToken!==String(t)) return; inner.style.minHeight=inner.dataset.wipeGuardPrevMinHeight||''; delete inner.dataset.wipeGuardToken; }
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({

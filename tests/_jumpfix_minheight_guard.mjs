@@ -150,3 +150,37 @@ assert('class5 no-guard: deep reader CLAMPED by re-window shrink ('+c5n.parked+'
   c5n.afterShrink < c5n.parked - 20000);
 assert('class5 guarded: reader HELD across re-window shrink ('+c5g.parked+'=='+c5g.afterShrink+')',
   c5g.afterShrink === c5g.parked);
+
+// Maintainer blocker gates (15 assertions; total file = 24 assertions).
+import fs from 'node:fs';
+const uiSrc=fs.readFileSync(new URL('../static/ui.js',import.meta.url),'utf8');
+const cssSrc=fs.readFileSync(new URL('../static/style.css',import.meta.url),'utf8');
+
+assert('gate1 source: tokenized pin helper exists', uiSrc.includes('function _pinWipeMinHeight'));
+assert('gate1 source: tokenized release helper exists', uiSrc.includes('function _releaseWipeMinHeight'));
+assert('gate1 source: baseline recorded only for first owner', uiSrc.includes("if(!inner.dataset.wipeGuardToken) inner.dataset.wipeGuardPrevMinHeight=prev"));
+assert('gate1 source: stale owner release cannot clear newer owner', uiSrc.includes("if(inner.dataset.wipeGuardToken!==String(token)) return"));
+assert('gate1 source: main pin is unpinned-only', uiSrc.includes('_mainWipeGuardToken=_readerUnpinnedForGuard?_pinWipeMinHeight'));
+assert('gate1 source: cache pin is unpinned-only', uiSrc.includes('_cacheGuardToken=_cacheReaderUnpinned?_pinWipeMinHeight'));
+assert('gate1 source: measurement pin is unpinned-only', uiSrc.includes('_settleToken=_compUnpinned?_pinWipeMinHeight'));
+assert('gate1 source: no unconditional orphan clear', !uiSrc.includes("if(inner&&inner.style&&inner.style.minHeight){ inner.style.minHeight=''; }"));
+
+// Execute the real helper source: releasing stale owner A must not stomp owner B.
+const helperStart=uiSrc.indexOf('let _wipeGuardSeq=0;');
+const helperEnd=uiSrc.indexOf('function _browserOverflowAnchorActive',helperStart);
+const helpers=new Function(uiSrc.slice(helperStart,helperEnd)+'; return {_pinWipeMinHeight,_releaseWipeMinHeight};')();
+const owned={style:{minHeight:'17px'},dataset:{}};
+const ownerA=helpers._pinWipeMinHeight(owned,100);
+const ownerB=helpers._pinWipeMinHeight(owned,200);
+helpers._releaseWipeMinHeight(owned,ownerA);
+assert('gate1 behavior: stale owner release leaves newer pin intact', owned.style.minHeight==='200px'&&owned.dataset.wipeGuardToken===ownerB);
+
+assert('gate2 CSS: any-pointer fine disables native anchoring', /@media\s*\(any-pointer:fine\).*?\.messages\{overflow-anchor:none;\}/s.test(cssSrc));
+assert('gate2 CSS: any-hover hover disables native anchoring', /@media\s*\(any-hover:hover\).*?\.messages\{overflow-anchor:none;\}/s.test(cssSrc));
+assert('gate2 JS: any-pointer fine mirrors CSS', uiSrc.includes("matchMedia('(any-pointer:fine)').matches"));
+assert('gate2 JS: any-hover hover mirrors CSS', uiSrc.includes("matchMedia('(any-hover:hover)').matches"));
+
+const restoreSrc=uiSrc.slice(uiSrc.indexOf('function _restoreMessageViewportAnchor'),uiSrc.indexOf('let _messageViewportAnchorRemounting'));
+const remountSrc=uiSrc.slice(uiSrc.indexOf('function _remountMessageViewportAnchor'),uiSrc.indexOf('function _compensateScrollForMeasurementDelta'));
+assert('gate3 sentinel: disappeared button uses prepend-height fallback and returns true', restoreSrc.includes('scrollHeightAtCapture')&&restoreSrc.includes('container.scrollTop=Math.max(0,container.scrollTop+_grew)'));
+assert('gate3 remount: load-older sentinel refuses generic message remount', remountSrc.includes("if(anchor.special==='load-older'||anchor.key==='__load_older_indicator__') return false;"));
