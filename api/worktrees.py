@@ -312,8 +312,20 @@ def remove_worktree_for_session(session, *, force: bool = False) -> dict:
 def find_git_repo_root(workspace: str | Path) -> Path:
     """Return the enclosing git repo root for *workspace*.
 
-    Use git itself instead of checking ``workspace/.git`` so nested workspaces
-    and linked git worktrees are both handled correctly.
+    Uses git itself instead of checking ``workspace/.git`` so nested
+    subdirectories and linked git worktrees are both handled correctly.
+
+    When *workspace* lives inside a **linked worktree** — e.g. a session that
+    started in ``<repo>/.worktrees/hermes-XXXX`` — ``git rev-parse
+    --show-toplevel`` returns that worktree's own root, not the canonical
+    clone. Feeding that root to worktree creation nests the new worktree
+    *inside* the existing one (``.worktrees/hermes-A/.worktrees/hermes-B``);
+    a session spawned from that worktree then nests one level deeper again,
+    recursively. ``git rev-parse --git-common-dir`` always resolves to the
+    main repository's ``.git`` even from a linked worktree, so its parent is
+    the canonical clone root. We redirect to it for a normal (non-bare) clone
+    whose common dir is a ``.git`` directory; bare repos and unusual layouts
+    keep the ``--show-toplevel`` result (prior behavior).
     """
     ws = Path(workspace).expanduser().resolve()
     if not ws.is_dir():
@@ -334,7 +346,33 @@ def find_git_repo_root(workspace: str | Path) -> Path:
     root = result.stdout.strip()
     if not root:
         raise ValueError("Workspace is not inside a git repository")
-    return Path(root).expanduser().resolve()
+    toplevel = Path(root).expanduser().resolve()
+
+    # Redirect to the canonical (main) worktree when *ws* is inside a linked
+    # worktree, so new worktrees are never created nested inside another one.
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=ws,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return toplevel
+    if common.returncode == 0:
+        common_dir = common.stdout.strip()
+        if common_dir:
+            # --git-common-dir may print an absolute path or one relative to
+            # cwd; joining onto *ws* is a no-op for an absolute path in
+            # pathlib, so this handles both forms.
+            common_path = (ws / common_dir).resolve()
+            if common_path.name == ".git":
+                canonical = common_path.parent
+                if canonical.is_dir():
+                    return canonical
+    return toplevel
 
 
 def _setup_agent_worktree(repo_root: str) -> dict:
