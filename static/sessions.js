@@ -1623,6 +1623,13 @@ async function _switchProfileForSessionLoad(profile){
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
+  // notifications so extensions always see the canonical session id, not the
+  // raw sidebar click id (which may differ after lineage folding).
+  if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
+    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
+    if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+  }
   // Extension pre-open hook — fires once per sidebar click, not on every call.
   // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
   // when loadSession runs the actual navigation inside it.
@@ -1631,10 +1638,6 @@ async function loadSession(sid){
     if(_preResult&&_preResult.cancel===true){
       return;
     }
-  }
-  if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
-    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
-    if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
   }
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
@@ -1903,8 +1906,8 @@ async function loadSession(sid){
   // cross-profile continuation can't poison restore state with an unusable id.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
-    if (_isCurrentLoad()) _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true});
+    _loadingSessionId=null;
+    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
