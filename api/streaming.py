@@ -1495,29 +1495,78 @@ def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | 
     )
 
 
-def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
-    """Persist a user-cancelled terminal state without provider-error wording.
+def _rollback_cancelled_turn_messages(session) -> None:
+    """Strip any in-flight content from a cancelled turn and roll back to pre-turn state.
 
-    cancel_stream() usually writes this marker first, but the streaming thread can
-    later unwind through the silent-failure or exception path. Those paths must
-    not append a misleading provider no-response error after an explicit cancel.
+    Removes the current-turn user message (if it was eagerly checkpointed) and
+    anything after it from both ``session.messages`` and ``session.context_messages``
+    so the session looks exactly as it did before the interrupted turn started.
+    No cancel marker, no partial assistant text, and no user bubble are left behind.
     """
-    _materialize_pending_user_turn_before_error(session)
+    _pending_user = str(getattr(session, 'pending_user_message', None) or '').strip()
+    _pending_started = float(getattr(session, 'pending_started_at', None) or 0)
+    # Roll back session.messages
+    try:
+        msgs = getattr(session, 'messages', None)
+        if _pending_user and isinstance(msgs, list) and msgs:
+            for _i in range(len(msgs) - 1, -1, -1):
+                _m = msgs[_i]
+                if not isinstance(_m, dict):
+                    continue
+                if _m.get('role') == 'user':
+                    _m_ts = float(_m.get('timestamp') or _m.get('_ts') or 0)
+                    _m_content = str(_m.get('content') or '')
+                    # Match on content (workspace prefix may have been prepended).
+                    # Use 1s tolerance: pending_started_at is a float (e.g. 1789553400.851)
+                    # but message timestamps are int(time.time()) = 1789553400, so a strict
+                    # >= comparison would silently skip the message we need to remove.
+                    if (
+                        (_pending_started == 0 or _m_ts >= _pending_started - 1)
+                        and (
+                            _pending_user == _m_content
+                            or _pending_user in _m_content
+                            or _m_content in _pending_user
+                        )
+                    ):
+                        session.messages = msgs[:_i]
+                    break  # only examine the last user message
+    except Exception:
+        logger.debug("_rollback_cancelled_turn_messages: failed to roll back messages", exc_info=True)
+    # Roll back session.context_messages
+    try:
+        ctx = getattr(session, 'context_messages', None)
+        if _pending_user and isinstance(ctx, list) and ctx:
+            for _i in range(len(ctx) - 1, -1, -1):
+                _m = ctx[_i]
+                if not isinstance(_m, dict):
+                    continue
+                if _m.get('role') == 'user':
+                    _m_content = str(_m.get('content') or '')
+                    if (
+                        _pending_user == _m_content
+                        or _pending_user in _m_content
+                        or _m_content in _pending_user
+                    ):
+                        session.context_messages = ctx[:_i]
+                    break
+    except Exception:
+        logger.debug("_rollback_cancelled_turn_messages: failed to roll back context_messages", exc_info=True)
+
+
+def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
+    """Roll back a cancelled turn: strip in-flight content and clear pending state.
+
+    Instead of persisting the user message, partial response, and a 'Task cancelled'
+    marker, this rolls the session back to the state it was in before the turn started.
+    The user's prompt and any partial output are discarded, leaving no trace of the
+    interrupted turn in the session history.
+    """
+    _rollback_cancelled_turn_messages(session)
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
-    if not _session_has_cancel_marker(session):
-        agent_name = _preferred_agent_display_name_for_session(session)
-        session.messages.append({
-            'role': 'assistant',
-            'content': _cancelled_turn_content(message, agent_name),
-            '_error': True,
-            'provider_details': str(message or 'Task cancelled.').strip(),
-            'provider_details_label': 'Cancellation details',
-            'timestamp': int(time.time()),
-        })
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -10803,134 +10852,16 @@ def cancel_stream(stream_id: str) -> bool:
                     )
                     _emit_cancel_event = False
                     return True
-                # ── Preserve the user's typed message before clearing pending state (#1298) ──
-                # The agent's internal messages list (where the user message was appended at
-                # the start of run_conversation()) may not have been merged back into
-                # _cs.messages yet — cancel_stream() races with the streaming thread's final
-                # _merge_display_messages_after_agent_result() call. Without this guard, the
-                # user's message is lost: pending_user_message gets cleared below, and
-                # _cs.messages still only contains messages from prior turns. The reporter
-                # of #1298 sees their typed text vanish from chat after clicking Stop.
-                #
-                # Recovery rule: if pending_user_message is set AND the latest message in
-                # _cs.messages isn't already a matching user turn, synthesize one. The
-                # match check guards against double-append when the streaming thread DID
-                # reach its merge step before cancel_stream() got the session lock.
-                #
-                # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
-                # in unit tests using Mock sessions) cannot escape and skip the rest of
-                # the cleanup.
-                try:
-                    _pending_user = getattr(_cs, 'pending_user_message', None)
-                    _pending_source = getattr(_cs, 'pending_user_source', None)
-                    _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
-                    _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
-                    _pending_started = getattr(_cs, 'pending_started_at', None) or 0
-                    _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
-                    if _pending_user and _msgs_for_recovery is not None:
-                        _last_user = None
-                        for _m in reversed(_msgs_for_recovery):
-                            if isinstance(_m, dict) and _m.get('role') == 'user':
-                                _last_user = _m
-                                break
-                        _already_persisted = False
-                        if _last_user is not None:
-                            _last_content = _last_user.get('content')
-                            _last_ts = _last_user.get('timestamp') or 0
-                            # Only treat as already-persisted if the latest user turn
-                            # was created AT OR AFTER the current turn's pending_started_at.
-                            # An earlier turn whose content happens to be a substring
-                            # (e.g. prior reply was "ok", user now types "ok please continue")
-                            # must NOT short-circuit synthesis — that would re-introduce
-                            # the data-loss bug this guard is supposed to prevent.
-                            if isinstance(_last_content, str) and _last_ts >= _pending_started:
-                                # Tolerate the workspace prefix the streaming thread prepends.
-                                if _pending_user == _last_content or _pending_user in _last_content:
-                                    _already_persisted = True
-                        if not _already_persisted:
-                            _recovered_ts = int(time.time())
-                            if isinstance(_pending_started, (int, float)) and _pending_started > 0:
-                                _recovered_ts = int(_pending_started)
-                            _user_turn: dict = {
-                                'role': 'user',
-                                'content': _pending_user,
-                                'timestamp': _recovered_ts,
-                            }
-                            if _pending_source and _pending_source != 'webui':
-                                _user_turn['_source'] = _pending_source
-                            if _pending_atts:
-                                _user_turn['attachments'] = _pending_atts
-                            _msgs_for_recovery.append(_user_turn)
-                except Exception:
-                    logger.debug(
-                        "Failed to recover pending user message on cancel for %s",
-                        _cancel_session_id,
-                    )
+                # Roll the session back to its pre-turn state.
+                # Do NOT persist the user's prompt, any partial response, or a
+                # cancel marker — the interrupted turn is discarded entirely so
+                # the chat history looks exactly as it did before the user sent it.
+                _rollback_cancelled_turn_messages(_cs)
                 _cs.active_stream_id = None
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None
                 _cs.pending_user_source = None
-                # Persist any partial assistant text that was streamed before cancel (#893).
-                # Preserving partial content means the user sees what the agent had
-                # produced rather than losing it entirely.  The marker is _partial=True
-                # (for session/UI identification only) — NOT _error=True — so the partial
-                # content IS kept in the history sent to the agent on the next user
-                # message, letting the model continue from where it was cut off.
-                # See the inner comment on the append call below for the rationale.
-                #
-                # #1361: Also persist reasoning trace and live tool calls that were
-                # accumulated in thread-local variables but invisible to the cancel path.
-                # This prevents paid-token data loss when cancelling mid-reasoning or
-                # mid-tool-execution.
-                # NOTE on _partial_tool_calls: the captured entries use the WebUI
-                # internal shape {name, args, done, duration, is_error} — they do
-                # NOT carry the OpenAI/Anthropic API id + function: {name, arguments}
-                # envelope. Storing under 'tool_calls' would cause
-                # _sanitize_messages_for_api to forward them to the next-turn LLM
-                # call and strict providers would 400 on the malformed entries.
-                # The underscore-prefixed key is not in the whitelist, so sanitize
-                # strips it. The UI reads it via static/messages.js. (v0.50.251.)
-                _partial_msg = _build_partial_message(
-                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
-                )
-                _cancel_marker_exists = _session_has_cancel_marker(_cs)
-                _cancel_marker_idx = len(_cs.messages)
-                if _cancel_marker_exists:
-                    for _idx in range(len(_cs.messages) - 1, -1, -1):
-                        _m = _cs.messages[_idx]
-                        if not isinstance(_m, dict) or _m.get('role') != 'assistant':
-                            continue
-                        _content = str(_m.get('content') or '').strip().lower()
-                        if any(pattern in _content for pattern in _CANCEL_MARKER_PATTERNS):
-                            _cancel_marker_idx = _idx
-                            break
-                if _partial_msg is not None:
-                    # Deduplicate against the full partial payload, not just
-                    # non-empty content. Tool-only/reasoning-only partials have
-                    # empty content, so a content-gated check can append the same
-                    # failed turn repeatedly during cancel/replay recovery (#2592).
-                    if not _partial_marker_already_present(
-                        _cs.messages,
-                        _partial_msg,
-                        before_idx=_cancel_marker_idx,
-                    ):
-                        _cs.messages.insert(_cancel_marker_idx, _partial_msg)
-                # Cancel marker — flagged _error=True so it is stripped from conversation
-                # history on the next turn (prevents model from seeing "Task cancelled."
-                # as a prior assistant reply).
-                if not _cancel_marker_exists:
-                    _cs.messages.append({
-                        'role': 'assistant',
-                        'content': _cancelled_turn_content(
-                            'Task cancelled.',
-                            _preferred_agent_display_name_for_session(_cs),
-                        ),
-                        '_error': True,
-                        'provider_details': 'Task cancelled.',
-                        'provider_details_label': 'Cancellation details',
-                        'timestamp': int(time.time()),
-                    })
                 _cs.save()
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
