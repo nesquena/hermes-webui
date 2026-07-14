@@ -151,22 +151,38 @@ def test_load_session_reattach_path_uses_attach_live_stream_for_running_sessions
 
 
 def test_load_session_same_sid_noop_does_not_mask_pending_switch_back():
-    """Clicking back to the prior session during a pending switch must reload it.
+    """Clicking back to the prior session during a pending switch must still
+    honor ownership.
 
     loadSession() clears S.messages before the metadata fetch for the target
     session returns. During that small window S.session still points at the
-    previous session. A fast click back to that previous sid used to hit the
-    same-session no-op guard and leave the pane empty/Loading forever.
+    previous session. A fast click back to that prior sid used to hit a hard
+    same-session no-op and leave the pane empty/Loading forever.
+
+    The no-op guard now allows a same-session reload only when either no other
+    load is in-flight, or the in-flight sid is the same sid (authoritative
+    ownership). If a different sid is loading, the guard must not short-circuit
+    so pending switch-back keeps progressing.
     """
     body = _function_body(SESSIONS_JS, "loadSession")
     compact = re.sub(r"\s+", "", body)
-    guard = "if(currentSid===sid&&!forceReload&&!_loadingSessionId)return;"
+    # The same-session no-op now opens a block so re-selecting the already-open
+    # session can clear a stale unread dot before returning (#4946). The
+    # protected ownership invariant is unchanged: the guard still requires
+    # (!_loadingSessionId || _loadingSessionId===sid) and still early-returns
+    # before _loadingSessionId=sid.
+    guard = "if(currentSid===sid&&!forceReload&&(!_loadingSessionId||_loadingSessionId===sid)){"
     assert guard in compact, (
-        "same-session no-op must be disabled while another loadSession() call "
-        "is in flight, otherwise switching away and immediately back can keep "
-        "the previous session's cleared transcript"
+        "same-session no-op must be owned by the current load target: "
+        "another in-flight sid must not suppress a pending switch-back"
     )
-    assert compact.find(guard) < compact.find("_loadingSessionId=sid;")
+    assert "_loadingSessionId===sid" in guard
+    guard_pos = compact.find(guard)
+    assert guard_pos < compact.find("_loadingSessionId=sid;")
+    # The guarded block must still early-return for the same-session no-op,
+    # while now also acknowledging the visit to clear a stale unread dot.
+    assert "_sessionVisitHasUnreadState(sid)" in compact[guard_pos:guard_pos + 600]
+    assert "return;}" in compact[guard_pos:guard_pos + 900]
 
 
 def test_load_session_preserves_existing_worklog_content_without_destructive_fallback():

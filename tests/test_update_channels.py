@@ -285,3 +285,117 @@ def test_clear_lock_retry_preserves_experimental_channel(tmp_path, monkeypatch):
     )
     assert result['ok'] is True
     assert result['lock_recovery']['action'] == 'no-lock-found'
+
+
+# ── Stable-tagged install opting into Experimental (#5862) ───────────────────
+#
+# b3nw's report: a plain stable install pinned on v0.52.0 that flips to the
+# Experimental channel. Unlike `channel_repo` (which tags stable and exp on the
+# SAME commits), here the stable tag PREDATES every exp-v* tag — so from HEAD ==
+# v0.52.0 there is NO exp-v* tag reachable behind HEAD. Both channel-scoped git
+# lookups then degrade: the chip `describe --always` leaks a bare SHA, and the
+# banner `describe --abbrev=0` fatals -> current_version=None -> "unknown".
+
+@pytest.fixture
+def stable_pinned_repo(tmp_path):
+    """v0.52.0 tagged first (stable only), then 3 exp-v* batches AHEAD on master.
+
+    HEAD is checked out ON v0.52.0, so no exp-v* tag is reachable behind HEAD.
+    """
+    repo = tmp_path / 'stable_pinned'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'remote', 'add', 'origin', 'https://github.com/nesquena/hermes-webui.git')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'v0.52.0 release')
+    _git(repo, 'tag', 'v0.52.0')  # stable tag, NO exp tag on this commit
+    for i in range(1, 4):
+        _git(repo, 'commit', '-q', '--allow-empty', '-m', f'exp batch {i}')
+        _git(repo, 'tag', f'exp-v0.52.{i}')
+    _git(repo, 'checkout', '-q', 'v0.52.0')  # pin HEAD on the stable release
+    return repo
+
+
+def test_stable_pinned_current_release_tag_is_none_on_experimental(stable_pinned_repo):
+    """Precondition: the channel-scoped current-tag lookup genuinely returns None
+    (no exp-v* reachable behind a v0.52.0 HEAD). This is the trigger for #5862."""
+    assert updates._current_release_tag(stable_pinned_repo, 'experimental') is None
+    # Stable still resolves the real tag.
+    assert updates._current_release_tag(stable_pinned_repo, 'stable') == 'v0.52.0'
+
+
+def test_stable_pinned_experimental_reports_installed_version_not_unknown(stable_pinned_repo, monkeypatch):
+    """#5862: current_version must be the neutral installed tag (v0.52.0), NOT
+    None (which the UI renders as 'unknown'), and the count must be the real
+    number of exp releases ahead (3), NOT the bogus _release_gap fallback of 1."""
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.52.0')
+    info = updates._check_repo_release(stable_pinned_repo, 'webui', 'experimental')
+    assert info is not None
+    assert info['current_version'] == 'v0.52.0', 'must not be None/"unknown"'
+    assert info['current_sha'] == 'v0.52.0'
+    assert info['latest_version'] == 'exp-v0.52.3'
+    assert info['behind'] == 3, 'all 3 exp releases are ahead, not a bogus 1'
+
+
+def test_stable_pinned_stable_channel_still_up_to_date(stable_pinned_repo, monkeypatch):
+    """Sanity: the SAME install on the stable channel is up-to-date on v0.52.0
+    (the exp-v* tags ahead must not be offered as stable updates)."""
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.52.0')
+    info = updates._check_repo_release(stable_pinned_repo, 'webui', 'stable')
+    assert info is not None
+    assert info['behind'] == 0
+    assert info['current_version'] == 'v0.52.0'
+
+
+def test_channel_version_badge_no_bare_sha_on_experimental(stable_pinned_repo, monkeypatch):
+    """#5862 chip: channel_version_badge must fall back to the neutral installed
+    version, never a bare git SHA, when no channel tag is reachable."""
+    monkeypatch.setattr(updates, 'REPO_ROOT', stable_pinned_repo)
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.52.0')
+    badge = updates.channel_version_badge('experimental')
+    assert badge == 'v0.52.0', f'expected installed version, got bare SHA-ish {badge!r}'
+    # Stable channel resolves its own reachable tag directly.
+    assert updates.channel_version_badge('stable') == 'v0.52.0'
+
+
+def test_count_channel_tags_ahead(stable_pinned_repo):
+    """The ahead-count helper: 3 exp-v* tags sit ahead of a v0.52.0 HEAD.
+
+    This helper is only ever CALLED when no channel tag is reachable on/behind
+    HEAD (current_tag is None) — exactly the experimental case here, where no
+    exp-v* tag sits on the v0.52.0 commit, so `--contains HEAD` counts precisely
+    the 3 tags strictly ahead.
+    """
+    _git(stable_pinned_repo, 'checkout', '-q', 'v0.52.0')
+    assert updates._count_channel_tags_ahead(stable_pinned_repo, 'experimental') == 3
+
+
+def test_stable_pinned_experimental_agent_repo_does_not_inject_webui_version(stable_pinned_repo, monkeypatch):
+    """#5864: the installed-version fallback is WebUI-only. _check_repo_release is
+    shared with the Agent repo, where WEBUI_VERSION (v0.52.0) is not a valid ref —
+    it must NOT be injected as the Agent's current_version/current_sha (that would
+    show the WebUI version as the Agent's and emit a broken Agent compare link)."""
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.52.0')
+    info = updates._check_repo_release(stable_pinned_repo, 'agent', 'experimental')
+    assert info is not None
+    # Agent must NOT carry the WebUI version.
+    assert info['current_version'] != 'v0.52.0'
+    assert info['current_sha'] != 'v0.52.0'
+
+
+def test_stable_pinned_experimental_current_sha_is_verified_ref_only(stable_pinned_repo, monkeypatch):
+    """#5864: current_sha must be a git-VERIFIED ref, never a raw WEBUI_VERSION
+    that can be dirty/`-N-g<sha>`/bare-SHA/`unknown`. When HEAD is exactly on a
+    tag, current_sha resolves to that tag; when WEBUI_VERSION is a non-ref dirty
+    string, the compare ref falls back to None (no broken /compare link) while the
+    displayed version still shows the real installed string."""
+    # HEAD is exactly on v0.52.0 → verified tag resolves for the compare link.
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.52.0-dirty-deadbeef')
+    info = updates._check_repo_release(stable_pinned_repo, 'webui', 'experimental')
+    assert info is not None
+    # current_version shows the real (dirty) installed string...
+    assert info['current_version'] == 'v0.52.0-dirty-deadbeef'
+    # ...but current_sha is the git-verified exact tag, NOT the dirty display string.
+    assert info['current_sha'] == 'v0.52.0'
+    assert 'dirty' not in (info['current_sha'] or '')

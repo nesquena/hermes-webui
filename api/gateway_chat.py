@@ -30,7 +30,7 @@ from api.config import (
     update_active_run,
 )
 from api.helpers import _redact_text, redact_session_data
-from api.models import get_session, merge_session_messages_append_only
+from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
+
 
 # Total byte-silence budget (seconds) for the gateway SSE socket, applied via
 # ``urlopen(timeout=...)``. A stream that emits ANY byte within the window never
@@ -515,6 +516,8 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.completed":
+                if payload.get("error"):
+                    raise RuntimeError(str(payload["error"]))
                 output = str(payload.get("output") or "")
                 if output and not final_text:
                     final_text = output
@@ -541,6 +544,63 @@ def _run_gateway_runs_api_streaming(
                 put_gateway_event("token", {"text": delta})
             usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
     return final_text, usage
+
+
+def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, model_provider, terminal_error):
+    from api.streaming import (
+        _classify_provider_error,
+        _materialize_pending_user_turn_before_error,
+        _provider_error_payload,
+        _session_payload_with_full_messages,
+        _snapshot_and_append_partial_on_error,
+    )
+
+    with _get_session_agent_lock(session_id):
+        session = get_session(session_id)
+        if not _stream_writeback_is_current(session, stream_id):
+            return None
+        error_classification = _classify_provider_error(terminal_error)
+        error_payload = _provider_error_payload(
+            terminal_error,
+            error_classification["type"],
+            error_classification.get("hint", ""),
+        )
+        _materialize_pending_user_turn_before_error(session)
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+        try:
+            _snapshot_and_append_partial_on_error(session, stream_id)
+        except Exception:
+            logger.debug("Failed to snapshot gateway partials on terminal error", exc_info=True)
+        error_message = {
+            "role": "assistant",
+            "content": (
+                f"**{error_classification['label']}:** "
+                f"{error_payload.get('message') or error_classification['label']}"
+            ) + (f"\n\n*{error_payload['hint']}*" if error_payload.get("hint") else ""),
+            "timestamp": int(time.time()),
+            "_error": True,
+        }
+        if error_payload.get("details"):
+            error_message["provider_details"] = error_payload["details"]
+        if not isinstance(session.messages, list):
+            session.messages = []
+        session.messages.append(error_message)
+        session.workspace = str(workspace)
+        session.model = model
+        session.model_provider = model_provider
+        try:
+            session.save()
+        except Exception:
+            logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
+        error_payload["session"] = redact_session_data(
+            _session_payload_with_full_messages(session, tool_calls=[])
+        )
+        error_payload["session_id"] = session.session_id
+        return error_payload
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -620,9 +680,14 @@ def _run_gateway_chat_streaming(
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
 
+    success_writeback_committed = False
+
     def put_gateway_event(event, data):
-        if cancel_event.is_set() and event not in ("cancel", "error", "apperror"):
+        if cancel_event.is_set() and not success_writeback_committed and event not in ("cancel", "error", "apperror"):
             return
+        if event == "apperror" and isinstance(data, dict):
+            data = data.copy()
+            data.setdefault("session_id", session_id)
         event_id = None
         if run_journal is not None:
             try:
@@ -645,6 +710,7 @@ def _run_gateway_chat_streaming(
 
     s = None
     final_text = ""
+    terminal_error = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
@@ -726,12 +792,17 @@ def _run_gateway_chat_streaming(
                     session=s,
                 )
             except Exception as exc:
-                put_gateway_event("apperror", {
-                    "label": "Gateway runs API error",
-                    "type": "gateway_runs_error",
-                    "message": str(exc)[:400],
-                    "hint": "Check that the Hermes Gateway runs API (/v1/runs) is available.",
-                })
+                error_payload = _settle_gateway_terminal_error(
+                    session_id,
+                    stream_id,
+                    workspace,
+                    model,
+                    model_provider,
+                    str(exc),
+                )
+                if error_payload is None:
+                    return
+                put_gateway_event("apperror", error_payload)
                 return
             if final_text is None:
                 return
@@ -877,6 +948,8 @@ def _run_gateway_chat_streaming(
                         sse_event = "message"
                         continue
                     last_payload = payload
+                    if payload.get("error"):
+                        terminal_error = str(payload["error"])
                     reasoning_delta = _gateway_sse_reasoning_delta(payload)
                     if reasoning_delta:
                         if stream_id in STREAM_REASONING_TEXT:
@@ -891,6 +964,19 @@ def _run_gateway_chat_streaming(
                     usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
             usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
         assistant_text = final_text.strip()
+        if terminal_error:
+            error_payload = _settle_gateway_terminal_error(
+                session_id,
+                stream_id,
+                workspace,
+                model,
+                model_provider,
+                terminal_error,
+            )
+            if error_payload is None:
+                return
+            put_gateway_event("apperror", error_payload)
+            return
         if not assistant_text:
             put_gateway_event("apperror", {
                 "label": "Gateway returned no response",
@@ -902,6 +988,12 @@ def _run_gateway_chat_streaming(
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)
             if not _stream_writeback_is_current(s, stream_id):
+                return
+            # A late Stop can land after Gateway has yielded a full answer but
+            # before success writeback. Treat it as cancellation so any
+            # credential-exhausted process-wakeup pause stays in place.
+            if cancel_event.is_set():
+                put_gateway_event("cancel", {"message": "Cancelled by user"})
                 return
             now = time.time()
             # Preserve subsecond ordering for gateway-backed turns. Using an
@@ -919,7 +1011,9 @@ def _run_gateway_chat_streaming(
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
+            previous_messages = list(getattr(s, "messages", None) or [])
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
+            previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
             # Stamp stable ids on the two new rows (shared with the display merge
             # below) so display and model-context copies share an id for the
             # fork/truncate aligner (#context-message-stable-id).
@@ -946,7 +1040,7 @@ def _run_gateway_chat_streaming(
                 logger.debug("Failed to filter gateway display context markers", exc_info=True)
                 display_context = previous_context
             display = merge_session_messages_append_only(
-                list(getattr(s, "messages", None) or []),
+                previous_messages,
                 display_context,
             )
             try:
@@ -978,7 +1072,33 @@ def _run_gateway_chat_streaming(
             s.workspace = str(workspace)
             s.model = model
             s.model_provider = model_provider
+
+            def _restore_cancelled_success_writeback():
+                if pending_source == "process_wakeup":
+                    s.context_messages = previous_context
+                    s.messages = previous_messages
+                    s.process_wakeup_pause = dict(previous_process_wakeup_pause)
+                elif previous_process_wakeup_pause:
+                    s.process_wakeup_pause = dict(previous_process_wakeup_pause)
+                else:
+                    clear_process_wakeup_pause(s, reason="run_completed")
+                s.save()
+                put_gateway_event("cancel", {"message": "Cancelled by user"})
+
+            # Recheck immediately before clearing the pause; Stop can arrive
+            # while the success transcript is being assembled.
+            if cancel_event.is_set():
+                _restore_cancelled_success_writeback()
+                return
+            clear_process_wakeup_pause(s, reason="run_completed")
+            if cancel_event.is_set():
+                _restore_cancelled_success_writeback()
+                return
             s.save()
+            if cancel_event.is_set():
+                _restore_cancelled_success_writeback()
+                return
+            success_writeback_committed = True
         try:
             from api.goals import evaluate_goal_after_turn, has_active_goal
             from api.profiles import get_hermes_home_for_profile

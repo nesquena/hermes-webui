@@ -418,6 +418,7 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     """Same-session force refresh must not collapse a long transcript to the tail."""
     assert "let _sameSessionForceReloadHint = null;" in SESSIONS_JS
     assert "function _captureSameSessionForceReloadHint(sid)" in SESSIONS_JS
+    assert "if(!sid || _sameSessionForceReloadHint.session_id===sid) _sameSessionForceReloadHint=null;" in SESSIONS_JS
     assert "loaded_renderable_count:loadedRenderableCount" in SESSIONS_JS
     assert "message_count:knownMessageCount" in SESSIONS_JS
     assert "truncated:!!_messagesTruncated" in SESSIONS_JS
@@ -427,7 +428,7 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);" in SESSIONS_JS
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
     assert "const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';" in SESSIONS_JS
-    assert "finally {\n    _clearSameSessionForceReloadHint(sid);\n  }" in SESSIONS_JS
+    assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function loadSession(sid)")
     load_end = SESSIONS_JS.index("// ── Handoff hint logic", load_start)

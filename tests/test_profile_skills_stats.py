@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 import yaml
 from api import profiles
@@ -25,11 +26,12 @@ def test_get_profile_skills_stats(tmp_path):
     # Setup skills directory with:
     # 1 compatible & enabled skill ("alpha")
     # 1 compatible & disabled skill ("beta")
-    # 1 incompatible skill ("gamma" - macos only on linux test run)
+    # 1 incompatible skill ("gamma" is explicitly tagged for another OS)
     profile_home = tmp_path / "auditor"
     _write_skill(profile_home, "alpha")
     _write_skill(profile_home, "beta")
-    _write_skill(profile_home, "gamma", platforms=["macos"])
+    incompatible_platform = "linux" if sys.platform == "darwin" else "macos"
+    _write_skill(profile_home, "gamma", platforms=[incompatible_platform])
     _write_config(profile_home, ["beta"])
 
     # Explicitly clear the stats cache to ensure we compute fresh

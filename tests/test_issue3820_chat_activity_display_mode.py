@@ -1,16 +1,46 @@
 """Regression tests for issue #3820 chat activity display mode."""
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+_EXTRACT_FUNC_JS = """
+function extractFunc(name){
+  const start = src.indexOf('function ' + name);
+  if(start === -1) throw new Error(name + ' not found');
+  const params = src.indexOf('(', start);
+  let depth = 0, close = -1;
+  for(let i=params; i<src.length; i++){
+    if(src[i] === '(') depth++;
+    else if(src[i] === ')'){
+      depth--;
+      if(depth === 0){ close = i; break; }
+    }
+  }
+  const brace = src.indexOf('{', close);
+  depth = 0;
+  for(let i=brace; i<src.length; i++){
+    if(src[i] === '{') depth++;
+    else if(src[i] === '}'){
+      depth--;
+      if(depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  throw new Error(name + ' body did not close');
+}
+""".strip()
 
 
 def _transparentEventCountLabelBlock(ui_js):
@@ -18,6 +48,13 @@ def _transparentEventCountLabelBlock(ui_js):
     start = ui_js.index("function _transparentEventCountLabel")
     end = ui_js.index("\nfunction ", start + 1)
     return ui_js[start:end]
+
+
+def _run_node_script(script):
+    assert NODE, "node is required for chat activity display mode behavior tests"
+    result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
 
 
 def test_chat_activity_display_mode_defaults_to_compact_worklog(monkeypatch, tmp_path):
@@ -31,7 +68,7 @@ def test_chat_activity_display_mode_defaults_to_compact_worklog(monkeypatch, tmp
     assert loaded["chat_activity_display_mode"] == "compact_worklog"
 
 
-def test_chat_activity_display_mode_persists_transparent_stream_and_rejects_invalid(monkeypatch, tmp_path):
+def test_chat_activity_display_mode_persists_transparent_stream_hide_all_activity_and_rejects_invalid(monkeypatch, tmp_path):
     import api.config as config
 
     settings_path = tmp_path / "settings.json"
@@ -41,20 +78,284 @@ def test_chat_activity_display_mode_persists_transparent_stream_and_rejects_inva
     assert saved["chat_activity_display_mode"] == "transparent_stream"
     assert json.loads(settings_path.read_text(encoding="utf-8"))["chat_activity_display_mode"] == "transparent_stream"
 
+    saved = config.save_settings({"chat_activity_display_mode": "hide_all_activity"})
+    assert saved["chat_activity_display_mode"] == "hide_all_activity"
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["chat_activity_display_mode"] == "hide_all_activity"
+
     saved = config.save_settings({"chat_activity_display_mode": "invalid_mode"})
-    assert saved["chat_activity_display_mode"] == "transparent_stream"
-    assert json.loads(settings_path.read_text(encoding="utf-8"))["chat_activity_display_mode"] == "transparent_stream"
+    assert saved["chat_activity_display_mode"] == "hide_all_activity"
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["chat_activity_display_mode"] == "hide_all_activity"
 
-
-def test_transparent_stream_uses_dedicated_mode_not_simplified_tool_calling():
+def test_chat_activity_display_mode_supports_three_values():
     assert "function chatActivityMode()" in UI_JS
     assert "function isTransparentStream()" in UI_JS
+    assert "function isFinalAnswerOnlyMode()" in UI_JS
     assert "function isCompactWorklogMode()" in UI_JS
     assert "chatActivityMode()==='transparent_stream'" in UI_JS
+    assert "chatActivityMode()==='hide_all_activity'" in UI_JS
     assert "window._chatActivityDisplayMode" in BOOT_JS
     assert "window._chatActivityDisplayMode" in PANELS_JS
     assert "window._simplifiedToolCalling=true" in BOOT_JS
     assert "window._simplifiedToolCalling=true" in PANELS_JS
+
+
+def test_chat_activity_display_mode_picker_uses_three_desktop_columns():
+    assert INDEX_HTML.count('class="chat-activity-mode-btn') == 3
+    assert "#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));" in STYLE_CSS
+    assert "#mainSettings .chat-activity-mode-toggle{grid-template-columns:1fr;}" in STYLE_CSS
+
+
+def test_chat_activity_display_mode_resolver_and_live_early_out():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+global.window = {{
+  _chatActivityDisplayMode: 'hide_all_activity',
+  _transparentStream: false,
+}};
+global.isSimplifiedToolCalling = () => true;
+eval(extractFunc('chatActivityMode'));
+eval(extractFunc('isTransparentStream'));
+eval(extractFunc('isFinalAnswerOnlyMode'));
+eval(extractFunc('isCompactWorklogMode'));
+const resolverResults = [
+  chatActivityMode(),
+  isTransparentStream(),
+  isFinalAnswerOnlyMode(),
+  isCompactWorklogMode(),
+];
+window._chatActivityDisplayMode = 'transparent_stream';
+window._transparentStream = false;
+resolverResults.push(
+  chatActivityMode(),
+  isTransparentStream(),
+  isFinalAnswerOnlyMode(),
+  isCompactWorklogMode(),
+);
+window._chatActivityDisplayMode = 'bogus';
+window._transparentStream = true;
+resolverResults.push(
+  chatActivityMode(),
+  isTransparentStream(),
+  isFinalAnswerOnlyMode(),
+  isCompactWorklogMode(),
+);
+process.stdout.write(JSON.stringify({{resolverResults}}));
+"""
+    result = _run_node_script(script)
+
+    assert result["resolverResults"] == [
+        "hide_all_activity",
+        False,
+        True,
+        False,
+        "transparent_stream",
+        True,
+        False,
+        False,
+        "transparent_stream",
+        True,
+        False,
+        False,
+    ]
+
+
+def test_chat_activity_display_mode_explicit_modes_are_preserved_by_render_helpers():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+let captured = [];
+function _projectLiveAnchorActivitySceneForStream(streamId, mode){{
+  return {{version:'activity_scene_v1', mode, activity_rows:[]}};
+}}
+function renderLiveAnchorActivityScene(streamId, scene, opts){{
+  captured.push({{streamId, sceneMode: scene.mode, optMode: opts.mode, sessionId: opts.sessionId}});
+  return false;
+}}
+let activeMode = 'compact_worklog';
+global.chatActivityMode = () => activeMode;
+eval(extractFunc('_renderLiveAnchorActivitySceneForStream'));
+eval(extractFunc('_renderLiveAnchorActivitySceneSnapshotForStream'));
+const helperResult = _renderLiveAnchorActivitySceneForStream('stream-1', 'sid-1', {{mode:'hide_all_activity'}});
+const snapshotResult = _renderLiveAnchorActivitySceneSnapshotForStream(
+  'stream-2',
+  {{version:'activity_scene_v1', activity_rows:[]}},
+  'sid-2',
+  {{mode:'transparent_stream'}},
+);
+activeMode = 'hide_all_activity';
+const compactOverrideResult = _renderLiveAnchorActivitySceneForStream(
+  'stream-3',
+  'sid-3',
+  {{mode:'compact_worklog'}},
+);
+process.stdout.write(JSON.stringify({{helperResult, snapshotResult, compactOverrideResult, captured}}));
+"""
+    result = _run_node_script(script)
+
+    assert result["helperResult"] is False
+    assert result["snapshotResult"] is False
+    assert result["compactOverrideResult"] is False
+    assert result["captured"] == [
+        {"streamId": "stream-1", "sceneMode": "hide_all_activity", "optMode": "hide_all_activity", "sessionId": "sid-1"},
+        {"streamId": "stream-2", "optMode": "transparent_stream", "sessionId": "sid-2"},
+        {"streamId": "stream-3", "sceneMode": "hide_all_activity", "optMode": "compact_worklog", "sessionId": "sid-3"},
+    ]
+
+
+def test_chat_activity_display_mode_live_renderer_early_outs_in_hide_all_mode():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+global.window = {{
+  _chatActivityDisplayMode: 'hide_all_activity',
+  _transparentStream: false,
+}};
+global.S = {{ session: {{ session_id: 'sid-1' }}, activeStreamId: 'stream-1' }};
+global.isSimplifiedToolCalling = () => true;
+global.$ = () => {{ throw new Error('unexpected DOM access'); }};
+eval(extractFunc('chatActivityMode'));
+eval(extractFunc('isTransparentStream'));
+eval(extractFunc('isFinalAnswerOnlyMode'));
+eval(extractFunc('isCompactWorklogMode'));
+eval(extractFunc('renderLiveAnchorActivityScene'));
+const result = renderLiveAnchorActivityScene(
+  'stream-1',
+  {{version:'activity_scene_v1', activity_rows:[{{role:'tool'}}]}},
+  {{sessionId:'sid-1', mode:'hide_all_activity'}},
+);
+process.stdout.write(JSON.stringify({{result, mode: chatActivityMode(), finalOnly: isFinalAnswerOnlyMode(), compact: isCompactWorklogMode()}}));
+"""
+    result = _run_node_script(script)
+
+    assert result == {"result": False, "mode": "hide_all_activity", "finalOnly": True, "compact": False}
+
+
+def test_chat_activity_display_mode_anchor_scene_preserves_hide_all_mode():
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "assistant_turn_anchors.js"))}, 'utf8');
+const sandbox = {{window:{{}}}};
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, {{filename:'assistant_turn_anchors.js'}});
+const api = sandbox.window.HermesAssistantTurnAnchors;
+const empty = api.projectAssistantTurnAnchorActivityScene(null, {{mode:'hide_all_activity'}});
+const registry = api.createAssistantTurnAnchorRegistry({{session_id:'sid-1', turn_id:'turn-1'}});
+api.applyAssistantTurnAnchorSourceEvents(registry, [
+  {{event:'tool', payload:{{tool_call_id:'tool-1', name:'terminal'}}, event_id:'run-1:1', seq:1}},
+  {{source_type:'settled_message', payload:{{role:'assistant', id:'message-final', content:'final answer'}}}},
+], {{run_id:'run-1', stream_id:'stream-1'}});
+const scene = api.projectAssistantTurnAnchorActivityScene(registry, {{mode:'hide_all_activity'}});
+const snapshot = api.createAssistantTurnAnchorRendererSnapshot({{mode:'hide_all_activity', rows:[]}});
+process.stdout.write(JSON.stringify({{emptyMode:empty.mode, sceneMode:scene.mode, snapshotMode:snapshot.mode}}));
+"""
+    result = _run_node_script(script)
+
+    assert result == {
+        "emptyMode": "hide_all_activity",
+        "sceneMode": "hide_all_activity",
+        "snapshotMode": "hide_all_activity",
+    }
+
+
+def test_chat_activity_display_mode_legacy_live_fallbacks_do_not_render_activity():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+global.S = {{ session: {{ session_id: 'sid-1' }}, activeStreamId: 'stream-1' }};
+global.isFinalAnswerOnlyMode = () => true;
+global.$ = () => {{ throw new Error('unexpected DOM access'); }};
+eval(extractFunc('appendLiveToolCard'));
+eval(extractFunc('ensureLiveWorklogShell'));
+const appendResult = appendLiveToolCard({{tid:'tool-1'}}, {{sessionId:'sid-1', streamId:'stream-1'}});
+const shellResult = ensureLiveWorklogShell();
+process.stdout.write(JSON.stringify({{appendResult: appendResult === undefined, shellResult}}));
+"""
+    result = _run_node_script(script)
+
+    assert result == {"appendResult": True, "shellResult": None}
+
+
+def test_chat_activity_display_mode_legacy_thinking_fallback_does_not_render_activity():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+global.isFinalAnswerOnlyMode = () => true;
+global.$ = () => {{ throw new Error('unexpected DOM access'); }};
+eval(extractFunc('appendThinking'));
+eval(extractFunc('updateThinking'));
+const appendResult = appendThinking('reasoning text', {{pending:true}});
+const updateResult = updateThinking('reasoning text', {{pending:true}});
+process.stdout.write(JSON.stringify({{appendResult: appendResult === undefined, updateResult: updateResult === undefined}}));
+"""
+    result = _run_node_script(script)
+
+    assert result == {"appendResult": True, "updateResult": True}
+
+
+def test_chat_activity_display_mode_settled_hide_all_scene_persists_without_worklog():
+    start = MESSAGES_JS.index("function _attachProjectedAnchorSceneToLastAssistant(messages){")
+    end = MESSAGES_JS.index("function _upsertAnchorProcessProse", start)
+    block = MESSAGES_JS[start:end]
+    persist_index = block.index("_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);")
+    return_index = block.index("return hasWorklogRows;")
+
+    assert "const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);" in block
+    assert "const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity';" in block
+    assert persist_index < return_index
+    assert "return true;" not in block
+
+
+def test_chat_activity_display_mode_switch_to_final_only_clears_existing_live_activity():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "panels.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+let cleanupCalls = 0;
+const select = {{value:''}};
+const buttons = [
+  {{mode:'compact_worklog'}},
+  {{mode:'transparent_stream'}},
+  {{mode:'hide_all_activity'}},
+].map(({{mode}}) => ({{
+  getAttribute: (name) => name === 'data-chat-activity-mode' ? mode : null,
+  classList: {{toggle(){{}}}},
+  setAttribute(){{}},
+}}));
+global.window = {{_hideLiveActivityForFinalAnswerOnly(){{ cleanupCalls += 1; }}}};
+global.document = {{querySelectorAll: () => buttons}};
+global.$ = (id) => id === 'settingsChatActivityDisplayMode' ? select : null;
+eval(extractFunc('_syncChatActivityDisplayModeControl'));
+_syncChatActivityDisplayModeControl('transparent_stream');
+const afterTransparent = {{mode: window._chatActivityDisplayMode, transparent: window._transparentStream, cleanupCalls}};
+_syncChatActivityDisplayModeControl('hide_all_activity');
+const afterHide = {{mode: window._chatActivityDisplayMode, transparent: window._transparentStream, cleanupCalls, selectValue: select.value}};
+process.stdout.write(JSON.stringify({{afterTransparent, afterHide}}));
+"""
+    result = _run_node_script(script)
+
+    assert result == {
+        "afterTransparent": {"mode": "transparent_stream", "transparent": True, "cleanupCalls": 0},
+        "afterHide": {"mode": "hide_all_activity", "transparent": False, "cleanupCalls": 1, "selectValue": "hide_all_activity"},
+    }
+
+
+def test_chat_activity_display_mode_live_cleanup_removes_existing_activity_rows():
+    start = UI_JS.index("function _hideLiveActivityForFinalAnswerOnly(){")
+    end = UI_JS.index("function _removeEmptyLiveWorklogShells", start)
+    block = UI_JS[start:end]
+
+    assert "clearLiveToolCards();" in block
+    assert "removeThinking" in block
+    assert ".transparent-event-row" in block
+    assert "#liveRunStatus" in block
+    assert "window._hideLiveActivityForFinalAnswerOnly=_hideLiveActivityForFinalAnswerOnly" in UI_JS
 
 
 def test_transparent_stream_live_branch_uses_direct_rows():
@@ -119,9 +420,12 @@ def test_settings_ui_exposes_chat_activity_display_mode_selector():
     assert 'id="settingsChatActivityDisplayMode"' in INDEX_HTML
     assert 'data-chat-activity-mode="compact_worklog"' in INDEX_HTML
     assert 'data-chat-activity-mode="transparent_stream"' in INDEX_HTML
+    assert 'data-chat-activity-mode="hide_all_activity"' in INDEX_HTML
     assert 'value="compact_worklog"' in INDEX_HTML
     assert 'value="transparent_stream"' in INDEX_HTML
+    assert 'value="hide_all_activity"' in INDEX_HTML
     assert 'data-i18n="settings_label_chat_activity_display_mode"' in INDEX_HTML
+    assert 'settings_option_final_answer_only' in INDEX_HTML
     assert "chat_activity_display_mode" in PANELS_JS
     assert "settingsChatActivityDisplayMode" in PANELS_JS
     assert "function _syncChatActivityDisplayModeControl" in PANELS_JS
@@ -130,6 +434,50 @@ def test_settings_ui_exposes_chat_activity_display_mode_selector():
     assert "renderMessages({preserveScroll:true})" in PANELS_JS
     assert "settings_label_chat_activity_display_mode" in I18N_JS
     assert "settings_desc_chat_activity_display_mode" in I18N_JS
+    assert I18N_JS.count("settings_option_final_answer_only") == I18N_JS.count("settings_option_transparent_stream")
+
+
+def test_chat_activity_display_mode_plumbing_preserves_hide_all_activity():
+    assert "s.chat_activity_display_mode==='transparent_stream'||s.chat_activity_display_mode==='hide_all_activity'" in BOOT_JS
+    assert "chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')" in PANELS_JS
+    assert "const next=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : 'compact_worklog';" in PANELS_JS
+    assert "hide_all_activity" in PANELS_JS
+
+
+def test_chat_activity_display_mode_settled_worklog_suppression():
+    script = f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "messages.js"))}, 'utf8');
+{_EXTRACT_FUNC_JS}
+eval(extractFunc('_anchorSceneActiveMode'));
+eval(extractFunc('_anchorSceneRowDisplayHintForMode'));
+eval(extractFunc('_anchorSceneHasWorklogWorthyRows'));
+global.window = {{
+  chatActivityMode() {{ return 'hide_all_activity'; }},
+  _chatActivityDisplayMode: 'compact_worklog',
+  _transparentStream: false,
+  isFinalAnswerOnlyMode() {{ return false; }},
+}};
+const activeMode = _anchorSceneActiveMode();
+const hiddenHint = _anchorSceneRowDisplayHintForMode({{display_hints:{{}}}}, 'hide_all_activity');
+const compactHint = _anchorSceneRowDisplayHintForMode({{display_hints:{{compact_worklog:'activity_row'}}}}, 'compact_worklog');
+const hiddenScene = _anchorSceneHasWorklogWorthyRows({{mode:'hide_all_activity', activity_rows:[{{role:'tool'}},{{role:'thinking'}}]}});
+window.isFinalAnswerOnlyMode = () => true;
+const activeFinalOnly = _anchorSceneHasWorklogWorthyRows({{mode:'compact_worklog', activity_rows:[{{role:'tool'}}]}});
+window.isFinalAnswerOnlyMode = () => false;
+const compactScene = _anchorSceneHasWorklogWorthyRows({{mode:'compact_worklog', activity_rows:[{{role:'tool'}}]}});
+process.stdout.write(JSON.stringify({{activeMode, hiddenHint, compactHint, hiddenScene, activeFinalOnly, compactScene}}));
+"""
+    result = _run_node_script(script)
+
+    assert result == {
+        "activeMode": "hide_all_activity",
+        "hiddenHint": "hidden_activity",
+        "compactHint": "activity_row",
+        "hiddenScene": False,
+        "activeFinalOnly": False,
+        "compactScene": True,
+    }
 
 
 def test_appearance_autosave_rerenders_only_when_activity_mode_changes():

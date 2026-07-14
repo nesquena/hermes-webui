@@ -41,6 +41,20 @@ const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
 const _SVG_EXTS=/\.svg$/i;
 const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
+// Minimal stand-in for ui.js' _inlineMediaHtmlForRef used when the driver
+// extracts only renderMd(). Mirrors the live UI for the cases the existing
+// tests assert against (https image, bare file:// image). The full renderer
+// (ui.js) is preferred on the real page — these nodes only cover what is
+// reachable from a standalone renderMd() invocation.
+function _inlineMediaHtmlForRef(ref){
+  const r = String(ref || '');
+  if (/^https?:\/\//.test(r)) return `<img class="msg-media-img" src="${esc(r)}" alt="image" loading="lazy">`;
+  if (/^file:\/\//.test(r)){
+    const m = r.replace(/^file:\/\//i, '');
+    return `<img class="msg-media-img" src="api/media?path=${encodeURIComponent(m)}" alt="image" loading="lazy">`;
+  }
+  return `<img class="msg-media-img" src="api/media?path=${encodeURIComponent(r)}" alt="image" loading="lazy">`;
+}
 
 function extractFunc(name) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');

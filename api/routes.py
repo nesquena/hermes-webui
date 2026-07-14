@@ -28,7 +28,7 @@ import time
 import uuid
 import http.client
 import socket as _socket
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
@@ -55,6 +55,7 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
+from api.shares import create_or_refresh_share, load_share, revoke_share
 
 logger = logging.getLogger(__name__)
 
@@ -470,6 +471,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     get_active_profile_name as _get_active_profile_name,
     get_active_hermes_home,
     list_profiles_api,
+    profile_scope_for_detached_worker,
 )
 
 
@@ -1041,6 +1043,7 @@ def _skill_view_from_active_dir(name: str) -> dict:
 # Trivial; many production SSE deployments run 5-15s heartbeats specifically
 # to handle proxies and mobile NAT.
 _SSE_HEARTBEAT_INTERVAL_SECONDS = 5
+_SESSION_SSE_SENT_EVENT_ID_LIMIT = 4096
 
 
 def _normalize_messaging_source(raw_source) -> str:
@@ -2809,6 +2812,7 @@ from api.config import (
     save_settings,
     SETTINGS_FILE,
     set_hermes_default_model,
+    canonical_model_provider_lane,
     model_with_provider_context,
     get_reasoning_status,
     set_reasoning_display,
@@ -4988,6 +4992,146 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     return s
 
 
+def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = None) -> list:
+    """Return the visible transcript that a public share should snapshot.
+
+    External sessions (Telegram/Discord/Slack/CLI/etc.) may have no WebUI sidecar
+    or may persist only local metadata in the sidecar while the transcript lives
+    in state.db. Public sharing should snapshot the same visible conversation the
+    session page renders, not the bare local sidecar payload.
+    """
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    current_messages = list(getattr(session, "messages", None) or [])
+    if not sid:
+        return current_messages
+    profile = getattr(session, "profile", None)
+    is_messaging = (
+        _is_messaging_session_record(session)
+        or _is_messaging_session_record(cli_meta)
+    )
+    if is_messaging or not current_messages:
+        cli_messages = get_cli_session_messages(sid, profile=profile)
+        if cli_messages:
+            if is_messaging:
+                return _merged_session_messages_for_display(session, cli_messages)
+            return list(cli_messages)
+    return current_messages
+
+
+def _build_share_metadata_sidecar(
+    sid: str,
+    snapshot_session,
+    *,
+    cli_meta: dict | None = None,
+):
+    """Create a minimal WebUI sidecar for share metadata on external sessions."""
+    cli_meta = dict(cli_meta or {})
+    workspace = (
+        cli_meta.get("workspace")
+        or cli_meta.get("cwd")
+        or getattr(snapshot_session, "workspace", None)
+    )
+    if not workspace:
+        workspace = get_last_workspace()
+    session = Session(
+        session_id=sid,
+        title=(
+            cli_meta.get("title")
+            or getattr(snapshot_session, "title", None)
+            or title_from(getattr(snapshot_session, "messages", None) or [], "CLI Session")
+        ),
+        workspace=workspace,
+        messages=[],
+        model=cli_meta.get("model") or getattr(snapshot_session, "model", None) or "unknown",
+        model_provider=(
+            cli_meta.get("model_provider")
+            or getattr(snapshot_session, "model_provider", None)
+        ),
+        created_at=cli_meta.get("created_at") or getattr(snapshot_session, "created_at", None),
+        updated_at=cli_meta.get("updated_at") or getattr(snapshot_session, "updated_at", None),
+        profile=cli_meta.get("profile") or getattr(snapshot_session, "profile", None),
+    )
+    session.is_cli_session = bool(
+        getattr(snapshot_session, "is_cli_session", False)
+        or is_cli_session_row(cli_meta)
+    )
+    session.source_tag = cli_meta.get("source_tag") or getattr(snapshot_session, "source_tag", None)
+    session.raw_source = (
+        cli_meta.get("raw_source")
+        or getattr(snapshot_session, "raw_source", None)
+        or session.source_tag
+    )
+    session.session_source = (
+        cli_meta.get("session_source")
+        or getattr(snapshot_session, "session_source", None)
+    )
+    session.source_label = (
+        cli_meta.get("source_label")
+        or getattr(snapshot_session, "source_label", None)
+    )
+    session.read_only = bool(
+        cli_meta.get("read_only") or getattr(snapshot_session, "read_only", False)
+    )
+    for attr in (
+        "user_id",
+        "chat_id",
+        "chat_type",
+        "thread_id",
+        "session_key",
+        "platform",
+        "origin_chat_id",
+        "origin_user_id",
+        "parent_session_id",
+    ):
+        value = cli_meta.get(attr)
+        if value is None:
+            value = getattr(snapshot_session, attr, None)
+        if value is not None:
+            setattr(session, attr, value)
+    return session
+
+
+def _resolve_share_session_pair(sid: str, handler):
+    """Resolve a shareable session plus the sidecar that stores share metadata.
+
+    Returns ``(snapshot_session, stored_session_or_none, cli_meta)``. The
+    snapshot session always carries the transcript that should become the public
+    share payload. ``stored_session`` is the WebUI-owned sidecar to mutate for
+    share_token/share_created_at persistence; it may be absent for pure external
+    sessions that have not yet created local metadata.
+    """
+    try:
+        stored_session = get_session(sid)
+        cli_meta = (
+            _lookup_cli_session_metadata(sid)
+            if _session_requires_cli_metadata_lookup(stored_session)
+            else {}
+        )
+        effective_profile = (
+            (cli_meta or {}).get("profile")
+            or getattr(stored_session, "profile", None)
+            or None
+        )
+        if not _session_visible_to_active_profile(effective_profile, handler):
+            raise KeyError(sid)
+        stored_session = _ensure_full_session_before_mutation(sid, stored_session)
+        snapshot_session = copy.copy(stored_session)
+        snapshot_session.messages = _share_snapshot_messages_for_session(
+            stored_session,
+            cli_meta=cli_meta,
+        )
+        return snapshot_session, stored_session, cli_meta or {}
+    except KeyError:
+        cli_meta = _lookup_cli_session_metadata(sid) or {}
+        effective_profile = cli_meta.get("profile") or None
+        if not _session_visible_to_active_profile(effective_profile, handler):
+            raise KeyError(sid) from None
+        synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
+        if reason == "was_webui" or synth is None:
+            raise KeyError(sid) from None
+        return synth, None, cli_meta
+
+
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
     """Clear stale persisted stream fields before /api/sessions serializes rows."""
     changed = False
@@ -5999,6 +6143,85 @@ def _catalog_model_id_matches(candidate: str, model: str) -> bool:
     if "/" in candidate:
         candidate = candidate.split("/", 1)[1]
     return candidate.replace("-", ".").lower() == model.replace("-", ".").lower()
+
+
+def _catalog_group_owns_exact_model(group: dict, model: str) -> bool:
+    provider_id = str(group.get("provider_id") or "").strip()
+    wrapper = f"@{provider_id}:"
+    for bucket in ("models", "extra_models"):
+        for entry in group.get(bucket) or []:
+            if not isinstance(entry, dict):
+                continue
+            candidate = str(entry.get("id") or "").strip()
+            if candidate.lower().startswith(wrapper.lower()):
+                candidate = candidate[len(wrapper):]
+            if candidate == model or _catalog_model_id_matches(candidate, model):
+                return True
+    return False
+
+
+def _repair_foreign_session_model_provider(
+    session,
+    *,
+    requested_model: str,
+    requested_provider: str | None,
+    resolved_model: str,
+    resolved_provider: str | None,
+    explicit_model_pick: bool,
+    profile_provider: str | None,
+) -> str | None:
+    """Repair a stale provider only when the cached catalog names one owner."""
+    stored_model = str(getattr(session, "model", "") or "").strip()
+    stored_provider = _clean_session_model_provider(getattr(session, "model_provider", None))
+    requested_provider = _clean_session_model_provider(requested_provider)
+    resolved_provider = _clean_session_model_provider(resolved_provider)
+    profile_provider = _clean_session_model_provider(profile_provider)
+    _, qualified_provider = _split_provider_qualified_model(requested_model)
+    if (
+        explicit_model_pick
+        or qualified_provider
+        or not stored_model
+        or not stored_provider
+        or (
+            str(requested_model or "").strip() != stored_model
+            and not _catalog_model_id_matches(str(requested_model or "").strip(), stored_model)
+        )
+        or requested_provider != stored_provider
+        or (
+            resolved_model != stored_model
+            and not _catalog_model_id_matches(resolved_model, stored_model)
+        )
+        or resolved_provider != stored_provider
+        or not profile_provider
+        or profile_provider == stored_provider
+    ):
+        return resolved_provider
+
+    try:
+        catalog = get_available_models(prefer_cache=True)
+    except Exception:
+        return resolved_provider
+    groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
+    stored_groups = [
+        group
+        for group in groups
+        if str(group.get("provider_id") or "").strip().lower() == stored_provider
+    ]
+    if (
+        not stored_groups
+        or any(group.get("models_endpoint_error") for group in stored_groups)
+        or any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups)
+    ):
+        return resolved_provider
+    owners = [
+        group
+        for group in groups
+        if str(group.get("provider_id") or "").strip().lower() != stored_provider
+        and _catalog_group_owns_exact_model(group, stored_model)
+    ]
+    if len(owners) != 1:
+        return resolved_provider
+    return str(owners[0].get("provider_id") or "").strip() or resolved_provider
 
 
 def _clean_session_model_provider(value: str | None) -> str | None:
@@ -8939,6 +9162,13 @@ from api.models import (
     _profile_has_user_projects,
     is_cron_session,
     is_safe_session_id,
+    PROCESS_WAKEUP_PAUSE_ERROR,
+    clear_process_wakeup_pause,
+    clear_process_wakeup_pause_if_model_changed,
+    process_wakeup_pause_matches,
+    process_wakeup_credential_state_fingerprint,
+    process_wakeup_pause_credential_state_changed,
+    suppress_process_wakeup_for_provider_pause,
 )
 
 
@@ -9166,12 +9396,22 @@ from api.streaming import (
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
+    _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     find_run_summary,
     read_run_events,
+    read_session_run_events,
+    session_journal_fingerprint,
     stale_interrupted_event,
 )
 from api.todo_state import attach_todo_state
-from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
+from api.providers import (
+    get_providers,
+    get_provider_quota,
+    get_provider_cost_history,
+    provider_has_process_wakeup_recovery_credential,
+    set_provider_key,
+    remove_provider_key,
+)
 from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
@@ -11471,6 +11711,8 @@ def handle_get(handler, parsed) -> bool:
 
                 if is_auth_enabled():
                     cookie_val = parse_cookie(handler)
+                    if not cookie_val:
+                        cookie_val = getattr(handler, "_trusted_auth_session_cookie_value", None)
                     if cookie_val and verify_session(cookie_val):
                         csrf_token = csrf_token_for_session(cookie_val) or ""
             except Exception:
@@ -11489,6 +11731,17 @@ def handle_get(handler, parsed) -> bool:
             )
         except Exception as exc:
             return _serve_shell_unavailable(handler, exc)
+
+    if parsed.path == "/share" or parsed.path.startswith("/share/"):
+        share_path = (Path(__file__).parent.parent / "static" / "share.html").resolve()
+        return t(
+            handler,
+            share_path.read_text(encoding="utf-8"),
+            content_type="text/html; charset=utf-8",
+            extra_headers={
+                "X-Robots-Tag": "noindex, nofollow",
+            },
+        )
 
     if parsed.path == "/login":
         _settings = load_settings()
@@ -11576,19 +11829,27 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/auth/status":
-        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, is_oidc_auth_enabled, parse_cookie, verify_session
+        from api.auth import (
+            _passkey_feature_flag_enabled,
+            ensure_trusted_auth_session,
+            get_password_hash,
+            is_auth_enabled,
+            is_oidc_auth_enabled,
+            is_trusted_auth_enabled,
+        )
         from api.passkeys import registered_credentials
 
         logged_in = False
+        session_info = None
         auth_enabled = is_auth_enabled()
         oidc_enabled = is_oidc_auth_enabled()
         if auth_enabled:
-            cv = parse_cookie(handler)
-            logged_in = bool(cv and verify_session(cv))
+            session_info = ensure_trusted_auth_session(handler)
+            logged_in = bool(session_info)
         passkey_flag = _passkey_feature_flag_enabled()
         passkeys = registered_credentials() if passkey_flag else []
         password_auth_enabled = get_password_hash() is not None
-        return j(handler, {
+        payload = {
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
             "oidc_enabled": oidc_enabled,
@@ -11598,7 +11859,28 @@ def handle_get(handler, parsed) -> bool:
             "passkeys_count": len(passkeys),
             "passkey_feature_flag": passkey_flag,
             "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
-        })
+        }
+        if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
+            payload["trusted_auth_enabled"] = True
+        if session_info and session_info.get("auth_type") == "trusted":
+            payload["auth_type"] = session_info.get("auth_type")
+            payload["user"] = session_info.get("username")
+            payload["bound_profile"] = session_info.get("bound_profile")
+        return j(handler, payload)
+
+    if parsed.path.startswith("/api/share/"):
+        token = parsed.path[len("/api/share/"):].strip()
+        share = load_share(token)
+        if not share:
+            return bad(handler, "Shared conversation not found", 404)
+        return j(
+            handler,
+            {"share": share},
+            extra_headers={
+                "Cache-Control": "no-store",
+                "X-Robots-Tag": "noindex, nofollow",
+            },
+        )
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
@@ -12805,6 +13087,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == '/api/sessions/events':
         return _handle_session_events_stream(handler)
 
+    session_events_session_id = _session_events_path_session_id(parsed.path)
+    if session_events_session_id is not None:
+        return _handle_session_sse_stream_for_session(handler, parsed, session_events_session_id)
+
     if parsed.path == "/api/media":
         return _handle_media(handler, parsed)
 
@@ -13500,6 +13786,90 @@ def handle_post(handler, parsed) -> bool:
         prompts.append(new_prompt)
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True, "prompt": new_prompt})
+
+    if parsed.path == "/api/share/create":
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        try:
+            snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        try:
+            share_meta = create_or_refresh_share(snapshot_session)
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        persisted_session = stored_session
+        if persisted_session is None:
+            persisted_session = _build_share_metadata_sidecar(
+                sid,
+                snapshot_session,
+                cli_meta=cli_meta,
+            )
+        persisted_session.share_token = share_meta["share_token"]
+        persisted_session.share_created_at = share_meta["share_created_at"]
+        persisted_session.save(touch_updated_at=False)
+        _publish_session_list_changed(
+            "session_share_create",
+            profile=getattr(persisted_session, "profile", None),
+            session_id=sid,
+        )
+        response_session = copy.copy(persisted_session)
+        response_session.messages = list(getattr(snapshot_session, "messages", None) or [])
+        return j(
+            handler,
+            {
+                "ok": True,
+                "share": {
+                    "token": share_meta["share_token"],
+                    "url": f"/share/{share_meta['share_token']}",
+                    "title": share_meta["share_title"],
+                    "message_count": share_meta["share_message_count"],
+                    "created_at": share_meta["share_created_at"],
+                    "updated_at": share_meta["share_updated_at"],
+                },
+                "session": response_session.compact() | {"messages": response_session.messages},
+            },
+        )
+
+    if parsed.path == "/api/share/revoke":
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        try:
+            snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        target_session = stored_session
+        if target_session is None:
+            token = str(getattr(snapshot_session, "share_token", "") or "").strip()
+            if not token:
+                return bad(handler, "Session not found", 404)
+            target_session = _build_share_metadata_sidecar(
+                sid,
+                snapshot_session,
+                cli_meta=cli_meta,
+            )
+            target_session.share_token = token
+            target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
+        revoke_share(target_session)
+        target_session.share_token = None
+        target_session.share_created_at = None
+        target_session.save(touch_updated_at=False)
+        _publish_session_list_changed(
+            "session_share_revoke",
+            profile=getattr(target_session, "profile", None),
+            session_id=sid,
+        )
+        response_session = copy.copy(target_session)
+        response_session.messages = list(getattr(snapshot_session, "messages", None) or [])
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session": response_session.compact() | {"messages": response_session.messages},
+            },
+        )
 
     if parsed.path == "/api/session/new":
         try:
@@ -14780,10 +15150,17 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
+            from api.auth import ensure_trusted_auth_session
             from api.profiles import switch_profile, _validate_profile_name
             from api.helpers import build_profile_cookie
             if name != 'default':
                 _validate_profile_name(name)
+            session_info = ensure_trusted_auth_session(handler)
+            if getattr(handler, '_trusted_auth_session_rejected', False):
+                return bad(handler, 'Authentication required', 401)
+            bound_profile = str((session_info or {}).get("bound_profile") or "").strip() or None
+            if bound_profile and name != bound_profile:
+                return bad(handler, "Profile is bound to the current session", 403)
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
             result = switch_profile(name, process_wide=False)
@@ -14797,8 +15174,15 @@ def handle_post(handler, parsed) -> bool:
                 restart_watcher_for_profile(name)
             except Exception as exc:
                 logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
+            session_cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None)
+            if session_cookie_value:
+                if bound_profile and name == bound_profile:
+                    return j(handler, result)
+                extra_header = build_profile_cookie(name, session_cookie_value=session_cookie_value)
+            else:
+                extra_header = build_profile_cookie(name, handler)
             return j(handler, result, extra_headers={
-                'Set-Cookie': build_profile_cookie(name, handler),
+                'Set-Cookie': extra_header,
             })
         except PermissionError as e:
             return bad(handler, _sanitize_error(e), 403)
@@ -15734,18 +16118,26 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"credentials": registered_credentials()})
 
     if parsed.path == "/api/auth/logout":
-        from api.auth import clear_auth_cookie, invalidate_session, parse_cookie
+        from api.auth import clear_auth_cookie, ensure_trusted_auth_session, get_trusted_auth_logout_url, invalidate_session, parse_cookie
+        from api.helpers import clear_profile_cookie
 
-        cookie_val = parse_cookie(handler)
+        session_info = ensure_trusted_auth_session(handler)
+        cookie_val = getattr(handler, '_trusted_auth_session_cookie_value', None) or parse_cookie(handler)
         if cookie_val:
             invalidate_session(cookie_val)
-        body = json.dumps({"ok": True}).encode()
+        payload = {"ok": True}
+        if session_info and session_info.get("auth_type") == "trusted":
+            logout_url = get_trusted_auth_logout_url()
+            if logout_url:
+                payload["trusted_logout_url"] = logout_url
+        body = json.dumps(payload).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         clear_auth_cookie(handler)
+        clear_profile_cookie(handler)
         handler.end_headers()
         handler.wfile.write(body)
         return True
@@ -16304,19 +16696,46 @@ def _sse_with_id(handler, event, data, event_id=None):
     _sse(handler, event, data)
 
 
-def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
+def _session_events_path_session_id(path: str | None) -> str | None:
+    path = str(path or "")
+    parts = path.strip("/").split("/")
+    if len(parts) != 4:
+        return None
+    if parts[0] != "api" or parts[1] != "sessions" or parts[3] != "events":
+        return None
+    sid = str(parts[2] or "").strip()
+    return sid or None
+
+
+def _session_events_resume_event_id(handler, parsed) -> str | None:
+    headers = getattr(handler, "headers", None)
+    raw = None
+    if headers is not None:
+        try:
+            raw = headers.get("Last-Event-ID")
+        except Exception:
+            raw = None
     raw = str(raw or "").strip()
-    if not raw:
-        return None, None
-    if ":" in raw:
-        run_id, tail = raw.rsplit(":", 1)
-    else:
-        run_id, tail = None, raw
+    if raw:
+        return raw
+    qs = parse_qs(getattr(parsed, "query", "") or "")
+    raw = str(qs.get("after_event_id", [None])[0] or "").strip()
+    return raw or None
+
+
+def _session_snapshot_payload(session, *, active_stream_id: str | None = None) -> dict:
     try:
-        seq = max(0, int(tail))
-    except (TypeError, ValueError):
-        return run_id or None, None
-    return run_id or None, seq
+        payload = session.compact(
+            include_runtime=bool(active_stream_id),
+            active_stream_ids={active_stream_id} if active_stream_id else None,
+        )
+    except Exception:
+        payload = {"session_id": str(getattr(session, "session_id", "") or "")}
+    return {"session": payload}
+
+
+def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
+    return _shared_parse_run_journal_event_id(raw)
 
 
 def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int | None:
@@ -16728,6 +17147,168 @@ def _handle_sse_stream(handler, parsed):
             except Exception:
                 pass
     return True
+
+
+def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
+    if not _session_id_visible_to_request_profile(handler, session_id):
+        return True
+    try:
+        session = get_session(session_id, metadata_only=True)
+    except KeyError:
+        return j(handler, {"error": "Session not found"}, status=404)
+
+    # Parse the resume cursor and baseline the journal BEFORE committing SSE headers
+    # (and thus before any run could complete mid-handler). Capturing after
+    # end_sse_headers() leaves a window where a run finishing between header commit
+    # and baseline is absorbed into the baseline and silently lost. Both operations
+    # are side-effect-free (header read + stat-only fingerprint), safe pre-response.
+    resume_event_id = _session_events_resume_event_id(handler, parsed)
+    _idle_journal_fp = session_journal_fingerprint(session_id)
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
+    # EventSource reconnect storms in browsers on long-lived SSE.
+    end_sse_headers(handler)
+    _sse_set_write_deadline(handler)
+
+    active_stream_id = _active_run_stream_for_session(session_id)
+    subscriber = None
+    subscriber_stream = None
+    replay_cutoff_seq = None
+    sent_event_ids: set[str] = set()
+    sent_event_order = deque()
+
+    def note_sent_event_id(event_id):
+        if not event_id:
+            return
+        sent_event_ids.add(event_id)
+        sent_event_order.append(event_id)
+        while len(sent_event_order) > _SESSION_SSE_SENT_EVENT_ID_LIMIT:
+            sent_event_ids.discard(sent_event_order.popleft())
+
+    def attach_active_stream():
+        stream_id = _active_run_stream_for_session(session_id)
+        stream = STREAMS.get(stream_id) if stream_id else None
+        if stream is None:
+            return None, None, None, stream_id
+        if hasattr(stream, "subscribe_with_snapshot"):
+            queue_, snapshot = stream.subscribe_with_snapshot()
+        else:
+            queue_ = stream.subscribe() if hasattr(stream, "subscribe") else stream
+            snapshot = {}
+        return queue_, stream, snapshot, stream_id
+
+    def emit_replay(events, stream_id, cutoff_seq):
+        for entry in events:
+            event_id = str(entry.get("event_id") or "")
+            event_seq = _run_journal_same_run_seq(event_id, stream_id)
+            if cutoff_seq is not None and event_seq is not None and event_seq > cutoff_seq:
+                continue
+            if event_id and event_id in sent_event_ids:
+                continue
+            _sse_with_id(handler, entry.get("event") or entry.get("type") or "message", entry.get("payload"), event_id)
+            if event_id:
+                note_sent_event_id(event_id)
+
+    def emit_session_snapshot(active_stream_id):
+        try:
+            fresh_session = get_session(session_id, metadata_only=True)
+        except KeyError:
+            fresh_session = session
+        _sse(handler, "session_snapshot", _session_snapshot_payload(fresh_session, active_stream_id=active_stream_id))
+
+    try:
+        replay_events = []
+        replay_ok = False
+        if resume_event_id:
+            replay = read_session_run_events(session_id, after_event_id=resume_event_id)
+            if replay.get("status") != "ok":
+                emit_session_snapshot(active_stream_id)
+            else:
+                replay_ok = True
+                replay_events = replay.get("events") or []
+        subscriber, subscriber_stream, stream_snapshot, active_stream_id = attach_active_stream()
+        if subscriber is None:
+            if replay_ok:
+                emit_replay(replay_events, active_stream_id, None)
+            while True:
+                subscriber, subscriber_stream, stream_snapshot, active_stream_id = attach_active_stream()
+                if subscriber is not None:
+                    break
+                # Journal advanced with no live stream to attach → a run completed
+                # entirely within the wait (or the first attach). Re-sync via a
+                # snapshot boundary (the same honest-recovery contract used for a
+                # failed reconciliation), then re-baseline so we only re-sync on
+                # genuinely new advances.
+                _current_journal_fp = session_journal_fingerprint(session_id)
+                if _current_journal_fp != _idle_journal_fp:
+                    _idle_journal_fp = _current_journal_fp
+                    emit_session_snapshot(active_stream_id)
+                handler.wfile.write(b": keepalive\n\n")
+                handler.wfile.flush()
+                time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
+        if subscriber is None:
+            return True
+        if replay_ok:
+            replay_cutoff_seq = _run_journal_same_run_seq(str(stream_snapshot.get("last_event_id") or ""), active_stream_id)
+            reconciled = read_session_run_events(session_id, after_event_id=resume_event_id)
+            if reconciled.get("status") == "ok":
+                emit_replay(reconciled.get("events") or [], active_stream_id, replay_cutoff_seq)
+            else:
+                emit_session_snapshot(active_stream_id)
+        try:
+            while True:
+                try:
+                    item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                except queue.Empty:
+                    handler.wfile.write(b": keepalive\n\n")
+                    handler.wfile.flush()
+                    continue
+                if len(item) >= 3:
+                    event, data, queued_event_id = item[0], item[1], item[2]
+                else:
+                    event, data = item
+                    queued_event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
+                event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(active_stream_id)
+                event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
+                _is_terminal = event in ("stream_end", "error", "cancel")
+                _already_sent = (
+                    (replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq)
+                    or (event_id and event_id in sent_event_ids)
+                )
+                if _already_sent:
+                    # Already delivered via replay/reconciliation (cutoff or dedup).
+                    # A terminal event still has to end this loop — otherwise, when
+                    # reconciliation replayed the active run's terminal at the cutoff,
+                    # the live copy would be skipped here and the handler would stay
+                    # blocked on a dead run's queue and miss subsequent session runs.
+                    if _is_terminal:
+                        break
+                    continue
+                if event_id:
+                    _sse_with_id(handler, event, data, event_id)
+                    note_sent_event_id(event_id)
+                else:
+                    _sse(handler, event, data)
+                if _is_terminal:
+                    break
+        except _CLIENT_DISCONNECT_ERRORS:
+            pass
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass
+    finally:
+        if subscriber is not None and subscriber is not subscriber_stream and hasattr(subscriber_stream, "unsubscribe"):
+            try:
+                subscriber_stream.unsubscribe(subscriber)
+            except Exception:
+                pass
+    return True
+
+
+_handle_session_sse_stream_for_session = _handle_session_run_journal_stream_for_session
 
 
 def _terminal_session_lookup(body_or_query):
@@ -19929,6 +20510,7 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
+    s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
@@ -20368,6 +20950,57 @@ def _start_run(
     )
 
 
+def _process_wakeup_revalidation_provider(model, provider) -> str:
+    """Return the canonical provider id used for wakeup credential revalidation."""
+    try:
+        _resolved_model, resolved_provider = canonical_model_provider_lane(model, provider)
+    except Exception:
+        logger.debug(
+            "failed to canonicalize process_wakeup revalidation lane for model=%r provider=%r",
+            model,
+            provider,
+            exc_info=True,
+        )
+        resolved_provider = None
+    candidate = resolved_provider if resolved_provider else provider
+    return str(candidate or "").strip()
+
+
+def _process_wakeup_provider_has_recovery_credential(
+    session,
+    *,
+    model,
+    provider,
+    provider_id: str | None = None,
+) -> bool:
+    """Check paused credential-pool recovery in the owning session profile."""
+    provider_id = str(
+        provider_id or _process_wakeup_revalidation_provider(model, provider) or ""
+    ).strip()
+    if not provider_id:
+        return False
+    profile_name = str(getattr(session, "profile", "") or "").strip()
+    if profile_name and not _is_root_profile(profile_name):
+        with profile_scope_for_detached_worker(
+            profile_name,
+            "process_wakeup credential revalidation",
+            logger_override=logger,
+        ):
+            return provider_has_process_wakeup_recovery_credential(provider_id, refresh=True)
+    return provider_has_process_wakeup_recovery_credential(provider_id, refresh=True)
+
+
+def _refresh_process_wakeup_pause_credential_fingerprint(session) -> bool:
+    """Refresh the stored credential fingerprint without clearing the pause."""
+    pause = getattr(session, "process_wakeup_pause", None)
+    if not isinstance(pause, dict) or not pause.get("paused"):
+        return False
+    updated = dict(pause)
+    updated["credential_state_fingerprint"] = process_wakeup_credential_state_fingerprint(session)
+    session.process_wakeup_pause = updated
+    return True
+
+
 def start_session_turn(
     session_id: str,
     message: str,
@@ -20407,6 +21040,7 @@ def start_session_turn(
     msg = str(message or "").strip()
     if not msg:
         return {"error": "message is required", "_status": 400}
+    turn_source = str(source or "process_wakeup").strip() or "process_wakeup"
     try:
         s = get_session(session_id)
     except KeyError:
@@ -20435,6 +21069,118 @@ def start_session_turn(
         profile_config=_pp_cfg,
         prefer_cached_catalog=True,
     )
+    _paused_wakeup_response = None
+    with _get_session_agent_lock(s.session_id):
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            return {"error": "Session not found", "_status": 404}
+        if clear_process_wakeup_pause_if_model_changed(
+            s,
+            model=model,
+            provider=model_provider,
+        ):
+            try:
+                s.save(touch_updated_at=False)
+            except Exception:
+                logger.debug(
+                    "failed to persist process_wakeup pause reset for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+        if turn_source == "process_wakeup":
+            _credential_state_changed = False
+            try:
+                _credential_state_changed = process_wakeup_pause_credential_state_changed(s)
+            except Exception:
+                logger.debug(
+                    "failed to compare process_wakeup credential state for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+            if process_wakeup_pause_matches(
+                s,
+                model=model,
+                provider=model_provider,
+                classification='credential_pool_empty',
+            ):
+                _credential_recovered = False
+                _credential_revalidation_provider = _process_wakeup_revalidation_provider(
+                    model,
+                    model_provider,
+                )
+                try:
+                    _credential_recovered = _process_wakeup_provider_has_recovery_credential(
+                        s,
+                        model=model,
+                        provider=model_provider,
+                        provider_id=_credential_revalidation_provider,
+                    )
+                except Exception:
+                    logger.debug(
+                        "failed to revalidate process_wakeup credential availability for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                if _credential_recovered:
+                    _recovery_reason = (
+                        'credential_state_changed'
+                        if _credential_state_changed
+                        else 'credential_recovered'
+                    )
+                    if clear_process_wakeup_pause(s, reason=_recovery_reason):
+                        try:
+                            s.save(touch_updated_at=False)
+                        except Exception:
+                            logger.debug(
+                                "failed to persist process_wakeup credential recovery reset for session %s",
+                                session_id,
+                                exc_info=True,
+                            )
+                elif _credential_state_changed:
+                    if _refresh_process_wakeup_pause_credential_fingerprint(s):
+                        try:
+                            s.save(touch_updated_at=False)
+                        except Exception:
+                            logger.debug(
+                                "failed to persist process_wakeup credential-state fingerprint refresh for session %s",
+                                session_id,
+                                exc_info=True,
+                            )
+            _paused_wakeup = suppress_process_wakeup_for_provider_pause(
+                s,
+                model=model,
+                provider=model_provider,
+                classification='credential_pool_empty',
+            )
+            if _paused_wakeup is not None:
+                try:
+                    PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+                except Exception:
+                    logger.debug(
+                        "failed to discard pending bg-task marker for paused wakeup %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                try:
+                    s.save(touch_updated_at=False)
+                except Exception:
+                    logger.debug(
+                        "failed to persist process_wakeup suppression for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                _paused_wakeup_response = {
+                    "error": PROCESS_WAKEUP_PAUSE_ERROR,
+                    "message": (
+                        "Automatic process wakeups are paused for this session because "
+                        "the provider credential pool is unavailable."
+                    ),
+                    "process_wakeup_pause": _paused_wakeup,
+                    "_status": 409,
+                }
+    if _paused_wakeup_response is not None:
+        return _paused_wakeup_response
     resp = _start_run(
         s,
         msg=msg,
@@ -20443,7 +21189,7 @@ def start_session_turn(
         model=model,
         model_provider=model_provider,
         normalized_model=normalized_model,
-        source="process_wakeup",
+        source=turn_source,
         route="start_session_turn",
     )
 
@@ -20933,6 +21679,34 @@ def _handle_chat_start(handler, body, diag=None):
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
             explicit_model_pick=explicit_model_pick,
+        )
+        # #5979: record a SIGNATURE of the deliberately-picked model+provider so
+        # the streaming resolver can preserve a custom-proxy vendor namespace on a
+        # cold catalog — but ONLY while the routing context still matches. On a
+        # fresh explicit pick, stamp the signature of the resolved model+provider;
+        # otherwise leave any prior signature in place (it self-invalidates when
+        # the model/provider changes, since the streaming side recomputes and
+        # compares). This survives same-model follow-up sends (the onchange marker
+        # is one-shot) yet can't outlive a real switch.
+        try:
+            if explicit_model_pick:
+                from api.models import model_explicit_pick_signature as _mk_sig
+                s.model_explicit_pick_signature = _mk_sig(model, model_provider)
+        except Exception:
+            pass
+        catalog_profile_provider = _pp_provider
+        if catalog_profile_provider is None and isinstance(_pp_cfg, dict):
+            profile_model_config = _pp_cfg.get("model") or {}
+            if isinstance(profile_model_config, dict):
+                catalog_profile_provider = profile_model_config.get("provider")
+        model_provider = _repair_foreign_session_model_provider(
+            s,
+            requested_model=requested_model,
+            requested_provider=requested_provider,
+            resolved_model=model,
+            resolved_provider=model_provider,
+            explicit_model_pick=explicit_model_pick,
+            profile_provider=catalog_profile_provider,
         )
         if model_provider == "moa" and moa_config is None:
             if webui_gateway_chat_enabled(get_config()):
@@ -22570,7 +23344,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # Collect keys from both _pending and _gateway_queues
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
     all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
-    if choice in ("once", "session"):
+    if choice == "session":
         for k in all_keys:
             approve_session(sid, k)
     elif choice == "always":
@@ -22578,6 +23352,11 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
             approve_session(sid, k)
             approve_permanent(k)
         save_permanent_allowlist(_permanent_approved)
+    # choice == "once": no persistence — approval lasts this single call only.
+    # resolve_gateway_approval() below unblocks the parked agent thread for
+    # every choice, so "once" still lets the current tool run; we just must not
+    # call approve_session() here, or the next matching guarded call would find
+    # the pattern already session-approved and skip its approval card (#6017).
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.

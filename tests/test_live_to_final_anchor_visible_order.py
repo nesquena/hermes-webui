@@ -427,7 +427,10 @@ def test_live_processed_anchor_renders_before_first_activity_row():
     assert "turnStartedAt:S.session&&S.session.pending_started_at" in live
     assert "if(!S.session) return null;" in shell
     assert "const activeStreamId=S.activeStreamId||'';" in shell
-    assert "_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id, {mode:'compact_worklog'})" in shell
+    # #5942/#5943: the hardcoded {mode:'compact_worklog'} hint was removed so the
+    # helper resolves the user's ACTIVE display mode (a caller hint must not force
+    # compact onto a transparent turn). Assert the call is still wired, mode-free.
+    assert "_renderLiveAnchorActivitySceneForStream(activeStreamId, S.session.session_id)" in shell
     assert "if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();" in send
 
 
@@ -1012,7 +1015,7 @@ def test_live_anchor_scene_snapshot_renders_transparent_rows_before_compact_gate
     row = _function_body(UI_JS, "_anchorSceneTransparentNodeForRow")
 
     transparent_gate = "return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);"
-    compact_gate = "if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;"
+    compact_gate = "if(sceneMode!=='compact_worklog') return false;"
     assert transparent_gate in live
     assert compact_gate in live
     assert live.index(transparent_gate) < live.index(compact_gate), (
@@ -1184,6 +1187,7 @@ global.$=(id)=>{{
   return findById(msgInner,id);
 }};
 let transparentMode=true;
+global.chatActivityMode=()=>transparentMode?'transparent_stream':'compact_worklog';
 global.isTransparentStream=()=>transparentMode;
 global.isCompactWorklogMode=()=>!transparentMode;
 global._anchorSceneRowsForRendering=(scene)=>scene.activity_rows||[];
@@ -1600,7 +1604,9 @@ def test_session_switch_prefers_live_anchor_scene_before_snapshot_fallback():
     fallback = SESSIONS_JS.index("restoreLiveTurnHtmlForSession", first)
     assert first < fallback
     assert "let restoredLiveTurn=!!restoredAnchorScene;" in SESSIONS_JS
-    assert "{mode:'compact_worklog'}" in SESSIONS_JS
+    # #5942/#5943: the restore path no longer forces {mode:'compact_worklog'} — it
+    # resolves the active display mode so a transparent session restores as
+    # transparent (not a compact grouped frame). The call itself is asserted above.
 
 
 def test_session_reload_can_render_runtime_journal_anchor_scene_snapshot():

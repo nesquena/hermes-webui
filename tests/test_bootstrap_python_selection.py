@@ -72,6 +72,24 @@ def test_ensure_python_fails_loudly_when_no_interpreter_can_import_agent(monkeyp
         raise AssertionError("expected RuntimeError")
 
 
+def test_packaged_launch_disables_repo_local_venv_creation(monkeypatch, tmp_path):
+    local_python = tmp_path / "webui" / ".venv" / "bin" / "python"
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_DISABLE_LOCAL_VENV", "1")
+    monkeypatch.setattr(bootstrap, "_python_can_run_webui_and_agent", lambda *a, **k: False)
+
+    with patch.object(bootstrap.venv, "EnvBuilder") as mock_builder:
+        try:
+            bootstrap.ensure_python_has_webui_deps(str(local_python), tmp_path / "agent")
+        except RuntimeError as exc:
+            assert "local .venv creation is disabled" in str(exc)
+            assert "HERMES_WEBUI_PYTHON" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+    mock_builder.assert_not_called()
+
+
 def test_local_venv_is_created_with_symlinks(monkeypatch, tmp_path):
     """Regression: mise/asdf macOS Pythons need symlinks=True to avoid SIGABRT.
 

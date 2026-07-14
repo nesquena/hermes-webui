@@ -1307,6 +1307,8 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/sessions              List of all session compact() dicts, sorted by updated_at
     /api/list                  ?session_id=X&path=. -> directory listing for session workspace
     /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)
+    /share/<token>             Public read-only HTML shell for a sanitized shared transcript snapshot
+    /api/share/<token>         Public JSON payload for a sanitized shared transcript snapshot
     /api/chat/stream           ?stream_id=X -> SSE stream. Long-lived. Emits token/tool/
                                approval/done/error events.
     /api/chat/stream/status    ?stream_id=X -> {"active": true/false, "stream_id": X}
@@ -1327,6 +1329,8 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
                                -> blocks until agent finishes. Returns full result.
+    /api/share/create          {"session_id"} -> creates or refreshes a public read-only snapshot link
+    /api/share/revoke          {"session_id"} -> revokes the current public snapshot link
     /api/approval/respond      {"session_id", "choice": once|session|always|deny}
                                -> {"ok": true, "choice": choice}
 

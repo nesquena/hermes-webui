@@ -588,8 +588,13 @@ def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_te
     assert "_clearQueueCardDisplay(currentSid);" in load_body[cross_start:cross_end], (
         "queue-card clear helper must be inside the cross-session branch"
     )
-    same_session_idx = load_body.find("if(currentSid===sid && !forceReload && !_loadingSessionId) return;")
-    assert same_session_idx >= 0
+    same_session_idx = load_body.find(
+        "if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){"
+    )
+    assert same_session_idx >= 0, (
+        "same-session no-op guard must still exist (now a block that first clears "
+        "a stale unread dot before returning) and must precede the cross-session branch"
+    )
     assert same_session_idx < cross_start
 
 
