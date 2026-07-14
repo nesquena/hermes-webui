@@ -10742,48 +10742,88 @@ function _transparentToolSummary(tc){
   if(target) return target;
   return '';
 }
-function _showTransparentCopiedFeedback(control){
-  if(!control) return;
-  let state=control._transparentCopiedFeedback;
-  if(!state){
-    state={
-      innerHTML:control.innerHTML,
-      color:control.style?control.style.color:undefined,
-      styleCssText:control.style&&typeof control.style.cssText==='string'?control.style.cssText:null,
-      titleAttr:control.getAttribute?control.getAttribute('title'):null,
-      ariaLabel:control.getAttribute?control.getAttribute('aria-label'):null,
-      timer:null,
-      generation:0,
-    };
-    control._transparentCopiedFeedback=state;
+function _showTransparentCopiedFeedback(control,row,opts){
+  if(!control&&!row) return;
+  opts=opts||{};
+  // A live-row refresh may replace a header's copy control with new markup.
+  // Keep the lifetime on the persistent row, then resolve the currently visible
+  // control for every render/expiry rather than retaining a detached button.
+  const feedbackRow=row||(control&&control.closest?control.closest('.transparent-event-row'):null);
+  const owner=feedbackRow||control;
+  if(!owner) return;
+  const currentControl=()=>{
+    if(feedbackRow&&feedbackRow.querySelector){
+      return feedbackRow.querySelector('.transparent-event-copy,.thinking-copy-btn');
+    }
+    return control||null;
+  };
+  const restoreControl=(target)=>{
+    if(!target) return;
+    const normal=target._transparentCopiedFeedbackNormal;
+    if(!normal) return;
+    target.innerHTML=normal.innerHTML;
+    if(target.style){
+      if(normal.styleCssText!==null) target.style.cssText=normal.styleCssText;
+      else target.style.color=normal.color||'';
+    }
+    if(normal.titleAttr===null){
+      if(target.removeAttribute) target.removeAttribute('title');
+    }else if(target.setAttribute){
+      target.setAttribute('title',normal.titleAttr);
+    }
+    if(normal.ariaLabel===null){
+      if(target.removeAttribute) target.removeAttribute('aria-label');
+    }else if(target.setAttribute){
+      target.setAttribute('aria-label',normal.ariaLabel);
+    }
+    delete target._transparentCopiedFeedbackNormal;
+  };
+  const renderCopiedControl=(target)=>{
+    if(!target) return;
+    if(!target._transparentCopiedFeedbackNormal){
+      target._transparentCopiedFeedbackNormal={
+        innerHTML:target.innerHTML,
+        color:target.style?target.style.color:undefined,
+        styleCssText:target.style&&typeof target.style.cssText==='string'?target.style.cssText:null,
+        titleAttr:target.getAttribute?target.getAttribute('title'):null,
+        ariaLabel:target.getAttribute?target.getAttribute('aria-label'):null,
+      };
+    }
+    const copiedLabel=t('copied')||'Copied';
+    target.innerHTML=typeof li==='function'?li('check',11):'✓';
+    if(target.style) target.style.color='var(--accent)';
+    if(target.setAttribute) target.setAttribute('title',copiedLabel);
+    else target.title=copiedLabel;
+    if(target.setAttribute) target.setAttribute('aria-label',copiedLabel);
+  };
+  const now=Date.now();
+  let state=owner._transparentCopiedFeedback;
+  if(opts.rehydrate){
+    if(!state) return;
+    if(!state.expiresAt||state.expiresAt<=now){
+      if(state.timer) clearTimeout(state.timer);
+      restoreControl(currentControl());
+      if(owner._transparentCopiedFeedback===state) delete owner._transparentCopiedFeedback;
+      return;
+    }
+    renderCopiedControl(currentControl());
+    return;
   }
-  if(state.timer) clearTimeout(state.timer);
+  if(!state){
+    state={timer:null,generation:0,expiresAt:0};
+    owner._transparentCopiedFeedback=state;
+  }else if(state.timer){
+    clearTimeout(state.timer);
+  }
   state.generation+=1;
   const generation=state.generation;
-  const copiedLabel=t('copied')||'Copied';
-  control.innerHTML=typeof li==='function'?li('check',11):'✓';
-  if(control.style) control.style.color='var(--accent)';
-  if(control.setAttribute) control.setAttribute('title',copiedLabel);
-  else control.title=copiedLabel;
-  if(control.setAttribute) control.setAttribute('aria-label',copiedLabel);
+  state.expiresAt=now+1500;
+  renderCopiedControl(currentControl());
   state.timer=setTimeout(()=>{
-    if(control._transparentCopiedFeedback!==state||state.generation!==generation) return;
-    control.innerHTML=state.innerHTML;
-    if(control.style){
-      if(state.styleCssText!==null) control.style.cssText=state.styleCssText;
-      else control.style.color=state.color||'';
-    }
-    if(state.titleAttr===null){
-      if(control.removeAttribute) control.removeAttribute('title');
-    }else{
-      if(control.setAttribute) control.setAttribute('title',state.titleAttr);
-    }
-    if(state.ariaLabel===null){
-      if(control.removeAttribute) control.removeAttribute('aria-label');
-    }else if(control.setAttribute){
-      control.setAttribute('aria-label',state.ariaLabel);
-    }
-    delete control._transparentCopiedFeedback;
+    if(owner._transparentCopiedFeedback!==state||state.generation!==generation) return;
+    state.timer=null;
+    restoreControl(currentControl());
+    delete owner._transparentCopiedFeedback;
   },1500);
 }
 function _copyEventToClipboard(row,control){
@@ -10830,7 +10870,7 @@ function _copyEventToClipboard(row,control){
     text=row.textContent||'';
   }
   if(!text) return;
-  const copied=()=>_showTransparentCopiedFeedback(control);
+  const copied=()=>_showTransparentCopiedFeedback(control,row);
   const fallback=()=>{
     let ta=null;
     try{
@@ -10863,11 +10903,14 @@ function _attachCopyButton(header){
   if(!header) return null;
   const bindCopyButton=(btn)=>{
     if(!btn) return null;
+    const row=header.closest?header.closest('.transparent-event-row'):null;
+    const feedbackState=row&&row._transparentCopiedFeedback;
+    const feedbackActive=!!(feedbackState&&Number(feedbackState.expiresAt)>Date.now());
     btn.classList.add('transparent-event-copy');
     btn.setAttribute('role','button');
     btn.setAttribute('tabindex','0');
     btn.setAttribute('data-transparent-copy','1');
-    if(!btn._transparentCopiedFeedback){
+    if(!btn._transparentCopiedFeedback&&!feedbackActive){
       btn.setAttribute('aria-label',t('copy')||'Copy');
       btn.title=t('copy')||'Copy';
     }
@@ -10880,6 +10923,9 @@ function _attachCopyButton(header){
     btn.onkeydown=function(ev){
       if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();handler(ev);}
     };
+    if(btn.parentNode&&typeof _showTransparentCopiedFeedback==='function'){
+      _showTransparentCopiedFeedback(btn,row,{rehydrate:true});
+    }
     return btn;
   };
   // Reuse ANY existing copy button (handles both .transparent-event-copy
@@ -10902,6 +10948,8 @@ function _attachCopyButton(header){
   const toggle=header.querySelector('.tool-card-toggle,.thinking-card-toggle');
   if(toggle&&toggle.parentNode===header) header.insertBefore(btn,toggle);
   else header.appendChild(btn);
+  const row=header.closest?header.closest('.transparent-event-row'):null;
+  if(typeof _showTransparentCopiedFeedback==='function') _showTransparentCopiedFeedback(btn,row,{rehydrate:true});
   return btn;
 }
 function _transparentEventCountLabel(toolCount){

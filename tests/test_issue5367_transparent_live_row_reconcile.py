@@ -1979,6 +1979,7 @@ global.setTimeout = (fn, ms)=>{ const id=nextTimer++; timers.set(id,{ fn, ms });
 global.clearTimeout = (id)=>{ clearedTimers.push(id); timers.delete(id); };
 function runTimer(id){ const timer=timers.get(id); timers.delete(id); timer.fn(); }
 let clipboardMode = 'success';
+let deferredClipboardResolve = null;
 let fallbackResult = true;
 const writes = [];
 const toasts = [];
@@ -1986,6 +1987,9 @@ Object.defineProperty(global, 'navigator', {
   configurable:true,
   value:{ clipboard:{ writeText:(text)=>{
     writes.push(text);
+    if(clipboardMode === 'deferred'){
+      return new Promise(resolve=>{ deferredClipboardResolve=resolve; });
+    }
     return clipboardMode === 'success' ? Promise.resolve() : Promise.reject(new Error('denied'));
   } } },
 });
@@ -2015,6 +2019,19 @@ function eventProbe(){
   };
 }
 async function settle(){ await Promise.resolve(); await Promise.resolve(); }
+function replaceCopyControl(header, oldCopy, classes, original){
+  const replacement = element('button', classes);
+  replacement.innerHTML = original.html;
+  replacement.style.color = original.color;
+  replacement.setAttribute('title', original.title);
+  replacement.setAttribute('aria-label', original.aria);
+  oldCopy.remove();
+  const toggle = header.querySelector('.tool-card-toggle,.thinking-card-toggle');
+  if(toggle&&toggle.parentNode===header) header.insertBefore(replacement,toggle);
+  else header.appendChild(replacement);
+  _attachCopyButton(header);
+  return replacement;
+}
 
 (async()=>{
   const tool = toolRow();
@@ -2090,7 +2107,7 @@ async function settle(){ await Promise.resolve(); await Promise.resolve(); }
   await settle();
   const failure = {
     check:tool.copy.innerHTML.includes('data-icon="check"'),
-    feedbackState:!!tool.copy._transparentCopiedFeedback,
+    feedbackState:!!tool.row._transparentCopiedFeedback,
     toasts:toasts.slice(toastCountBeforeFailure).map(item=>item.message),
   };
 
@@ -2099,6 +2116,80 @@ async function settle(){ await Promise.resolve(); await Promise.resolve(); }
   const writesBeforeEmpty = writes.length;
   empty.copy.onclick(eventProbe());
   await settle();
+  const emptyCopySkipped = writes.length === writesBeforeEmpty && !empty.row._transparentCopiedFeedback;
+
+  // Copy success can settle after a live-row refresh has replaced the activated
+  // control. The row remains the owner, so the visible replacement receives the
+  // check and later restores its own normal presentation.
+  clipboardMode = 'deferred';
+  const race = toolRow();
+  _attachCopyButton(race.header);
+  let headerToggleCount = 0;
+  race.header.onclick = ()=>{ headerToggleCount += 1; };
+  const beforeSuccess = eventProbe();
+  race.copy.onclick(beforeSuccess);
+  const replacementBeforeSuccess = replaceCopyControl(race.header, race.copy, 'transparent-event-copy', {
+    html:'<svg data-original="replacement-before-success"></svg>',
+    color:'rgb(7, 8, 9)',
+    title:'Replacement before success title',
+    aria:'Replacement before success aria',
+  });
+  race.copy = replacementBeforeSuccess;
+  const beforeResolutionCheck = race.copy.innerHTML.includes('data-icon="check"');
+  deferredClipboardResolve();
+  await settle();
+  const firstRaceTimerId = race.row._transparentCopiedFeedback.timer;
+  const staleRaceTimer = timers.get(firstRaceTimerId).fn;
+  const replacementAfterSuccess = {
+    check:race.copy.innerHTML.includes('data-icon="check"'),
+    title:race.copy.title,
+    aria:race.copy.getAttribute('aria-label'),
+  };
+  const replacementDuringFeedback = {
+    html:'<svg data-original="replacement-during-feedback"></svg>',
+    color:'rgb(11, 12, 13)',
+    title:'Replacement during feedback title',
+    aria:'Replacement during feedback aria',
+  };
+  race.copy = replaceCopyControl(race.header, race.copy, 'transparent-event-copy', replacementDuringFeedback);
+  const inheritedDuringFeedback = {
+    check:race.copy.innerHTML.includes('data-icon="check"'),
+    title:race.copy.title,
+    aria:race.copy.getAttribute('aria-label'),
+  };
+  clipboardMode = 'success';
+  race.copy.onclick(eventProbe());
+  await settle();
+  const latestRaceTimerId = race.row._transparentCopiedFeedback.timer;
+  const latestRaceTimerDuration = timers.get(latestRaceTimerId).ms;
+  staleRaceTimer();
+  const staleTimerDidNotClearLatest = race.copy.innerHTML.includes('data-icon="check"');
+  runTimer(latestRaceTimerId);
+  const replacementRestored = {
+    html:race.copy.innerHTML,
+    color:race.copy.style.color,
+    title:race.copy.title,
+    aria:race.copy.getAttribute('aria-label'),
+  };
+
+  clipboardMode = 'deferred';
+  const thinkingRace = thinkingRow('rebound transparent reasoning');
+  _attachCopyButton(thinkingRace.header);
+  thinkingRace.copy.onclick(eventProbe());
+  thinkingRace.copy = replaceCopyControl(thinkingRace.header, thinkingRace.copy, 'thinking-copy-btn', {
+    html:'<svg data-original="thinking-replacement"></svg>',
+    color:'rgb(14, 15, 16)',
+    title:'Thinking replacement title',
+    aria:'Thinking replacement aria',
+  });
+  deferredClipboardResolve();
+  await settle();
+  const thinkingRaceCheck = {
+    count:thinkingRace.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn').length,
+    bound:typeof thinkingRace.copy.onclick === 'function' && typeof thinkingRace.copy.onkeydown === 'function',
+    check:thinkingRace.copy.innerHTML.includes('data-icon="check"'),
+  };
+  runTimer(thinkingRace.row._transparentCopiedFeedback.timer);
 
   process.stdout.write(JSON.stringify({
     firstState,
@@ -2110,7 +2201,18 @@ async function settle(){ await Promise.resolve(); await Promise.resolve(); }
     thinkingState,
     fallbackSuccess,
     failure,
-    emptyCopySkipped:writes.length === writesBeforeEmpty && !empty.copy._transparentCopiedFeedback,
+    emptyCopySkipped,
+    replacementRace:{
+      beforeResolutionCheck,
+      replacementAfterSuccess,
+      inheritedDuringFeedback,
+      latestRaceTimerDuration,
+      staleTimerDidNotClearLatest,
+      replacementRestored,
+      oneFunctionalControl:race.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn').length === 1 && typeof race.copy.onclick === 'function',
+      activationDidNotToggle:beforeSuccess.stopped && beforeSuccess.prevented && headerToggleCount === 0,
+    },
+    thinkingReplacementRace:thinkingRaceCheck,
   }));
 })().catch(error=>{ console.error(error); process.exit(1); });
 """
@@ -2145,3 +2247,31 @@ async function settle(){ await Promise.resolve(); await Promise.resolve(); }
         "toasts": ["Copy failed"],
     }
     assert data["emptyCopySkipped"] is True
+    assert data["replacementRace"] == {
+        "beforeResolutionCheck": False,
+        "replacementAfterSuccess": {
+            "check": True,
+            "title": "Copied",
+            "aria": "Copied",
+        },
+        "inheritedDuringFeedback": {
+            "check": True,
+            "title": "Copied",
+            "aria": "Copied",
+        },
+        "latestRaceTimerDuration": 1500,
+        "staleTimerDidNotClearLatest": True,
+        "replacementRestored": {
+            "html": '<svg data-original="replacement-during-feedback"></svg>',
+            "color": "rgb(11, 12, 13)",
+            "title": "Replacement during feedback title",
+            "aria": "Replacement during feedback aria",
+        },
+        "oneFunctionalControl": True,
+        "activationDidNotToggle": True,
+    }
+    assert data["thinkingReplacementRace"] == {
+        "count": 1,
+        "bound": True,
+        "check": True,
+    }
