@@ -32,9 +32,9 @@ def test_new_session_remembers_regular_empty_session_id():
     end = SESSIONS_JS.find("async function loadSession(", start)
     assert start != -1 and end != -1, "newSession block not found"
     body = SESSIONS_JS[start:end]
-    assign_idx = body.find("S.session=data.session")
+    assign_idx = body.find("setWorkspaceSearchSession(data.session)")
     remember_idx = body.find("_rememberNewChatDraftSession(S.session)")
-    assert assign_idx != -1, "newSession must assign S.session from the POST response"
+    assert assign_idx != -1, "newSession must accept the POST session payload before draft tracking"
     assert remember_idx > assign_idx, "newSession must remember the created empty session id"
     assert "if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);" in body, (
         "worktree-backed new sessions must not become New Chat draft candidates"

@@ -296,7 +296,7 @@ def test_compression_exhausted_apperror_clears_reference_ui_and_labels_error():
     assert "const eventSid=d.old_session_id||d.session_id||'';" in block
     assert "const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';" in block
     assert "if(d.session&&typeof d.session==='object')" in block
-    assert "S.session=d.session;" in block
+    assert "setWorkspaceSearchSession(d.session);" in block
 
 
 def test_apperror_matches_only_current_or_continuation_session_for_background_errors():

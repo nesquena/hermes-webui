@@ -673,7 +673,7 @@ def test_populate_model_dropdown_accepts_session_visit_freshness_and_guards_stal
 def test_load_session_schedules_session_visit_model_refresh_before_message_load():
     body = _extract_function_body(_read_static("sessions.js"), "async function loadSession(")
 
-    assign_idx = body.index("S.session=data.session")
+    assign_idx = body.index("setWorkspaceSearchSession(data.session)")
     message_load_idx = body.index("await _ensureMessagesLoaded(sid", assign_idx)
     failure_return_idx = body.index("return;", message_load_idx)
     model_block_idx = body.index("if(typeof populateModelDropdown==='function')", assign_idx)

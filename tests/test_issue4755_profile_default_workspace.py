@@ -97,6 +97,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
           activeProfile:'default',
           toolCalls:[],
         }};
+        function setWorkspaceSearchSession(session){{S.session=session;return true;}}
         global.window={{}};
         global.document={{createElement:()=>({{dataset:{{}},appendChild:()=>{{}}}})}};
         global.localStorage={{setItem:()=>{{}}}};

@@ -33,7 +33,7 @@ def test_load_session_initial_metadata_request_defers_model_resolution_until_aft
     body = _extract_function(SESSIONS_JS, "async function loadSession(sid")
     fast_metadata_fetch = "messages=0&resolve_model=0"
     deferred_metadata_fetch = "messages=0&resolve_model=1"
-    assignment = "S.session=data.session"
+    assignment = "setWorkspaceSearchSession(data.session)"
 
     assert fast_metadata_fetch in body[: body.index(assignment)], (
         "loadSession() first paint must use the metadata fast path so session "
