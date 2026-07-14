@@ -7596,7 +7596,11 @@ def _worktree_default_from_config(profile: str | None) -> bool:
             cfg_dict = get_config_for_profile_home(get_hermes_home_for_profile(profile))
         else:
             cfg_dict = get_config_for_profile_home(None)
-        return bool((cfg_dict or {}).get("worktree", False))
+        # Strict boolean: only a real YAML `true` opts in.  Any other shape
+        # ("true", 1, [], {}, null, ...) is malformed for this key and must
+        # fall to the safe no-worktree default rather than truthiness-coerce
+        # into minting worktrees.
+        return (cfg_dict or {}).get("worktree", False) is True
     except Exception:
         # Config resolution must never break session creation.
         logger.warning("failed to read worktree config default", exc_info=True)
@@ -13914,7 +13918,11 @@ def handle_post(handler, parsed) -> bool:
         # worktree (e.g. the boot-time auto-bind) send ``worktree: false``
         # explicitly.
         raw_worktree = body.get("worktree")
-        worktree_explicit = raw_worktree is not None
+        # Presence-based, not truthiness-based: a client that sends the key at
+        # all (even ``worktree: null``) has spoken explicitly and never falls
+        # through to the config default.  ``null`` parses as non-true below,
+        # i.e. an explicit opt-out — only a genuinely ABSENT key inherits.
+        worktree_explicit = "worktree" in body
         if worktree_explicit:
             worktree_requested = (
                 raw_worktree is True

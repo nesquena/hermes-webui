@@ -6303,7 +6303,9 @@ async function promptWorkspacePath(){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws)return;
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): worktree:false is explicit so a config
+      // worktree default can't leak a worktree from a workspace prompt.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
@@ -6339,7 +6341,9 @@ async function switchToWorkspace(path,name){
     const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): explicit worktree:false — a workspace
+      // switch from a blank page is not deliberate New Chat intent.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
@@ -7128,7 +7132,7 @@ async function switchToProfile(name) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible});
+      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
       if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.

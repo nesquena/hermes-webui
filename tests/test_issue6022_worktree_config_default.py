@@ -142,6 +142,27 @@ def test_explicit_false_beats_config_default_true(tmp_path, monkeypatch):
     assert session.get("worktree_path") in (None, "")
 
 
+def test_explicit_null_beats_config_default_true(tmp_path, monkeypatch):
+    """Sending the key at all — even ``worktree: null`` — is an explicit
+    statement and must never fall through to the config default."""
+    repo, worktree = _mk_repo_dirs(tmp_path)
+
+    def _fail(workspace):
+        pytest.fail("worktree must not be created when body sends worktree=null")
+
+    monkeypatch.setattr(worktrees, "create_worktree_for_workspace", _fail)
+    captured = _post_session_new(
+        tmp_path,
+        monkeypatch,
+        {"workspace": str(repo), "profile": "default", "worktree": None},
+        config_default=True,
+        workspace_dir=repo,
+    )
+    assert captured["status"] == 200
+    session = captured["payload"]["session"]
+    assert session.get("worktree_path") in (None, "")
+
+
 def test_explicit_true_with_config_default_off_creates_worktree(tmp_path, monkeypatch):
     repo, worktree = _mk_repo_dirs(tmp_path)
     captured = _post_session_new(
@@ -222,6 +243,25 @@ def test_worktree_default_resolves_named_profile_home(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "get_config_for_profile_home", fake_cfg)
     assert routes._worktree_default_from_config("work") is True
     assert seen["home"] == tmp_path / "work"
+
+
+def test_worktree_default_requires_strict_boolean_true(monkeypatch):
+    """Only a real YAML ``true`` opts in — malformed shapes (quoted strings,
+    ints, lists, dicts, null) must fall to the safe no-worktree default, not
+    truthiness-coerce into minting worktrees."""
+    for malformed in ("true", "yes", 1, [True], {"enabled": True}, None, 0, ""):
+        monkeypatch.setattr(
+            routes,
+            "get_config_for_profile_home",
+            lambda home, _v=malformed: {"worktree": _v},
+        )
+        assert routes._worktree_default_from_config(None) is False, (
+            f"non-boolean config value {malformed!r} must not enable worktrees"
+        )
+    monkeypatch.setattr(
+        routes, "get_config_for_profile_home", lambda home: {"worktree": True}
+    )
+    assert routes._worktree_default_from_config(None) is True
 
 
 def test_worktree_default_is_fail_soft_on_config_errors(monkeypatch):
