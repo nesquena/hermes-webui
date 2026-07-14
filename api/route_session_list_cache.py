@@ -222,6 +222,14 @@ def _session_list_cache_set(key: tuple, payload: dict) -> None:
 
 
 def _session_list_cache_clear(profile: str | None = None) -> None:
+    # #5455: invalidate the short-lived stamp cache so any poll arriving
+    # immediately after a structural session change computes a fresh
+    # source stamp instead of returning the cached pre-change one.
+    try:
+        with _SOURCE_STAMP_CACHE_LOCK:
+            _SOURCE_STAMP_CACHE.clear()
+    except Exception:
+        pass
     normalized_profile = _session_list_cache_profile_scope(profile) if profile else None
     with _SESSIONS_CACHE_LOCK:
         global _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION
