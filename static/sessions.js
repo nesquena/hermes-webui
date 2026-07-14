@@ -1776,6 +1776,15 @@ async function loadSession(sid){
   }
   if (currentSid !== sid && typeof window !== 'undefined' && typeof window._beginSessionSwitchLayoutStabilization === 'function') {
     try { window._beginSessionSwitchLayoutStabilization(sid, _loadGeneration); } catch (_) {}
+  } else if (sameSessionForceReload && typeof window !== 'undefined' && typeof window._endSessionSwitchLayoutStabilization === 'function') {
+    // A same-session force reload does NOT open a new stabilization (the
+    // currentSid===sid gate above skips _begin), but it IS the authoritative
+    // current load. If an older cross-session load left stabilization active
+    // (e.g. its async settle is still pending when the user force-reloads the
+    // same session), nothing else would retire it and the transcript could stay
+    // forced-visible / min-height-pinned. Force-retire + invalidate it now so
+    // the reload starts from a clean layout state.
+    try { window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, true); } catch (_) {}
   }
   if (currentSid !== sid && typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
     try { window._resetScrollDirectionTracker(); } catch (_) {}
@@ -1992,6 +2001,17 @@ async function loadSession(sid){
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
     if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
+    // Settle session-switch stabilization for the INFLIGHT streaming-restore
+    // path. This branch renders + reattaches the live stream and then returns
+    // without falling through to the idle/attach settle below, so without this
+    // the stabilization opened at _begin (currentSid!==sid) would never be
+    // released (begin=1 / settle=0 / end=0) — leaving the transcript
+    // forced-visible / min-height-pinned for the rest of the session. Pass the
+    // streaming flag: the live turn keeps growing, so we must not arm the
+    // ResizeObserver (it would chase the stream and never settle).
+    if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._settleSessionSwitchLayoutStabilization==='function'){
+      window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration, true);
+    }
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.

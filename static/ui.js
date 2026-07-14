@@ -5135,6 +5135,10 @@ let _sessionSwitchLayoutStabilizationObserver=null;
 let _sessionSwitchLayoutPostProcessPending=0;
 let _sessionSwitchLayoutSettleRequested=false;
 let _liveAnchorScrollRebuildGeneration=0;
+// Cleanup ownership for the live-anchor min-height guard, tracked separately
+// from the render/session generation so a no-guard rebuild can't strand
+// min-height set (see _prepareLiveAnchorScrollRebuildGuard).
+let _liveAnchorMinHeightGuardOwner=0;
 function _endSessionSwitchLayoutStabilization(loadGeneration,token,force){
   // `force` lets the authoritative current load retire stabilization owned by
   // an older load it superseded (e.g. a forced reload of the incoming session
@@ -12094,9 +12098,26 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
   }
   const guardHeight=Math.max(messagesEl.scrollHeight,Number(scrollSnapshot.scrollHeight)||0);
   if(guardHeight>0) msgInner.style.minHeight=`${guardHeight}px`;
+  // Min-height cleanup ownership is tracked SEPARATELY from the render/session
+  // generation. Every rebuild advances the render generation (used to guard the
+  // stale-snapshot restore), but only a rebuild that actually installs a
+  // min-height guard takes cleanup ownership. This lets the release closure
+  // decide correctly in both overlap cases:
+  //   - A newer rebuild that installs its OWN guard bumps the owner, so the
+  //     older release no-ops (the newer one will restore the true original) —
+  //     no torn-down active guard.
+  //   - A newer rebuild that installs NO guard (reader re-pinned / session
+  //     switch) leaves the owner untouched, so THIS release still runs and
+  //     min-height can never be stranded set (the no-successor leak).
+  const guardOwnerToken=++_liveAnchorMinHeightGuardOwner;
+  let released=false;
   return {
     readerAwayFromBottom:true,
     release:()=>{
+      // Only the current cleanup owner may restore. If a newer guard superseded
+      // us, it owns min-height now and will release its own value.
+      if(released||guardOwnerToken!==_liveAnchorMinHeightGuardOwner) return;
+      released=true;
       msgInner.style.minHeight=previousMinHeight;
       if(msgInner.dataset&&msgInner.dataset[guardPreviousKey]===previousMinHeight){
         delete msgInner.dataset[guardPreviousKey];
@@ -12169,13 +12190,12 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   if(scrollRebuildGuard&&scrollRebuildGuard.release){
     requestAnimationFrame(()=>{
-      // Guard the release itself: a newer rebuild (B) may have installed its own
-      // min-height guard before this older callback (A) runs. A's release()
-      // would restore the value A saved and tear down B's active guard, causing
-      // an intermediate height collapse and viewport movement. Only release when
-      // we still own the current guard; otherwise B owns it and will restore the
-      // true original via its own dataset-backed release.
-      if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;
+      // release() is self-owning: it restores min-height only if THIS guard is
+      // still the cleanup owner (a newer guard-installing rebuild bumps the
+      // owner and releases its own value; a newer no-guard rebuild leaves us the
+      // owner so we still release). So call it unconditionally here — gating it
+      // on the render generation would strand min-height set when a no-guard
+      // successor advanced the generation without taking cleanup ownership.
       scrollRebuildGuard.release();
       // Releasing the temporary min-height changes layout. Restoring in this
       // SAME callback reads the pre-release geometry and lands one frame early.
@@ -12294,13 +12314,11 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   if(scrollRebuildGuard&&scrollRebuildGuard.release){
     requestAnimationFrame(()=>{
-      // Guard the release itself: a newer rebuild may have installed its own
-      // min-height guard before this older callback runs. Releasing here would
-      // restore this callback's saved value and tear down the newer guard,
-      // collapsing height and moving the viewport. Only release when we still
-      // own the current guard; otherwise the newer rebuild restores the true
-      // original via its own dataset-backed release.
-      if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;
+      // release() is self-owning (see renderLiveAnchorActivityScene): it restores
+      // min-height only when THIS guard is still the cleanup owner, so call it
+      // unconditionally. Gating on the render generation would strand min-height
+      // set when a no-guard successor advanced the generation without taking
+      // cleanup ownership.
       scrollRebuildGuard.release();
       requestAnimationFrame(()=>{
         if(scrollRebuildIdentity&&typeof _liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity)) return;
@@ -17765,29 +17783,38 @@ function loadPdfInline(container){
     };
     if(_pdfjsReady){
       loadPdf(window._pdfjsLib);
-    } else if(!_pdfjsLoading){
-      _pdfjsLoading=true;
-      const _pdfSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
-      const _pdfWorker='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
-      const _pdfBlob=new Blob([`import*as p from'${_pdfSrc}';p.GlobalWorkerOptions.workerSrc='${_pdfWorker}';window._pdfjsLib=p;window._pdfjsReady=true;window.dispatchEvent(new Event('pdfjs-ready'));`],{type:'application/javascript'});
-      const s=document.createElement('script');
-      s.type='module';
-      const _pdfBlobUrl=URL.createObjectURL(_pdfBlob);
-      s.src=_pdfBlobUrl;
-      s.onload=()=>URL.revokeObjectURL(_pdfBlobUrl);
-      document.head.appendChild(s);
-      window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
-      setTimeout(()=>{
-        if(!_pdfjsReady){
-          const dlUrl=publicMediaUrl+'&download=1';
-          if(el.parentNode){
-            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
-          }
-          releaseMarker();
-        }
-      },15000);
     } else {
-      window.addEventListener('pdfjs-ready',()=>{ loadPdf(window._pdfjsLib); },{once:true});
+      // pdfjs is loaded once and shared across every PDF in the render. Kick off
+      // the loader on the first PDF that needs it, but give EVERY waiting PDF —
+      // not just the loader owner — its own pdfjs-ready listener AND its own
+      // bounded timeout that releases THIS el's stabilization marker. Otherwise
+      // a shared loader failure (CDN blocked) fires the owner's timeout only,
+      // stranding every other waiter's marker so stabilization never settles.
+      if(!_pdfjsLoading){
+        _pdfjsLoading=true;
+        const _pdfSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+        const _pdfWorker='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+        const _pdfBlob=new Blob([`import*as p from'${_pdfSrc}';p.GlobalWorkerOptions.workerSrc='${_pdfWorker}';window._pdfjsLib=p;window._pdfjsReady=true;window.dispatchEvent(new Event('pdfjs-ready'));`],{type:'application/javascript'});
+        const s=document.createElement('script');
+        s.type='module';
+        const _pdfBlobUrl=URL.createObjectURL(_pdfBlob);
+        s.src=_pdfBlobUrl;
+        s.onload=()=>URL.revokeObjectURL(_pdfBlobUrl);
+        s.onerror=()=>{ _pdfjsLoading=false; };
+        document.head.appendChild(s);
+      }
+      window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
+      // Per-el bounded cleanup: if pdfjs is still not ready after the cap, render
+      // this el's fallback (once) and release this el's marker so a stalled or
+      // failed shared loader can't leave stabilization pending indefinitely.
+      setTimeout(()=>{
+        if(_pdfjsReady||_pdfMkDone) return;
+        const dlUrl=publicMediaUrl+'&download=1';
+        if(el.parentNode){
+          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+        }
+        releaseMarker();
+      },15000);
     }
   });
 }

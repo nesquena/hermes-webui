@@ -109,7 +109,9 @@ def test_session_switch_wires_begin_before_reset_and_settle_after_both_render_br
     settle_idle = "window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration);"
     assert begin in load
     assert load.index(begin) < load.index(reset)
-    assert load.count(settle_streaming) == 1
+    # Two streaming settles now: the INFLIGHT streaming-restore branch and the
+    # post-await activeStreamId attach branch. Both opt out of the observer.
+    assert load.count(settle_streaming) == 2
     assert load.count(settle_idle) == 1
     for marker, settle in (
         ("if(activeStreamId){", settle_streaming),
@@ -124,15 +126,64 @@ def test_live_anchor_scroll_guard_restores_after_release_layout_frame():
         body = _function_body(UI_JS, name)
         compact = re.sub(r"\s+", "", body)
         release = "scrollRebuildGuard.release();"
-        # The release() call must itself be gated on still owning the guard, so a
-        # superseded older callback cannot restore its stale min-height and tear
-        # down a newer rebuild's active guard.
-        guarded_release = "if(scrollRebuildIdentity&&typeof_liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity))return;scrollRebuildGuard.release();"
-        assert guarded_release in compact, f"{name}: release() must be identity-gated"
-        nested = "requestAnimationFrame(()=>{if(scrollRebuildIdentity&&typeof_liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity))return;if(_messageUserUnpinned)_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);});"
+        # release() must be called UNCONDITIONALLY here (not gated on the render
+        # generation). Ownership is enforced INSIDE release() via a separate
+        # min-height cleanup owner token, so gating the call on the render
+        # generation would strand min-height set whenever a no-guard successor
+        # advanced the generation without taking cleanup ownership (the leak the
+        # maintainer flagged). The following-frame snapshot restore stays gated.
         assert release in compact
+        gated_release = "_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity))return;scrollRebuildGuard.release();"
+        assert gated_release not in compact, f"{name}: release() must NOT be render-generation gated"
+        nested = "requestAnimationFrame(()=>{if(scrollRebuildIdentity&&typeof_liveAnchorScrollRebuildGuardCurrent==='function'&&!_liveAnchorScrollRebuildGuardCurrent(scrollRebuildIdentity))return;if(_messageUserUnpinned)_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);});"
         assert nested in compact
         assert compact.index(release) < compact.index(nested)
+
+
+def test_min_height_guard_release_ownership_survives_no_guard_successor():
+    """The min-height cleanup guard must own its release via a token tracked
+    SEPARATELY from the render/session generation. Every rebuild advances the
+    render generation, but only a guard-installing rebuild takes cleanup
+    ownership — so a later no-guard rebuild (reader re-pinned / session switch)
+    can't invalidate an older release and strand msgInner.style.minHeight set
+    (the permanent-frozen-layout leak, which could regress desktop too).
+    """
+    prep = _function_body(UI_JS, "_prepareLiveAnchorScrollRebuildGuard")
+    # A dedicated owner counter, distinct from _liveAnchorScrollRebuildGeneration.
+    assert "_liveAnchorMinHeightGuardOwner" in prep
+    assert "const guardOwnerToken=++_liveAnchorMinHeightGuardOwner;" in prep
+    # release() no-ops unless THIS guard is still the current cleanup owner.
+    assert "if(released||guardOwnerToken!==_liveAnchorMinHeightGuardOwner) return;" in prep
+    # Only a guard-installing prepare bumps the owner: the early no-guard returns
+    # must happen BEFORE the owner is taken.
+    assert prep.index("return {readerAwayFromBottom:false,release:null};") < prep.index("++_liveAnchorMinHeightGuardOwner")
+    assert prep.index("return {readerAwayFromBottom:true,release:null};") < prep.index("++_liveAnchorMinHeightGuardOwner")
+    # The owner global is declared once.
+    assert UI_JS.count("let _liveAnchorMinHeightGuardOwner=0;") == 1
+
+
+def test_inflight_streaming_restore_settles_stabilization():
+    """The INFLIGHT streaming-restore branch renders + reattaches and returns
+    without falling through to the idle/attach settle, so it must settle
+    stabilization itself (with the streaming flag) — otherwise begin=1/settle=0/
+    end=0 leaves the transcript forced-visible for the whole session.
+    """
+    load = _function_body(SESSIONS_JS, "loadSession")
+    inflight = load[load.index("if(INFLIGHT[sid]){"):load.index("}else{\n    // Phase 2b")]
+    assert "window._settleSessionSwitchLayoutStabilization(sid, _loadGeneration, true);" in inflight, \
+        "INFLIGHT streaming-restore branch must settle with the streaming flag"
+
+
+def test_same_session_force_reload_force_retires_prior_stabilization():
+    """A same-session force reload skips _begin (currentSid===sid) but is the
+    authoritative current load, so it must force-retire + invalidate any prior
+    stabilization left active by an older cross-session load, or the transcript
+    can stay forced-visible / min-height-pinned.
+    """
+    load = _function_body(SESSIONS_JS, "loadSession")
+    # The else-branch of the _begin gate handles same-session force reload.
+    assert "} else if (sameSessionForceReload && typeof window !== 'undefined' && typeof window._endSessionSwitchLayoutStabilization === 'function') {" in load
+    assert "window._endSessionSwitchLayoutStabilization(_loadGeneration, undefined, true);" in load
 
 
 def test_session_switch_has_no_fixed_load_expiry_and_postprocess_is_event_driven():
@@ -227,10 +278,6 @@ def test_async_pdf_and_yaml_processors_hold_pending_marker_until_completion():
     assert "_pdfMkDone" in pdf
 
     tree = _function_body(UI_JS, "initTreeViews")
-    # The deferred js-yaml path holds a marker across the async lib load + the
-    # re-run that inserts the tree DOM, releasing it from the settle callback so
-    # a CDN failure (onerror, which never invokes cb) still clears the pending
-    # count instead of wedging the quiet check forever.
     assert "_beginSessionSwitchLayoutPostProcess()" in tree
     assert "_loadJsyamlThen(" in tree
     assert "_endSessionSwitchLayoutPostProcess(yamlMarker)" in tree
@@ -238,3 +285,29 @@ def test_async_pdf_and_yaml_processors_hold_pending_marker_until_completion():
     loader = _function_body(UI_JS, "_loadJsyamlThen")
     assert "s.onerror=()=>{ _jsyamlLoading=false; if(settle) settle(); }" in loader
     assert "s.onload=()=>{ _jsyamlLoading=false; try{ cb(); } finally{ if(settle) settle(); } }" in loader
+
+
+def test_multi_pdf_shared_loader_failure_releases_every_waiter():
+    """pdfjs is loaded once and shared. When two PDFs are pending and the shared
+    loader fails/stalls, EVERY waiter must release its own marker — not just the
+    loader owner — or a blocked CDN strands the other waiters' markers and
+    stabilization never settles. The fix gives each waiting el its own bounded
+    timeout (outside the `!_pdfjsLoading` owner block) that releases its own
+    marker, plus an onerror reset so a failed load doesn't wedge _pdfjsLoading.
+    """
+    pdf = _function_body(UI_JS, "loadPdfInline")
+    compact = re.sub(r"\s+", "", pdf)
+    # The per-el timeout must live in the shared else-branch, NOT nested inside
+    # the `if(!_pdfjsLoading)` owner-only block. Assert the timeout guard + its
+    # release are present and reference the per-el done flag (so it runs for
+    # every waiter, and no-ops if the el already settled).
+    assert "if(_pdfjsReady||_pdfMkDone)return;" in compact, \
+        "each waiting PDF must have its own bounded cleanup timeout"
+    # The owner block resets _pdfjsLoading on script error so a failed shared
+    # load can be retried and doesn't permanently block future PDFs.
+    assert "s.onerror=()=>{_pdfjsLoading=false;};" in compact
+    # The pdfjs-ready listener is registered for every waiter (outside the owner
+    # block), so a late success still renders all pending PDFs.
+    owner_block = pdf[pdf.index("if(!_pdfjsLoading){"):pdf.index("window.addEventListener('pdfjs-ready'")]
+    assert "setTimeout(" not in owner_block, \
+        "the bounded cleanup timeout must be per-el (outside the loader-owner block)"
