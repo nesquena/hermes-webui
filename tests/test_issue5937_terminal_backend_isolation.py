@@ -1310,3 +1310,28 @@ def test_api_chat_sync_lease_survives_setup_and_restore_failure():
     release = src.find("_terminal_backend_lease.release()", restore)
     nested_finally = src.rfind("finally:", restore, release)
     assert 0 < restore < nested_finally < release
+
+
+def test_api_chat_sync_identity_comes_from_resolved_profile_not_raw_environ():
+    """Source guard (#5988 P1 / greptile): /api/chat must build the lease
+    identity from THIS request's RESOLVED profile overlay + stamped
+    HERMES_HOME, not raw process-global os.environ (which a concurrent
+    streaming turn owns for its whole run). Building it from live os.environ
+    would let a sync turn reuse the streaming profile's cached backend."""
+    start = ROUTES_PY.find("def _handle_chat_sync(")
+    end = ROUTES_PY.find("\ndef ", start + 1)
+    src = ROUTES_PY[start:end]
+    # The raw-os.environ acquire is gone.
+    assert "acquire_turn_lease_failclosed(dict(os.environ))" not in src
+    # The profile is resolved and overlaid, HERMES_HOME stamped, and THAT
+    # snapshot is what the lease is acquired from.
+    resolve = src.find("get_hermes_home_for_profile(")
+    overlay = src.find("_effective_turn_env.update(_chat_safe_profile_env)")
+    stamp = src.find('_effective_turn_env["HERMES_HOME"] = _chat_profile_home')
+    acquire = src.find("acquire_turn_lease_failclosed(_effective_turn_env)")
+    assert 0 < resolve < overlay < acquire
+    assert 0 < stamp < acquire
+    # And the resolved profile env is actually APPLIED for the turn (so the
+    # agent creates the backend the identity names), then restored.
+    assert "os.environ.update(_chat_safe_profile_env)" in src
+    assert "for _pk, _pv in _old_profile_env.items():" in src
