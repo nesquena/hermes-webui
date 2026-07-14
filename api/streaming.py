@@ -7195,6 +7195,15 @@ def _run_agent_streaming(
 
         _effective_turn_env = dict(os.environ)
         _effective_turn_env.update(_safe_profile_runtime_env)
+        # #5988 round 5: the identity must reflect THIS turn's profile, not
+        # whatever HERMES_HOME the shared process env currently carries (a
+        # prior turn's, applied to os.environ only later at the mutation
+        # below). Stamp the RESOLVED profile home so two profiles can never
+        # share a backend identity. The forwarded-secret VALUES are already
+        # present via _safe_profile_runtime_env (the profile's .env), which
+        # terminal_backend_identity() now fingerprints.
+        if _profile_home:
+            _effective_turn_env['HERMES_HOME'] = _profile_home
         _terminal_backend_lease, _ = acquire_turn_lease_failclosed(
             _effective_turn_env
         )
@@ -9994,35 +10003,41 @@ def _run_agent_streaming(
                     _unreg_clarify_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
-            with _ENV_LOCK:
-                for _key, _old_value in old_profile_env.items():
-                    if _old_value is None: os.environ.pop(_key, None)
-                    else: os.environ[_key] = _old_value
-                if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
-                else: os.environ['TERMINAL_CWD'] = old_cwd
-                if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
-                else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
-                if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
-                else: os.environ['HERMES_SESSION_KEY'] = old_session_key
-                if old_session_id is None: os.environ.pop('HERMES_SESSION_ID', None)
-                else: os.environ['HERMES_SESSION_ID'] = old_session_id
-                if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
-                else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
-                if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
-                else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
-                if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
-                else: os.environ['HERMES_HOME'] = old_hermes_home
-            # #5937: release this turn's backend-identity lease AFTER the env
-            # restore so a waiting differing-backend turn can't invalidate
-            # while this turn's environment is still nominally in effect.
-            if _terminal_backend_lease is not None:
-                try:
-                    _terminal_backend_lease.release()
-                except Exception:
-                    logger.debug(
-                        "terminal backend lease release failed (#5937)",
-                        exc_info=True,
-                    )
+            try:
+                with _ENV_LOCK:
+                    for _key, _old_value in old_profile_env.items():
+                        if _old_value is None: os.environ.pop(_key, None)
+                        else: os.environ[_key] = _old_value
+                    if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
+                    else: os.environ['TERMINAL_CWD'] = old_cwd
+                    if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
+                    else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
+                    if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
+                    else: os.environ['HERMES_SESSION_KEY'] = old_session_key
+                    if old_session_id is None: os.environ.pop('HERMES_SESSION_ID', None)
+                    else: os.environ['HERMES_SESSION_ID'] = old_session_id
+                    if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
+                    else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
+                    if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
+                    else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
+                    if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
+                    else: os.environ['HERMES_HOME'] = old_hermes_home
+            finally:
+                # #5937: release this turn's backend-identity lease AFTER the env
+                # restore so a waiting differing-backend turn can't invalidate
+                # while this turn's environment is still nominally in effect.
+                # #5988 round 5 (lease-leak): NESTED in a finally so the ordered
+                # primary release runs even if the env restore above raises —
+                # the outer-finally backstop is then the second line of defense,
+                # not the only path that frees the lease.
+                if _terminal_backend_lease is not None:
+                    try:
+                        _terminal_backend_lease.release()
+                    except Exception:
+                        logger.debug(
+                            "terminal backend lease release failed (#5937)",
+                            exc_info=True,
+                        )
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)

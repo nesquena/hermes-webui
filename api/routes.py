@@ -21861,14 +21861,26 @@ def _handle_chat_sync(handler, body):
     except TerminalBackendIsolationError as e:
         return j(handler, {"error": str(e)}, status=503)
 
-    with _ENV_LOCK:
-        old_cwd = os.environ.get("TERMINAL_CWD")
-        os.environ["TERMINAL_CWD"] = str(workspace)
-        old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
-        old_session_key = os.environ.get("HERMES_SESSION_KEY")
-        os.environ["HERMES_EXEC_ASK"] = "1"
-        os.environ["HERMES_SESSION_KEY"] = s.session_id
+    # #5988 round 5 (lease-leak): the env mutation, agent run, env restore, and
+    # lease release all live under ONE guaranteed teardown. The release is in
+    # the OUTER finally so it runs even if (a) the env MUTATION below raises
+    # before the run — previously it sat between the acquire and the protecting
+    # try, so a throw there leaked the lease with no backstop on this path — or
+    # (b) the env RESTORE raises during teardown. release() is idempotent, so
+    # this never double-frees another turn's count.
+    # Pre-bind so the restore in the finally can never NameError even if the
+    # mutation below raises before binding them.
+    old_cwd = old_exec_ask = old_session_key = None
     try:
+        with _ENV_LOCK:
+            # Capture ALL prior values before mutating any, so a set that
+            # raises still leaves an accurate restore snapshot.
+            old_cwd = os.environ.get("TERMINAL_CWD")
+            old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
+            old_session_key = os.environ.get("HERMES_SESSION_KEY")
+            os.environ["TERMINAL_CWD"] = str(workspace)
+            os.environ["HERMES_EXEC_ASK"] = "1"
+            os.environ["HERMES_SESSION_KEY"] = s.session_id
         from run_agent import AIAgent
 
         with CHAT_LOCK:
@@ -21967,23 +21979,26 @@ def _handle_chat_sync(handler, body):
                 persist_user_message=msg,
             )
     finally:
-        with _ENV_LOCK:
-            if old_cwd is None:
-                os.environ.pop("TERMINAL_CWD", None)
-            else:
-                os.environ["TERMINAL_CWD"] = old_cwd
-            if old_exec_ask is None:
-                os.environ.pop("HERMES_EXEC_ASK", None)
-            else:
-                os.environ["HERMES_EXEC_ASK"] = old_exec_ask
-            if old_session_key is None:
-                os.environ.pop("HERMES_SESSION_KEY", None)
-            else:
-                os.environ["HERMES_SESSION_KEY"] = old_session_key
-        # Release AFTER the env restore: a waiter admitted by this release
-        # must never observe this turn's TERMINAL_* mutations. release() is
-        # idempotent (#5937).
-        _terminal_backend_lease.release()
+        try:
+            with _ENV_LOCK:
+                if old_cwd is None:
+                    os.environ.pop("TERMINAL_CWD", None)
+                else:
+                    os.environ["TERMINAL_CWD"] = old_cwd
+                if old_exec_ask is None:
+                    os.environ.pop("HERMES_EXEC_ASK", None)
+                else:
+                    os.environ["HERMES_EXEC_ASK"] = old_exec_ask
+                if old_session_key is None:
+                    os.environ.pop("HERMES_SESSION_KEY", None)
+                else:
+                    os.environ["HERMES_SESSION_KEY"] = old_session_key
+        finally:
+            # #5988 round 5 (lease-leak): NESTED in a finally so the release
+            # runs even if the env restore above raises. Ordered AFTER the
+            # restore so a waiter admitted by this release never observes this
+            # turn's TERMINAL_* mutations. release() is idempotent (#5937).
+            _terminal_backend_lease.release()
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(

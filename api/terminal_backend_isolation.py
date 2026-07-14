@@ -55,6 +55,7 @@ probe layer here shrink to a single verified call.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
@@ -147,21 +148,96 @@ def _env_json(runtime_env: Mapping[str, str], key: str, default: str) -> str:
         return raw
 
 
+def _forwarded_secret_fingerprint(runtime_env: Mapping[str, str]) -> str:
+    """SHA-256 (truncated) over the (name, value) pairs the backend forwards
+    from the host env into the sandbox (#5988 round 5).
+
+    The backend identity already fingerprints ``TERMINAL_DOCKER_FORWARD_ENV``
+    as a LIST of names, but the agent forwards each name's live VALUE into the
+    container. Two profiles that forward the same var NAMES with DIFFERENT
+    values (e.g. ``TENOR_API_KEY=alpha-secret`` vs ``beta-secret``) therefore
+    produced byte-identical identities and could reuse each other's cached
+    container carrying the other profile's secret. This folds the forwarded
+    values in — hashed, so no secret value ever appears in the identity tuple
+    or the logs that print it. Returns "" when nothing is forwarded.
+
+    ``TERMINAL_DOCKER_ENV`` (explicit key→value map) is NOT included here: it is
+    already value-complete in the backend identity via ``_env_json``.
+    """
+    raw = _env_value(runtime_env, "TERMINAL_DOCKER_FORWARD_ENV", "[]")
+    seed = ""
+    names: list[str] = []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        # Unparseable list: fail closed — fold the raw text in so two different
+        # malformed values still differ, and enumerate nothing.
+        seed = "raw:" + raw
+    else:
+        if isinstance(parsed, list):
+            names = [str(n) for n in parsed]
+        else:
+            seed = "raw:" + raw
+    if not names and not seed:
+        return ""
+    parts = [seed]
+    for name in sorted(set(names)):
+        value = runtime_env.get(name)
+        # Distinguish "forwarded but unset" (None) from "forwarded empty" ("").
+        marker = "\x00" if value is None else "\x01"
+        parts.append(f"{name}{marker}{'' if value is None else value}")
+    material = "\x1e".join(parts)
+    return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _profile_identity_suffix(runtime_env: Mapping[str, str]) -> tuple[str, ...]:
+    """Profile-boundary components appended to EVERY backend identity so two
+    distinct profiles never share a cached backend (#5988 round 5).
+
+    ``HERMES_HOME`` (the profile) is the coarse, universal boundary — it
+    applies to every backend type, including a persistent LOCAL shell that
+    inherits the host env. The forwarded-secret fingerprint is the
+    finer guard for same-home turns whose forwarded credential VALUES differ.
+    Appended (not prepended) so callers that read ``identity[0]`` for the
+    backend type — e.g. the ``_FORCE_REMOVE_ENV_TYPES`` check — keep working.
+    """
+    return (
+        "home",
+        _env_value(runtime_env, "HERMES_HOME"),
+        "fwd",
+        _forwarded_secret_fingerprint(runtime_env),
+    )
+
+
 def terminal_backend_identity(runtime_env: Mapping[str, str]) -> tuple[str, ...]:
     """Return a stable identity for the terminal backend encoded in *runtime_env*.
 
     Every setting the agent's ``get_config()`` feeds into creating the
     *active* backend's environment participates (#5988 round 4: two turns are
     same-identity only when environment creation would consume identical
-    inputs). Inactive backends' settings are excluded — an SSH host left over
-    in env must not change a local backend's identity. Absent keys are
-    normalized to the agent's defaults so ``{}`` and
-    ``{"TERMINAL_SSH_PORT": "22"}`` cannot disagree. Deliberately excluded:
-    CWD (two same-backend sessions with different workspaces share one cache
-    slot by design) and per-command knobs that don't shape the environment
-    object (TERMINAL_TIMEOUT, TERMINAL_MAX_FOREGROUND_TIMEOUT,
-    TERMINAL_DISK_WARNING_GB, TERMINAL_LIFETIME_SECONDS).
+    inputs), AND the profile boundary is part of the identity (#5988 round 5:
+    ``HERMES_HOME`` + a fingerprint of the forwarded-secret values, so two
+    profiles can never share a cached backend carrying the other's secret).
+    Inactive backends' settings are excluded — an SSH host left over in env
+    must not change a local backend's identity. Absent keys are normalized to
+    the agent's defaults so ``{}`` and ``{"TERMINAL_SSH_PORT": "22"}`` cannot
+    disagree. Deliberately excluded: CWD (two same-backend sessions with
+    different workspaces share one cache slot by design) and per-command knobs
+    that don't shape the environment object (TERMINAL_TIMEOUT,
+    TERMINAL_MAX_FOREGROUND_TIMEOUT, TERMINAL_DISK_WARNING_GB,
+    TERMINAL_LIFETIME_SECONDS).
+
+    *runtime_env* must be an identity-complete, profile-safe snapshot — the
+    effective turn env with ``HERMES_HOME`` stamped to the RESOLVED profile
+    home, not raw live ``os.environ`` (whose ``HERMES_HOME`` may still be a
+    previous turn's). The streaming and ``/api/chat`` turn paths build it.
     """
+    return _backend_identity_tuple(runtime_env) + _profile_identity_suffix(runtime_env)
+
+
+def _backend_identity_tuple(runtime_env: Mapping[str, str]) -> tuple[str, ...]:
+    """The backend-specific identity (without the profile suffix). ``[0]`` is
+    the backend type, which ``_invalidate_default_env`` reads."""
     env_type = _env_value(runtime_env, "TERMINAL_ENV", "local").lower()
     if env_type == "ssh":
         return (
@@ -191,7 +267,11 @@ def terminal_backend_identity(runtime_env: Mapping[str, str]) -> tuple[str, ...]
             _env_value(
                 runtime_env, "TERMINAL_CONTAINER_DISK", _AGENT_DEFAULT_CONTAINER_DISK
             ),
-            _env_json(runtime_env, "TERMINAL_DOCKER_FORWARD_ENV", "[]"),
+            # TERMINAL_DOCKER_FORWARD_ENV is represented by the profile suffix's
+            # forwarded-secret fingerprint (#5988 round 5) — order-independent
+            # over the name SET and value-complete — so it is intentionally not
+            # a separate backend-tuple field (which would over-split on mere
+            # list-order differences).
             _env_json(runtime_env, "TERMINAL_DOCKER_VOLUMES", "[]"),
             _env_json(runtime_env, "TERMINAL_DOCKER_ENV", "{}"),
             _env_json(runtime_env, "TERMINAL_DOCKER_EXTRA_ARGS", "[]"),

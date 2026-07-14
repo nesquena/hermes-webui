@@ -1167,3 +1167,146 @@ def test_api_chat_sync_handler_is_under_the_same_lease():
     restore_idx = handler_src.find('os.environ["HERMES_SESSION_KEY"] = old_session_key')
     release_idx = handler_src.find("_terminal_backend_lease.release()")
     assert 0 < restore_idx < release_idx
+
+
+# ── Round 5: profile-complete, profile-safe identity ─────────────────────────
+#
+# Gate #5988 round 5 [CORE]: the identity that gates backend reuse omitted the
+# profile (HERMES_HOME) and the forwarded-secret VALUES, so two profiles with
+# identical backend config produced byte-identical identities and one could
+# reuse the other's cached container carrying the other profile's secret.
+
+ALPHA = {
+    **DOCKER_A,
+    "HERMES_HOME": "/profiles/alpha",
+    "TERMINAL_DOCKER_FORWARD_ENV": '["TENOR_API_KEY"]',
+    "TENOR_API_KEY": "alpha-secret",
+}
+BETA = {
+    **DOCKER_A,
+    "HERMES_HOME": "/profiles/beta",
+    "TERMINAL_DOCKER_FORWARD_ENV": '["TENOR_API_KEY"]',
+    "TENOR_API_KEY": "beta-secret",
+}
+
+
+def test_backend_type_still_readable_at_index_0():
+    """The profile components are APPENDED, so callers that read identity[0]
+    for the backend type (e.g. the _FORCE_REMOVE_ENV_TYPES check) keep working."""
+    assert isolation.terminal_backend_identity({})[0] == "local"
+    assert isolation.terminal_backend_identity(SSH)[0] == "ssh"
+    assert isolation.terminal_backend_identity(DOCKER_A)[0] == "docker"
+
+
+def test_identity_carries_profile_suffix():
+    ident = isolation.terminal_backend_identity(
+        {"TERMINAL_ENV": "local", "HERMES_HOME": "/h"}
+    )
+    assert "home" in ident and "/h" in ident and "fwd" in ident
+
+
+def test_distinct_profile_homes_split_identity_even_with_identical_backend():
+    """The reproduced cross-profile leak: identical backend config, different
+    profile — identities MUST differ so no reuse is possible."""
+    assert isolation.terminal_backend_identity(ALPHA) != isolation.terminal_backend_identity(BETA)
+
+
+def test_hermes_home_splits_even_a_local_backend():
+    """Profile boundary is universal — a persistent LOCAL shell inherits the
+    host env, so two profiles must not share one local slot either."""
+    a = isolation.terminal_backend_identity({"TERMINAL_ENV": "local", "HERMES_HOME": "/a"})
+    b = isolation.terminal_backend_identity({"TERMINAL_ENV": "local", "HERMES_HOME": "/b"})
+    assert a != b
+    assert a[0] == "local"
+
+
+def test_same_home_different_forwarded_secret_value_splits_identity():
+    base = {**DOCKER_A, "HERMES_HOME": "/p/x", "TERMINAL_DOCKER_FORWARD_ENV": '["TENOR_API_KEY"]'}
+    a = isolation.terminal_backend_identity({**base, "TENOR_API_KEY": "aaa"})
+    b = isolation.terminal_backend_identity({**base, "TENOR_API_KEY": "bbb"})
+    assert a != b
+
+
+def test_forwarded_secret_value_never_appears_in_identity_tuple():
+    """The fingerprint is a hash — the raw secret must not leak into the
+    identity tuple (which gets logged)."""
+    ident = isolation.terminal_backend_identity(
+        {**DOCKER_A, "TERMINAL_DOCKER_FORWARD_ENV": '["TENOR_API_KEY"]', "TENOR_API_KEY": "top-secret-value"}
+    )
+    assert "top-secret-value" not in "\x1e".join(map(str, ident))
+
+
+def test_forwarded_env_unset_vs_empty_value_differ():
+    fwd = '["K"]'
+    unset = isolation.terminal_backend_identity({**DOCKER_A, "TERMINAL_DOCKER_FORWARD_ENV": fwd})
+    empty = isolation.terminal_backend_identity({**DOCKER_A, "TERMINAL_DOCKER_FORWARD_ENV": fwd, "K": ""})
+    assert unset != empty
+
+
+def test_forwarded_fingerprint_is_forward_list_order_stable():
+    a = isolation.terminal_backend_identity(
+        {**DOCKER_A, "TERMINAL_DOCKER_FORWARD_ENV": '["A","B"]', "A": "1", "B": "2"}
+    )
+    b = isolation.terminal_backend_identity(
+        {**DOCKER_A, "TERMINAL_DOCKER_FORWARD_ENV": '["B","A"]', "A": "1", "B": "2"}
+    )
+    assert a == b
+
+
+def test_no_forwarded_env_yields_empty_fingerprint():
+    assert isolation._forwarded_secret_fingerprint({}) == ""
+    assert isolation._forwarded_secret_fingerprint({"TERMINAL_DOCKER_FORWARD_ENV": "[]"}) == ""
+
+
+def test_distinct_profiles_do_not_reuse_a_cached_backend(monkeypatch):
+    """End-to-end: alpha commits a docker identity and seeds its container;
+    a beta turn (different home + secret) must NOT reuse it — it triggers a
+    verified transition (force-remove alpha's container), not a silent share."""
+    agent = FakeAgent()
+    patch_probes(monkeypatch, agent)
+    # alpha first use: slot observed absent, commits, no cleanup
+    assert one_shot(agent, ALPHA) is False
+    cid = agent.seed_docker()  # alpha's container now cached under "default"
+    # beta arrives: different identity → transition, force-remove alpha's cid
+    assert one_shot(agent, BETA) is True
+    assert agent.cleanup_calls == [("default", True)]
+    assert cid not in agent.containers
+    with isolation._COND:
+        assert isolation._last_backend_identity == isolation.terminal_backend_identity(BETA)
+
+
+# ── Round 5: lease-leak on synchronous setup / restore failure ───────────────
+
+
+def test_streaming_stamps_profile_home_and_nests_the_release():
+    """Source guard: the streaming identity snapshot stamps the RESOLVED
+    profile home (not stale os.environ), and the primary release is nested in
+    a finally so a restore failure can't skip it."""
+    assert "_effective_turn_env['HERMES_HOME'] = _profile_home" in STREAMING_PY
+    restore = STREAMING_PY.find("for _key, _old_value in old_profile_env.items()")
+    assert restore > 0
+    release = STREAMING_PY.find("_terminal_backend_lease.release()", restore)
+    # a `finally:` sits between the restore loop and the primary release
+    nested_finally = STREAMING_PY.rfind("finally:", restore, release)
+    assert 0 < restore < nested_finally < release
+
+
+def test_api_chat_sync_lease_survives_setup_and_restore_failure():
+    """Source guard (#5988 round 5 lease-leak): in _handle_chat_sync the env
+    MUTATION is inside the guarded try (round-4 left it between the acquire and
+    the try → a throw leaked the lease with no backstop), and the release is
+    NESTED in a finally so a restore failure can't skip it."""
+    start = ROUTES_PY.find("def _handle_chat_sync(")
+    end = ROUTES_PY.find("\ndef ", start + 1)
+    src = ROUTES_PY[start:end]
+    acquire = src.find("acquire_turn_lease_failclosed(")
+    assert acquire > 0
+    guarded_try = src.find("\n    try:", acquire)
+    mutation = src.find('os.environ["TERMINAL_CWD"] = str(workspace)', acquire)
+    # mutation is AFTER the guarding try opens (i.e. inside it), not before it
+    assert 0 < acquire < guarded_try < mutation
+    # release is nested under a finally that follows the restore
+    restore = src.find('os.environ.pop("TERMINAL_CWD", None)', mutation)
+    release = src.find("_terminal_backend_lease.release()", restore)
+    nested_finally = src.rfind("finally:", restore, release)
+    assert 0 < restore < nested_finally < release
