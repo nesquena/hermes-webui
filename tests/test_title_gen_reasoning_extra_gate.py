@@ -16,6 +16,7 @@ class TestAuxReasoningExtraRouteContract:
         assert _route_accepts_reasoning_extra('deepseek', 'deepseek-reasoner', '') is True
         assert _route_accepts_reasoning_extra('anthropic', 'claude-sonnet-4-6', '') is True
         assert _route_accepts_reasoning_extra('lmstudio', 'qwen3-8b', '') is True
+        assert _route_accepts_reasoning_extra('google-gemini', 'gemini-2.5-pro', '') is True
 
     def test_known_reject_routes_omit_suppression(self):
         assert _route_accepts_reasoning_extra('openai', 'gpt-5', 'https://api.openai.com/v1') is False

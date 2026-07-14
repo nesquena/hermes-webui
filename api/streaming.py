@@ -48,6 +48,7 @@ from api.config import (
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
     _PROVIDER_MODELS,
     _PROVIDER_DISPLAY,
+    _resolve_provider_alias,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -3274,7 +3275,8 @@ def _route_accepts_reasoning_extra(provider: str = '', model: str = '', base_url
     # Provider IDs from the built-in catalog resolve their endpoint in the
     # client.  Do not mistake an implicit URL for an unresolved custom route.
     builtin_providers = set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY)
-    if provider_lower in builtin_providers:
+    provider_canonical = str(_resolve_provider_alias(provider_lower) or '').strip().lower()
+    if provider_canonical in builtin_providers:
         return True
 
     # Provider can be omitted for an implicit MiniMax configuration.  Its
