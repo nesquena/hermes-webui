@@ -16726,9 +16726,12 @@ function _toolReadRangeLabel(tc){
   const offset=args.offset;
   if(!Number.isSafeInteger(offset)||offset<=0) return '';
   const limit=args.limit;
-  if(!Number.isSafeInteger(limit)||limit<=1) return `L${offset}`;
-  const end=offset+limit-1;
-  return Number.isSafeInteger(end)?`L${offset}-${end}`:`L${offset}`;
+  if(limit===undefined) return `L${offset}`;
+  if(!Number.isSafeInteger(limit)||limit<=0) return '';
+  if(limit===1) return `L${offset}`;
+  const span=limit-1;
+  if(offset>Number.MAX_SAFE_INTEGER-span) return '';
+  return `L${offset}-${offset+span}`;
 }
 function _toolFullCommandLabel(tc){
   // Full (multi-line) shell command for the EXPANDED detail lead. Mirrors the
