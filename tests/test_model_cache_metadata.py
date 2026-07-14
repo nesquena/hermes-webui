@@ -26,7 +26,7 @@ def test_save_models_cache_to_disk_preserves_response_metadata(tmp_path, monkeyp
             {
                 "provider": "OpenAI",
                 "provider_id": "openai",
-                "models": [{"id": "gpt-5.4-mini", "label": "GPT 5.4 Mini"}],
+                "models": [{"id": "gpt-5.4-mini", "label": "GPT 5.4 Mini", "supports_fast_tier": True}],
             }
         ],
     }

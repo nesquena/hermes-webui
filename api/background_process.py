@@ -57,6 +57,14 @@ _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
 _REAPER_INTERVAL_SECS = 60.0
 
+# Serializes the check-then-start of the module's daemon threads
+# (``start_drain_thread`` / ``start_session_channel_reaper``). Without it two
+# concurrent callers can both observe ``is_alive() == False`` and each spawn a
+# thread; the loser's thread is never referenced by the module global and runs
+# forever, un-joinable. A dedicated lock (not the purpose-bound
+# ``SESSION_CHANNELS_LOCK`` / ``_EMIT_COALESCE_LOCK``) keeps this narrow.
+_THREAD_LIFECYCLE_LOCK = threading.Lock()
+
 # T3: per-session coalesce gate for the public bg_task_complete SSE emit.
 # The server-side wakeup path remains immediate; only the browser-observation
 # frame is throttled so a burst of background task completions does not flood an
@@ -377,6 +385,32 @@ def _reaper_loop() -> None:
                     for sid in collected:
                         _LAST_EMIT_TS.pop(sid, None)
                 logger.debug("SessionChannel reaper collected: %s", collected)
+            # Sweep the per-session completion-dedup map by DELIVERY lifecycle,
+            # not channel collection. ``BG_TASK_COMPLETE_EVENTS_SEEN`` gains a
+            # ``session_id -> set[process_id]`` entry the first time a bg task
+            # completes for a session — in ``_process_one``, whether or not any
+            # tab/SSE channel ever existed — and is otherwise never deleted, so it
+            # grows unbounded. Coupling the prune to channel collection (an
+            # earlier version of this fix) missed the dominant case: a headless
+            # completion (task fires, tab closed or never opened) has no channel
+            # to collect. Instead, once a completion has been drained (its
+            # ``session_id`` removed from ``PENDING_BG_TASK_COMPLETIONS``), the
+            # short ``_move_to_finished`` dedup window is closed and the entry is
+            # pure leak — so sweep every delivered (not-pending) session here,
+            # every tick. The registry's own per-``process_id``
+            # ``_completion_consumed`` gate remains the primary idempotency
+            # backstop, so sweeping a delivered session's set can never resurrect
+            # an already-delivered completion (even in the tiny window between
+            # this module's ``SEEN.add`` and ``PENDING.add`` in ``_process_one``).
+            from api import config as _cfg
+
+            with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+                for sid in [
+                    s
+                    for s in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN
+                    if s not in _cfg.PENDING_BG_TASK_COMPLETIONS
+                ]:
+                    _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)
         # Wait but wake up promptly on stop.
@@ -387,16 +421,17 @@ def _reaper_loop() -> None:
 def start_session_channel_reaper() -> bool:
     """Start the SessionChannel reaper thread. Idempotent; returns True on first start."""
     global _REAPER_THREAD
-    if _REAPER_THREAD is not None and _REAPER_THREAD.is_alive():
-        return False
-    _REAPER_STOP.clear()
-    _REAPER_THREAD = threading.Thread(
-        target=_reaper_loop,
-        name="hermes-webui-session-channel-reaper",
-        daemon=True,
-    )
-    _REAPER_THREAD.start()
-    return True
+    with _THREAD_LIFECYCLE_LOCK:
+        if _REAPER_THREAD is not None and _REAPER_THREAD.is_alive():
+            return False
+        _REAPER_STOP.clear()
+        _REAPER_THREAD = threading.Thread(
+            target=_reaper_loop,
+            name="hermes-webui-session-channel-reaper",
+            daemon=True,
+        )
+        _REAPER_THREAD.start()
+        return True
 
 
 def stop_session_channel_reaper(timeout: float = 2.0) -> None:
@@ -1239,7 +1274,12 @@ def _start_server_side_wakeup_turn(
                 session_id, wakeup_prompt, source="process_wakeup"
             )
             status = int((resp or {}).get("_status", 200) or 200)
-            if status == 409:
+            if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                logger.info(
+                    "server-side wakeup suppressed for session %s: provider credential state is paused",
+                    session_id,
+                )
+            elif status == 409:
                 # Raced an active turn (e.g. a human /api/chat/start, or a
                 # sibling deferred-wakeup thread). Re-defer this prompt so it
                 # is delivered by the winning turn's teardown / next-turn drain
@@ -1290,10 +1330,28 @@ def _drain_loop() -> None:
         return
     logger.info("bg_task_complete drain thread started")
     while not _DRAIN_STOP.is_set():
+        # Read the queue defensively: a rebuilt/partially-initialized registry
+        # may not expose ``completion_queue`` (mirrors streaming.py's
+        # ``getattr(process_registry, 'completion_queue', None)`` guard). Direct
+        # attribute access here would raise AttributeError, which the old broad
+        # ``except Exception: continue`` swallowed silently and re-tried with no
+        # backoff — a 100%-CPU tight loop. Back off on the stop event instead.
+        q = getattr(process_registry, "completion_queue", None)
+        if q is None:
+            _DRAIN_STOP.wait(1.0)
+            continue
         try:
-            evt = process_registry.completion_queue.get(timeout=1.0)
+            evt = q.get(timeout=1.0)
+        except queue.Empty:
+            # Nothing to drain this second — re-check the stop flag and loop.
+            continue
         except Exception:
-            # queue.Empty or transient — re-check stop flag and continue.
+            # Unexpected queue failure: log it (not silent) and back off on the
+            # stop event so a persistent error can't spin the thread hot.
+            logger.warning(
+                "bg_task_complete drain queue read failed", exc_info=True
+            )
+            _DRAIN_STOP.wait(1.0)
             continue
         if not isinstance(evt, dict):
             continue
@@ -1328,19 +1386,35 @@ def unregister_process_session(session_key: str) -> None:
         _cfg.PROCESS_SESSION_INDEX.pop(str(session_key), None)
 
 
+def forget_bg_task_completion_dedup(session_id: str) -> None:
+    """Drop a session's ``BG_TASK_COMPLETE_EVENTS_SEEN`` entry.
+
+    Called on session deletion so a session deleted while a completion is still
+    pending (undelivered) — which the reaper's delivery-gated sweep deliberately
+    keeps — can't leak its dedup set forever. Safe for unknown ids (no-op).
+    """
+    if not session_id:
+        return
+    from api import config as _cfg
+
+    with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+        _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(str(session_id), None)
+
+
 def start_drain_thread() -> bool:
     """Start the background drain thread idempotently. Returns True on first start."""
     global _DRAIN_THREAD
-    if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
-        return False
-    _DRAIN_STOP.clear()
-    _DRAIN_THREAD = threading.Thread(
-        target=_drain_loop,
-        name="hermes-webui-bg-task-complete-drain",
-        daemon=True,
-    )
-    _DRAIN_THREAD.start()
-    return True
+    with _THREAD_LIFECYCLE_LOCK:
+        if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
+            return False
+        _DRAIN_STOP.clear()
+        _DRAIN_THREAD = threading.Thread(
+            target=_drain_loop,
+            name="hermes-webui-bg-task-complete-drain",
+            daemon=True,
+        )
+        _DRAIN_THREAD.start()
+        return True
 
 
 def stop_drain_thread(timeout: float = 2.0) -> None:

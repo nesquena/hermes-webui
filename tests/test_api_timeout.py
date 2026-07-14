@@ -211,10 +211,14 @@ def test_update_flows_keep_explicit_longer_timeouts():
     """Legitimately long update flows should not inherit the generic 30s guard."""
     src = _source(UI_JS)
     panels = _source(PANELS_JS)
-    assert "api('/api/updates/check',{method:'POST',body:JSON.stringify({force:true}),timeoutMs:60000})" in panels
+    # /api/updates/check builds its body in a _checkBody var (to optionally add
+    # an explicit channel), but must still carry the 60s timeout override.
+    assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000})" in panels
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
-    assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000})" in src
-    assert "api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000})" in src
+    # apply/force now build their body inline to optionally carry the offered
+    # channel (Codex debounce-race fix), but MUST still carry the 120s override.
+    assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000})" in src
+    assert "api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000})" in src
 
 
 def test_session_message_loads_keep_explicit_longer_timeouts():

@@ -588,8 +588,13 @@ def test_queue_card_cross_session_helper_used_only_for_session_change(cleanup_te
     assert "_clearQueueCardDisplay(currentSid);" in load_body[cross_start:cross_end], (
         "queue-card clear helper must be inside the cross-session branch"
     )
-    same_session_idx = load_body.find("if(currentSid===sid && !forceReload && !_loadingSessionId) return;")
-    assert same_session_idx >= 0
+    same_session_idx = load_body.find(
+        "if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){"
+    )
+    assert same_session_idx >= 0, (
+        "same-session no-op guard must still exist (now a block that first clears "
+        "a stale unread dot before returning) and must precede the cross-session branch"
+    )
     assert same_session_idx < cross_start
 
 
@@ -931,8 +936,12 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "messages.js must listen for live reasoning SSE events"
     assert "liveReasoningText += text" in src, \
         "live reasoning SSE events must update the active Worklog Thinking Card text"
-    assert "_updateLiveThinkingCard(_liveThinkingText())" in src, \
-        "live reasoning SSE events must refresh the current segment's Worklog Thinking Card"
+    assert "const liveThinkingText=_liveThinkingText();" in src, \
+        "live reasoning SSE events must compute the current segment's Worklog Thinking Card text once"
+    assert "if(!_upsertAnchorReasoning(liveThinkingText))" in src, \
+        "live reasoning SSE events must prefer the anchor renderer before falling back"
+    assert "_updateLiveThinkingCard(liveThinkingText)" in src, \
+        "live reasoning SSE events must keep the current segment's Worklog Thinking Card as fallback"
     assert "source.addEventListener('tool_complete'" in src or 'source.addEventListener("tool_complete"' in src, \
         "messages.js must listen for live tool completion SSE events"
     assert "function _parseStreamState()" in src, \

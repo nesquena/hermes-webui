@@ -49,6 +49,18 @@ def test_onboarding_uses_i18n_helpers():
     assert "onboarding_title: 'Bienvenido a Hermes Web UI'" in i18n
 
 
+def test_onboarding_provider_notice_uses_i18n_key():
+    js = read("static/onboarding.js")
+    py = read("api/onboarding.py")
+    assert '"provider_note_key": note_key' in py
+    assert '"provider_note_args": note_args' in py
+    assert "function _localizedOnboardingProviderNote(system)" in js
+    assert "Array.isArray(system&&system.provider_note_args)" in js
+    assert "t(key,...args)" in js
+    assert "!/\\{\\d+\\}/.test(localized)" in js
+    assert "system.provider_note|| (setupOk?" not in js
+
+
 def test_bootstrap_script_contains_official_installer_and_windows_guard():
     src = read("bootstrap.py")
     assert (

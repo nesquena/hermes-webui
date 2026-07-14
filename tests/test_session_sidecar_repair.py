@@ -547,6 +547,75 @@ class TestEmptyMessagesGuard:
         assert s.pending_user_message is None
         assert s.active_stream_id is None
 
+    def test_repeated_pending_prompt_uses_current_checkpoint_identity(self, hermes_home, monkeypatch):
+        """Historical identical text must not suppress the current pending turn."""
+        s = _make_session(
+            messages=[
+                {"role": "user", "content": "repeat this", "timestamp": 111, "attachments": [{"name": "old.png"}]},
+                {"role": "assistant", "content": "Earlier answer"},
+            ],
+            context_messages=[
+                {"role": "user", "content": "repeat this", "timestamp": 111, "attachments": [{"name": "old.png"}]},
+                {"role": "assistant", "content": "Earlier answer"},
+            ],
+        )
+        s.pending_user_message = "repeat this"
+        s.pending_started_at = 222.0
+        s.pending_attachments = [{"name": "current.png"}]
+        s.active_stream_id = "stream_1"
+        lock = config._get_session_agent_lock(s.session_id)
+
+        with lock:
+            core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
+            result = _apply_core_sync_or_error_marker(
+                s, core_path, stream_id_for_recheck="stream_1",
+            )
+
+        assert result is True
+        users = [m for m in s.messages if m.get("role") == "user"]
+        assert len(users) == 2
+        assert users[-1]["timestamp"] == 222
+        assert users[-1]["attachments"] == [{"name": "current.png"}]
+        context_users = [m for m in s.context_messages if m.get("role") == "user"]
+        assert len(context_users) == 2
+        assert context_users[-1]["timestamp"] == 222
+        assert context_users[-1]["attachments"] == [{"name": "current.png"}]
+
+    def test_recovered_assistant_context_row_still_deduplicates(self):
+        s = _make_session(
+            context_messages=[{"role": "assistant", "content": "Recovered answer"}],
+        )
+        recovered = {
+            "role": "assistant",
+            "content": "Recovered answer",
+            "timestamp": 222,
+        }
+
+        models._append_recovered_turn_to_context(s, recovered)
+
+        assert s.context_messages == [{"role": "assistant", "content": "Recovered answer"}]
+
+    def test_recovered_user_context_row_requires_tail_checkpoint(self):
+        s = _make_session(
+            context_messages=[
+                {"role": "user", "content": "repeat this", "timestamp": 222, "attachments": [{"name": "same.png"}]},
+                {"role": "assistant", "content": "Earlier answer"},
+            ],
+        )
+        recovered = {
+            "role": "user",
+            "content": "repeat this",
+            "timestamp": 222,
+            "attachments": [{"name": "same.png"}],
+            "_recovered": True,
+        }
+
+        models._append_recovered_turn_to_context(s, recovered)
+
+        context_users = [m for m in s.context_messages if m.get("role") == "user"]
+        assert len(context_users) == 2
+        assert context_users[-1]["timestamp"] == 222
+
     def test_bails_when_pending_user_message_none(self, hermes_home, monkeypatch):
         """If pending_user_message is None, repair bails out."""
         s = _make_session(messages=[])

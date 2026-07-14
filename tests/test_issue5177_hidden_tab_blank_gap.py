@@ -78,6 +78,27 @@ def _refresh_block(compact: str) -> str:
     raise AssertionError("refreshActiveSessionIfExternallyUpdated braces did not balance")
 
 
+def _ensure_messages_loaded_block(compact: str) -> str:
+    marker_named = "asyncfunction_ensureMessagesLoaded(sid,opts){"
+    marker_arglist = "asyncfunction_ensureMessagesLoaded(sid){"
+    start = compact.find(marker_named)
+    if start == -1:
+        start = compact.find(marker_arglist)
+    assert start != -1, "_ensureMessagesLoaded definition not found"
+    i = compact.find("{", start)
+    assert i != -1, "_ensureMessagesLoaded opening brace not found"
+    depth = 0
+    for j in range(i, len(compact)):
+        c = compact[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return compact[start : j + 1]
+    raise AssertionError("_ensureMessagesLoaded braces did not balance")
+
+
 def test_keep_stale_until_loaded_flag_computed_in_loadsession():
     # The flag must be computed by AND-ing the caller's opts with
     # sameSessionForceReload — cross-session switches MUST keep clearing
@@ -137,7 +158,7 @@ def test_ensure_messages_loaded_called_with_keep_stale_flag():
     # cannot skip the swap when stale messages are still in place.
     block = _load_session_block(_compact(SESSIONS_JS))
     # Both INFLIGHT and idle paths.
-    assert block.count("await_ensureMessagesLoaded(sid,{force:_keepStaleUntilLoaded})") == 2
+    assert block.count("await_ensureMessagesLoaded(sid,{force:_keepStaleUntilLoaded,loadGeneration:_loadGeneration})") == 2
 
 
 def test_ensure_messages_loaded_supports_force_override():
@@ -150,14 +171,7 @@ def test_ensure_messages_loaded_supports_force_override():
     # greptile P2 r3393… on #5189) and the historical `arguments[1]` shape
     # (for callers preserving an existing public signature). The required
     # invariant is the EARLY-RETURN being gated on opts.force.
-    marker_named = "asyncfunction_ensureMessagesLoaded(sid,opts){"
-    marker_arglist = "asyncfunction_ensureMessagesLoaded(sid){"
-    start = compact.find(marker_named)
-    if start == -1:
-        start = compact.find(marker_arglist)
-    assert start != -1, "_ensureMessagesLoaded definition not found"
-    # Take a generously-sized window for the early-return region.
-    region = compact[start: start + 1000]
+    region = _ensure_messages_loaded_block(compact)
     # Either explicit named param `opts` (preferred), or arguments[1] fallback,
     # both must coerce to an object so opts.force is safe to read.
     assert (

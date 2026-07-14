@@ -36,9 +36,12 @@ def test_local_svg_inline_rendering():
     with open('static/ui.js', encoding="utf-8") as f:
         src = f.read()
     assert "msg-media-svg" in src, "Missing msg-media-svg CSS class for SVG rendering"
-    # Should have at least 2 SVG handlers (URL + local)
+    # Both URL-based and local-path SVG handlers are centralised in
+    # _inlineMediaHtmlForRef (the single MEDIA renderer exported by ui.js for
+    # use by both renderMd() and the streaming smd path). The shared function
+    # contains all SVG markup, so we only need the helper to exist once.
     count = src.count("msg-media-svg")
-    assert count >= 2, f"Expected >=2 msg-media-svg references, got {count}"
+    assert count >= 1, f"Expected >=1 msg-media-svg references in _inlineMediaHtmlForRef, got {count}"
 
 
 def test_local_audio_inline_rendering():
@@ -47,8 +50,10 @@ def test_local_audio_inline_rendering():
         src = f.read()
     assert "msg-media-audio" in src, "Missing msg-media-audio CSS class"
     assert "<audio controls" in src, "Should render <audio> element with controls"
+    # See comment in test_svg_rendered_before_image_catch_all — audio markup
+    # lives in a single shared helper now.
     count = src.count("msg-media-audio")
-    assert count >= 2, f"Expected >=2 msg-media-audio references, got {count}"
+    assert count >= 1, f"Expected >=1 msg-media-audio references in _inlineMediaHtmlForRef, got {count}"
 
 
 def test_local_video_inline_rendering():
@@ -57,8 +62,10 @@ def test_local_video_inline_rendering():
         src = f.read()
     assert "msg-media-video" in src, "Missing msg-media-video CSS class"
     assert "<video controls" in src, "Should render <video> element with controls"
+    # See comment in test_svg_rendered_before_image_catch_all — video markup
+    # lives in a single shared helper now.
     count = src.count("msg-media-video")
-    assert count >= 2, f"Expected >=2 msg-media-video references, got {count}"
+    assert count >= 1, f"Expected >=1 msg-media-video references in _inlineMediaHtmlForRef, got {count}"
 
 
 def test_url_svg_audio_video_handlers():
@@ -73,6 +80,23 @@ def test_url_svg_audio_video_handlers():
     assert url_svg, "URL SVG handler should test extension on src"
     assert url_audio >= 1, "URL audio handler should test extension on src"
     assert url_video >= 1, "URL video handler should test extension on src"
+
+
+def test_webm_prefers_video_when_audio_and_video_regexes_overlap():
+    """Verify .webm is not shadowed by the audio regex."""
+    with open('static/ui.js', encoding="utf-8") as f:
+        src = f.read()
+    kind_start = src.find("function _mediaKindForName")
+    kind_body = src[kind_start:kind_start + 400]
+    assert "_VIDEO_EXTS.test(clean)" in kind_body
+    assert "_AUDIO_EXTS.test(clean)" in kind_body
+    assert kind_body.index("_VIDEO_EXTS.test(clean)") < kind_body.index("_AUDIO_EXTS.test(clean)"), \
+        "_mediaKindForName must check video before audio so .webm renders as video"
+    inline_start = src.find("function _inlineMediaHtmlForRef")
+    inline_body = src[inline_start:inline_start + 4500]
+    assert "const kind=_AUDIO_EXTS.test(ref)?'audio':'video';" not in inline_body, \
+        "Local MEDIA rendering must reuse _mediaKindForName instead of reintroducing audio-first .webm ordering"
+    assert "if(localKind==='audio'||localKind==='video')" in inline_body
 
 
 def test_attachment_svg_audio_video():

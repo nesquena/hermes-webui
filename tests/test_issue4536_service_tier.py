@@ -1,5 +1,7 @@
 """Tests for issue #4536 — main-model service_tier persistence and guarded forwarding."""
 
+import sys
+
 import pytest
 
 
@@ -61,6 +63,7 @@ class TestIssue4536ServiceTier:
 
         payload = config.get_auxiliary_models()
         assert payload["main"]["service_tier"] == "priority"
+        assert payload["main"]["supports_fast_tier"] is True
 
     def test_main_service_tier_default_clears_persisted_value(self, monkeypatch, tmp_path):
         """Choosing Default/off should clear service_tier from persisted main-model options."""
@@ -92,6 +95,11 @@ class TestIssue4536ServiceTier:
         )
         assert openai_payload == {"service_tier": "priority"}
 
+        codex_payload = config._main_model_request_overrides(
+            {"model": {"provider": "openai-codex", "default": "gpt-5.5", "service_tier": "priority"}},
+        )
+        assert codex_payload == {"service_tier": "priority"}
+
         openrouter_payload = config._main_model_request_overrides(
             {"model": {"provider": "openrouter", "default": "meta-llama/llama-3.1", "service_tier": "priority"}},
         )
@@ -107,10 +115,10 @@ class TestIssue4536ServiceTier:
         )
         assert openai_alias_payload == {"service_tier": "priority"}
 
-        codex_payload = config._main_model_request_overrides(
+        codex_nonfast_payload = config._main_model_request_overrides(
             {"model": {"provider": "openai-codex", "default": "gpt-5.3-codex", "service_tier": "priority"}},
         )
-        assert codex_payload == {}
+        assert codex_nonfast_payload == {}
 
         codex_empty_model_payload = config._main_model_request_overrides(
             {"model": {"provider": "openai-codex", "service_tier": "priority"}},
@@ -121,6 +129,16 @@ class TestIssue4536ServiceTier:
             {"model": {"provider": "openai", "default": "meta-llama/llama-3.1", "service_tier": "priority"}},
         )
         assert stale_openai_payload == {}
+
+        foreign_prefixed_openai_payload = config._main_model_request_overrides(
+            {"model": {"provider": "openai", "default": "openrouter/gpt-5.5", "service_tier": "priority"}},
+        )
+        assert foreign_prefixed_openai_payload == {}
+
+        codex_unknown_model_payload = config._main_model_request_overrides(
+            {"model": {"provider": "openai-codex", "default": "gpt-7.0-codex", "service_tier": "priority"}},
+        )
+        assert codex_unknown_model_payload == {}
 
     def test_auxiliary_payload_hides_service_tier_for_non_openai_main_models(self, monkeypatch, tmp_path):
         """Saved service_tier should not be re-exposed once the main model switches away from OpenAI."""
@@ -194,3 +212,57 @@ class TestIssue4536ServiceTier:
         assert result["ok"] is True
         text = config_path.read_text(encoding="utf-8")
         assert "service_tier" not in text
+
+    def test_standalone_agent_import_failure_preserves_supported_service_tier(self, monkeypatch, tmp_path):
+        """If hermes_cli is unavailable, Settings saves should not delete supported service_tier state."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model:\n  provider: openai-codex\n  default: gpt-5.5\n  service_tier: priority\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(
+            config,
+            "cfg",
+            {"model": {"provider": "openai-codex", "default": "gpt-5.5", "service_tier": "priority"}},
+        )
+        monkeypatch.setitem(sys.modules, "hermes_cli.models", None)
+
+        assert config._main_model_request_overrides(
+            {"model": {"provider": "openai-codex", "default": "gpt-5.5", "service_tier": "priority"}},
+        ) == {"service_tier": "priority"}
+
+        result = config.set_hermes_default_model("gpt-5.5", provider="openai-codex")
+
+        assert result["ok"] is True
+        text = config_path.read_text(encoding="utf-8")
+        assert "service_tier: priority" in text
+
+    def test_standalone_agent_import_failure_still_blocks_codex_slug(self, monkeypatch):
+        """The compatibility fallback must not broadly enable Codex-specific model slugs."""
+        from api import config
+
+        monkeypatch.setitem(sys.modules, "hermes_cli.models", None)
+
+        assert config._main_model_request_overrides(
+            {"model": {"provider": "openai-codex", "default": "gpt-5.3-codex", "service_tier": "priority"}},
+        ) == {}
+
+    def test_auxiliary_payload_marks_false_fast_tier_for_unsupported_main_models(self, monkeypatch, tmp_path):
+        """The frontend needs explicit false metadata, not an absent field that falls back stale."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model:\n  provider: openai-codex\n  default: gpt-5.3-codex\n  service_tier: priority\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+
+        payload = config.get_auxiliary_models()
+
+        assert payload["main"]["service_tier"] == ""
+        assert payload["main"]["supports_fast_tier"] is False

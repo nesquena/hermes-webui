@@ -312,14 +312,11 @@ class TestReasoningCommand:
         m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
-        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
+        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
             assert f"'{level}'" in fn, (
                 f"cmdReasoning must accept '{level}' (CLI parity with "
                 f"hermes_constants.parse_reasoning_effort)"
             )
-        assert "'max'" not in fn, (
-            "cmdReasoning should only expose efforts up to xhigh"
-        )
 
     def test_reasoning_subargs_match_cli_levels(self):
         """Autocomplete subArgs must expose every CLI effort level + show/hide."""
@@ -328,14 +325,11 @@ class TestReasoningCommand:
         assert m, "reasoning COMMANDS entry not found"
         entry = m.group(0)
         for suggestion in (
-            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'
+            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
         ):
             assert f"'{suggestion}'" in entry, (
                 f"reasoning subArgs must include '{suggestion}' for CLI parity"
             )
-        assert "'max'" not in entry, (
-            "reasoning command subArgs must not include 'max'"
-        )
 
 
 # ── api/config.py — reasoning helpers ────────────────────────────────────────
@@ -365,7 +359,7 @@ class TestReasoningConfigHelpers:
         # Snapshot-style assertion: if hermes_constants adds a level, this
         # test will fail fast so we know to update WebUI too.
         assert VALID_REASONING_EFFORTS == (
-            'minimal', 'low', 'medium', 'high', 'xhigh'
+            'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
         )
 
     def test_set_reasoning_effort_persists_to_config_yaml(self, tmp_path, monkeypatch):
