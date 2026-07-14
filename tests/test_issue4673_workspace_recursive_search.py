@@ -186,8 +186,6 @@ def test_search_does_not_traverse_visible_symlink_into_hidden_directory(tmp_path
 
 @descriptor_search
 def test_search_returns_in_workspace_file_symlinks_without_following_directories(tmp_path):
-    import api.workspace as workspace_module
-
     root = tmp_path / "workspace"
     (root / "real").mkdir(parents=True)
     (root / "real" / "needle.txt").write_text("ok", encoding="utf-8")
