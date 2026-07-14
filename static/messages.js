@@ -633,8 +633,82 @@ function _handleMarkdownTableCopy(event){
   const clipboardData=event.clipboardData||event.originalEvent&&event.originalEvent.clipboardData;
   if(!clipboardData||typeof clipboardData.setData!=='function') return;
   if(typeof event.preventDefault==='function') event.preventDefault();
-  clipboardData.setData('text/html', payload.html);
-  clipboardData.setData('text/plain', payload.plain);
+  clipboardData.setData('text/html', html);
+  clipboardData.setData('text/plain', plain);
+}
+
+function _stripClipboardStyles(root){
+  if(!root||!root.querySelectorAll) return;
+  const allEl=root.querySelectorAll('*');
+  for(let i=0;i<allEl.length;i++){
+    const el=allEl[i];
+    el.removeAttribute('style');
+    const attrs=el.attributes;
+    if(attrs){
+      const toRemove=[];
+      for(let j=0;j<attrs.length;j++){
+        const name=attrs[j].name;
+        if(name.startsWith('data-markdown-table-')||name==='data-markdown-table-enhanced'||name==='data-raw-text'||name==='data-testid'){
+          toRemove.push(name);
+        }
+      }
+      toRemove.forEach((n)=>el.removeAttribute(n));
+    }
+  }
+  const sortBtns=root.querySelectorAll('.markdown-table-sort');
+  for(let i=0;i<sortBtns.length;i++){
+    const btn=sortBtns[i];
+    const label=btn.querySelector('.markdown-table-sort-label');
+    const parent=btn.parentNode;
+    if(parent&&label) parent.insertBefore(document.createTextNode(label.textContent), btn);
+    btn.remove();
+  }
+  const filters=root.querySelectorAll('.markdown-table-filter');
+  for(let i=0;i<filters.length;i++) filters[i].remove();
+  for(let i=0;i<allEl.length;i++){
+    const el=allEl[i];
+    if(el.className&&typeof el.className==='string'){
+      el.className=el.className.split(/\s+/).filter((c)=>!c.startsWith('markdown-table-')).join(' ').trim();
+    }
+  }
+}
+
+function _plainTextFromFragment(root){
+  if(!root) return '';
+  const parts=[];
+  const walk = (node) => {
+    if(!node) return;
+    if(node.nodeType===3){
+      parts.push(node.textContent);
+    }else if(node.nodeType===1){
+      const tag=node.tagName.toLowerCase();
+      if(tag==='br'){ parts.push('\n'); return; }
+      if(tag==='th'||tag==='td'){
+        for(let c=node.firstChild;c;c=c.nextSibling) walk(c);
+        const ns=node.nextElementSibling;
+        if(ns&&ns.tagName&&(ns.tagName==='TH'||ns.tagName==='TD')) parts.push('\t');
+        return;
+      }
+      if(tag==='tr'||tag==='thead'||tag==='tbody'||tag==='tfoot'||tag==='table'){
+        for(let c=node.firstChild;c;c=c.nextSibling) walk(c);
+        if(tag==='tr'){
+          const ns=node.nextElementSibling;
+          if(!ns||(ns.tagName!=='TR'&&ns.tagName!=='THEAD'&&ns.tagName!=='TBODY'&&ns.tagName!=='TFOOT')){
+            parts.push('\n');
+          }
+        }
+        return;
+      }
+      if(['p','div','h1','h2','h3','h4','h5','h6','li','blockquote','pre'].includes(tag)){
+        for(let c=node.firstChild;c;c=c.nextSibling) walk(c);
+        parts.push('\n');
+        return;
+      }
+      for(let c=node.firstChild;c;c=c.nextSibling) walk(c);
+    }
+  };
+  for(let c=root.firstChild;c;c=c.nextSibling) walk(c);
+  return parts.join('');
 }
 
 function _wireMarkdownTableCopyHandler(root){

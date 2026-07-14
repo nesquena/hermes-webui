@@ -88,6 +88,9 @@ const required = [
   '_findEnhancedMarkdownTableFromRange',
   '_markdownTableCopyPayloadForTable',
   '_handleMarkdownTableCopy',
+  '_findEnhancedMarkdownTablesInRange',
+  '_stripClipboardStyles',
+  '_plainTextFromFragment',
 ];
 
 for (const name of required) {
