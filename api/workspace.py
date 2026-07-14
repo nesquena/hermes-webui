@@ -973,6 +973,11 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
 _DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
+class WorkspaceSearchUnavailableError(RuntimeError):
+    """Raised when recursive search cannot use descriptor-relative traversal."""
 
 
 def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
@@ -995,6 +1000,8 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         # protection, but no regression vs the prior path-based behaviour, and
         # symlink creation needs admin on Windows anyway.
         flags = os.O_RDONLY | (_O_DIRECTORY if want_dir else 0) | _O_NOFOLLOW
+        if not want_dir:
+            flags |= _O_NONBLOCK
         try:
             return os.open(str(target), flags)
         except OSError:
@@ -1010,6 +1017,8 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
             is_last = i == len(rel_parts) - 1
             want_directory = (not is_last) or want_dir
             flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0)
+            if not want_directory:
+                flags |= _O_NONBLOCK
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
             except OSError:
@@ -1462,6 +1471,10 @@ def search_workspace(
     max_directory_entries: int = _WORKSPACE_SEARCH_MAX_DIRECTORY_ENTRIES,
 ) -> dict:
     """Return bounded, workspace-relative recursive name/path matches."""
+    if not _DIR_FD_OK:
+        raise WorkspaceSearchUnavailableError(
+            "Recursive workspace search requires descriptor-relative traversal"
+        )
     root = safe_resolve_ws(workspace, '.')
     needle = str(query or '').strip().casefold()
     if len(needle) < 2:
@@ -1474,133 +1487,151 @@ def search_workspace(
         1, min(int(max_directory_entries), _WORKSPACE_SEARCH_MAX_DIRECTORY_ENTRIES)
     )
 
+    def _open_search_fd(root_fd: int, parts: tuple[str, ...], *, want_dir: bool) -> int:
+        fd = os.dup(root_fd)
+        try:
+            for index, part in enumerate(parts):
+                last = index == len(parts) - 1
+                directory = want_dir or not last
+                flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if directory else 0)
+                if not directory:
+                    flags |= _O_NONBLOCK
+                next_fd = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            return fd
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+
+    def _resolved_link_parts(rel_parts: tuple[str, ...]) -> tuple[tuple[str, ...] | None, bool]:
+        candidate = root.joinpath(*rel_parts).resolve()
+        try:
+            return candidate.relative_to(root).parts, False
+        except ValueError:
+            return None, True
+
     started = time.monotonic()
-    pending = [('.', 0)]
+    pending = [((), 0)]
     results = []
     visited = 0
     truncated = False
     visited_dirs = set()
-    while pending and not truncated:
-        if time.monotonic() - started >= max_seconds:
-            truncated = True
-            break
-        rel_dir, depth = pending.pop(0)
-        directory = safe_resolve_ws(root, rel_dir)
-        dir_fd = None
-        try:
-            if _DIR_FD_OK:
-                dir_fd = open_anchored_fd(root, directory, want_dir=True)
+    try:
+        root_fd = os.open(str(root), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    except OSError:
+        raise FileNotFoundError(f"Not found: {root}") from None
+    try:
+        while pending and not truncated:
+            if time.monotonic() - started >= max_seconds:
+                truncated = True
+                break
+            rel_dir_parts, depth = pending.pop(0)
+            dir_fd = None
+            try:
+                dir_fd = _open_search_fd(root_fd, rel_dir_parts, want_dir=True)
                 dir_stat = os.fstat(dir_fd)
-            else:
-                dir_stat = directory.stat()
-            dir_key = (getattr(dir_stat, 'st_dev', None), getattr(dir_stat, 'st_ino', None))
-            if None in dir_key:
-                dir_key = str(directory)
-            if dir_key in visited_dirs:
-                if dir_fd is not None:
-                    os.close(dir_fd)
-                continue
-            visited_dirs.add(dir_key)
-            scan = os.scandir(dir_fd if _DIR_FD_OK and dir_fd is not None else directory)
-        except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
-            if dir_fd is not None:
-                try:
-                    os.close(dir_fd)
-                except OSError:
-                    pass
-            truncated = True
-            continue
-        try:
-            with scan:
-                directory_count = 0
-                for item in scan:
-                    if time.monotonic() - started >= max_seconds:
-                        truncated = True
-                        break
-                    directory_count += 1
-                    if directory_count > max_directory_entries:
-                        truncated = True
-                        break
-                    visited += 1
-                    if visited > max_entries:
-                        truncated = True
-                        break
-                    name = item.name
-                    if not include_hidden and _is_workspace_hidden_name(name):
-                        continue
-                    rel_path = name if rel_dir == '.' else f'{rel_dir}/{name}'
-                    try:
-                        if _DIR_FD_OK and dir_fd is not None:
-                            lstat_result = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-                            is_symlink = stat.S_ISLNK(lstat_result.st_mode)
-                        else:
-                            lstat_result = item.stat(follow_symlinks=False)
-                            is_symlink = item.is_symlink()
-                        if is_symlink:
-                            if _DIR_FD_OK and dir_fd is not None:
-                                target_stat = os.stat(name, dir_fd=dir_fd, follow_symlinks=True)
+                dir_key = (getattr(dir_stat, 'st_dev', None), getattr(dir_stat, 'st_ino', None))
+                if None in dir_key:
+                    dir_key = rel_dir_parts
+                if dir_key in visited_dirs:
+                    continue
+                visited_dirs.add(dir_key)
+                with os.scandir(dir_fd) as scan:
+                    directory_count = 0
+                    for item in scan:
+                        if time.monotonic() - started >= max_seconds:
+                            truncated = True
+                            break
+                        directory_count += 1
+                        if directory_count > max_directory_entries:
+                            truncated = True
+                            break
+                        visited += 1
+                        if visited > max_entries:
+                            truncated = True
+                            break
+                        name = item.name
+                        if not include_hidden and _is_workspace_hidden_name(name):
+                            continue
+                        rel_parts = rel_dir_parts + (name,)
+                        rel_path = '/'.join(rel_parts)
+                        lstat_result = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                        is_symlink = stat.S_ISLNK(lstat_result.st_mode)
+                        external = False
+                        target_fd = None
+                        try:
+                            if is_symlink:
+                                target_parts, external = _resolved_link_parts(rel_parts)
+                                if not external:
+                                    try:
+                                        target_fd = _open_search_fd(root_fd, target_parts or (), want_dir=False)
+                                    except OSError:
+                                        target_fd = _open_search_fd(root_fd, target_parts or (), want_dir=True)
+                                    target_stat = os.fstat(target_fd)
+                                    entry_type = 'symlink'
+                                    display_is_dir = stat.S_ISDIR(target_stat.st_mode)
+                                    size = target_stat.st_size if stat.S_ISREG(target_stat.st_mode) else None
+                                else:
+                                    entry_type = 'symlink'
+                                    display_is_dir = False
+                                    size = None
                             else:
-                                target_stat = item.stat(follow_symlinks=True)
-                            try:
-                                resolved = safe_resolve_ws(root, rel_path)
-                            except (OSError, RuntimeError, ValueError):
-                                continue
-                            if _DIR_FD_OK and dir_fd is not None:
-                                final_lstat = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-                            else:
-                                final_lstat = item.stat(follow_symlinks=False)
-                            if (
-                                (lstat_result.st_dev, lstat_result.st_ino, lstat_result.st_mode)
-                                != (final_lstat.st_dev, final_lstat.st_ino, final_lstat.st_mode)
+                                entry_type = 'dir' if stat.S_ISDIR(lstat_result.st_mode) else 'file'
+                                display_is_dir = entry_type == 'dir'
+                                size = lstat_result.st_size if stat.S_ISREG(lstat_result.st_mode) else None
+                            final_lstat = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                            if (lstat_result.st_dev, lstat_result.st_ino, lstat_result.st_mode) != (
+                                final_lstat.st_dev, final_lstat.st_ino, final_lstat.st_mode
                             ):
                                 truncated = True
                                 continue
-                            try:
-                                if safe_resolve_ws(root, rel_path) != resolved:
+                            entry = {
+                                'name': name,
+                                'path': rel_path,
+                                'type': entry_type,
+                                'is_dir': display_is_dir,
+                                'mtime_ns': lstat_result.st_mtime_ns,
+                            }
+                            if not external:
+                                entry['size'] = size
+                            else:
+                                entry['target_outside_workspace'] = True
+                            if needle in name.casefold() or needle in rel_path.casefold():
+                                results.append(entry)
+                                if len(results) >= max_results:
                                     truncated = True
-                                    continue
-                            except (OSError, RuntimeError, ValueError):
-                                truncated = True
-                                continue
-                            entry_type = 'symlink'
-                            display_is_dir = stat.S_ISDIR(target_stat.st_mode)
-                            size = None
-                        else:
-                            resolved = safe_resolve_ws(root, rel_path)
-                            is_dir = stat.S_ISDIR(lstat_result.st_mode)
-                            entry_type = 'dir' if is_dir else 'file'
-                            display_is_dir = is_dir
-                            size = lstat_result.st_size if stat.S_ISREG(lstat_result.st_mode) else None
-                        mtime_ns = lstat_result.st_mtime_ns
-                    except (FileNotFoundError, OSError, RuntimeError, ValueError):
-                        truncated = True
-                        continue
-                    entry = {
-                        'name': name,
-                        'path': rel_path,
-                        'type': entry_type,
-                        'is_dir': display_is_dir,
-                        'size': size,
-                        'mtime_ns': mtime_ns,
-                    }
-                    if needle in name.casefold() or needle in rel_path.casefold():
-                        results.append(entry)
-                        if len(results) >= max_results:
+                                    break
+                            if entry_type == 'dir':
+                                if depth >= max_depth:
+                                    truncated = True
+                                    break
+                                pending.append((rel_parts, depth + 1))
+                        except (FileNotFoundError, OSError, RuntimeError, ValueError):
                             truncated = True
-                            break
-                    if entry_type == 'dir':
-                        if depth >= max_depth:
-                            truncated = True
-                            break
-                        pending.append((rel_path, depth + 1))
-                if truncated:
-                    break
-        finally:
-            if dir_fd is not None:
-                try:
-                    os.close(dir_fd)
-                except OSError:
-                    pass
+                            continue
+                        finally:
+                            if target_fd is not None:
+                                try:
+                                    os.close(target_fd)
+                                except OSError:
+                                    pass
+            except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
+                truncated = True
+            finally:
+                if dir_fd is not None:
+                    try:
+                        os.close(dir_fd)
+                    except OSError:
+                        pass
+    finally:
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
     return {'results': results[:max_results], 'truncated': truncated}
 
 

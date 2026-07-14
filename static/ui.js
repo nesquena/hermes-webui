@@ -491,7 +491,7 @@ async function startCompressionRecovery(btn){
     if(!sid) throw new Error('Compression recovery did not return a session.');
     try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
     if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
-    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];syncTopbar();renderMessages();}
+    else if(data.session){setWorkspaceSearchSession(data.session);S.messages=data.session.messages||[];syncTopbar();renderMessages();}
     if(typeof renderSessionList==='function') await renderSessionList();
     if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
     if(typeof showToast==='function') showToast((data&&data.message)||'Started focused continuation.',3000,'success');
@@ -9231,7 +9231,7 @@ async function refreshSession() {
   if (!S.session) return;
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
-    S.session = data.session;
+    setWorkspaceSearchSession(data.session);
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
@@ -18974,14 +18974,21 @@ function _renderWorkspaceSearchResults(box){
     for(const item of results){
       const row=document.createElement('button');
       row.type='button'; row.className='workspace-search-result';
-      const isDir=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
-      row.innerHTML='<span class="file-icon">'+li(isDir?'folder':'file',14)+'</span><span class="workspace-search-result-path">'+esc(item.path)+'</span>';
-      row.onclick=()=>{
-        if(isDir){
-          if(typeof _clearWorkspaceSearch==='function') _clearWorkspaceSearch();
-          loadDir(item.path);
-        }else openFile(item.path);
-      };
+      const isExternal=item.type==='symlink'&&item.target_outside_workspace;
+      const isDir=!isExternal&&(item.type==='dir'||(item.type==='symlink'&&item.is_dir));
+      row.innerHTML='<span class="file-icon">'+li(isExternal?'external-link':(isDir?'folder':'file'),14)+'</span><span class="workspace-search-result-path">'+esc(item.path)+'</span>';
+      if(isExternal){
+        row.disabled=true;
+        row.tabIndex=-1;
+        row.setAttribute('aria-disabled','true');
+      }else{
+        row.onclick=()=>{
+          if(isDir){
+            if(typeof _clearWorkspaceSearch==='function') _clearWorkspaceSearch();
+            loadDir(item.path);
+          }else openFile(item.path);
+        };
+      }
       box.appendChild(row);
     }
   }
@@ -19605,7 +19612,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;setWorkspaceSearchSession(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -19638,7 +19645,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;setWorkspaceSearchSession(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;

@@ -9388,6 +9388,7 @@ from api.workspace import (
     EscapeAuthorizationExpiredError,
     list_dir,
     search_workspace,
+    WorkspaceSearchUnavailableError,
     list_authorized_escape_dir,
     dir_signature,
     list_workspace_suggestions,
@@ -16641,6 +16642,8 @@ def _handle_workspace_search(handler, parsed):
         include_hidden = qs.get("include_hidden", ["0"])[0].lower() in {"1", "true", "yes"}
         payload = search_workspace(Path(workspace), query, include_hidden=include_hidden)
         return j(handler, {"query": query, **payload})
+    except WorkspaceSearchUnavailableError as e:
+        return bad(handler, _sanitize_error(e), 503)
     except (FileNotFoundError, ValueError) as e:
         return bad(handler, _sanitize_error(e), 404)
 
