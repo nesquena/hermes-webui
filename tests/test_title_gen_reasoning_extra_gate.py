@@ -5,6 +5,8 @@ import sys
 import types
 from unittest.mock import patch
 
+import pytest
+
 _agent_stub = types.ModuleType('agent')
 _aux_stub = types.ModuleType('agent.auxiliary_client')
 sys.modules.setdefault('agent', _agent_stub)
@@ -51,31 +53,38 @@ class TestAuxReasoningExtraRouteContract:
         assert _route_accepts_reasoning_extra('custom:relay', '', 'https://relay.example.test/v1') is False
         assert _route_accepts_reasoning_extra('', 'reasoning-model', '') is False
 
-    def test_auto_and_local_routes_use_their_resolved_effective_route(self):
+    def test_empty_model_auto_and_local_routes_use_the_configured_default(self):
         cases = (
-            ('auto', 'qwen-title', 'qwen', 'https://dashscope.example/v1', True),
-            ('local', 'deepseek-title', 'deepseek', 'https://api.deepseek.com/v1', True),
-            ('auto', 'openai-title', 'openai', 'https://api.openai.com/v1', False),
-            ('local', 'unknown-title', 'custom:relay', 'https://relay.example/v1', False),
+            ('auto', 'qwen', 'qwen3-title', '', True),
+            ('local', 'deepseek', 'deepseek-reasoner', '', True),
+            ('auto', 'openai', 'gpt-5', '', False),
+            ('local', 'custom', 'title-model', 'https://relay.example/v1', False),
         )
-        for provider, model, resolved_provider, resolved_url, accepted in cases:
+        for provider, default_provider, default_model, default_url, accepted in cases:
             captured = []
 
-            def call_llm(**kwargs):
-                captured.append(kwargs)
+            def call_llm(*, _captured=captured, **kwargs):
+                _captured.append(kwargs)
                 return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
 
             with patch('api.streaming._get_aux_title_config', return_value={
-                'provider': provider, 'model': model, 'base_url': '',
-            }), patch('api.streaming.resolve_model_provider', return_value=(
-                model, resolved_provider, resolved_url,
-            )), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+                'provider': provider, 'model': '', 'base_url': '',
+            }), patch('api.config.cfg', {
+                'model': {
+                    'provider': default_provider,
+                    'default': default_model,
+                    'base_url': default_url,
+                },
+            }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
                 generate_title_raw_via_aux('question', 'answer')
             expected = {'reasoning': {'enabled': False}} if accepted else None
             assert captured[-1]['extra_body'] == expected
 
-    def test_delimiter_wrapped_url_is_redacted_from_route_and_traceback(self):
-        url = ')https://USER_MARKER:PASSWORD_MARKER@relay.example/v1]?api_key=KEY_MARKER&token=TOKEN_MARKER'
+    @pytest.mark.parametrize('url', (
+        '(https://USER MARKER:PASSWORD MARKER@relay.example/v1)?api_key=(KEY MARKER)&token=[TOKEN MARKER]',
+        '["https://USER [MARKER] : PASSWORD (MARKER) @relay.example/v1"?token="TOKEN MARKER"&key=\'KEY MARKER\']',
+    ))
+    def test_delimiter_wrapped_url_is_redacted_from_route_and_traceback(self, url):
         logged = []
 
         def fail(**_kwargs):
@@ -89,5 +98,5 @@ class TestAuxReasoningExtraRouteContract:
             generate_title_raw_via_aux('question', 'answer')
 
         output = '\n'.join(' '.join(map(str, args)) for args in logged)
-        for marker in ('USER_MARKER', 'PASSWORD_MARKER', 'KEY_MARKER', 'TOKEN_MARKER'):
+        for marker in ('USER', 'PASSWORD', 'KEY', 'TOKEN'):
             assert marker not in output

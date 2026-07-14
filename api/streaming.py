@@ -3315,31 +3315,47 @@ def _safe_aux_route_for_log(base_url: str = '') -> str:
 
 def _redact_urls_for_log(text: str) -> str:
     """Remove credentials carried by any HTTP(S) URL in exception text."""
+    # Scrub before parsing. Exception renderers can wrap URLs in delimiters or
+    # preserve whitespace in userinfo, either of which can defeat a conventional
+    # URL match before its credentials are removed.
+    redacted = re.sub(
+        r"(?i)(https?://)[^@\r\n]*@",
+        r"\1<redacted>@",
+        str(text or ''),
+    )
+    redacted = re.sub(
+        # Values can be quoted/bracketed or contain spaces. Stop only at the
+        # next query field, a fragment, or a newline.
+        r"(?i)([?&]\s*(?:api_key|token|key|secret)\s*=\s*)[^&#\r\n]*",
+        r"\1<redacted>",
+        redacted,
+    )
     redacted = re.sub(
         # Do not let punctuation which commonly wraps an exception value bound
         # this match.  _safe_aux_route_for_log drops a trailing delimiter along
         # with any URL credentials it encounters.
         r"https?://[^\s'\"<>{}]+",
         lambda match: _safe_aux_route_for_log(match.group(0)),
-        str(text or ''),
+        redacted,
     )
     # Exception text is not guaranteed to contain a URL that parses cleanly:
     # clients can quote, delimit, or otherwise mangle it.  Scrub the complete
     # rendered message as a final defense, rather than trusting URL parsing.
     redacted = re.sub(
-        r"(?i)(https?://)[^/\s@<>\[\]{}()]+@",
+        r"(?i)(https?://)[^@\r\n]*@",
         r"\1<redacted>@",
         redacted,
     )
     redacted = re.sub(
         # Also cover a userinfo fragment which an exception formatter has
-        # separated from its scheme (for example, ``)user:secret@host``).
-        r"(?i)[^\s@:/<>\[\]{}()]+:[^\s@/<>\[\]{}()]+@",
+        # separated from its scheme (for example, ``)user:secret@host``),
+        # including delimiters and whitespace around its components.
+        r"(?i)(?<![\w/])[^@:\r\n]{1,128}?\s*:\s*[^@\r\n]{1,128}?@",
         "<redacted>@",
         redacted,
     )
     return re.sub(
-        r"(?i)([?&](?:api_key|token|key|secret)=)[^&#\s'\"<>()\[\]{}]+",
+        r"(?i)([?&]\s*(?:api_key|token|key|secret)\s*=\s*)[^&#\r\n]*",
         r"\1<redacted>",
         redacted,
     )
@@ -3361,13 +3377,25 @@ def _log_aux_title_failure(message: str, base_url: str, provider: str, model: st
 
 def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tuple[str, str, str]:
     """Resolve auto/local auxiliary routes before compatibility classification."""
-    if str(provider or '').strip().lower() not in {'auto', 'local'}:
+    provider_lower = str(provider or '').strip().lower()
+    if provider_lower not in {'', 'auto', 'local'}:
         return provider, model, base_url
+    effective_model = str(model or '').strip()
+    # resolve_model_provider deliberately leaves an empty model empty. For
+    # implicit, auto, and legacy local auxiliary routes, resolve the configured
+    # default model through that existing effective-route resolver instead.
+    if not effective_model:
+        try:
+            model_cfg = get_config().get('model', {})
+            if isinstance(model_cfg, dict):
+                effective_model = str(model_cfg.get('default') or model_cfg.get('name') or '').strip()
+        except Exception:
+            pass
     try:
-        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
+        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(effective_model)
         return (
             str(resolved_provider or provider or ''),
-            str(resolved_model or model or ''),
+            str(resolved_model or effective_model or model or ''),
             str(base_url or resolved_base_url or ''),
         )
     except Exception:
