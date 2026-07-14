@@ -3393,10 +3393,17 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(effective_model)
         # Explicit routes keep their configured provider, except picker values
         # (``@provider:model``), whose provider/model pair is canonicalized by
-        # resolve_model_provider.  That resolver preserves model suffixes such
-        # as ``:free`` and ``:thinking``.
+        # resolve_model_provider.  An explicit provider with no auxiliary
+        # model still uses the configured default model: do not return the
+        # pre-resolution blank model or request/gate routing would diverge.
+        # That resolver preserves model suffixes such as ``:free`` and
+        # ``:thinking``.
         if provider_lower not in {'', 'auto', 'local'} and not effective_model.startswith('@'):
-            return provider, model, base_url
+            return (
+                provider,
+                str(resolved_model or effective_model or model or ''),
+                str(base_url or resolved_base_url or ''),
+            )
         return (
             str(resolved_provider or provider or ''),
             str(resolved_model or effective_model or model or ''),

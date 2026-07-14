@@ -61,6 +61,8 @@ class TestAuxReasoningExtraRouteContract:
              ('qwen', 'qwen3-title', None), {'reasoning': {'enabled': False}}),
             ('local', '', '', 'deepseek', 'deepseek-reasoner', '',
              ('deepseek', 'deepseek-reasoner', None), {'reasoning': {'enabled': False}}),
+            ('deepseek', '', '', 'deepseek', 'deepseek-reasoner', '',
+             ('deepseek', 'deepseek-reasoner', None), {'reasoning': {'enabled': False}}),
             ('auto', '', '', 'openai', 'gpt-5', '',
              ('openai', 'gpt-5', None), None),
             ('local', '', '', 'custom', 'title-model', 'https://relay.example/v1',
