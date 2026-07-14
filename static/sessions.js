@@ -815,9 +815,14 @@ function _isSessionEffectivelyStreaming(s) {
   return Boolean(s && (
     s.is_streaming ||
     _hasPendingUserMessageSignal(s) ||
-    _isSessionLocallyStreaming(s) ||
-    (typeof _activeRunSessionIds !== 'undefined' && _activeRunSessionIds.has(s.session_id))
+    _isSessionLocallyStreaming(s)
   ));
+}
+
+function _isSessionRingStreaming(s) {
+  return _isSessionEffectivelyStreaming(s) || Boolean(
+    s && typeof _activeRunSessionIds !== 'undefined' && _activeRunSessionIds.has(s.session_id)
+  );
 }
 
 function _hasPendingUserMessageSignal(s) {
@@ -6901,8 +6906,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   const rows=(collapsedRows||[])
     .filter(s=>!_isChildSession(s)&&((s&&s.pinned)||!_isForkWithResolvableParent(s, sessionIdsInList)))
     .map(cleanSidebarRow);
-  const isChildStreaming=(childRow)=>typeof _isSessionEffectivelyStreaming==='function'
-    ? _isSessionEffectivelyStreaming(childRow)
+  const isChildStreaming=(childRow)=>typeof _isSessionRingStreaming==='function'
+    ? _isSessionRingStreaming(childRow)
     : !!(childRow&&(childRow.active_stream_id||childRow.pending_user_message));
   const childHasUnread=(childRow)=>typeof _hasUnreadForSession==='function'
     ? _hasUnreadForSession(childRow)
@@ -7943,7 +7948,8 @@ function renderSessionListFromCache(){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
-    const isStreaming=ownStreaming||!!s._child_session_streaming;
+    const ownRingStreaming=_isSessionRingStreaming(s);
+    const isStreaming=ownRingStreaming||!!s._child_session_streaming;
     _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
@@ -8363,7 +8369,7 @@ function renderSessionListFromCache(){
       for(const child of sortedChildren){
         if(child.session_source==='fork'){
           const childIsActive=!!(activeSidForSidebar&&child.session_id===activeSidForSidebar);
-          const childStreaming=_isSessionEffectivelyStreaming(child);
+          const childStreaming=_isSessionRingStreaming(child);
           const childHasUnread=_hasUnreadForSession(child)&&!childIsActive;
           const childAttention=_sessionAttentionState(child);
           const childAttentionClass=childAttention?(childAttention.kind==='approval'?' attention-approval':(childAttention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
