@@ -53,14 +53,30 @@ class TestAuxReasoningExtraRouteContract:
         assert _route_accepts_reasoning_extra('custom:relay', '', 'https://relay.example.test/v1') is False
         assert _route_accepts_reasoning_extra('', 'reasoning-model', '') is False
 
-    def test_empty_model_auto_and_local_routes_use_the_configured_default(self):
+    def test_aux_route_matrix_uses_one_resolved_route_for_request_and_gate(self):
         cases = (
-            ('auto', 'qwen', 'qwen3-title', '', True),
-            ('local', 'deepseek', 'deepseek-reasoner', '', True),
-            ('auto', 'openai', 'gpt-5', '', False),
-            ('local', 'custom', 'title-model', 'https://relay.example/v1', False),
+            # auxiliary_provider, auxiliary_model, auxiliary_url,
+            # default_provider, default_model, default_url, request route, extra_body
+            ('auto', '', '', 'qwen', 'qwen3-title', '',
+             ('qwen', 'qwen3-title', None), {'reasoning': {'enabled': False}}),
+            ('local', '', '', 'deepseek', 'deepseek-reasoner', '',
+             ('deepseek', 'deepseek-reasoner', None), {'reasoning': {'enabled': False}}),
+            ('auto', '', '', 'openai', 'gpt-5', '',
+             ('openai', 'gpt-5', None), None),
+            ('local', '', '', 'custom', 'title-model', 'https://relay.example/v1',
+             ('custom', 'title-model', 'https://relay.example/v1'), None),
+            ('auto', '@openrouter:deepseek/deepseek-r1:free', '', 'openai', 'gpt-5', '',
+             ('openrouter', 'deepseek/deepseek-r1:free', None), {'reasoning': {'enabled': False}}),
+            ('auto', '@custom:relay:vendor/model:thinking', 'https://relay.example/v1', 'openai', 'gpt-5', '',
+             ('custom:relay', 'vendor/model:thinking', 'https://relay.example/v1'), None),
+            ('auto', '', '', 'minimax', 'MiniMax-M2.5', 'https://api.minimaxi.com/v1',
+             ('minimax', 'MiniMax-M2.5', 'https://api.minimaxi.com/v1'),
+             {'reasoning': {'enabled': False}, 'reasoning_split': True}),
         )
-        for provider, default_provider, default_model, default_url, accepted in cases:
+        for (
+            provider, model, base_url, default_provider, default_model, default_url,
+            expected_route, expected_extra,
+        ) in cases:
             captured = []
 
             def call_llm(*, _captured=captured, **kwargs):
@@ -68,7 +84,7 @@ class TestAuxReasoningExtraRouteContract:
                 return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
 
             with patch('api.streaming._get_aux_title_config', return_value={
-                'provider': provider, 'model': '', 'base_url': '',
+                'provider': provider, 'model': model, 'base_url': base_url,
             }), patch('api.config.cfg', {
                 'model': {
                     'provider': default_provider,
@@ -77,8 +93,9 @@ class TestAuxReasoningExtraRouteContract:
                 },
             }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
                 generate_title_raw_via_aux('question', 'answer')
-            expected = {'reasoning': {'enabled': False}} if accepted else None
-            assert captured[-1]['extra_body'] == expected
+            request = captured[-1]
+            assert (request['provider'], request['model'], request['base_url']) == expected_route
+            assert request['extra_body'] == expected_extra
 
     @pytest.mark.parametrize('model', (
         '@openai:gpt-5.5',

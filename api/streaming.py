@@ -3376,10 +3376,8 @@ def _log_aux_title_failure(message: str, base_url: str, provider: str, model: st
 
 
 def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tuple[str, str, str]:
-    """Resolve auto/local auxiliary routes before compatibility classification."""
+    """Resolve the one auxiliary title route used for requests and compatibility."""
     provider_lower = str(provider or '').strip().lower()
-    if provider_lower not in {'', 'auto', 'local'}:
-        return provider, model, base_url
     effective_model = str(model or '').strip()
     # resolve_model_provider deliberately leaves an empty model empty. For
     # implicit, auto, and legacy local auxiliary routes, resolve the configured
@@ -3393,6 +3391,12 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
             pass
     try:
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(effective_model)
+        # Explicit routes keep their configured provider, except picker values
+        # (``@provider:model``), whose provider/model pair is canonicalized by
+        # resolve_model_provider.  That resolver preserves model suffixes such
+        # as ``:free`` and ``:thinking``.
+        if provider_lower not in {'', 'auto', 'local'} and not effective_model.startswith('@'):
+            return provider, model, base_url
         return (
             str(resolved_provider or provider or ''),
             str(resolved_model or effective_model or model or ''),
@@ -3569,29 +3573,18 @@ def generate_title_raw_via_aux(
         provider = ''
     model = model or configured.get('model', '') or ''
     base_url = base_url or configured.get('base_url', '') or ''
-    try:
-        from api.profiles import _split_webui_provider_model_value
-
-        normalized_model, normalized_provider = _split_webui_provider_model_value(
-            model or None,
-            provider or None,
-        )
-        model = normalized_model or ''
-        provider = normalized_provider or ''
-    except ValueError:
-        pass
     api_key = ''
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
-    base_max_tokens = _title_completion_budget(provider, model, base_url)
-    gate_provider, gate_model, gate_base_url = _effective_aux_title_route(
+    provider, model, base_url = _effective_aux_title_route(
         provider, model, base_url,
     )
     reasoning_extra = {}
-    if _route_accepts_reasoning_extra(gate_provider, gate_model, gate_base_url):
+    if _route_accepts_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
+    base_max_tokens = _title_completion_budget(provider, model, base_url)
     try:
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
