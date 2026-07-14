@@ -860,7 +860,7 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
     if(data.session.session_id&&data.session.session_id!==currentSid){
       await loadSession(data.session.session_id);
     }else{
-      S.session=data.session;
+      setWorkspaceSearchSession(data.session);
       S.messages=data.session.messages||[];
       S.toolCalls=data.session.tool_calls||[];
       clearLiveToolCards();
@@ -962,7 +962,7 @@ async function _runManualCompression(focusTopic){
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('session no longer available');
       }
-      S.session=live.session;
+      setWorkspaceSearchSession(live.session);
       S.messages=live.session.messages||[];
       S.toolCalls=live.session.tool_calls||[];
       if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;

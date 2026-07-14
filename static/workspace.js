@@ -306,6 +306,16 @@ function _resetWorkspaceSearch(clearQuery){
   S._workspaceSearchTruncated=false;
   S._workspaceSearchPending=false;
 }
+function setWorkspaceSearchSession(session){
+  const previous=S.session;
+  const previousKey=previous?`${previous.session_id||''}\u0000${previous.workspace||''}`:'\u0000';
+  const nextKey=session?`${session.session_id||''}\u0000${session.workspace||''}`:'\u0000';
+  S.session=session;
+  if(nextKey===previousKey) return false;
+  _resetWorkspaceSearch(true);
+  if(typeof renderFileTree==='function') renderFileTree();
+  return true;
+}
 function _clearWorkspaceSearch(){ _resetWorkspaceSearch(true); }
 function requestWorkspaceSearch(query){
   const normalizedQuery=String(query||'').trim();
