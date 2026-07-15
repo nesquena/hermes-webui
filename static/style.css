@@ -3117,6 +3117,8 @@
     .composer-mobile-config-panel.open{display:flex;}
     .composer-mobile-config-action{box-sizing:border-box;flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
     .composer-mobile-context-action{flex:1 0 100%;}
+    /* Keep the rich picker in the visual viewport when mobile browser chrome moves. */
+    #composerModelDropdown{position:fixed;bottom:auto;box-sizing:border-box;min-width:0;width:calc(100vw - 16px);max-width:calc(100vw - 16px);z-index:220;}
     /* icon-only composer chips continue below mobile widths */
     .composer-divider{display:none;}
     .composer-status{flex:0 1 auto;min-width:0;max-width:96px;font-size:10px;text-align:right;}
@@ -3246,6 +3248,10 @@
 .ws-dropdown.open{display:block;}
 .ws-dropdown-footer{left:0;right:auto;bottom:calc(100% + 4px);min-width:280px;max-width:min(420px,calc(100vw - 32px));}
 .model-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:280px;max-width:min(420px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:min(70vh,640px);overflow-y:auto;}
+/* Re-assert the mobile picker after the base dropdown rule below the phone media block. */
+@media (max-width:640px){
+ #composerModelDropdown{position:fixed;bottom:auto;box-sizing:border-box;min-width:0;width:calc(100vw - 16px);max-width:calc(100vw - 16px);z-index:220;}
+}
 .model-dropdown.open{display:block;}
 .model-scope-note{position:sticky;top:0;z-index:2;padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text);font-size:11px;font-weight:650;line-height:1.4;background:color-mix(in srgb,var(--surface) 82%,var(--accent-bg));box-shadow:0 1px 0 rgba(0,0,0,.12);}
 .model-group{padding:8px 14px 4px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);text-transform:uppercase;border-top:1px solid var(--border2);margin-top:2px;}.model-group.collapsible{cursor:pointer;user-select:none}.model-group.collapsible:before{content:'\25b6';display:inline-block;font-size:8px;margin-right:5px;transition:transform .15s ease}.model-group.collapsible.open:before{transform:rotate(90deg)}.model-group-body:empty{display:none}
