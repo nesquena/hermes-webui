@@ -938,9 +938,13 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "live reasoning SSE events must update the active Worklog Thinking Card text"
     assert "const liveThinkingText=_liveThinkingText();" in src, \
         "live reasoning SSE events must compute the current segment's Worklog Thinking Card text once"
-    assert "if(!_upsertAnchorReasoning(liveThinkingText))" in src, \
+    assert "const anchorReasoningFallback={};" in src, \
+        "live reasoning SSE events must capture the active anchor id for fallback"
+    assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback))" in src, \
         "live reasoning SSE events must prefer the anchor renderer before falling back"
-    assert "_updateLiveThinkingCard(liveThinkingText)" in src, \
+    assert "_updateLiveThinkingCard(liveThinkingText,{" in src and "...anchorReasoningFallback" in src, \
+        "live reasoning SSE events must carry anchor identity into the fallback renderer"
+    assert "anchorRenderFallback:true" in src and "sessionId:activeSid" in src and "streamId" in src, \
         "live reasoning SSE events must keep the current segment's Worklog Thinking Card as fallback"
     assert "source.addEventListener('tool_complete'" in src or 'source.addEventListener("tool_complete"' in src, \
         "messages.js must listen for live tool completion SSE events"
