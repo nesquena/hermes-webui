@@ -148,17 +148,56 @@ _SESSION_SAVE_PUBLICATION_LOCKS_GUARD = threading.Lock()
 _SESSION_SAVE_PUBLICATION_LOCKS = weakref.WeakValueDictionary()
 
 
+def _session_save_publication_lock_key(path: Path) -> str:
+    """Return the canonical, final-name-scoped identity for one sidecar lock.
+
+    Resolve only the parent directory: aliases through symlinked parents and
+    relative/``..`` spellings must converge before the sidecar exists, while an
+    attacker-swapped final symlink must not redirect lock ownership. Session
+    sidecars are atomically replaced, name-scoped files; inode/hard-link aliases
+    are intentionally not treated as another supported storage identity.
+    ``normcase`` supplies Windows' case-insensitive path semantics.
+    """
+    candidate = Path(path).expanduser()
+    canonical_parent = candidate.parent.resolve(strict=False)
+    canonical = canonical_parent / candidate.name
+    return os.path.normcase(os.path.normpath(os.fspath(canonical)))
+
+
 def _get_session_save_publication_lock(path: Path):
-    # ``SESSION_DIR`` is already process-owned canonical storage. Avoid
-    # ``Path.resolve()`` here: it stats every path component on each save and
-    # materially penalizes the small-session hot path.
-    key = os.fspath(path)
+    key = _session_save_publication_lock_key(path)
     with _SESSION_SAVE_PUBLICATION_LOCKS_GUARD:
         lock = _SESSION_SAVE_PUBLICATION_LOCKS.get(key)
         if lock is None:
             lock = threading.Lock()
             _SESSION_SAVE_PUBLICATION_LOCKS[key] = lock
         return lock
+
+
+def _session_save_writer_snapshot(meta: dict, extra: dict) -> dict:
+    """Detach every cache-relevant value before authoritative serialization.
+
+    The bounded raw tail and tool calls are deep copies. Prefix messages get a
+    detached top-level mapping so cache facts (role, timestamp, counts) cannot
+    change after serialization; tool-result messages are fully detached because
+    todo derivation consumes their content. The returned object is used by both
+    authoritative ``json.dumps`` and derived-cache construction.
+    """
+    snapshot = {**meta, **extra}
+    messages = list(snapshot.get('messages') or [])
+    tail_offset = max(0, len(messages) - _SESSION_TAIL_CACHE_LIMIT)
+    frozen_messages = []
+    for index, message in enumerate(messages):
+        if index >= tail_offset or not isinstance(message, dict) or message.get('role') == 'tool':
+            frozen_messages.append(copy.deepcopy(message))
+        else:
+            frozen_messages.append(dict(message))
+    snapshot['messages'] = frozen_messages
+    snapshot['tool_calls'] = copy.deepcopy(snapshot.get('tool_calls'))
+    anchor_scene_index = snapshot.get('anchor_scene_index')
+    if isinstance(anchor_scene_index, dict):
+        snapshot['anchor_scene_index'] = copy.deepcopy(anchor_scene_index)
+    return snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -1333,20 +1372,23 @@ class Session:
                 f"See #1558."
             )
         sidecar_path = self.path
-        publication_key = os.fspath(sidecar_path)
+        publication_path_key = os.fspath(sidecar_path)
         publication_lock = getattr(self, '_save_publication_lock', None)
         if (
             publication_lock is None
-            or getattr(self, '_save_publication_lock_key', None) != publication_key
+            or getattr(self, '_save_publication_path_key', None) != publication_path_key
         ):
             publication_lock = _get_session_save_publication_lock(sidecar_path)
             # Keep the weak-registry value alive for this Session object's hot
             # save path without leaking locks after all same-ID objects expire.
+            # The raw spelling is only a fast-path invalidation hint; registry
+            # ownership itself is keyed by the canonical parent + final name.
             self._save_publication_lock = publication_lock
-            self._save_publication_lock_key = publication_key
+            self._save_publication_path_key = publication_path_key
         with publication_lock:
             saved = self._save_authoritative_sidecar_and_tail_cache(
                 touch_updated_at=touch_updated_at,
+                sidecar_path=sidecar_path,
             )
         if not saved:
             return
@@ -1377,7 +1419,12 @@ class Session:
                     exc_info=True,
                 )
 
-    def _save_authoritative_sidecar_and_tail_cache(self, touch_updated_at: bool = True) -> bool:
+    def _save_authoritative_sidecar_and_tail_cache(
+        self,
+        touch_updated_at: bool = True,
+        *,
+        sidecar_path: Path,
+    ) -> bool:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1452,14 +1499,33 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        # Freeze list membership while the per-sidecar publication lock is held.
-        # Concurrent writers use independent Session objects; copying this list
-        # binds later cache derivation to the exact writer snapshot without a
-        # full transcript deepcopy on every small save. The bounded tail itself
-        # is deep-copied when its derived payload is built below.
-        frozen_snapshot = {**meta, **extra}
-        frozen_snapshot['messages'] = list(frozen_snapshot.get('messages') or [])
-        payload = json.dumps(frozen_snapshot, ensure_ascii=False, indent=2)
+        existing_signature = _sidecar_stat_signature(sidecar_path)
+        previous_signature = getattr(self, '_last_saved_source_signature', None)
+        fast_small_snapshot = (
+            existing_signature is not None
+            and existing_signature == previous_signature
+            and not _session_tail_cache_signature_is_large_enough(existing_signature)
+        )
+        if fast_small_snapshot:
+            # Stable small sidecars never publish a tail cache. Preserve the cheap
+            # membership snapshot on their checkpoint hot path; if this save grows
+            # past the threshold, rebuild one detached snapshot before publication.
+            frozen_snapshot = {**meta, **extra}
+            frozen_snapshot['messages'] = list(frozen_snapshot.get('messages') or [])
+            payload = json.dumps(frozen_snapshot, ensure_ascii=False, indent=2)
+            if len(payload.encode('utf-8')) >= _SESSION_TAIL_CACHE_MIN_SOURCE_BYTES:
+                frozen_snapshot = _session_save_writer_snapshot(meta, extra)
+                payload = json.dumps(frozen_snapshot, ensure_ascii=False, indent=2)
+                snapshot_is_immutable = True
+            else:
+                snapshot_is_immutable = False
+        else:
+            # One detached writer snapshot owns both authoritative serialization
+            # and every cache-relevant tail/tool/fact value. Mutating ``self``
+            # after this point cannot produce accepted derived bytes that differ.
+            frozen_snapshot = _session_save_writer_snapshot(meta, extra)
+            payload = json.dumps(frozen_snapshot, ensure_ascii=False, indent=2)
+            snapshot_is_immutable = True
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1473,15 +1539,27 @@ class Session:
         # The recovery path is api/session_recovery.py — at server startup and
         # via /api/session/recover, sessions whose JSON has fewer messages than
         # their .bak get restored automatically.
+        incoming_msg_count = len(frozen_snapshot.get('messages') or [])
         try:
-            if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
-                try:
-                    existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+            if existing_signature is not None:
+                existing_text = None
+                existing_msg_count = -1
+                if (
+                    existing_signature == getattr(self, '_last_saved_source_signature', None)
+                    and isinstance(getattr(self, '_last_saved_message_count', None), int)
+                ):
+                    # The same Session object still owns the exact bytes it last
+                    # published. Avoid re-reading and full-parsing them on every
+                    # checkpoint; any external/in-process replacement changes the
+                    # stat signature and falls through to the authoritative read.
+                    existing_msg_count = self._last_saved_message_count
+                else:
+                    existing_text = sidecar_path.read_text(encoding='utf-8')
+                    try:
+                        existing = json.loads(existing_text)
+                        existing_msg_count = len(existing.get('messages') or [])
+                    except (json.JSONDecodeError, ValueError):
+                        existing_msg_count = -1
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1497,7 +1575,19 @@ class Session:
                     )
                     return False
                 if existing_msg_count > incoming_msg_count:
-                    bak_path = self.path.with_suffix('.json.bak')
+                    if existing_text is None:
+                        # A shrink needs the actual previous bytes for the backup.
+                        # Re-parse after the read so a replacement between the fast
+                        # stat and this slow path cannot back up an unrelated count.
+                        existing_text = sidecar_path.read_text(encoding='utf-8')
+                        try:
+                            existing = json.loads(existing_text)
+                            existing_msg_count = len(existing.get('messages') or [])
+                        except (json.JSONDecodeError, ValueError):
+                            existing_msg_count = -1
+                    if existing_msg_count <= incoming_msg_count:
+                        existing_text = None
+                    bak_path = sidecar_path.with_suffix('.json.bak')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
                     # mirroring the main save() pattern below. Prevents a
                     # torn .bak from a crash mid-write or a concurrent
@@ -1507,6 +1597,8 @@ class Session:
                     # this fix the backup either lands cleanly or doesn't
                     # land at all.
                     try:
+                        if existing_text is None:
+                            raise OSError("authoritative source changed before backup")
                         bak_tmp = bak_path.with_suffix(
                             f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
                         )
@@ -1524,13 +1616,13 @@ class Session:
         except OSError:
             pass
 
-        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+        tmp = sidecar_path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
             with open(tmp, 'w', encoding='utf-8') as f:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            _safe_replace(tmp, self.path)
+            _safe_replace(tmp, sidecar_path)
             _invalidate_persisted_session_ids_snapshot()
         except Exception:
             try:
@@ -1549,12 +1641,15 @@ class Session:
             # derived bytes. An eligible source is republished below; an ineligible
             # source stays cache-free. Failure is non-fatal and the reader still
             # rejects any retained stale entry by its old source signature.
+            source_signature = _sidecar_stat_signature(sidecar_path)
+            self._last_saved_source_signature = source_signature
+            self._last_saved_message_count = incoming_msg_count
             delete_session_tail_cache(self.session_id)
-            source_signature = _sidecar_stat_signature(self.path)
             if _session_tail_cache_signature_is_large_enough(source_signature):
                 _write_session_tail_cache(
                     frozen_snapshot,
                     expected_signature=source_signature,
+                    snapshot_is_immutable=snapshot_is_immutable,
                 )
         except Exception:
             logger.debug(
@@ -3952,7 +4047,12 @@ def _session_tail_cache_snapshot_value(snapshot, key, default=None):
     return getattr(snapshot, key, default)
 
 
-def _session_tail_cache_payload(session, source_signature) -> dict | None:
+def _session_tail_cache_payload(
+    session,
+    source_signature,
+    *,
+    snapshot_is_immutable: bool = False,
+) -> dict | None:
     """Build a v1 cache payload from a Session or its frozen save snapshot."""
     if _session_tail_cache_snapshot_value(session, '_loaded_metadata_only', False):
         return None
@@ -3967,7 +4067,7 @@ def _session_tail_cache_payload(session, source_signature) -> dict | None:
         return None
     source_count = len(messages)
     offset = max(0, source_count - _SESSION_TAIL_CACHE_LIMIT)
-    raw_tail = copy.deepcopy(messages[offset:])
+    raw_tail = messages[offset:] if snapshot_is_immutable else copy.deepcopy(messages[offset:])
     all_timestamps_valid = all(
         isinstance(message, dict)
         and _tail_cache_finite_number(message.get('timestamp'))
@@ -3999,7 +4099,9 @@ def _session_tail_cache_payload(session, source_signature) -> dict | None:
             all_tool_calls_positionable = False
             continue
         if assistant_idx >= offset:
-            cached_tool_calls.append(copy.deepcopy(tool_call))
+            cached_tool_calls.append(
+                tool_call if snapshot_is_immutable else copy.deepcopy(tool_call)
+            )
 
     try:
         from api.todo_state import derive_todo_state
@@ -4033,8 +4135,10 @@ def _session_tail_cache_payload(session, source_signature) -> dict | None:
         'tool_calls': cached_tool_calls,
         'all_tool_calls_positionable': all_tool_calls_positionable,
         'todo_state': todo_state,
-        'anchor_scene_index': copy.deepcopy(
+        'anchor_scene_index': (
             _session_tail_cache_snapshot_value(session, 'anchor_scene_index')
+            if snapshot_is_immutable
+            else copy.deepcopy(_session_tail_cache_snapshot_value(session, 'anchor_scene_index'))
         ) if isinstance(
             _session_tail_cache_snapshot_value(session, 'anchor_scene_index'),
             dict,
@@ -4084,8 +4188,17 @@ def _write_session_tail_cache_payload(payload: dict, *, expected_signature) -> b
             pass
 
 
-def _write_session_tail_cache(session, *, expected_signature) -> bool:
-    payload = _session_tail_cache_payload(session, expected_signature)
+def _write_session_tail_cache(
+    session,
+    *,
+    expected_signature,
+    snapshot_is_immutable: bool = False,
+) -> bool:
+    payload = _session_tail_cache_payload(
+        session,
+        expected_signature,
+        snapshot_is_immutable=snapshot_is_immutable,
+    )
     if payload is None:
         return False
     return _write_session_tail_cache_payload(
