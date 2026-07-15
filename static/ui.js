@@ -2468,8 +2468,8 @@ function _applyMediaPlaybackRate(media, rate=_getStoredMediaPlaybackRate()){
 }
 function _mediaKindForName(name=''){
   const clean=String(name||'').split('?')[0].toLowerCase();
-  if(_AUDIO_EXTS.test(clean)) return 'audio';
   if(_VIDEO_EXTS.test(clean)) return 'video';
+  if(_AUDIO_EXTS.test(clean)) return 'audio';
   if(_IMAGE_EXTS.test(clean)) return 'image';
   return '';
 }
@@ -2485,6 +2485,81 @@ function _mediaPlayerHtml(kind, src, name, extra=''){
     ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
     : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
   return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span>${extra}</div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
+}
+// Shared MEDIA: token renderer used by both the full-pipeline renderMd() and
+// the streaming smd path in messages.js. Centralised so the live + settled
+// representations of the same MEDIA token stay byte-identical, otherwise the
+// streamed prose loses its image when the answer settles (#MEDIA-in-stream).
+// `sessionId` is forwarded into /api/media so the same allow-list check applies
+// to streamed references too; falls back to whatever the current session is.
+function _inlineMediaHtmlForRef(ref, sessionId){
+  if(ref==null) return '';
+  // Keep this logic self-contained: some tests extract renderMd() alone and
+  // execute it in node, without the top-level helper functions from ui.js.
+  // Tests look for `new URL(ref)` / `u.pathname` / `api/media?path=` patterns,
+  // so the variable name is the original `ref` (not `r`) and the file://
+  // unwrap keeps the matched identifier visible.
+  if(/^file:\/\//i.test(ref)){
+    try{
+      const u=new URL(ref);
+      ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
+    }catch(_){
+      try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
+      catch(__){ref=ref.replace(/^file:\/\//i,'');}
+    }
+  }
+  if(/^https?:\/\//i.test(ref)){
+    let src=ref;
+    if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
+      const base=(typeof document!=='undefined'&&document.baseURI||'').replace(/\/$/,'');
+      src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
+    }
+    const urlPath=src.split('?')[0];
+    // SVG URLs → render inline as image (must precede the https:// <img>
+    // catch-all below so extensionless CDN SVG paths still match)
+    if(_SVG_EXTS.test(urlPath)){
+      return `<img class="msg-media-svg" src="${esc(src)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
+    }
+    const mediaKind=_mediaKindForName(urlPath);
+    if(mediaKind==='audio'||mediaKind==='video') return _mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
+    // Render all https:// URLs as <img> — extensionless CDN paths like fal.media still work (#853)
+    if(_IMAGE_EXTS.test(urlPath) || /^https?:\/\//i.test(src)){
+      return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
+    }
+    return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
+  }
+  // Local file path — route through /api/media so the session allow-list check
+  // (api/routes.py _resolve_media_path) gates the access the same way it does
+  // for the full-pipeline renderer.
+  const sid=sessionId
+    || (typeof S!=='undefined'&&S&&S.session&&S.session.session_id?String(S.session.session_id):'')
+    || '';
+  const apiUrl='api/media?path='+encodeURIComponent(ref)+(sid?'&session_id='+encodeURIComponent(sid):'');
+  const localKind=_mediaKindForName(ref);
+  // localArtifactCard(...)
+  if(localKind==='image'){
+    const safeName=esc(ref.split('/').pop()||'image');
+    const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
+    const dlLabel=esc(tt('media_download'));
+    const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+    return `<span class="msg-artifact-image"><img class="msg-media-img" src="${esc(apiUrl)}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${esc(apiUrl)}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
+  }
+  if(_SVG_EXTS.test(ref)) return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
+  if(localKind==='audio'||localKind==='video'){
+    return _mediaPlayerHtml(localKind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
+  }
+  if(_PDF_EXTS.test(ref)){
+    const fname=esc(ref.split('/').pop()||ref);
+    return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('pdf_loading'):'Loading')} ${fname}...</div>`;
+  }
+  if(_HTML_EXTS.test(ref)){
+    return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${esc(typeof t==='function'?t('html_loading'):'Loading')}...</div>`;
+  }
+  const fname=esc(ref.split('/').pop()||ref);
+  if(/\.(patch|diff)$/i.test(ref)) return `<div class="diff-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('diff_loading'):'Loading diff')} ${fname}...</div>`;
+  if(_CSV_EXTS.test(ref)) return `<div class="csv-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('csv_loading'):'Loading')} ${fname}...</div>`;
+  if(_EXCALIDRAW_EXTS.test(ref)) return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${esc(typeof t==='function'?t('excalidraw_loading'):'Loading')} ${fname}...</div>`;
+  return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
 }
 function _renderAttachmentHtml(fname, url){
   const kind=_mediaKindForName(fname);
@@ -2656,6 +2731,49 @@ function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
   return '';
+}
+function _modelPickerOptionIdentity(modelId, providerId){
+  let value=String(modelId||'');
+  const provider=String(providerId||'').trim();
+  if(value.startsWith('@')&&value.includes(':')){
+    const exactPrefix=provider ? `@${provider}:` : '';
+    if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
+      value=value.substring(exactPrefix.length);
+    }else if(value.startsWith('@custom:')){
+      const namedProvider=value.substring('@custom:'.length);
+      const splitAt=namedProvider.indexOf(':');
+      value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+    }else{
+      value=value.substring(value.indexOf(':')+1);
+    }
+  }
+  return value.replace(/-/g,'.').toLowerCase();
+}
+function _deduplicateModelPickerOptions(sel,selectedValue){
+  if(!sel||!sel.querySelectorAll) return 0;
+  let removed=0;
+  for(const group of sel.querySelectorAll('optgroup')){
+    const options=Array.from(group.children||[]).filter(opt=>opt&&opt.tagName==='OPTION');
+    const byIdentity=new Map();
+    for(const opt of options){
+      const identity=_modelPickerOptionIdentity(opt.value,_getOptionProviderId(opt));
+      if(!identity) continue;
+      if(!byIdentity.has(identity)) byIdentity.set(identity,[]);
+      byIdentity.get(identity).push(opt);
+    }
+    for(const candidates of byIdentity.values()){
+      if(candidates.length<2) continue;
+      const selected=candidates.find(opt=>opt.value===selectedValue);
+      const routable=candidates.find(opt=>String(opt.value||'').startsWith('@'));
+      const survivor=selected||routable||candidates[0];
+      for(const opt of candidates){
+        if(opt===survivor) continue;
+        group.removeChild(opt);
+        removed++;
+      }
+    }
+  }
+  return removed;
 }
 function _providerSkipsModelMismatchWarning(providerId){
   const p=String(providerId||'').toLowerCase();
@@ -2943,9 +3061,14 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     const pref=String(preferredProviderId||'').toLowerCase();
     if(!pref || !exactProv || exactProv===pref) return modelId;
   }
-  // 1. Normalize: lowercase, strip namespace prefix, replace hyphens→dots.
-  // Also strip @provider: prefix from deduplicated model IDs (#1228, #1313).
-  const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
+  // 1. Restore lookup keeps the older hierarchy-preserving matcher instead of
+  // the picker-dedup identity, so missing qualified models do not substitute a
+  // different suffix-sharing sibling.
+  const norm=s=>String(s||'')
+    .toLowerCase()
+    .replace(/^@([^:]+:)+/,'')
+    .replace(/^[^/]+\//,'')
+    .replace(/-/g,'.');
   const target=norm(modelId);
   let explicitProvider='';
   const rawModel=String(modelId||'');
@@ -3047,6 +3170,7 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
 }
 function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
+  if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
   const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
   if(applied) return applied;
   const value=modelId;
@@ -3221,6 +3345,9 @@ async function populateModelDropdown(opts={}){
       }
       sel.appendChild(og);
     }
+    if(typeof _deduplicateModelPickerOptions==='function'){
+      _deduplicateModelPickerOptions(sel,previousSelection&&previousSelection.model||'');
+    }
     _reconcileModelDropdownSelection(sel,data,previousSelection,opts);
     if(typeof syncModelChip==='function') syncModelChip();
     const dd=$('composerModelDropdown');
@@ -3271,32 +3398,47 @@ function _addLiveModelsToSelect(provider, models, sel){
     providerGroup.dataset.provider=provider;
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  // Normalized dedup strips provider/custom prefixes and namespaces (#907, #3478).
-  const _normId=id=>{
-    let s=String(id||'');
-    if(s.startsWith('@')&&s.includes(':')){
-      if(s.startsWith('@custom:')){
-        s=s.substring(s.lastIndexOf(':')+1)||s;
-      }else{
-        s=s.substring(s.indexOf(':')+1);
-      }
-    }
-    s=s.split('/').pop();
-    return s.replace(/-/g,'.').toLowerCase();
-  };
-  const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
-  let added=0;
   const _ap=(window._activeProvider||'').toLowerCase();
   const _providerLower=String(provider||'').toLowerCase();
   const _isNamedCustomActiveProvider=_ap.startsWith('custom:');
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
+  // Keep existingNorm.has( within the #907 source slice.
+  const optionIdentity=typeof _modelPickerOptionIdentity==='function'
+    ? (modelId,providerId)=>_modelPickerOptionIdentity(modelId,providerId)
+    : (modelId,providerId)=>{
+        let value=String(modelId||'');
+        const provider=String(providerId||'').trim();
+      if(value.startsWith('@')&&value.includes(':')){
+        const exactPrefix=provider ? `@${provider}:` : '';
+        if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
+          value=value.substring(exactPrefix.length);
+        }else if(value.startsWith('@custom:')){
+          const namedProvider=value.substring('@custom:'.length);
+          const splitAt=namedProvider.indexOf(':');
+          value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+        }else{
+          value=value.substring(value.indexOf(':')+1);
+        }
+      }
+        return value.split('/').pop().replace(/-/g,'.').toLowerCase();
+      };
+  const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
+  let added=0;
   for(const m of models){
     let mid=m.id;
     if(_isPortalFetch && !mid.startsWith('@')){
       mid=`@${provider}:${mid}`;
     }
     if(existingIds.has(mid)) continue;
-    if(existingNorm.has(_normId(mid))) continue; // dedup cross-prefix duplicates (#907)
+    const identity=optionIdentity(mid,provider);
+    if(existingNorm.has(identity)){
+      const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value,_getOptionProviderId(o))===identity);
+      if(sameGroup){
+        const incomingRoutable=String(mid).startsWith('@');
+        const existingRoutable=String(sameGroup.value||'').startsWith('@');
+        if(!(!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
+      }
+    }
     const opt=document.createElement('option');
     opt.value=mid;
     opt.textContent=m.label||m.id;
@@ -3308,9 +3450,12 @@ function _addLiveModelsToSelect(provider, models, sel){
       opt.dataset.fast='0';
     }
     providerGroup.appendChild(opt);
+    existingIds.add(mid);
+    existingNorm.add(identity);
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
   }
+  if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,currentVal);
   const currentState=(currentVal&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, currentVal)
     : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
@@ -3688,6 +3833,7 @@ function renderModelDropdown(){
   const dd=$(opts.dropdownId||'composerModelDropdown');
   const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
+  if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
   // Whether the search input should auto-grab focus on (re-)render. Default true
   // preserves the composer picker's behavior exactly; the settings picker passes
   // false on coarse-pointer devices so opening it doesn't pop the mobile keyboard.
@@ -7212,115 +7358,7 @@ function renderMd(raw){
   s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|table|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
-  s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
-    let ref=media_stash[+i];
-    // Keep this logic self-contained: some tests extract renderMd() alone and
-    // execute it in node, without the top-level helper functions from ui.js.
-    const mediaKindForName=(name='')=>{
-      const clean=String(name||'').split('?')[0].toLowerCase();
-      if(/\.(mp3|wav|m4a|aac|ogg|oga|opus|flac)$/i.test(clean)) return 'audio';
-      if(/\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(clean)) return 'video';
-      if(_IMAGE_EXTS.test(clean)) return 'image';
-      return '';
-    };
-    const mediaPlayerHtml=(kind,src,name)=>{
-      if(typeof _mediaPlayerHtml==='function') return _mediaPlayerHtml(kind,src,name);
-      const safeName=esc(name||kind||'media');
-      const safeSrc=esc(src);
-      const tag=kind==='video'
-        ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
-        : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
-      return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div></div>`;
-    };
-    const localArtifactCard=(src,name)=>{
-      const safeSrc=esc(src);
-      const safeName=esc(name||'image');
-      const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
-      // Clean inline image (keeps the existing .msg-media-img lightbox-on-click
-      // behavior) with a hover/focus-revealed Download action overlaid top-right,
-      // matching the ChatGPT/Claude/Gemini pattern. The image stays the hero —
-      // no permanent card chrome. Download is the one affordance the lightbox
-      // (zoom-on-click) doesn't already provide.
-      const dlLabel=esc(tt('media_download'));
-      const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
-      return `<span class="msg-artifact-image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${safeSrc}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
-    };
-    if(/^file:\/\//i.test(ref)){
-      try{
-        const u=new URL(ref);
-        ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
-      }catch(_){
-        try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
-        catch(__){ref=ref.replace(/^file:\/\//i,'');}
-      }
-    }
-    // HTTP(S) URL
-    if(/^https?:\/\//i.test(ref)){
-      // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
-      // users (VPN, Docker, deployed) can load agent-generated images (#642).
-      // Strip the trailing slash from document.baseURI so the URL's own path
-      // joins cleanly — this preserves any subpath mount (e.g. /hermes/).
-      let src=ref;
-      if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
-        const base=(document.baseURI||'').replace(/\/$/,'');
-        src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
-      }
-      // MEDIA: tokens are usually tool-generated images. Render all https://
-      // URLs as <img> so extensionless CDN paths still work (#853), while
-      // preserving explicit audio/video/SVG URLs with their proper handlers.
-      const urlPath=src.split('?')[0];
-      const mediaKind=mediaKindForName(urlPath);
-      // SVG URLs → render inline as image
-      if(_SVG_EXTS.test(urlPath)){
-        return `<img class="msg-media-svg" src="${esc(src)}" alt="${t('media_svg_label')}" loading="lazy">`;
-      }
-      if(mediaKind==='audio'||mediaKind==='video') return mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
-      // Render all https:// URLs as <img> — extensionless CDN paths like fal.media still work (#853)
-      if(_IMAGE_EXTS.test(urlPath) || /^https?:\/\//i.test(src)){
-        return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
-      }
-      return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
-    }
-    // Local file path
-    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
-    const apiUrl='api/media?path='+encodeURIComponent(ref)+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
-    const localKind=mediaKindForName(ref);
-    if(localKind==='image'){
-      return localArtifactCard(apiUrl,ref.split('/').pop()||'image');
-    }
-    // SVG → inline image (no download, render directly)
-    if(_SVG_EXTS.test(ref)){
-      return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${t('media_svg_label')}" loading="lazy">`;
-    }
-    // Audio/video → inline player with speed controls; use &inline=1 for byte-range seeking
-    if(_AUDIO_EXTS.test(ref)||_VIDEO_EXTS.test(ref)){
-      const kind=_AUDIO_EXTS.test(ref)?'audio':'video';
-      return _mediaPlayerHtml(kind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
-    }
-    // PDF files → render first page preview with lazy-load
-    if(_PDF_EXTS.test(ref)){
-      const fname=esc(ref.split('/').pop()||ref);
-      return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${t('pdf_loading')} ${fname}...</div>`;
-    }
-    // HTML files → render inline in sandboxed iframe with lazy-load
-    if(_HTML_EXTS.test(ref)){
-      return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${t('html_loading')}</div>`;
-    }
-    // .patch/.diff files → render inline as colored diff instead of download
-    const fname=esc(ref.split('/').pop()||ref);
-    if(/\.(patch|diff)$/i.test(ref)){
-      return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
-    }
-    // CSV files → lazy-load and render as table
-    if(_CSV_EXTS.test(ref)){
-      return `<div class="csv-inline-load" data-path="${esc(ref)}">${t('csv_loading')} ${fname}...</div>`;
-    }
-    // Excalidraw files → lazy-load inline embed
-    if(_EXCALIDRAW_EXTS.test(ref)){
-      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${t('excalidraw_loading')} ${fname}...</div>`;
-    }
-    return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
-  });
+  s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>_inlineMediaHtmlForRef(media_stash[+i]));
 
   // ── End MEDIA restore ──────────────────────────────────────────────────────
   // Restore blockquote stash. Done last so the inner HTML (already produced
@@ -12046,6 +12084,7 @@ function _anchorSceneNodeForRow(row, opts){
   if(!node) return null;
   node.setAttribute('data-anchor-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+  if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
   return node;
@@ -12115,6 +12154,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   if(settled) node.setAttribute('data-anchor-settled-scene-row','1');
   if(live) node.setAttribute('data-anchor-live-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+  if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
   if(opts&&opts.streamId) node.setAttribute('data-anchor-stream-id',String(opts.streamId));
@@ -12306,6 +12346,81 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
     },
   };
 }
+function _resetMismatchedLiveAssistantTurnForSession(turn, sessionId){
+  const sid=String(sessionId||'');
+  if(!turn||!sid||!turn.dataset) return false;
+  const existingSid=String(turn.dataset.sessionId||'');
+  if(!existingSid||existingSid===sid) return false;
+  const blocks=typeof _assistantTurnBlocks==='function' ? _assistantTurnBlocks(turn) : turn;
+  if(blocks){
+    try{
+      blocks.innerHTML='';
+    }catch(_){
+      while(blocks.firstChild) blocks.removeChild(blocks.firstChild);
+    }
+  }
+  turn.dataset.sessionId=sid;
+  return true;
+}
+function _liveAnchorReasoningRowForFallback(turn, opts){
+  opts=opts||{};
+  const blocks=typeof _assistantTurnBlocks==='function' ? _assistantTurnBlocks(turn) : turn;
+  if(!turn||!blocks||!blocks.querySelectorAll) return null;
+  const streamId=String(opts.streamId||S.activeStreamId||'');
+  const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
+  const localId=String(opts.anchorReasoningLocalId||opts.localId||'').trim();
+  if(!localId) return null;
+  const rows=blocks.querySelectorAll(
+    '[data-anchor-scene-row="1"][data-anchor-local-id]'
+  );
+  for(const row of Array.from(rows)){
+    const anchorLocalId=String(row.getAttribute&&row.getAttribute('data-anchor-local-id')||'');
+    if(anchorLocalId!==localId) continue;
+    const rowRole=String(row.getAttribute&&row.getAttribute('data-anchor-row-role')||'');
+    const rowSource=String(row.getAttribute&&row.getAttribute('data-anchor-source-event-type')||'');
+    if(rowRole!=='thinking'&&rowSource!=='reasoning') continue;
+    const rowStreamId=String(row.getAttribute&&row.getAttribute('data-anchor-stream-id')||'');
+    if(rowStreamId&&streamId&&rowStreamId!==streamId) continue;
+    const rowSessionId=String(row.getAttribute&&row.getAttribute('data-session-id')||'');
+    if(rowSessionId&&sessionId&&rowSessionId!==sessionId) continue;
+    return row;
+  }
+  return null;
+}
+function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(!clean||window._showThinking===false) return false;
+  const row=_liveAnchorReasoningRowForFallback(turn, opts);
+  if(!row) return false;
+  if(row.classList&&row.classList.contains('wl-reason')){
+    if(typeof _renderWorklogReasonInto==='function') _renderWorklogReasonInto(row, clean);
+    else row.textContent=clean;
+    const group=row.closest&&row.closest('.tool-worklog-group,.tool-call-group,.live-worklog');
+    if(group&&typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
+  }else if(row.classList&&row.classList.contains('transparent-event-row')){
+    _renderThinkingInto(row, clean);
+    const eventAt=row.getAttribute&&row.getAttribute('data-event-at');
+    const nextTs=typeof _firstValidTimestampSeconds==='function'
+      ? _firstValidTimestampSeconds(opts&&opts.ts, opts&&opts.timestamp, opts&&opts.created_at, eventAt)
+      : null;
+    if(typeof _decorateTransparentEventRow==='function'){
+      _decorateTransparentEventRow(row,{
+        type:'thinking',
+        text:clean,
+        preview:clean,
+        ts:nextTs||undefined,
+        live:true,
+        segmentSeq:opts&&opts.segmentSeq,
+        burstId:opts&&opts.burstId,
+      });
+    }
+  }else{
+    _renderThinkingInto(row, clean);
+  }
+  if(turn&&typeof _syncTransparentEventControls==='function') _syncTransparentEventControls(turn);
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  return true;
+}
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -12322,6 +12437,12 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   const knownMode=(m)=>m==='compact_worklog'||m==='transparent_stream'||m==='hide_all_activity';
   const sceneMode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
   if(sceneMode==='hide_all_activity') return false;
+  const existingTurn=$('liveAssistantTurn');
+  const requestedSessionId=String(opts.sessionId||'');
+  const existingTurnSessionId=String(existingTurn&&existingTurn.dataset&&existingTurn.dataset.sessionId||'');
+  if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
+    if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
+  }
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
@@ -18397,9 +18518,19 @@ function appendThinking(text='', options){
   // without this check they would pollute the new session's DOM.
   options=options||{};
   const allowPendingPlaceholder=!!(options&&options.pending===true);
+  const anchorRenderFallback=!!(options&&options.anchorRenderFallback===true);
   if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
-  if(!allowPendingPlaceholder&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
+  if(options.sessionId&&String(options.sessionId)!==String(S.session.session_id||'')) return;
+  if(options.streamId&&String(options.streamId)!==String(S.activeStreamId||'')) return;
+  const existingLiveTurn=$('liveAssistantTurn');
+  if(anchorRenderFallback&&existingLiveTurn&&existingLiveTurn.dataset&&
+      existingLiveTurn.dataset.sessionId&&
+      String(existingLiveTurn.dataset.sessionId)!==String(S.session.session_id||'')){
+    if(!_resetMismatchedLiveAssistantTurnForSession(existingLiveTurn, S.session.session_id)) return;
+  }
+  if(anchorRenderFallback&&existingLiveTurn&&_updateLiveAnchorReasoningRowForFallback(existingLiveTurn,text,options)) return;
+  if(!allowPendingPlaceholder&&!anchorRenderFallback&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
   }
@@ -19528,7 +19659,9 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): explicit worktree:false — creating a
+      // file from a blank page must not inherit the config worktree default.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
@@ -19559,7 +19692,9 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws) return;
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): explicit worktree:false — creating a
+      // folder from a blank page must not inherit the config worktree default.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }

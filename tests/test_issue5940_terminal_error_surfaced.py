@@ -76,5 +76,6 @@ def test_captured_terminal_error_seeds_last_err_on_completion():
     """At turn completion, the captured terminal error must seed `_last_err` when
     the agent/result carried no error — so the classifier runs on the real cause
     instead of silent_failure=True."""
-    assert "if not _last_err and _captured_terminal_error[0]:" in STREAMING_PY
+    assert "_captured_terminal_failure = bool(_captured_terminal_error[0])" in STREAMING_PY
+    assert "if not _last_err and _captured_terminal_failure:" in STREAMING_PY
     assert "_last_err = _captured_terminal_error[0]" in STREAMING_PY

@@ -131,6 +131,30 @@ def test_agent_health_payload_alive_uses_safe_runtime_details(monkeypatch):
     assert "pid" not in payload["details"]
 
 
+def test_active_profile_gateway_running_pid_uses_active_profile_path(monkeypatch, tmp_path):
+    from api import agent_health, profiles
+
+    active_home = tmp_path / "profiles" / "active"
+    gateway_status = _PathSensitiveGatewayStatus(active_home)
+    monkeypatch.setattr(agent_health, "_gateway_status_module", lambda: gateway_status)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: active_home)
+
+    assert agent_health.get_active_profile_gateway_running_pid() == 98765
+    assert gateway_status.running_pid_path == active_home / "gateway.pid"
+
+
+def test_active_profile_gateway_running_pid_fails_closed_when_status_is_unavailable(monkeypatch):
+    from api import agent_health
+
+    monkeypatch.setattr(
+        agent_health,
+        "_gateway_status_module",
+        lambda: (_ for _ in ()).throw(ModuleNotFoundError("gateway.status")),
+    )
+
+    assert agent_health.get_active_profile_gateway_running_pid() is None
+
+
 def test_agent_health_payload_down_when_gateway_metadata_exists_but_no_process(monkeypatch):
     from api import agent_health
 
