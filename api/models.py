@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from contextlib import closing, contextmanager
 from pathlib import Path
 
@@ -139,6 +140,22 @@ _SESSION_TAIL_CACHE_VERSION = 1
 _SESSION_TAIL_CACHE_LIMIT = 300
 _SESSION_TAIL_CACHE_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_TAIL_CACHE_MIN_SOURCE_BYTES = 1 * 1024 * 1024
+
+# Storage publication ownership is separate from the non-reentrant agent lock:
+# callers commonly hold the latter while calling Session.save(). Weak values keep
+# the registry bounded while all concurrent users of one sidecar share one lock.
+_SESSION_SAVE_PUBLICATION_LOCKS_GUARD = threading.Lock()
+_SESSION_SAVE_PUBLICATION_LOCKS = weakref.WeakValueDictionary()
+
+
+def _get_session_save_publication_lock(path: Path):
+    key = str(path.expanduser().resolve())
+    with _SESSION_SAVE_PUBLICATION_LOCKS_GUARD:
+        lock = _SESSION_SAVE_PUBLICATION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SESSION_SAVE_PUBLICATION_LOCKS[key] = lock
+        return lock
 
 
 # ---------------------------------------------------------------------------
@@ -1305,6 +1322,50 @@ class Session:
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
+        if getattr(self, '_loaded_metadata_only', False):
+            raise RuntimeError(
+                f"Refusing to save metadata-only session {self.session_id!r}: "
+                f"would atomically overwrite on-disk messages with []. "
+                f"Reload with metadata_only=False before mutating state. "
+                f"See #1558."
+            )
+        sidecar_path = self.path
+        with _get_session_save_publication_lock(sidecar_path):
+            saved = self._save_authoritative_sidecar_and_tail_cache(
+                touch_updated_at=touch_updated_at,
+            )
+        if not saved:
+            return
+        if not skip_index:
+            _write_session_index(updates=[self])
+
+        # #4985 belt-and-suspenders self-heal: a successful save with at
+        # least one real message on the sidecar is unconditional proof the
+        # row is alive (the #4985 "zero-message orphan" only ever exists
+        # when ``len(self.messages) == 0``). Clear the tombstone so the
+        # next ``/api/sessions`` poll does not need the prune helper to
+        # run before the row re-appears — useful when the message-commit
+        # happens on a poll that does not yet see state.db.messages rows
+        # (e.g. the WebUI's own sidecar commit lands before the agent's
+        # state.db append, or the helper is skipped via a different code
+        # path). Wrapped because a tombstone failure must never block a
+        # save. The helper's self-healing branch in
+        # ``_prune_orphaned_webui_zero_message_sessions`` is the primary
+        # fix; this is the belt.
+        if self.messages:
+            try:
+                _clear_webui_zero_message_orphan_tombstone(self.session_id)
+                _clear_webui_deleted_session_tombstone(self.session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to clear webui tombstone for %s",
+                    self.session_id,
+                    exc_info=True,
+                )
+
+    def _save_authoritative_sidecar_and_tail_cache(self, touch_updated_at: bool = True) -> bool:
+        if not is_safe_session_id(self.session_id):
+            raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
         # Refuse to save a session that was loaded with metadata_only=True.
         # Such sessions have messages=[] (it's the whole point of the partial
@@ -1377,7 +1438,8 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        frozen_snapshot = copy.deepcopy({**meta, **extra})
+        payload = json.dumps(frozen_snapshot, ensure_ascii=False, indent=2)
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1413,7 +1475,7 @@ class Session:
                         incoming_msg_count,
                         self.active_stream_id,
                     )
-                    return
+                    return False
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
                     # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
@@ -1463,10 +1525,15 @@ class Session:
         # fsync'd file on every streaming checkpoint would cost more than the
         # bounded read can save.
         try:
+            # Every successful authoritative publication invalidates its previous
+            # derived bytes. An eligible source is republished below; an ineligible
+            # source stays cache-free. Failure is non-fatal and the reader still
+            # rejects any retained stale entry by its old source signature.
+            delete_session_tail_cache(self.session_id)
             source_signature = _sidecar_stat_signature(self.path)
             if _session_tail_cache_signature_is_large_enough(source_signature):
                 _write_session_tail_cache(
-                    self,
+                    frozen_snapshot,
                     expected_signature=source_signature,
                 )
         except Exception:
@@ -1475,32 +1542,7 @@ class Session:
                 self.session_id,
                 exc_info=True,
             )
-        if not skip_index:
-            _write_session_index(updates=[self])
-
-        # #4985 belt-and-suspenders self-heal: a successful save with at
-        # least one real message on the sidecar is unconditional proof the
-        # row is alive (the #4985 "zero-message orphan" only ever exists
-        # when ``len(self.messages) == 0``). Clear the tombstone so the
-        # next ``/api/sessions`` poll does not need the prune helper to
-        # run before the row re-appears — useful when the message-commit
-        # happens on a poll that does not yet see state.db.messages rows
-        # (e.g. the WebUI's own sidecar commit lands before the agent's
-        # state.db append, or the helper is skipped via a different code
-        # path). Wrapped because a tombstone failure must never block a
-        # save. The helper's self-healing branch in
-        # ``_prune_orphaned_webui_zero_message_sessions`` is the primary
-        # fix; this is the belt.
-        if self.messages:
-            try:
-                _clear_webui_zero_message_orphan_tombstone(self.session_id)
-                _clear_webui_deleted_session_tombstone(self.session_id)
-            except Exception:
-                logger.debug(
-                    "Failed to clear webui tombstone for %s",
-                    self.session_id,
-                    exc_info=True,
-                )
+        return True
 
     @classmethod
     def load(cls, sid, *, _populate_tail_cache=True):
@@ -3803,6 +3845,24 @@ def delete_session_tail_cache(sid: str) -> bool:
         return False
 
 
+def delete_session_sidecar_and_tail_cache(sid: str) -> bool:
+    """Best-effort removal of one session's authoritative and derived files."""
+    if not is_safe_session_id(sid):
+        return False
+    sidecar = SESSION_DIR / f'{sid}.json'
+    with _get_session_save_publication_lock(sidecar):
+        try:
+            sidecar.unlink(missing_ok=True)
+            sidecar_deleted = True
+        except OSError:
+            logger.debug("Failed to remove session sidecar for %s", sid, exc_info=True)
+            sidecar_deleted = False
+        # Keep separate failure handling: a sidecar failure must not retain the
+        # derived copy, and a cache failure must not resurrect/fail the source.
+        cache_deleted = delete_session_tail_cache(sid)
+    return sidecar_deleted and cache_deleted
+
+
 def _tail_cache_strict_int(value, *, minimum=None, maximum=None) -> bool:
     if isinstance(value, bool) or not isinstance(value, int):
         return False
@@ -3864,17 +3924,23 @@ def _session_tail_cache_profile_is_active(session) -> bool:
         return False
 
 
+def _session_tail_cache_snapshot_value(snapshot, key, default=None):
+    if isinstance(snapshot, dict):
+        return snapshot.get(key, default)
+    return getattr(snapshot, key, default)
+
+
 def _session_tail_cache_payload(session, source_signature) -> dict | None:
-    """Build a v1 cache payload from a fully materialized Session object."""
-    if getattr(session, '_loaded_metadata_only', False):
+    """Build a v1 cache payload from a Session or its frozen save snapshot."""
+    if _session_tail_cache_snapshot_value(session, '_loaded_metadata_only', False):
         return None
-    sid = getattr(session, 'session_id', None)
+    sid = _session_tail_cache_snapshot_value(session, 'session_id')
     if not is_safe_session_id(sid):
         return None
     signature = _tail_cache_signature_dict(source_signature)
     if signature is None:
         return None
-    messages = getattr(session, 'messages', None)
+    messages = _session_tail_cache_snapshot_value(session, 'messages')
     if not isinstance(messages, list):
         return None
     source_count = len(messages)
@@ -3888,7 +3954,7 @@ def _session_tail_cache_payload(session, source_signature) -> dict | None:
 
     all_tool_calls_positionable = True
     cached_tool_calls = []
-    raw_tool_calls = getattr(session, 'tool_calls', None)
+    raw_tool_calls = _session_tail_cache_snapshot_value(session, 'tool_calls')
     if not isinstance(raw_tool_calls, list):
         raw_tool_calls = []
         all_tool_calls_positionable = False
@@ -3925,7 +3991,10 @@ def _session_tail_cache_payload(session, source_signature) -> dict | None:
         for message in messages
         if isinstance(message, dict) and _tail_cache_finite_number(message.get('timestamp'))
     ]
-    last_message_at = max(timestamps) if timestamps else getattr(session, 'updated_at', None)
+    last_message_at = max(timestamps) if timestamps else _session_tail_cache_snapshot_value(
+        session,
+        'updated_at',
+    )
     if last_message_at is not None and not _tail_cache_finite_number(last_message_at):
         last_message_at = None
     return {
@@ -3943,7 +4012,7 @@ def _session_tail_cache_payload(session, source_signature) -> dict | None:
         'all_tool_calls_positionable': all_tool_calls_positionable,
         'todo_state': todo_state,
         'anchor_scene_index': _anchor_scene_index_from_records(
-            getattr(session, 'anchor_activity_scenes', None)
+            _session_tail_cache_snapshot_value(session, 'anchor_activity_scenes')
         ),
         'all_cached_timestamps_valid': all_timestamps_valid,
         'created_at': float(time.time()),

@@ -291,20 +291,22 @@ class TestIssue765FollowupHardening:
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
+        start_barrier = threading.Barrier(2)
         replace_sources = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
+        def _record_replace(src, dst):
             if Path(dst) == s.path:
                 replace_sources.append(str(src))
-                barrier.wait(timeout=5)
             return original_replace(src, dst)
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _record_replace)
 
         def _save_worker():
             try:
+                # Both callers enter save concurrently, but same-ID publication is
+                # intentionally serialized by the storage-owned transaction lock.
+                start_barrier.wait(timeout=5)
                 s.save(skip_index=True)
             except Exception as e:
                 errors.append(e)
