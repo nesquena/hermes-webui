@@ -476,7 +476,7 @@ function _saveSessionViewedCounts() {
   }
 }
 
-function _setSessionViewedCount(sid, messageCount = 0, opts = null) {
+function _setSessionViewedCount(sid, messageCount = 0) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -490,11 +490,7 @@ function _setSessionViewedCount(sid, messageCount = 0, opts = null) {
     typeof existingMarker === 'object' &&
     !Array.isArray(existingMarker) &&
     existingMarker.manual;
-  const isVisitAcknowledgment =
-    opts &&
-    typeof opts === 'object' &&
-    !Array.isArray(opts) &&
-    opts.fromVisit === true;
+  const isVisitAcknowledgment = !!(_setSessionViewedCount._inVisitDepth > 0);
 
   if (
     isManualUnread &&
@@ -834,7 +830,12 @@ function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt) {
 // by ad-hoc DOM surgery (Greptile concern (b) on #4946).
 function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0) {
   if (!sid) return;
-  _setSessionViewedCount(sid, messageCount, {fromVisit: true});
+  _setSessionViewedCount._inVisitDepth = (_setSessionViewedCount._inVisitDepth || 0) + 1;
+  try {
+    _setSessionViewedCount(sid, messageCount);
+  } finally {
+    _setSessionViewedCount._inVisitDepth = Math.max((_setSessionViewedCount._inVisitDepth || 1) - 1, 0);
+  }
   _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
 }

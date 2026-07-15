@@ -281,6 +281,7 @@ let repaints = 0;
 let S = {{ session: {{ session_id: 'open', message_count: 9 }} }};
 const _sessionListSnapshotById = new Map();
 const _sessionStreamingById = new Map();
+
 function _forgetObservedStreamingSession() {{}}
 function renderSessionListFromCache() {{ repaints += 1; }}
 const document = {{
@@ -363,8 +364,9 @@ const SESSION_VIEWED_COUNTS_KEY = 'v';
 let _sessionCompletionUnread = null;
 let _sessionViewedCounts = null;
 let S = {{ session: {{ session_id: 'open', message_count: 9 }} }};
+const _sessionStreamingById = new Map();
 function _forgetObservedStreamingSession() {{}}
-function renderSessionListFromCache() {{}}
+
 const document = {{
   visibilityState: 'visible',
   hasFocus: () => true,
