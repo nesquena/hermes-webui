@@ -662,6 +662,13 @@ def main() -> None:
         print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
 
     try:
+        from api.kanban_notifications import start_kanban_notification_watcher
+        if start_kanban_notification_watcher():
+            print('[ok] Kanban notification watcher thread started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: Kanban notification watcher failed to start: {e}', flush=True)
+
+    try:
         from api.plugins import load_plugins
         load_plugins()
     except Exception as e:
@@ -744,6 +751,11 @@ def main() -> None:
             stop_session_channel_reaper()
         except Exception:
             logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
+        try:
+            from api.kanban_notifications import stop_kanban_notification_watcher
+            stop_kanban_notification_watcher()
+        except Exception:
+            logger.debug("Failed to stop Kanban notification watcher during shutdown", exc_info=True)
 
 if __name__ == '__main__':
     main()
