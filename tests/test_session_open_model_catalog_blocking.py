@@ -24,10 +24,10 @@ Two contract fixes, asserted here as invariants (not snapshots):
    holds _available_models_cache_lock across an in-flight cold rebuild. It
    serves warm-memory (non-blocking lock) → disk → stale-disk → minimal-static.
 
-2. get_available_models_for_session_visit is stale-while-revalidate: with ANY
-   shape-valid cache it returns immediately and refreshes on a detached daemon.
-   Only a true cold boot (no cache at all) may fall back to the *bounded*
-   rebuild, which is itself capped at _LIVE_REBUILD_BUDGET_SECONDS.
+2. get_available_models_for_session_visit never waits on catalog work: it serves
+   any shape-valid cache immediately, skips contended cache locks, and starts a
+   detached refresh. On a true cold boot it returns the network-free static
+   catalog immediately while the detached refresh populates the durable cache.
 """
 
 from __future__ import annotations
@@ -204,10 +204,57 @@ def test_session_visit_serves_stale_without_blocking(monkeypatch):
     assert result["default_model"] == "anthropic/claude-sonnet-4"
 
 
-def test_session_visit_cold_boot_uses_bounded_rebuild(monkeypatch):
-    """True cold boot — NO cache on disk at all — is the only branch allowed to
-    wait, and even then it uses the *bounded* rebuild (capped at
-    _LIVE_REBUILD_BUDGET_SECONDS), never an unbounded blocking probe.
+def test_session_visit_fresh_disk_does_not_wait_behind_catalog_lock(monkeypatch):
+    """A validated fresh-disk payload must remain immediately usable while a
+    concurrent catalog rebuild owns the in-memory publication lock.
+
+    Both lock acquisitions in the fresh-disk path must be non-blocking: the
+    first memory check is optional, and a busy publication lock must not delay
+    returning the already-validated disk payload.
+    """
+    from api import config as cfg
+
+    cfg.invalidate_models_cache()
+    monkeypatch.setattr(
+        cfg, "_models_cache_file_age_seconds", lambda *a, **k: 0.0, raising=True
+    )
+    monkeypatch.setattr(
+        cfg,
+        "_load_models_cache_from_disk",
+        lambda: _catalog("anthropic/claude-opus-4"),
+        raising=True,
+    )
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _holder():
+        with cfg._available_models_cache_lock:
+            holding.set()
+            release.wait(timeout=1.0)
+
+    t = threading.Thread(target=_holder, daemon=True)
+    t.start()
+    try:
+        assert holding.wait(timeout=0.5), "holder thread never acquired the lock"
+
+        t0 = time.monotonic()
+        result = cfg.get_available_models_for_session_visit()
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 0.25, (
+            f"fresh-disk session visit waited {elapsed:.2f}s behind the catalog "
+            "lock instead of returning the validated disk payload"
+        )
+        assert result["default_model"] == "anthropic/claude-opus-4"
+    finally:
+        release.set()
+        t.join(timeout=1.0)
+
+
+def test_session_visit_cold_boot_returns_static_and_refreshes_async(monkeypatch):
+    """True cold boot must return a network-free catalog immediately and move
+    the live rebuild onto the existing detached refresh worker.
     """
     from api import config as cfg
 
@@ -219,30 +266,33 @@ def test_session_visit_cold_boot_uses_bounded_rebuild(monkeypatch):
     monkeypatch.setattr(
         cfg, "_load_stale_models_cache_from_disk", lambda **_kw: None, raising=True
     )
-    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.4, raising=True)
 
-    rebuilt = {"n": 0}
+    spawned = {"n": 0}
+    prefer_cache_calls = {"n": 0}
 
-    def _slow_rebuild(_builder):
-        rebuilt["n"] += 1
-        time.sleep(0.8)  # 2x budget — stands in for a hung provider probe
+    def _spy_spawn():
+        spawned["n"] += 1
+        return True
+
+    def _network_free_catalog(*, prefer_cache=False, force_refresh=False):
+        assert prefer_cache is True
+        assert force_refresh is False
+        prefer_cache_calls["n"] += 1
         return _catalog()
 
-    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _slow_rebuild, raising=True)
+    monkeypatch.setattr(
+        cfg, "_spawn_session_visit_background_refresh", _spy_spawn, raising=True
+    )
+    monkeypatch.setattr(cfg, "get_available_models", _network_free_catalog, raising=True)
 
     t0 = time.monotonic()
     result = cfg.get_available_models_for_session_visit()
     elapsed = time.monotonic() - t0
 
-    assert rebuilt["n"] == 1, "cold boot with no cache must attempt the bounded rebuild"
-    assert elapsed < 2.0, (
-        f"cold-boot rebuild was not bounded ({elapsed:.2f}s) — the "
-        f"{cfg._LIVE_REBUILD_BUDGET_SECONDS}s budget did not apply"
-    )
-    # Structurally valid, usable catalog regardless of which fallback served it.
-    assert isinstance(result, dict)
-    for k in ("active_provider", "default_model", "configured_model_badges", "groups"):
-        assert k in result, f"cold-boot fallback catalog missing {k!r}"
+    assert elapsed < 0.25, f"cold session visit blocked {elapsed:.2f}s"
+    assert spawned["n"] == 1, "cold boot must start one detached live refresh"
+    assert prefer_cache_calls["n"] == 1, "cold boot must return the network-free catalog"
+    assert result["default_model"] == "anthropic/claude-sonnet-4"
 
 
 # ---------------------------------------------------------------------------
@@ -359,15 +409,15 @@ def test_session_visit_stale_path_spawns_background_refresh():
     assert "_spawn_session_visit_background_refresh()" in body, (
         "session_visit must spawn a background refresh on the stale path"
     )
-    # The stale branch returns before the cold-boot rebuild. Anchor on the
-    # code-only stage markers (comments also mention force_refresh, so match
-    # the _mark() labels which appear solely in executable lines).
+    # The stale branch returns before the cold-boot fallback. Anchor on the
+    # code-only stage markers so this guard proves both branches use detached
+    # refresh rather than merely matching explanatory comments.
     spawn = body.find('_mark("stale_served_background_refresh")')
-    cold = body.find('_mark("cold_boot_bounded_rebuild_start")')
+    cold = body.find('_mark("cold_boot_background_refresh_spawned")')
     assert spawn != -1 and cold != -1
     assert spawn < cold, (
         "the stale-serve + background-refresh must precede the cold-boot "
-        "bounded rebuild"
+        "background-refresh fallback"
     )
 
 

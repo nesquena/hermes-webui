@@ -8453,25 +8453,38 @@ def get_available_models_for_session_visit() -> dict:
     if cache_age is not None and cache_age < _SESSION_VISIT_MODELS_FRESHNESS_SECONDS:
         _mark("cache_age_within_ttl")
         now_mono = time.monotonic()
-        with _available_models_cache_lock:
-            cached = _get_fresh_memory_models_cache(now_mono)
+        if _available_models_cache_lock.acquire(blocking=False):
+            try:
+                cached = _get_fresh_memory_models_cache(now_mono)
+            finally:
+                _available_models_cache_lock.release()
             if cached is not None:
                 _mark("memory_cache_hit")
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
+        else:
+            _mark("memory_cache_lock_busy")
         _mark("memory_cache_miss_loading_disk")
         disk_cached = _load_models_cache_from_disk()
         if disk_cached is not None:
-            with _available_models_cache_lock:
-                cached = _get_fresh_memory_models_cache(time.monotonic())
-                if cached is not None:
-                    _mark("disk_then_memory_cache_hit")
-                    _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-                    return cached
-                _available_models_cache = copy.deepcopy(disk_cached)
-                _available_models_cache_ts = time.monotonic()
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
+            if _available_models_cache_lock.acquire(blocking=False):
+                try:
+                    cached = _get_fresh_memory_models_cache(time.monotonic())
+                    if cached is not None:
+                        _mark("disk_then_memory_cache_hit")
+                        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                        return cached
+                    _available_models_cache = copy.deepcopy(disk_cached)
+                    _available_models_cache_ts = time.monotonic()
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _sync_models_cache_provenance()
+                finally:
+                    _available_models_cache_lock.release()
+            else:
+                # The disk payload is already validated for this profile and
+                # release. Publishing it to memory is optional; never wait on a
+                # concurrent rebuild before returning it to session-open.
+                _mark("disk_cache_publish_lock_busy")
             _mark("disk_cache_returned")
             _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
             return copy.deepcopy(disk_cached)
@@ -8497,22 +8510,15 @@ def get_available_models_for_session_visit() -> dict:
         return copy.deepcopy(stale_cached)
 
     # True cold boot: no cache on disk at all (first run, or cache cleared).
-    # There is nothing to serve, so fall back to the bounded rebuild — itself
-    # capped at _LIVE_REBUILD_BUDGET_SECONDS and never unbounded — and, failing
-    # that, the network-free minimal catalog. This is the ONLY branch that can
-    # wait, and only when there is literally no cached catalog to return.
-    try:
-        _mark("cold_boot_bounded_rebuild_start")
-        result = get_available_models(force_refresh=True)
-        _mark("cold_boot_bounded_rebuild_done")
-        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-        return result
-    except Exception:
-        _mark("cold_boot_rebuild_failed")
-        logger.debug("session-visit models refresh failed", exc_info=True)
-        _mark("prefer_cache_fallback")
-        _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-        return get_available_models(prefer_cache=True)
+    # Return the network-free static catalog now and populate the durable cache
+    # on the existing detached refresh worker. Session-open never owns live
+    # provider work, even on the first request after installation.
+    _spawn_session_visit_background_refresh()
+    _mark("cold_boot_background_refresh_spawned")
+    result = get_available_models(prefer_cache=True)
+    _mark("cold_boot_static_returned")
+    _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+    return result
 
 
 def _maybe_log_slow_stages(
