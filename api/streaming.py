@@ -8891,7 +8891,7 @@ def _run_agent_streaming(
                 )
                 if (
                     _terminal_failure
-                    and _soft_partial_terminal_failure
+                    and (_soft_partial_terminal_failure or _tool_limit_reached)
                     and _classification['type'] == 'no_response'
                     and not _saved_transcript_lacks_final_answer
                 ):
