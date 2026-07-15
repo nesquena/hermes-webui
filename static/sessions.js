@@ -476,7 +476,7 @@ function _saveSessionViewedCounts() {
   }
 }
 
-function _setSessionViewedCount(sid, messageCount = 0) {
+function _setSessionViewedCount(sid, messageCount = 0, opts = null) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -490,20 +490,31 @@ function _setSessionViewedCount(sid, messageCount = 0) {
     typeof existingMarker === 'object' &&
     !Array.isArray(existingMarker) &&
     existingMarker.manual;
+  const isVisitAcknowledgment =
+    opts &&
+    typeof opts === 'object' &&
+    !Array.isArray(opts) &&
+    opts.fromVisit === true;
+
   if (
     isManualUnread &&
     typeof _isSessionActivelyViewedForList === 'function' &&
     _isSessionActivelyViewedForList(sid)
   ) {
     // Keep explicit manual-unread markers for the first active-session reconcile
-    // immediately after the user marks unread, then allow explicit consume on
-    // subsequent active-session reconciles.
+    // after the user marks unread.
     if (existingMarker.manual_pending === true) {
       existingMarker.manual_pending = false;
       _saveSessionCompletionUnread();
       return;
     }
-    _clearSessionCompletionUnread(sid);
+
+    // Only an explicit visit acknowledgement should clear a manual marker after
+    // the first protective pass. Passive polling updates of an active session
+    // must not consume the user-visible unread intent.
+    if (isVisitAcknowledgment) {
+      _clearSessionCompletionUnread(sid);
+    }
     return;
   }
 
@@ -823,7 +834,7 @@ function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt) {
 // by ad-hoc DOM surgery (Greptile concern (b) on #4946).
 function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0) {
   if (!sid) return;
-  _setSessionViewedCount(sid, messageCount);
+  _setSessionViewedCount(sid, messageCount, {fromVisit: true});
   _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);
   if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
 }
