@@ -178,7 +178,7 @@ def _open_windows_directory_handle(path: Path):  # pragma: no cover - Windows on
     create_file.restype = wintypes.HANDLE
     handle = create_file(
         os.fspath(path),
-        0,
+        0x00010080,  # DELETE | FILE_READ_ATTRIBUTES; pin against rename/replacement.
         0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE; no delete sharing.
         None,
         3,  # OPEN_EXISTING
