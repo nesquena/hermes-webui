@@ -378,6 +378,17 @@ def test_same_canonical_sidecar_aliases_share_publication_lock(tmp_path, monkeyp
     assert not absolute.exists(), "lock lookup must not create the sidecar"
 
 
+def test_publication_lock_key_applies_windows_case_normalization(tmp_path, monkeypatch):
+    store = tmp_path / "Sessions"
+    store.mkdir()
+    monkeypatch.setattr(models.os.path, "normcase", lambda value: value.casefold())
+
+    upper = models._get_session_save_publication_lock(store / "Session.JSON")
+    lower = models._get_session_save_publication_lock(store / "session.json")
+
+    assert upper is lower
+
+
 def test_session_dir_rewiring_to_same_store_reuses_publication_lock(tmp_path, monkeypatch):
     real = tmp_path / "profiles" / "default" / "sessions"
     real.mkdir(parents=True)
@@ -416,6 +427,23 @@ def test_publication_lock_does_not_follow_final_symlink_and_is_name_scoped(tmp_p
     assert sidecar.resolve() == target.resolve()
     assert models._get_session_save_publication_lock(sidecar) is by_name_lock
     assert models._get_session_save_publication_lock(target) is not by_name_lock
+
+
+def test_publication_lock_is_final_name_scoped_for_hardlink_aliases(tmp_path):
+    store = tmp_path / "sessions"
+    store.mkdir()
+    first = store / "first.json"
+    second = store / "second.json"
+    first.write_text("source", encoding="utf-8")
+    try:
+        os.link(first, second)
+    except OSError as exc:  # pragma: no cover - filesystem dependent
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    assert os.path.samefile(first, second)
+    assert models._get_session_save_publication_lock(first) is not (
+        models._get_session_save_publication_lock(second)
+    )
 
 
 def test_session_retained_publication_lock_releases_after_gc(
