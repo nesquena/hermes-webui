@@ -709,6 +709,7 @@ async function loadDir(path, opts={}){
                              // rejected here instead of painting the wrong profile's files.
   try{
     if(!path||path==='.'||refreshExpanded){
+      if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
