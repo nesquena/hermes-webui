@@ -2950,9 +2950,9 @@ _TITLE_ATTACHED_FILES_SUFFIX_RE = re.compile(
 )
 
 
-def _strip_title_internal_metadata(text: str) -> str:
+def _strip_title_internal_metadata(text: str, *, include_legacy: bool = False) -> str:
     """Remove WebUI-only workspace/attachment metadata from title input."""
-    value = _strip_workspace_prefix(str(text or ''), include_legacy=True)
+    value = _strip_workspace_prefix(str(text or ''), include_legacy=include_legacy)
     return _TITLE_ATTACHED_FILES_SUFFIX_RE.sub('', value).strip()
 
 
@@ -2990,7 +2990,10 @@ def _first_exchange_snippets(messages):
             continue
         role = m.get('role')
         if role == 'user':
-            candidate = _strip_title_internal_metadata(_message_text(m.get('content')))
+            candidate = _strip_title_internal_metadata(
+                _message_text(m.get('content')),
+                include_legacy=True,
+            )
             if not user_text and candidate:
                 user_text = candidate
                 continue
@@ -3032,7 +3035,10 @@ def _latest_exchange_snippets(messages):
             if candidate:
                 asst_text = candidate
         elif role == 'user' and not user_text:
-            candidate = _strip_title_internal_metadata(_message_text(m.get('content')))
+            candidate = _strip_title_internal_metadata(
+                _message_text(m.get('content')),
+                include_legacy=True,
+            )
             if candidate:
                 user_text = candidate
         if user_text and asst_text:
