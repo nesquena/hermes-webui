@@ -9,7 +9,7 @@ The acceptance matrix from the RFC drives the test layout. Each test
 exercises one invariant end-to-end through the public module API
 (``start_kanban_notification_watcher``, ``stop_kanban_notification_watcher``,
 ``_run_one_iteration``, ``_discover_boards``, ``_initialize_baseline_state``,
-``_candidate_rows``, ``_classify_terminal``, ``_validate_target``,
+``_candidate_rows``, ``_classify_terminal``,
 ``_build_prompt``, ``_dispatch``, ``_advance_cursor``).
 
 The watcher is exercised by ``_run_one_iteration`` instead of the live thread
@@ -30,6 +30,7 @@ import threading
 import time
 import types
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -81,14 +82,29 @@ class _Row(dict):
 class FakeConn:
     """Minimal sqlite-like connection backed by a fake module's tables."""
 
-    def __init__(self, db: "FakeKanbanDB"):
+    def __init__(self, db: "FakeKanbanDB", board: str | None = None):
         self._db = db
         self._closed = False
+        # The board this connection "serves". Production opens a
+        # separate SQLite file per board (via ``kb.kanban_db_path``),
+        # so the JOIN of ``kanban_notify_subs`` with ``task_events``
+        # is naturally board-scoped. The fake mirrors that scoping so
+        # tests that exercise multiple boards can't accidentally see
+        # another board's subscriptions or events through a candidate
+        # scan.
+        self.board = board or db.get_current_board() or db.DEFAULT_BOARD
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        # Mirrors the production ``_ClosingConn`` (and the real
+        # ``kb.connect_closing``) — sqlite3's built-in __exit__ only
+        # scopes the transaction, it never closes the FD. Tests that
+        # exercise the helper's FD-leak guard therefore need to
+        # observe that FakeConn.close() actually runs when the test
+        # ``with`` block exits.
+        self.close()
         return False
 
     def execute(self, sql: str, params=()):
@@ -106,19 +122,36 @@ class FakeConn:
         if "PRAGMA table_info" in s and "task_events" in s:
             return SimpleNamespace(fetchall=lambda: [])
         if "max(id)" in s.lower() and "task_events" in s:
-            latest = max((e["id"] for e in self._db.task_events), default=0)
+            current_board = self.board
+            latest = max(
+                (
+                    int(e["id"])
+                    for e in self._db.task_events
+                    if (e.get("board") or FakeKanbanDB.DEFAULT_BOARD) == current_board
+                ),
+                default=0,
+            )
             return SimpleNamespace(fetchone=lambda: _Row(latest=latest))
         if "FROM kanban_notify_subs" in s and "WHERE task_id" in s:
             (task_id,) = params
+            current_board = self.board
             rows = [
                 r
                 for r in self._db.subs
-                if r["task_id"] == task_id and r["platform"] == "webui"
+                if r["task_id"] == task_id
+                and r["platform"] == "webui"
+                and (r.get("board") or FakeKanbanDB.DEFAULT_BOARD) == current_board
             ]
             return SimpleNamespace(fetchone=lambda: _Row(**rows[0]) if rows else None)
         if "FROM kanban_notify_subs" in s and "platform = ?" in s:
             (platform,) = params
-            rows = [r for r in self._db.subs if r["platform"] == platform]
+            current_board = self.board
+            rows = [
+                r
+                for r in self._db.subs
+                if r["platform"] == platform
+                and (r.get("board") or FakeKanbanDB.DEFAULT_BOARD) == current_board
+            ]
             return SimpleNamespace(fetchall=lambda: [_Row(**r) for r in rows])
         if "INNER JOIN task_events" in s and "kanban_notify_subs" in s:
             # Production's per-board candidate JOIN (RFC §7 + M8 + C1).
@@ -129,9 +162,26 @@ class FakeConn:
             # rows). The board baseline comes from ``params[-1]`` so
             # an event at or below the recorded baseline is filtered
             # out regardless of cursor state.
+            #
+            # Board scoping: production opens a separate SQLite file
+            # per board via ``kb.kanban_db_path``, so the JOIN is
+            # naturally board-scoped — a candidate scan for board A
+            # never sees board B's subscriptions or events. The fake
+            # keeps all rows in shared lists (the simplest possible
+            # backing) but tags each row with its board and filters by
+            # ``self.board`` (set on connect / connect_closing) so the
+            # same scoping contract holds. Rows tagged with a
+            # different board (or untagged legacy rows) are filtered
+            # out of THIS connection's candidate set.
             platform = "webui"
             board_baseline = int(params[-1]) if params else 0
-            webui_subs = [r for r in self._db.subs if r["platform"] == platform]
+            current_board = self.board
+            webui_subs = [
+                r
+                for r in self._db.subs
+                if r["platform"] == platform
+                and (r.get("board") or FakeKanbanDB.DEFAULT_BOARD) == current_board
+            ]
             out_rows: list[_Row] = []
             for sub in webui_subs:
                 last_event_id = int(sub.get("last_event_id") or 0)
@@ -143,7 +193,10 @@ class FakeConn:
                     (
                         e
                         for e in self._db.task_events
-                        if e["task_id"] == sub["task_id"] and int(e["id"]) > effective
+                        if e["task_id"] == sub["task_id"]
+                        and (e.get("board") or FakeKanbanDB.DEFAULT_BOARD)
+                        == current_board
+                        and int(e["id"]) > effective
                     ),
                     key=lambda e: int(e["id"]),
                 )
@@ -331,10 +384,10 @@ class FakeKanbanDB:
         return None
 
     def connect(self, *, board=None):
-        return FakeConn(self)
+        return FakeConn(self, board=board)
 
     def connect_closing(self, *, board=None):
-        return FakeConn(self)
+        return FakeConn(self, board=board)
 
     @staticmethod
     def _normalize_board_slug(slug):
@@ -362,8 +415,14 @@ class FakeKanbanDB:
         return self._current
 
     # --- Test helpers ----------------------------------------------------
-    def add_task(self, task: FakeTask):
+    def add_task(self, task: FakeTask, *, board: str | None = None):
         self.tasks.append(task)
+        # ``board`` is accepted for API symmetry with ``add_sub`` /
+        # ``add_event`` but not stored on the task: production scopes
+        # only the ``kanban_notify_subs`` / ``task_events`` rows per
+        # board; the ``tasks`` row is shared across boards. Keeping
+        # the parameter here means callers can wire a test up in one
+        # shape without losing the connection between sub and task.
 
     def add_event(
         self,
@@ -371,9 +430,17 @@ class FakeKanbanDB:
         kind: str,
         payload: dict | None = None,
         event_id: int | None = None,
+        *,
+        board: str | None = None,
     ):
         if event_id is None:
             event_id = max((e["id"] for e in self.task_events), default=0) + 1
+        # Default to the active board (mirrors the production contract:
+        # callers that wire a test up per board usually call
+        # ``make_board("boardN")`` once, then add rows belonging to that
+        # board without re-stating ``board=``). Falls back to
+        # ``DEFAULT_BOARD`` when no active board is set.
+        effective_board = board or self.get_current_board() or self.DEFAULT_BOARD
         self.task_events.append(
             {
                 "id": event_id,
@@ -382,10 +449,17 @@ class FakeKanbanDB:
                 "kind": kind,
                 "payload": payload or {},
                 "created_at": int(time.time()),
+                "board": effective_board,
             }
         )
 
-    def add_sub(self, sub: FakeSub):
+    def add_sub(self, sub: FakeSub, *, board: str | None = None):
+        # Same per-board defaulting contract as ``add_event`` so a test
+        # that calls ``make_board("modern")`` then ``add_sub(...)`` (no
+        # explicit ``board=``) tags the row with the active board. The
+        # explicit ``board=`` keyword still wins — that's how the
+        # cross-board isolation tests opt a row into a specific board.
+        effective_board = board or self.get_current_board() or self.DEFAULT_BOARD
         rec = {
             "task_id": sub.task_id,
             "platform": sub.platform,
@@ -395,6 +469,7 @@ class FakeKanbanDB:
             "profile": sub.profile,
             "created_at": int(time.time()),
             "updated_at": int(time.time()),
+            "board": effective_board,
         }
         # Drop None columns so the row shape matches the schema the watcher
         # inspects (and so 'profile' absent in the modern schema stays absent).
@@ -409,6 +484,12 @@ class FakeKanbanDB:
             "name": name or slug,
             "archived": archived,
         }
+        # Switch the active board so subsequent ``add_event`` /
+        # ``add_sub`` calls (without an explicit ``board=``) tag their
+        # rows with this board. Tests that want to seed multiple boards
+        # explicitly pass ``board=`` per call; this just removes the
+        # need to repeat the slug on every helper after a board switch.
+        self._current = slug
 
 
 # ── Test harness ──────────────────────────────────────────────────────────
@@ -507,6 +588,24 @@ def notifications_module(monkeypatch):
     import api.kanban_notifications as mod  # noqa: E402
 
     importlib.reload(mod)
+    # Save the PRODUCTION ``_open_conn`` BEFORE we monkeypatch it so
+    # the dedicated real-SQLite tests in this file can exercise the
+    # actual bridge helper that opens the kanban DB directly via
+    # ``sqlite3`` (it must NOT call ``kb.init_db`` / ``kb.connect``).
+    # The fixture's list-backed behaviour tests don't want a real
+    # SQLite file at all — they drive the watcher through FakeKanbanDB
+    # — so we replace ``_open_conn`` with a thin wrapper that returns
+    # the existing FakeConn CM.
+    production_open_conn = mod._open_conn
+
+    def _fake_open_conn(board=None):
+        # Routing the test calls back through FakeKanbanDB keeps every
+        # existing list-backed test working without modification; the
+        # production helper itself is exercised directly by the new
+        # ``test_open_conn_*`` real-SQLite suite below.
+        return fake_kanban.connect_closing(board=board)
+
+    monkeypatch.setattr(mod, "_open_conn", _fake_open_conn)
     monkeypatch.setattr(mod, "start_session_turn", _fake_start_session_turn)
     monkeypatch.setattr(mod, "_get_session_for_target", _fake_get_session)
     # Also patch the lazy reference the module captures at first dispatch.
@@ -552,6 +651,14 @@ def notifications_module(monkeypatch):
         start_session_turn=_fake_start_session_turn,
         set_strict_missing=_set_strict_missing,
         register_session=_register_session,
+        # The PRODUCTION bridge helper — saved before the fixture
+        # monkeypatched ``mod._open_conn``. Tests in this file that
+        # need to exercise the real SQLite path (the legacy-schema,
+        # missing-DB, empty-DB, busy-timeout, and exception-close
+        # suites) call this directly with a ``tmp_path``-derived
+        # ``kanban_db_path`` override so the rest of the fixture's
+        # list-backed tests are untouched.
+        open_conn=production_open_conn,
     )
 
 
@@ -1668,6 +1775,203 @@ def test_late_discovered_board_completion_after_subscription_dispatches(
     assert sub["last_event_id"] == 9000
 
 
+def test_refresh_board_discovery_picks_up_late_board(notifications_module):
+    """Deterministic coverage of the actual late-board refresh path.
+
+    The watcher loop calls ``_refresh_board_discovery`` (extracted from
+    the production loop body) every ``_BOARD_DISCOVERY_REFRESH_SECONDS``
+    so boards created after WebUI starts become observable without a
+    restart. This test exercises the helper directly:
+
+      * The helper is idempotent: calling it twice with the same board
+        set is a no-op for baseline / schema cache.
+      * It picks up a brand-new board added AFTER init and seeds it
+        with baseline=0 (RFC §6 consequence).
+      * It primes the per-board schema cache so the very next
+        ``_run_one_iteration`` reuses the cached introspection
+        instead of re-reading PRAGMA table_info.
+
+    No sleep-based timing; the helper returns the timestamp the caller
+    records so the watcher can compare against it directly.
+    """
+    fb = notifications_module.fake_kanban
+    mod = notifications_module.mod
+    mod._initialize_baseline_state(["default"])
+    state = {"boards": ["default"], "baseline": {"default": 0}, "schema_by_board": {}}
+
+    # First refresh: nothing new; state should be left untouched.
+    fb.make_board("experiments", archived=False)
+    boards_now = mod._discover_boards()
+    assert "experiments" in boards_now
+
+    t0 = mod._refresh_board_discovery(state)
+    assert isinstance(t0, float)
+    # New board shows up in state["boards"].
+    assert "experiments" in state["boards"]
+    # Late board gets baseline=0 — not MAX(task_events.id) (RFC §6).
+    assert state["baseline"]["experiments"] == 0
+    # Schema cache primed so the next iteration doesn't re-introspect.
+    assert "experiments" in state["schema_by_board"]
+
+    # Calling again with the same boards set is a no-op: existing
+    # baseline for default stays at the init value, and the new board's
+    # baseline is not overwritten by a re-snapshot.
+    state["baseline"]["experiments"] = 1234
+    mod._refresh_board_discovery(state)
+    assert state["baseline"]["experiments"] == 1234, (
+        "refresh must NOT overwrite an existing baseline (would replay ghosts)"
+    )
+
+    # End-to-end after the refresh: a fresh terminal event on the new
+    # board is observable without restarting the watcher.
+    fb.add_task(FakeTask(id="t_after_refresh", title="After", status="done"))
+    fb.add_event("t_after_refresh", "completed", {"status": "done"}, event_id=7777)
+    fb.add_sub(
+        FakeSub(
+            task_id="t_after_refresh",
+            platform="webui",
+            chat_id="chat-after-refresh",
+        )
+    )
+    mod._run_one_iteration(state)
+    assert any(
+        c["chat_id"] == "chat-after-refresh" for c in notifications_module.dispatched
+    ), "post-refresh terminal event did not dispatch"
+
+
+def test_refresh_board_discovery_is_silent_on_discovery_error(
+    notifications_module, monkeypatch
+):
+    """A transient ``_discover_boards`` failure (locked Agent DB, I/O
+    blip) must NOT kill the watcher loop. The helper swallows the
+    exception, returns the timestamp, and leaves the existing state
+    alone so the next refresh can recover."""
+    mod = notifications_module.mod
+    state = {"boards": ["default"], "baseline": {"default": 0}, "schema_by_board": {}}
+
+    def _explode():
+        raise OSError("locked")
+
+    monkeypatch.setattr(mod, "_discover_boards", _explode)
+    # Must not raise.
+    t = mod._refresh_board_discovery(state)
+    assert isinstance(t, float)
+    # Existing state is preserved (no boards list mutation, no crash).
+    assert state["boards"] == ["default"]
+    assert state["baseline"] == {"default": 0}
+
+
+def test_watcher_loop_initial_init_failure_keeps_thread_alive(
+    notifications_module, monkeypatch
+):
+    """If the initial ``_initialize_baseline_state`` call raises an
+    unexpected exception (something the helper itself does not
+    anticipate and downgrade), the watcher MUST stay alive and
+    enter the same fail-closed shape the bounded reinitialization
+    cadence already understands. KeyboardInterrupt and SystemExit must
+    propagate; everything else (Exception, custom RuntimeError) is
+    caught and converted to a fail-closed state.
+
+    The watcher loop is exercised on a real thread so we can
+    deterministically observe whether the exception was swallowed or
+    killed the daemon.
+    """
+    import threading as _t
+
+    mod = notifications_module.mod
+
+    call_state = {"n": 0}
+
+    def _init_factory(boards):
+        call_state["n"] += 1
+        if call_state["n"] == 1:
+            raise RuntimeError("simulated init failure")
+        # Subsequent calls succeed — proves the loop keeps retrying.
+        return {
+            "boards": list(boards),
+            "baseline": {b: 0 for b in boards},
+            "schema_ok": True,
+            "schema": {
+                "has_updated_at": True,
+                "required_ok": True,
+                "profile_column": "notifier_profile",
+            },
+            "schema_by_board": {
+                b: {
+                    "has_updated_at": True,
+                    "required_ok": True,
+                    "profile_column": "notifier_profile",
+                }
+                for b in boards
+            },
+            "marker_loaded": True,
+        }
+
+    monkeypatch.setattr(mod, "_initialize_baseline_state", _init_factory)
+    # Avoid hanging on real disk / Agent DB calls.
+    monkeypatch.setattr(mod, "_discover_boards", lambda: ["default"])
+
+    dispatched_chats: list[str] = []
+
+    def _fake_iteration(state):
+        dispatched_chats.append(state.get("boards", ["default"])[0])
+        return []
+
+    monkeypatch.setattr(mod, "_run_one_iteration", _fake_iteration)
+    monkeypatch.setattr(mod, "_DEFAULT_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(mod, "_BOARD_DISCOVERY_REFRESH_SECONDS", 0.01)
+    monkeypatch.setattr(mod, "_REINITIALIZE_RETRY_SECONDS", 0.01)
+
+    mod._STOP_EVENT.clear()
+    try:
+        th = _t.Thread(target=mod._watcher_loop, daemon=True)
+        th.start()
+        # Wait until the loop has run at least one iteration (proves
+        # the RuntimeError did NOT kill the daemon).
+        deadline = time.time() + 3.0
+        while time.time() < deadline and not dispatched_chats:
+            time.sleep(0.01)
+        # Stop the loop.
+        mod._STOP_EVENT.set()
+        th.join(timeout=2.0)
+        assert not th.is_alive(), (
+            "watcher thread did not exit promptly after stop signal"
+        )
+    finally:
+        mod._STOP_EVENT.clear()
+
+    # At least one iteration ran — proves the daemon survived the
+    # initial init failure.
+    assert dispatched_chats, (
+        "watcher loop never reached an iteration after initial init raised; "
+        "the daemon was killed by the unhandled exception"
+    )
+    assert call_state["n"] >= 2, (
+        "bounded reinit did not retry _initialize_baseline_state after the "
+        f"initial failure (call_state={call_state!r})"
+    )
+
+    # KeyboardInterrupt must NOT be swallowed: it is the stop signal.
+    # Drive ``_watcher_loop`` synchronously on the test thread so pytest
+    # sees the propagated ``KeyboardInterrupt`` on the same thread it is
+    # running on (and ``pytest.raises`` consumes it cleanly). Running it
+    # on a daemon thread instead surfaces the same exception to pytest as
+    # ``PytestUnhandledThreadExceptionWarning`` because the test's
+    # main-thread assertions have already returned by the time the
+    # daemon raises.
+    monkeypatch.setattr(
+        mod,
+        "_initialize_baseline_state",
+        lambda boards: (_ for _ in ()).throw(KeyboardInterrupt("stop")),
+    )
+    mod._STOP_EVENT.clear()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            mod._watcher_loop()
+    finally:
+        mod._STOP_EVENT.clear()
+
+
 # ── M5: schema-fail-closed must be positively asserted ───────────────
 
 
@@ -1707,9 +2011,6 @@ def test_only_webui_platform_rows_are_candidates_uses_real_state(
     fb.add_task(FakeTask(id="t_a", title="A"))
     fb.add_task(FakeTask(id="t_b", title="B"))
     fb.add_task(FakeTask(id="t_c", title="C"))
-    fb.add_event("t_a", "completed", {"status": "done"}, event_id=10)
-    fb.add_event("t_b", "completed", {"status": "done"}, event_id=11)
-    fb.add_event("t_c", "completed", {"status": "done"}, event_id=12)
     fb.add_sub(FakeSub(task_id="t_a", platform="webui", chat_id="chat-webui"))
     fb.add_sub(FakeSub(task_id="t_b", platform="telegram", chat_id="chat-tg"))
     fb.add_sub(FakeSub(task_id="t_c", platform="discord", chat_id="chat-dc"))
@@ -1923,43 +2224,215 @@ def test_board_conn_exits_on_exception_path(monkeypatch, tmp_path):
 # ── Task 3: stop/start race ────────────────────────────────────────
 
 
-def test_concurrent_stop_then_start_serializes_correctly():
-    """A ``stop`` followed immediately by a concurrent ``start`` must
-    result in exactly one live thread. The stop's join blocks the
-    start until the previous thread is fully stopped, so the start
-    observes a clean slate and spawns exactly one fresh thread."""
-    import api.kanban_notifications as kanban
+def test_concurrent_stop_then_start_serializes_correctly(
+    monkeypatch, notifications_module
+):
+    """A ``stop`` racing with a concurrent ``start`` must serialize
+    through ``_LIFECYCLE_LOCK`` so exactly one fresh thread is spawned
+    (never zero, never two) and ``_WATCHER_THREAD`` references the
+    fresh thread.
 
-    kanban.stop_kanban_notification_watcher(timeout=2.0)
-    assert kanban.start_kanban_notification_watcher() is True
-    # Hold the lock from a competing thread to observe the contract.
+    Test design — deterministic, no sleep polling, no worker-thread
+    asserts:
+
+      * ``_watcher_loop`` is replaced with a controlled loop that
+        signals ``watcher_started`` on entry and ``watcher_exited`` on
+        exit. The real production loop would otherwise burn CPU
+        between stop calls; the controlled loop just waits on
+        ``_STOP_EVENT`` so the join completes deterministically.
+      * ``Thread.join`` is wrapped so the *initial* watcher's join
+        stalls until ``release_join`` is set, but every other join
+        (including the cleanup stop at the end of the test) goes
+        straight through. The stall signals ``stop_in_join`` so the
+        main thread knows stop is inside the join, still holding
+        ``_LIFECYCLE_LOCK``.
+      * The competitor signals ``competitor_called_start`` immediately
+        before calling the production ``start`` and ``competitor_done``
+        once ``start`` returns. The main thread synchronizes on these
+        events instead of polling.
+
+    Sequence:
+
+      1. Start the initial watcher; wait for ``watcher_started``.
+      2. Start ``stop_thread``; wait for ``stop_in_join`` — at this
+         point stop holds ``_LIFECYCLE_LOCK`` inside the stalled join.
+      3. Start ``competitor_thread``; wait for ``competitor_called_start``
+         — the competitor is now inside ``start_kanban_notification_watcher``,
+         blocked on the lifecycle lock (no sleep needed: step 2
+         proved stop still holds it).
+      4. Release the join. Stop finishes, drops the lock reference,
+         releases the lock; the competitor acquires the lock and
+         spawns a fresh thread.
+      5. Wait for ``competitor_done``; assert exactly one ``True``
+         result and a live ``_WATCHER_THREAD`` distinct from the
+         original.
+
+    Cleanup runs in ``finally`` so a failed assertion still drains the
+    threads and stops the watcher.
+    """
     import threading
 
-    barrier = threading.Barrier(3)
-    start_results: list[bool] = []
-    stop_results: list[bool] = []
+    import api.kanban_notifications as kanban
+
+    # Clean slate.
+    kanban.stop_kanban_notification_watcher(timeout=2.0)
+    kanban._STOP_EVENT.clear()
+    kanban._WATCHER_THREAD = None
+
+    # Controlled watcher loop. Signals ``watcher_started`` on entry
+    # and ``watcher_exited`` on exit so the test thread can synchronize
+    # without polling. The body is just ``wait`` on ``_STOP_EVENT`` —
+    # the production loop's actual work (board discovery, candidate
+    # scan, dispatch) is irrelevant to the stop/start race the test
+    # is exercising.
+    watcher_started = threading.Event()
+    watcher_exited = threading.Event()
+
+    def _controlled_loop():
+        watcher_started.set()
+        try:
+            while not kanban._STOP_EVENT.is_set():
+                if kanban._STOP_EVENT.wait(timeout=0.05):
+                    break
+        finally:
+            watcher_exited.set()
+
+    monkeypatch.setattr(kanban, "_watcher_loop", _controlled_loop)
+
+    # Stall only the *initial* watcher's join. The wrapper captures
+    # the initial thread reference in a mutable slot — once the
+    # competitor spawns a fresh thread, its join must NOT stall
+    # (otherwise the cleanup stop at the end of the test would hang).
+    stop_in_join = threading.Event()
+    release_join = threading.Event()
+    stall_target: list = []
+    real_join = threading.Thread.join
+
+    def _stalling_join(self, timeout=None):
+        if stall_target and self is stall_target[0]:
+            stop_in_join.set()
+            release_join.wait(timeout=5.0)
+        return real_join(self, timeout=timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", _stalling_join)
+
+    # The competitor signals "about to call start" and "start returned"
+    # so the main thread can synchronize without polling and without
+    # asserting inside a worker thread (which would surface as
+    # PytestUnhandledThreadExceptionWarning).
+    competitor_called_start = threading.Event()
+    competitor_done = threading.Event()
+    competitor_results: list[bool] = []
 
     def _compete():
-        barrier.wait()
-        start_results.append(kanban.start_kanban_notification_watcher())
-        barrier.wait()
-        stop_results.append(
-            kanban.stop_kanban_notification_watcher(timeout=2.0) is None
+        try:
+            competitor_called_start.set()
+            result = kanban.start_kanban_notification_watcher()
+            competitor_results.append(result)
+        finally:
+            competitor_done.set()
+
+    competitor_thread = threading.Thread(target=_compete, name="competitor")
+
+    stop_thread = threading.Thread(
+        target=lambda: kanban.stop_kanban_notification_watcher(timeout=5.0),
+        name="stopper",
+    )
+
+    try:
+        # 1. Start the initial watcher; wait for the controlled loop
+        #    to enter so stop has a real live thread to join.
+        assert kanban.start_kanban_notification_watcher() is True
+        initial_thread = kanban._WATCHER_THREAD
+        assert initial_thread is not None
+        stall_target.append(initial_thread)
+        assert watcher_started.wait(timeout=2.0), (
+            "controlled watcher loop did not start"
         )
 
-    threads = [threading.Thread(target=_compete) for _ in range(2)]
-    for t in threads:
-        t.start()
-    barrier.wait()  # release the competitors
-    barrier.wait()
-    for t in threads:
-        t.join(timeout=2)
-    kanban.stop_kanban_notification_watcher(timeout=2.0)
-    # Exactly one True on the first start (the canonical start), the
-    # two competitors see either False (already running) or False (no
-    # thread), and both stops return cleanly.
-    assert kanban.watcher_is_alive() is False
-    assert start_results.count(False) >= 1
+        # 2. Start stop. It acquires ``_LIFECYCLE_LOCK``, sets
+        #    ``_STOP_EVENT``, then enters the stalled join — so the
+        #    lock is still held when ``stop_in_join`` fires.
+        stop_thread.start()
+        assert stop_in_join.wait(timeout=2.0), "stop never entered the stalled join"
+
+        # 3. Start the competitor. It will call the production
+        #    ``start``, which will block on ``_LIFECYCLE_LOCK`` until
+        #    stop finishes. We do NOT need a sleep here: step 2
+        #    proved stop still holds the lock, and the
+        #    ``competitor_called_start`` event proves the competitor
+        #    has reached the lock-acquire call. The is_alive check
+        #    below is the assertion: if the competitor had already
+        #    returned, the lock invariant would be broken.
+        competitor_thread.start()
+        assert competitor_called_start.wait(timeout=2.0), (
+            "competitor did not call start"
+        )
+        assert competitor_thread.is_alive(), (
+            "competitor returned without acquiring _LIFECYCLE_LOCK; "
+            "stop/start serialization invariant violated"
+        )
+
+        # 4. Release the join. Stop completes the join, drops
+        #    ``_WATCHER_THREAD`` to None, releases the lock; the
+        #    competitor acquires the lock and spawns a fresh thread.
+        release_join.set()
+
+        # Wait for the controlled loop to actually exit (deterministic
+        # since _STOP_EVENT is set).
+        assert watcher_exited.wait(timeout=2.0), (
+            "controlled watcher did not exit after stop signal"
+        )
+
+        # Wait for stop and competitor to finish their work.
+        stop_thread.join(timeout=5.0)
+        assert not stop_thread.is_alive(), "stop_thread did not finish"
+        competitor_thread.join(timeout=5.0)
+        assert not competitor_thread.is_alive(), "competitor_thread did not finish"
+
+        # 5. No duplicate, no lost reference. Exactly one True from
+        #    the competitor (start spawned a fresh thread after stop
+        #    dropped the initial reference).
+        assert competitor_results == [True], (
+            f"competitor start must succeed after stop drops the lock; "
+            f"got {competitor_results!r}"
+        )
+        final_thread = kanban._WATCHER_THREAD
+        assert final_thread is not None, "watcher reference lost across stop/start race"
+        assert final_thread is not initial_thread, (
+            "_WATCHER_THREAD must be the FRESH thread, not the original"
+        )
+        assert final_thread.is_alive(), "fresh watcher thread is not alive"
+    finally:
+        # Cleanup — release the stall in case any assertion failed
+        # before we got there, then drain the threads and stop the
+        # watcher. The cleanup ``stop_kanban_notification_watcher``
+        # call goes through the production code; the stalled join
+        # wrapper only stalls the *initial* thread, so joining the
+        # fresh thread (which is now ``_WATCHER_THREAD``) does NOT
+        # block.
+        release_join.set()
+        try:
+            if watcher_started.is_set() and not watcher_exited.is_set():
+                kanban._STOP_EVENT.set()
+                watcher_exited.wait(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            stop_thread.join(timeout=5.0)
+        except Exception:
+            pass
+        try:
+            competitor_thread.join(timeout=5.0)
+        except Exception:
+            pass
+        try:
+            kanban.stop_kanban_notification_watcher(timeout=2.0)
+        except Exception:
+            pass
+        assert kanban.watcher_is_alive() is False, (
+            "watcher should be stopped after test cleanup"
+        )
 
 
 # ── Task 4: multi-chat identity preserved ──────────────────────────
@@ -2724,13 +3197,23 @@ def test_real_sqlite_full_iteration_cursor_round_trip(
             self.close()
             return False
 
+    # Ordered event log: every CM __enter__/__exit__ and every
+    # dispatch is recorded at the moment it happens so we can prove
+    # the close-before-dispatch invariant with a true ordering
+    # (not a count check). Each entry is a (kind, label) tuple.
+    event_log: list[tuple[str, str]] = []
+
     open_calls = []
     close_calls = []
 
     class _TrackingCM:
+        def __init__(self, conn_id):
+            self._id = conn_id
+
         def __enter__(self):
             c = _SqliteConn()
             open_calls.append(c)
+            event_log.append(("enter", f"conn-{self._id}"))
             return c
 
         def __exit__(self, exc_type, exc, tb):
@@ -2739,11 +3222,21 @@ def test_real_sqlite_full_iteration_cursor_round_trip(
             # we can assert every conn closed before dispatch.
             open_calls[-1].close()
             close_calls.append(len(open_calls))
+            event_log.append(("exit", f"conn-{self._id}"))
             return False
+
+    next_conn_id = {"n": 0}
+
+    def _open_conn_factory():
+        def _make_cm(board=None):
+            next_conn_id["n"] += 1
+            return _TrackingCM(next_conn_id["n"])
+
+        return _make_cm
 
     from api import kanban_notifications as mod
 
-    monkeypatch.setattr(mod, "_open_conn", lambda board=None: _TrackingCM())
+    monkeypatch.setattr(mod, "_open_conn", _open_conn_factory())
     monkeypatch.setattr(
         mod,
         "get_session",
@@ -2762,6 +3255,7 @@ def test_real_sqlite_full_iteration_cursor_round_trip(
     dispatched = []
 
     def _fake_start(chat_id, prompt, *, source="process_wakeup"):
+        event_log.append(("dispatch", chat_id))
         dispatched.append({"chat_id": chat_id, "prompt": prompt})
         return {"_status": 200, "stream_id": "real-stream-1"}
 
@@ -2795,18 +3289,27 @@ def test_real_sqlite_full_iteration_cursor_round_trip(
     )
     assert dispatched[0]["chat_id"] == "chat-real"
 
-    # The watcher must have opened at least one connection and
-    # CLOSED it before ``start_session_turn`` ran. The
-    # ``_TrackingCM.__exit__`` records closure in ``close_calls``; we
-    # require at least one close that happened BEFORE the dispatch
-    # call. We approximate this by checking that the dispatched
-    # ``prompt`` contains the terminal event we seeded — if the
-    # watcher was still holding a connection when dispatch ran, the
-    # production code would have raised on the join. We also require
-    # at least one close event was recorded.
-    assert close_calls, (
-        f"expected at least one _TrackingCM.__exit__ call (close before "
-        f"dispatch invariant), got {close_calls!r}"
+    # Close-before-dispatch ordering: every ``exit`` recorded before
+    # the first ``dispatch`` entry is the close the iteration makes
+    # on its way to start_session_turn. Without the invariant, the
+    # iteration would dispatch while a connection was still open.
+    first_dispatch_idx = next(
+        (i for i, e in enumerate(event_log) if e[0] == "dispatch"), None
+    )
+    assert first_dispatch_idx is not None, "no dispatch recorded in event log"
+    exits_before_dispatch = [
+        i for i, e in enumerate(event_log[:first_dispatch_idx]) if e[0] == "exit"
+    ]
+    assert exits_before_dispatch, (
+        f"close before dispatch invariant violated: event_log={event_log!r}"
+    )
+    # Also: the FIRST ``start_session_turn`` invocation must come
+    # AFTER at least one CM ``exit`` (the iteration closes the
+    # candidate-scan conn before it dispatches). The previous test
+    # only counted events; the strengthened version asserts true
+    # ordering.
+    assert first_dispatch_idx > 0, (
+        f"dispatch ran before any CM open/exit cycle, event_log={event_log!r}"
     )
 
     # Read back the persisted cursor from a fresh SQLite connection.
@@ -3034,6 +3537,712 @@ def test_legacy_no_updated_at_full_iteration_dispatch_and_advance(
         f"legacy cursor did not advance: {sub['last_event_id']}"
     )
     assert len(notifications_module.dispatched) == 1
+
+
+# ── Production _open_conn real-SQLite suite ─────────────────────────
+# The bridge connection helper opens the Agent's kanban DB directly via
+# stdlib ``sqlite3`` (RFC §5: fail-closed introspection, never migrate).
+# Each test below drives ``notifications_module.open_conn`` with a
+# ``tmp_path``-derived path so the production helper runs end-to-end
+# against a real SQLite file, with a FakeKanbanDB-style ``kb`` stand-in
+# ``kanban_db_path`` injection to redirect resolution to the temp file.
+# No live Agent state, no real ``hermes_cli`` import.
+
+
+@pytest.fixture
+def real_kanban_kb(monkeypatch, tmp_path):
+    """Provide a fake ``kb`` object whose ``kanban_db_path`` resolves
+    to a per-test ``tmp_path`` SQLite file and whose ``DEFAULT_BUSY_TIMEOUT_MS``
+    is a positive int (mirrors the Agent's published default). Tests
+    set ``kb_path`` on the returned namespace after creating the file
+    so the production helper opens that exact path."""
+
+    class _KbPath:
+        def __init__(self, path_obj):
+            self._path = path_obj
+
+        def kanban_db_path(self, *, board=None):
+            return self._path
+
+        DEFAULT_BUSY_TIMEOUT_MS = 120_000
+
+        def _resolve_busy_timeout_ms(self):
+            return 120_000
+
+    p = tmp_path / "kanban.db"
+    kb = _KbPath(p)
+    return SimpleNamespace(kb=kb, path=p, monkeypatch=monkeypatch)
+
+
+def test_open_conn_preserves_legacy_four_column_schema_unchanged(
+    notifications_module, real_kanban_kb, monkeypatch
+):
+    """``_inspect_subs_columns`` through the PRODUCTION helper must
+    leave a legacy four-column ``kanban_notify_subs`` schema
+    byte-for-byte / column-for-column unchanged and must never call
+    ``init_db`` / ``connect`` / ``connect_closing`` /
+    ``_sqlite_connect``. The legacy table intentionally lacks
+    ``notifier_profile`` so the auto-migration shape would be easy to
+    detect: if the production helper fell back to ``kb.connect``,
+    the migration would add ``notifier_profile`` and bump the row
+    shape to five columns."""
+    import sqlite3
+
+    p = real_kanban_kb.path
+    # Build a deliberately-legacy schema with the 4 required columns
+    # only — no ``notifier_profile``, no ``updated_at``, no
+    # ``created_at``. The production helper must never add a column.
+    with sqlite3.connect(str(p)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE kanban_notify_subs (
+                task_id TEXT,
+                platform TEXT,
+                chat_id TEXT,
+                last_event_id INTEGER
+            );
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT, status TEXT,
+                summary TEXT, result TEXT, block_reason TEXT
+            );
+            CREATE TABLE task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT, kind TEXT, payload TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?)",
+            ("t_legacy", "webui", "chat-l", 0),
+        )
+        conn.commit()
+    # Snapshot the on-disk schema (raw SQLite master) BEFORE. The
+    # PRAGMA tuple shape is (cid, name, type, notnull, default_value,
+    # pk) — index 1 is the column name. We use positional indexing here
+    # (not row["name"]) because the snapshot conn doesn't have the
+    # production ``row_factory`` set; this is purely an on-disk check.
+    with sqlite3.connect(str(p)) as conn:
+        before_cols = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(kanban_notify_subs)").fetchall()
+        ]
+    # Install a spy module that records every Agent-helper call. The
+    # production _open_conn MUST NOT touch any of these — the bridge
+    # uses ``kb.kanban_db_path`` exclusively and stdlib ``sqlite3``
+    # directly. If any of init_db / connect / connect_closing /
+    # _sqlite_connect is hit, the test fails.
+    calls: list[str] = []
+
+    class _SpyKb:
+        kanban_db_path = real_kanban_kb.kb.kanban_db_path
+        DEFAULT_BUSY_TIMEOUT_MS = real_kanban_kb.kb.DEFAULT_BUSY_TIMEOUT_MS
+        _resolve_busy_timeout_ms = real_kanban_kb.kb._resolve_busy_timeout_ms
+
+        def init_db(self, *, board=None):
+            calls.append("init_db")
+            raise AssertionError("production helper called init_db")
+
+        def connect(self, *, board=None):
+            calls.append("connect")
+            raise AssertionError("production helper called connect")
+
+        def connect_closing(self, *, board=None):
+            calls.append("connect_closing")
+            raise AssertionError("production helper called connect_closing")
+
+        def _sqlite_connect(self, path):
+            calls.append("_sqlite_connect")
+            raise AssertionError("production helper called _sqlite_connect")
+
+    monkeypatch.setattr(notifications_module.mod, "_kb", lambda: _SpyKb())
+    # Route ``mod._open_conn`` to the SAVED production helper so the
+    # introspect path actually exercises the production code; the
+    # fixture's pre-monkeypatched FakeKanbanDB connection would
+    # bypass the helper entirely.
+    monkeypatch.setattr(
+        notifications_module.mod, "_open_conn", notifications_module.open_conn
+    )
+
+    # Drive the production helper: introspect via the watcher's own
+    # schema-introspection helper (the path the watcher takes on every
+    # iteration).
+    introspection = notifications_module.mod._inspect_subs_columns("default")
+
+    # 1. The schema columns are unchanged. Positional indexing — the
+    # snapshot conn doesn't have the production ``row_factory``.
+    with sqlite3.connect(str(p)) as conn:
+        after_cols = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(kanban_notify_subs)").fetchall()
+        ]
+    assert (
+        after_cols
+        == before_cols
+        == [
+            "task_id",
+            "platform",
+            "chat_id",
+            "last_event_id",
+        ]
+    ), f"legacy 4-column schema was modified: before={before_cols}, after={after_cols}"
+    # 2. The introspection helper picked up the legacy shape correctly.
+    assert introspection["has_notifier_profile"] is False
+    assert introspection["has_profile"] is False
+    assert introspection["required_ok"] is True
+    assert introspection["profile_column"] is None  # legacy/unknown
+    # 3. None of the Agent helpers were called.
+    assert calls == [], (
+        f"production _open_conn reached into Agent schema helpers: {calls!r}"
+    )
+
+
+def test_open_conn_does_not_create_tables_on_empty_db(
+    notifications_module, real_kanban_kb, monkeypatch
+):
+    """Opening a pre-existing empty Kanban DB must NOT create any
+    Agent-owned tables. An empty DB has a valid SQLite header but no
+    ``kanban_notify_subs`` / ``tasks`` / ``task_events`` — the helper
+    uses ``mode=rw`` so the file is opened read/write without creating
+    it, and ``PRAGMA table_info`` returns an empty list."""
+    import sqlite3
+
+    p = real_kanban_kb.path
+    # Pre-create the file with the SQLite header only. ``open`` is
+    # enough — sqlite3.connect("") would create one, so we write the
+    # canonical empty-DB header via sqlite3 itself.
+    sqlite3.connect(str(p)).close()
+
+    # Spy module that records every Agent-helper call. The production
+    # helper MUST NOT touch any of these.
+    calls: list[str] = []
+
+    class _SpyKb:
+        kanban_db_path = real_kanban_kb.kb.kanban_db_path
+        DEFAULT_BUSY_TIMEOUT_MS = real_kanban_kb.kb.DEFAULT_BUSY_TIMEOUT_MS
+        _resolve_busy_timeout_ms = real_kanban_kb.kb._resolve_busy_timeout_ms
+
+        def init_db(self, *, board=None):
+            calls.append("init_db")
+            raise AssertionError("production helper called init_db")
+
+        def connect(self, *, board=None):
+            calls.append("connect")
+            raise AssertionError("production helper called connect")
+
+        def connect_closing(self, *, board=None):
+            calls.append("connect_closing")
+            raise AssertionError("production helper called connect_closing")
+
+        def _sqlite_connect(self, path):
+            calls.append("_sqlite_connect")
+            raise AssertionError("production helper called _sqlite_connect")
+
+    monkeypatch.setattr(notifications_module.mod, "_kb", lambda: _SpyKb())
+
+    # Open, run a benign query, close.
+    with notifications_module.open_conn("default") as conn:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    # Empty DB → no Agent tables were created.
+    assert rows == [], (
+        f"empty DB gained tables after _open_conn: {[dict(r) for r in rows]!r}"
+    )
+    assert calls == [], f"production helper reached into Agent: {calls!r}"
+
+
+def test_open_conn_raises_on_missing_db_and_creates_no_file(
+    notifications_module, real_kanban_kb, monkeypatch
+):
+    """A missing kanban DB must raise and MUST NOT create the file or
+    any parent directory. The bridge uses ``mode=rw`` (not ``rwc``)
+    so sqlite3.connect raises OperationalError. RFC §5: fail-closed
+    introspection."""
+    import sqlite3
+
+    p = real_kanban_kb.path
+    # ``tmp_path`` exists; the file ``p`` does not.
+    parent = p.parent
+    assert not p.exists()
+    assert parent.exists()
+
+    # Spy kb: if init_db is called we're already failing — it would
+    # have created the parent dir + file.
+    calls: list[str] = []
+
+    class _SpyKb:
+        kanban_db_path = real_kanban_kb.kb.kanban_db_path
+        DEFAULT_BUSY_TIMEOUT_MS = real_kanban_kb.kb.DEFAULT_BUSY_TIMEOUT_MS
+        _resolve_busy_timeout_ms = real_kanban_kb.kb._resolve_busy_timeout_ms
+
+        def init_db(self, *, board=None):
+            calls.append("init_db")
+            raise AssertionError("production helper called init_db")
+
+        def connect(self, *, board=None):
+            calls.append("connect")
+            raise AssertionError("production helper called connect")
+
+        def connect_closing(self, *, board=None):
+            calls.append("connect_closing")
+            raise AssertionError("production helper called connect_closing")
+
+        def _sqlite_connect(self, path):
+            calls.append("_sqlite_connect")
+            raise AssertionError("production helper called _sqlite_connect")
+
+    monkeypatch.setattr(notifications_module.mod, "_kb", lambda: _SpyKb())
+    with pytest.raises(sqlite3.OperationalError):
+        # The helper raises on mode=rw with no file. The watcher handles
+        # that failure by staying fail-closed; this test proves the helper
+        # does not silently materialize the database.
+        with notifications_module.open_conn("default") as conn:
+            conn.execute("SELECT 1").fetchall()
+    # File still does not exist; parent directory unchanged.
+    assert not p.exists(), (
+        f"_open_conn silently created the DB file at {p} (RFC §5 violated)"
+    )
+    assert parent.exists()
+    # init_db / connect / connect_closing / _sqlite_connect were never
+    # called.
+    assert calls == [], f"production helper reached into Agent: {calls!r}"
+
+
+def test_open_conn_cursor_update_persists_across_reopen(
+    notifications_module, real_kanban_kb, monkeypatch
+):
+    """A cursor UPDATE issued through the production helper must
+    survive the context-manager exit AND a fresh reopen. The
+    production ``_update_cursor_row`` uses ``conn.execute`` only
+    (the bridge sets ``isolation_level=None`` so writes are
+    immediately durable)."""
+    import sqlite3
+
+    p = real_kanban_kb.path
+    # Build the production schema.
+    with sqlite3.connect(str(p)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE kanban_notify_subs (
+                task_id TEXT, platform TEXT, chat_id TEXT,
+                last_event_id INTEGER, updated_at INTEGER
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO kanban_notify_subs VALUES (?, ?, ?, ?, ?)",
+            ("t1", "webui", "chat-c", 0, None),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(notifications_module.mod, "_kb", lambda: real_kanban_kb.kb)
+
+    # Open with the production helper, UPDATE the cursor, exit. The
+    # with-block must close the FD; a fresh open must read the
+    # persisted value.
+    with notifications_module.open_conn("default") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "UPDATE kanban_notify_subs SET last_event_id = ?, updated_at = ? "
+            "WHERE task_id = ? AND chat_id = ?",
+            (99, int(time.time()), "t1", "chat-c"),
+        )
+    # Fresh open via the production helper — same path.
+    with notifications_module.open_conn("default") as conn:
+        row = conn.execute(
+            "SELECT last_event_id FROM kanban_notify_subs WHERE task_id = ?",
+            ("t1",),
+        ).fetchone()
+    assert row["last_event_id"] == 99, (
+        f"cursor UPDATE did not persist across reopen: {row['last_event_id']}"
+    )
+
+
+def test_open_conn_named_board_argument_reaches_kanban_db_path(
+    notifications_module, monkeypatch, tmp_path
+):
+    """The ``board`` argument passed to ``_open_conn`` must reach
+    ``kb.kanban_db_path(board=...)`` so per-board DBs are routed
+    correctly. The test wires a spy ``_kb`` whose ``kanban_db_path``
+    returns a real ``tmp_path`` SQLite file keyed on the supplied
+    board (so we can also verify path-per-board resolution)."""
+    import sqlite3 as _sqlite3
+
+    seen: list[str | None] = []
+    paths: dict[str, Path] = {}
+
+    def _ensure_db(name: str) -> Path:
+        # Per-board temp path; keep them under tmp_path so we never
+        # touch the user's live DB.
+        p = tmp_path / f"{name}.db"
+        if not p.exists():
+            _sqlite3.connect(str(p)).close()
+        paths[name] = p
+        return p
+
+    class _Kb:
+        DEFAULT_BUSY_TIMEOUT_MS = 120_000
+
+        def kanban_db_path(self, *, board=None):
+            seen.append(board)
+            return _ensure_db(board or "default")
+
+    monkeypatch.setattr(notifications_module.mod, "_kb", lambda: _Kb())
+
+    # Named board "experiments" -> resolves to tmp_path/experiments.db.
+    with notifications_module.open_conn("experiments") as conn:
+        conn.execute("SELECT 1").fetchone()
+    # board=None -> resolves to tmp_path/default.db.
+    with notifications_module.open_conn(None) as conn:
+        conn.execute("SELECT 1").fetchone()
+    # Other board: "alpha".
+    with notifications_module.open_conn("alpha") as conn:
+        conn.execute("SELECT 1").fetchone()
+
+    assert seen == ["experiments", None, "alpha"], (
+        f"kanban_db_path(board=...) was not invoked with the supplied "
+        f"boards in order; got {seen!r}"
+    )
+    # Each board resolved to its own tmp_path file.
+    assert paths["experiments"].exists()
+    assert paths["default"].exists()
+    assert paths["alpha"].exists()
+
+
+def test_open_conn_busy_timeout_observable_via_pragma(
+    notifications_module, real_kanban_kb, monkeypatch, tmp_path
+):
+    """The configured busy_timeout must be observable: the production
+    helper sets ``PRAGMA busy_timeout=<ms>`` so a sqlite3 round trip
+    can read it back. We exercise the env-driven override path
+    (reject invalid values, honor positive ones). When the Agent
+    supplies a callable ``kb._resolve_busy_timeout_ms`` we still
+    honor the env via it (mirroring Agent behavior); when it does
+    NOT supply a callable, the helper parses the env directly with
+    the documented strict rules."""
+    import sqlite3
+
+    # Ensure the file exists.
+    p = real_kanban_kb.path
+    if not p.exists():
+        sqlite3.connect(str(p)).close()
+
+    class _KbEnv:
+        """kb with no ``_resolve_busy_timeout_ms`` callable — the
+        production helper then parses ``HERMES_KANBAN_BUSY_TIMEOUT_MS``
+        directly. Required for the env-override branch."""
+
+        def __init__(self, path):
+            self._path = path
+
+        DEFAULT_BUSY_TIMEOUT_MS = 120_000
+
+        def kanban_db_path(self, *, board=None):
+            return self._path
+
+    monkeypatch.setattr(notifications_module.mod, "_kb", lambda: _KbEnv(p))
+
+    # Case 1: invalid env value must fall back to the agent default.
+    monkeypatch.setenv("HERMES_KANBAN_BUSY_TIMEOUT_MS", "not-a-number")
+    with notifications_module.open_conn("default") as conn:
+        v = conn.execute("PRAGMA busy_timeout").fetchone()
+    assert v[0] == 120_000, f"busy_timeout fallback failed: got {v[0]}"
+
+    # Case 2: non-positive env value must fall back to the agent default.
+    monkeypatch.setenv("HERMES_KANBAN_BUSY_TIMEOUT_MS", "0")
+    with notifications_module.open_conn("default") as conn:
+        v = conn.execute("PRAGMA busy_timeout").fetchone()
+    assert v[0] == 120_000
+
+    # Case 3: positive env value is honored exactly.
+    monkeypatch.setenv("HERMES_KANBAN_BUSY_TIMEOUT_MS", "4321")
+    with notifications_module.open_conn("default") as conn:
+        v = conn.execute("PRAGMA busy_timeout").fetchone()
+    assert v[0] == 4321, f"env override not honored: got {v[0]}"
+
+
+def test_open_conn_setup_exception_closes_already_opened_fd(
+    notifications_module, real_kanban_kb, monkeypatch
+):
+    """If any setup step after ``sqlite3.connect`` raises, the FD that
+    was opened must be closed before the helper re-raises (no leaked
+    FD on the hot watcher path).
+
+    Mechanism: monkey-patch the production module's
+    ``sqlite3.connect`` with a thin wrapper that opens a real
+    connection but wraps it in a proxy whose ``row_factory`` setter
+    raises. The production helper's ``conn.row_factory = sqlite3.Row``
+    assignment triggers the controlled failure, exercising the
+    helper's post-connect ``try/except`` which must close the
+    already-opened FD.
+
+    The previous test only proved "32 opens in a row did not crash";
+    a leak per failure would survive that heuristic on small CI
+    runners. The strengthened version retains the wrapped proxy and
+    proves the close path positively:
+
+      1. The wrapped underlying real connection is recorded so we can
+         observe whether it was closed.
+      2. The setup failure surfaces as a ``RuntimeError`` (proxy
+         re-raise).
+      3. The underlying real connection's ``close()`` was invoked
+         exactly once during the failure path.
+      4. Any subsequent use of the underlying real connection
+         raises ``sqlite3.ProgrammingError`` ("Cannot operate on a
+         closed database") — i.e. the FD is genuinely gone, not just
+         a swallowed exception.
+    """
+    import sqlite3 as real_sqlite3
+
+    p = real_kanban_kb.path
+    if not p.exists():
+        real_sqlite3.connect(str(p)).close()
+    monkeypatch.setattr(notifications_module.mod, "_kb", lambda: real_kanban_kb.kb)
+
+    class _RowFactorySetterFails:
+        """Delegate every attribute access to a real sqlite3
+        Connection except ``row_factory``, whose setter raises. The
+        production helper's ``conn.row_factory = sqlite3.Row``
+        assignment triggers the failure, exercising the helper's
+        post-connect close-on-error path. ``close_count`` records
+        every ``close()`` invocation so the test can positively
+        assert the FD was closed."""
+
+        def __init__(self, real_conn: real_sqlite3.Connection):
+            self._c = real_conn
+            self.close_count = 0
+
+        def __getattr__(self, name):
+            return getattr(self._c, name)
+
+        def __setattr__(self, name, value):
+            if name == "row_factory":
+                raise RuntimeError(
+                    "simulated post-connect setup failure at row_factory"
+                )
+            object.__setattr__(self, name, value)
+
+        def close(self):
+            # Count every close call, then delegate to the underlying
+            # real connection. This lets the production helper close
+            # the proxy (which calls our wrapper close → real close)
+            # and still lets the test confirm the call happened.
+            self.close_count += 1
+            return self._c.close()
+
+    original_connect = real_sqlite3.connect
+    captured_proxies: list[_RowFactorySetterFails] = []
+
+    def _wrapped_connect(*args, **kwargs):
+        proxy = _RowFactorySetterFails(original_connect(*args, **kwargs))
+        captured_proxies.append(proxy)
+        return proxy
+
+    # Patch the production module's sqlite3.connect via monkeypatch so
+    # pytest restores the original after the test. The production
+    # module's ``sqlite3`` is the real ``sqlite3`` module, so this
+    # also temporarily replaces the global ``sqlite3.connect`` for
+    # the duration of this test only.
+    monkeypatch.setattr(notifications_module.mod.sqlite3, "connect", _wrapped_connect)
+
+    # The ``with`` must raise mid-setup.
+    with pytest.raises(RuntimeError):
+        with notifications_module.open_conn("default") as conn:
+            conn.execute("SELECT 1").fetchall()
+
+    # Positive assertions on the wrapped proxy:
+    assert len(captured_proxies) == 1, (
+        f"expected exactly one sqlite3.connect call, got {len(captured_proxies)}"
+    )
+    proxy = captured_proxies[0]
+    # The production helper's ``try/except`` path must have invoked
+    # ``close()`` on the already-opened connection at least once. A
+    # real leak would surface as ``close_count == 0``.
+    assert proxy.close_count >= 1, (
+        f"close() was not invoked on the underlying connection after "
+        f"the post-connect setup failure; FD was leaked. "
+        f"close_count={proxy.close_count}"
+    )
+    # Underlying real connection is genuinely closed: any further
+    # operation raises ``sqlite3.ProgrammingError`` with a clear
+    # "closed database" message. This is the positive proof that the
+    # FD was released, not just an exception swallowed.
+    real_conn = proxy._c
+    with pytest.raises(real_sqlite3.ProgrammingError) as excinfo:
+        real_conn.execute("SELECT 1")
+    assert "closed" in str(excinfo.value).lower(), (
+        f"underlying connection accepted queries after close: {excinfo.value!r}"
+    )
+
+    # Restore the real connect so any later assertions / tests don't
+    # see the wrapper. monkeypatch.undo would also restore the ``_kb``
+    # patch, leaking state into other tests, so we restore selectively.
+    notifications_module.mod.sqlite3.connect = original_connect
+
+
+def test_candidate_rows_is_board_scoped(notifications_module):
+    """Board-aware FakeKanbanDB contract: ``_candidate_rows`` for board A
+    must NEVER return board B's subscriptions or events. Production opens
+    a separate SQLite file per board so this scoping is natural; the
+    fake mirrors it by tagging each sub / event with its board and
+    filtering in the FakeConn JOIN.
+
+    To prove the JOIN's board filter is what's keeping the sets apart
+    (and not just a coincidence of task_id / event_id uniqueness), the
+    SAME task_id is shared across both boards — only the board tag
+    distinguishes them.
+    """
+    fb = notifications_module.fake_kanban
+    mod = notifications_module.mod
+    fb.make_board("board_a", archived=False)
+    fb.make_board("board_b", archived=False)
+
+    shared_task = "t_shared"
+    # Board A: shared task with a terminal event + a webui subscription.
+    fb.add_task(FakeTask(id=shared_task, title="A"), board="board_a")
+    fb.add_event(
+        shared_task,
+        "completed",
+        {"status": "done"},
+        event_id=100,
+        board="board_a",
+    )
+    fb.add_sub(
+        FakeSub(task_id=shared_task, platform="webui", chat_id="chat-a"),
+        board="board_a",
+    )
+    # Board B: SAME task_id on board B (independent DB file in
+    # production). A board-blind candidate scan would conflate the two.
+    fb.add_task(FakeTask(id=shared_task, title="B"), board="board_b")
+    fb.add_event(
+        shared_task,
+        "completed",
+        {"status": "done"},
+        event_id=200,
+        board="board_b",
+    )
+    fb.add_sub(
+        FakeSub(task_id=shared_task, platform="webui", chat_id="chat-b"),
+        board="board_b",
+    )
+
+    state = mod._initialize_baseline_state(["board_a", "board_b"])
+    # Scan board A — must only see board A's candidates.
+    rows_a = mod._candidate_rows("board_a", state)
+    assert rows_a, "board A produced zero candidates"
+    for row in rows_a:
+        assert row.get("board") == "board_a", (
+            f"board A scan leaked board B row: {row!r}"
+        )
+        assert row.get("task_id") == shared_task, (
+            f"board A scan produced unexpected task_id: {row!r}"
+        )
+        assert row.get("chat_id") == "chat-a"
+        assert int(row["event_id"]) == 100, (
+            f"board A scan leaked board B's event id: {row!r}"
+        )
+
+    # Scan board B — must only see board B's candidates.
+    rows_b = mod._candidate_rows("board_b", state)
+    assert rows_b, "board B produced zero candidates"
+    for row in rows_b:
+        assert row.get("board") == "board_b", (
+            f"board B scan leaked board A row: {row!r}"
+        )
+        assert row.get("task_id") == shared_task
+        assert row.get("chat_id") == "chat-b"
+        assert int(row["event_id"]) == 200, (
+            f"board B scan leaked board A's event id: {row!r}"
+        )
+
+    # No overlap whatsoever between the two candidate sets.
+    a_events = {int(r["event_id"]) for r in rows_a}
+    b_events = {int(r["event_id"]) for r in rows_b}
+    assert a_events.isdisjoint(b_events), (
+        f"board A and board B share candidate event ids: A={a_events!r} B={b_events!r}"
+    )
+
+
+def test_live_schema_break_then_repair_resumes_dispatch(
+    notifications_module, monkeypatch, caplog
+):
+    """Focused sequence coverage for the production schema-cache
+    contract (RFC §5 / C6): valid schema at startup → post-startup
+    schema break → iteration drops the broken board → operator
+    repairs → next iteration's per-board introspection picks up the
+    fixed schema and dispatches.
+
+    Coverage only — the production semantics (per-board
+    ``_inspect_subs_columns`` refresh on every iteration; broken
+    boards excluded from ``state["boards"]`` until repaired) are
+    already enforced by the existing accepted tests. This test
+    chains them together end-to-end so a future reviewer sees the
+    full loop in one place.
+    """
+    fb = notifications_module.fake_kanban
+    mod = notifications_module.mod
+    # Start with a valid modern schema; the candidate scan + dispatch
+    # path is well-defined.
+    notifications_module.register_session("chat-rep", profile="default")
+    fb.add_task(FakeTask(id="t_rep", title="Repairable", status="done"))
+    fb.add_event("t_rep", "completed", {"status": "done"}, event_id=10)
+    fb.add_sub(FakeSub(task_id="t_rep", platform="webui", chat_id="chat-rep"))
+
+    state = mod._initialize_baseline_state(["default"])
+    assert state["schema_ok"] is True
+    # First iteration: valid schema, dispatch works.
+    mod._run_one_iteration(state)
+    assert len(notifications_module.dispatched) == 1
+    assert notifications_module.dispatched[0]["chat_id"] == "chat-rep"
+    pre_break_cursor = next(s for s in fb.subs if s["task_id"] == "t_rep")[
+        "last_event_id"
+    ]
+    assert pre_break_cursor == 10
+
+    # Operator breaks the schema mid-run (drops ``last_event_id`` so
+    # ``required_ok`` is False).
+    fb.subs_columns = ["task_id", "platform", "chat_id", "notifier_profile"]
+    # A fresh event arrives; the per-board introspection in the next
+    # iteration must observe the broken schema and exclude the board.
+    fb.add_event("t_rep", "completed", {"status": "done"}, event_id=11)
+    notifications_module.dispatched.clear()
+    with caplog.at_level("WARNING"):
+        mod._run_one_iteration(state)
+    # No new dispatch — the broken board is dropped from ``state["boards"]``.
+    assert notifications_module.dispatched == []
+    assert state["boards"] == [], (
+        f"broken board must be dropped from state.boards; got {state['boards']!r}"
+    )
+    # Cursor must NOT advance: the schema is broken and the events
+    # stay readable for the repair recovery path.
+    assert next(s for s in fb.subs if s["task_id"] == "t_rep")["last_event_id"] == 10
+
+    # Operator repairs the schema.
+    fb.subs_columns = [
+        "task_id",
+        "platform",
+        "chat_id",
+        "notifier_profile",
+        "last_event_id",
+    ]
+    # Simulate the watcher's ``_refresh_board_discovery`` /
+    # ``_inspect_subs_columns`` cycle by directly re-introspecting
+    # and re-adding the board. The production watcher does this on
+    # every iteration's top-of-loop ``for board in boards: live =
+    # _inspect_subs_columns(board)`` block, so we exercise the same
+    # path here.
+    refreshed = mod._inspect_subs_columns("default")
+    assert refreshed["required_ok"] is True, (
+        f"repaired schema must report required_ok=True; got {refreshed!r}"
+    )
+    state.setdefault("schema_by_board", {})["default"] = refreshed
+    state["boards"] = ["default"]
+    mod._run_one_iteration(state)
+    # The previously-suppressed event (id=11) now dispatches.
+    assert any(c["chat_id"] == "chat-rep" for c in notifications_module.dispatched), (
+        f"post-repair iteration did not dispatch; state={state!r}"
+    )
 
 
 # Use the same prompt-prefix constant the production module uses so the
