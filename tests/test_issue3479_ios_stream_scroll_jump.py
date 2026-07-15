@@ -5,6 +5,8 @@ jump came from discrete transcript rebuilds and card replacement paths, so these
 tests pin those call sites rather than the per-token renderer.
 """
 
+import json
+import subprocess
 from pathlib import Path
 
 
@@ -34,6 +36,17 @@ def _function_body(src: str, name: str) -> str:
 
 def _compact(text: str) -> str:
     return "".join(text.split())
+
+
+def _run_node(source: str) -> dict:
+    proc = subprocess.run(
+        ["node", "-e", source],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
 def test_refresh_session_uses_same_frame_scroll_snapshot_restore():
@@ -74,7 +87,7 @@ def test_live_anchor_worklog_rebuild_restores_snapshot_before_follow_settle():
     dedupe_idx = body.index("_dedupeLiveProcessedWorklogAnchors(turn);")
     move_status_idx = body.index("_moveLiveRunStatusToTurnEnd();")
     restore_idx = body.index("_restoreMessageScrollSnapshotSameFrame(scrollSnapshot);")
-    release_idx = body.index("if(scrollRebuildGuard&&scrollRebuildGuard.release)")
+    release_idx = body.index("_scheduleLiveAnchorScrollRebuildGuardRelease(scrollRebuildGuard,scrollSnapshot)")
     settle_idx = body.index("if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();")
 
     assert capture_idx < guard_idx < remove_idx < restore_detail_idx < dedupe_idx < move_status_idx < restore_idx < release_idx < settle_idx
@@ -92,7 +105,99 @@ def test_live_anchor_worklog_rebuild_guards_height_for_unpinned_reader():
     assert "_messageUserUnpinned=true;" in compact
     assert "_scrollPinned=false;" in compact
     assert "_nearBottomCount=0;" in compact
-    assert "msgInner.style.minHeight=`${guardHeight}px`;" in compact
+    assert "consttoken=_pinWipeMinHeight(msgInner,guardHeight);" in compact
+    assert "release:token?()=>_releaseWipeMinHeight(msgInner,token):null" in compact
+
+
+def test_live_anchor_delayed_release_cannot_restore_after_newer_owner_wins():
+    helpers = "\n".join(
+        _function_body(UI_JS, name)
+        for name in (
+            "_pinWipeMinHeight",
+            "_releaseWipeMinHeight",
+            "_prepareLiveAnchorScrollRebuildGuard",
+            "_scheduleLiveAnchorScrollRebuildGuardRelease",
+        )
+    )
+    source = f"""
+const messages={{scrollHeight:5000,scrollTop:3000,clientHeight:800}};
+const inner={{scrollHeight:5000,style:{{minHeight:'17px'}},dataset:{{}}}};
+function $(id){{return id==='messages'?messages:inner;}}
+let _messageUserUnpinned=true,_scrollPinned=false,_nearBottomCount=0;
+let restores=0,raf=[];
+function _restoreMessageScrollSnapshotSameFrame(){{restores++;}}
+function requestAnimationFrame(cb){{raf.push(cb);}}
+let _wipeGuardSeq=0;
+{helpers}
+const oldGuard=_prepareLiveAnchorScrollRebuildGuard({{scrollHeight:5000}});
+const oldToken=inner.dataset.wipeGuardToken;
+const newerToken=_pinWipeMinHeight(inner,6000);
+_scheduleLiveAnchorScrollRebuildGuardRelease(oldGuard,{{top:3000}});
+while(raf.length) raf.shift()();
+const afterStale={{minHeight:inner.style.minHeight,token:inner.dataset.wipeGuardToken,restores}};
+const newerReleased=_releaseWipeMinHeight(inner,newerToken);
+console.log(JSON.stringify({{oldToken,newerToken,afterStale,newerReleased,finalMinHeight:inner.style.minHeight,finalToken:inner.dataset.wipeGuardToken||null}}));
+"""
+    result = _run_node(source)
+    assert result["oldToken"] != result["newerToken"]
+    assert result["afterStale"] == {
+        "minHeight": "6000px",
+        "token": result["newerToken"],
+        "restores": 0,
+    }
+    assert result["newerReleased"] is True
+    assert result["finalMinHeight"] == "17px"
+    assert result["finalToken"] is None
+
+
+def test_measurement_render_exception_releases_owner_token_immediately():
+    helpers = "\n".join(
+        _function_body(UI_JS, name)
+        for name in (
+            "_pinWipeMinHeight",
+            "_releaseWipeMinHeight",
+            "_compensateScrollForMeasurementDelta",
+        )
+    )
+    source = f"""
+const classes=new Set();
+const container={{
+  scrollTop:3000,scrollHeight:5000,clientHeight:800,
+  classList:{{add:x=>classes.add(x),remove:x=>classes.delete(x)}},
+  querySelector:()=>null,
+}};
+const inner={{scrollHeight:5000,style:{{minHeight:'17px'}},dataset:{{}}}};
+function $(id){{return id==='messages'?container:inner;}}
+function _captureMessageViewportAnchor(){{return null;}}
+let _messageUserUnpinned=true;
+let _wipeGuardSeq=0;
+{helpers}
+let threw=false;
+try{{_compensateScrollForMeasurementDelta(()=>{{throw new Error('render failure');}});}}catch(_e){{threw=true;}}
+console.log(JSON.stringify({{threw,minHeight:inner.style.minHeight,token:inner.dataset.wipeGuardToken||null,measuring:classes.has('vscroll-measuring')}}));
+"""
+    assert _run_node(source) == {
+        "threw": True,
+        "minHeight": "17px",
+        "token": None,
+        "measuring": False,
+    }
+
+
+def test_all_guarded_render_paths_have_exception_cleanup_and_owned_restore():
+    render = _function_body(UI_JS, "renderMessages")
+    cache = render[render.index("const _cacheGuardToken="):render.index("// Mid-stream flicker fix")]
+    compact = _function_body(UI_JS, "renderLiveAnchorActivityScene")
+    transparent = _function_body(UI_JS, "_renderLiveAnchorActivitySceneTransparent")
+    settle = _function_body(UI_JS, "_compensateScrollForMeasurementDelta")
+
+    assert "finally" in render and "if(!_mainGuardCompleted&&_mainWipeGuardToken)" in render
+    assert "finally" in cache and "if(_cacheGuardCleanupArmed&&_cacheGuardToken)" in cache
+    assert "finally" in compact and "scrollRebuildGuard.release();" in compact
+    assert "finally" in transparent and "scrollRebuildGuard.release();" in transparent
+    assert "if(!_releaseWipeMinHeight(_inner,_settleToken)) return;" in settle
+    schedule = _function_body(UI_JS, "_scheduleLiveAnchorScrollRebuildGuardRelease")
+    assert "if(released&&_messageUserUnpinned)" in schedule
 
 
 def test_same_frame_snapshot_preserves_bottom_distance_and_unpinned_state():

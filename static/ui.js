@@ -1031,11 +1031,12 @@ function _pinWipeMinHeight(inner, height){
   return token;
 }
 function _releaseWipeMinHeight(inner, token){
-  if(!inner||!inner.style||!inner.dataset||!token) return;
-  if(inner.dataset.wipeGuardToken!==String(token)) return;
+  if(!inner||!inner.style||!inner.dataset||!token) return false;
+  if(inner.dataset.wipeGuardToken!==String(token)) return false;
   inner.style.minHeight=inner.dataset.wipeGuardPrevMinHeight||'';
   delete inner.dataset.wipeGuardToken;
   delete inner.dataset.wipeGuardPrevMinHeight;
+  return true;
 }
 
 function _browserOverflowAnchorActive(el){
@@ -1304,16 +1305,27 @@ function _compensateScrollForMeasurementDelta(renderFn){
   // Only unpinned readers need height held against browser clamping. Pinned
   // readers must leave scrollHeight free so auto-follow can land at the true tail.
   const _compUnpinned=(typeof _messageUserUnpinned!=='undefined')&&_messageUserUnpinned;
-  if(_compUnpinned) _pinWipeMinHeight(_inner,_guardH);
+  const _outerToken=_compUnpinned?_pinWipeMinHeight(_inner,_guardH):null;
   container.classList.add('vscroll-measuring');
-  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
+  let _renderCompleted=false;
+  try{
+    renderFn();
+    _renderCompleted=true;
+  }finally{
+    container.classList.remove('vscroll-measuring');
+    // If the nested render throws before installing its successor token, release
+    // this outer guard now. Owner-checking makes this harmless if it was superseded.
+    if(!_renderCompleted&&_outerToken) _releaseWipeMinHeight(_inner,_outerToken);
+  }
   // The inner render supersedes the outer token. Re-pin after renderFn as the final
   // owner, hold through two frames, then release and restore the semantic anchor.
   const _settleH=Math.max(_guardH,(_inner&&Number.isFinite(_inner.scrollHeight))?_inner.scrollHeight:0);
   const _settleToken=_compUnpinned?_pinWipeMinHeight(_inner,_settleH):null;
   const _releaseSettledGuard=()=>{
     if(!_settleToken) return;
-    _releaseWipeMinHeight(_inner,_settleToken);
+    // A newer render may supersede this delayed guard. Never apply the old
+    // semantic anchor unless this callback still owned and released the token.
+    if(!_releaseWipeMinHeight(_inner,_settleToken)) return;
     void container.scrollHeight;
     if(anchorBefore) _restoreMessageViewportAnchor(anchorBefore);
   };
@@ -12453,23 +12465,11 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
   _nearBottomCount=0;
   const msgInner=$('msgInner');
   if(!msgInner||!msgInner.style) return {readerAwayFromBottom:true,release:null};
-  const guardPreviousKey='liveAnchorScrollGuardPreviousMinHeight';
-  let previousMinHeight=msgInner.style.minHeight||'';
-  if(msgInner.dataset&&Object.prototype.hasOwnProperty.call(msgInner.dataset,guardPreviousKey)){
-    previousMinHeight=msgInner.dataset[guardPreviousKey]||'';
-  }else if(msgInner.dataset){
-    msgInner.dataset[guardPreviousKey]=previousMinHeight;
-  }
   const guardHeight=Math.max(messagesEl.scrollHeight,Number(scrollSnapshot.scrollHeight)||0);
-  if(guardHeight>0) msgInner.style.minHeight=`${guardHeight}px`;
+  const token=_pinWipeMinHeight(msgInner,guardHeight);
   return {
     readerAwayFromBottom:true,
-    release:()=>{
-      msgInner.style.minHeight=previousMinHeight;
-      if(msgInner.dataset&&msgInner.dataset[guardPreviousKey]===previousMinHeight){
-        delete msgInner.dataset[guardPreviousKey];
-      }
-    },
+    release:token?()=>_releaseWipeMinHeight(msgInner,token):null,
   };
 }
 function _resetMismatchedLiveAssistantTurnForSession(turn, sessionId){
@@ -12547,6 +12547,18 @@ function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
   if(typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
+function _scheduleLiveAnchorScrollRebuildGuardRelease(guard,scrollSnapshot){
+  if(!guard||typeof guard.release!=='function') return false;
+  const finish=()=>{
+    // A newer render may supersede this token before the delayed callback runs.
+    // Restore the old snapshot only when this guard still owned and released it.
+    const released=guard.release();
+    if(released&&_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+  };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(finish);
+  else finish();
+  return true;
+}
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -12596,6 +12608,8 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     : null;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  let scrollRebuildGuardReleaseScheduled=false;
+  try{
   blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
@@ -12621,17 +12635,15 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   _dedupeLiveProcessedWorklogAnchors(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-  if(scrollRebuildGuard&&scrollRebuildGuard.release){
-    requestAnimationFrame(()=>{
-      scrollRebuildGuard.release();
-      // Only re-restore the unpinned snapshot if the reader is STILL unpinned at
-      // rAF time. If they re-pinned between guard-engage and this frame, the
-      // stale re-restore would yank them back off the bottom (Opus gate finding).
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-    });
-  }
+  scrollRebuildGuardReleaseScheduled=_scheduleLiveAnchorScrollRebuildGuardRelease(scrollRebuildGuard,scrollSnapshot);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
+  }finally{
+    // Exceptions in any DOM renderer above must not strand the transcript floor.
+    if(!scrollRebuildGuardReleaseScheduled&&scrollRebuildGuard&&scrollRebuildGuard.release){
+      scrollRebuildGuard.release();
+    }
+  }
 }
 function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   opts=opts||{};
@@ -12655,6 +12667,8 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(!blocks) return false;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
+  let scrollRebuildGuardReleaseScheduled=false;
+  try{
   const activeStreamId = String(streamId || S.activeStreamId || '');
   const activeSessionId = String(S.session && S.session.session_id || '');
   const preserveByKey = new Map();
@@ -12735,14 +12749,14 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(renderedRows.length) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-  if(scrollRebuildGuard&&scrollRebuildGuard.release){
-    requestAnimationFrame(()=>{
-      scrollRebuildGuard.release();
-      if(_messageUserUnpinned) _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-    });
-  }
+  scrollRebuildGuardReleaseScheduled=_scheduleLiveAnchorScrollRebuildGuardRelease(scrollRebuildGuard,scrollSnapshot);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return !!renderedRows.length;
+  }finally{
+    if(!scrollRebuildGuardReleaseScheduled&&scrollRebuildGuard&&scrollRebuildGuard.release){
+      scrollRebuildGuard.release();
+    }
+  }
 }
 
 function _transparentLiveRowKey(node, streamId){
@@ -15207,6 +15221,8 @@ function renderMessages(options){
       const _cachePrewipeH=(inner&&Number.isFinite(inner.scrollHeight))?inner.scrollHeight:0;
       const _cacheReaderUnpinned=!!(scrollSnapshot&&(scrollSnapshot.userUnpinned===true||scrollSnapshot.pinned===false))||_messageUserUnpinned;
       const _cacheGuardToken=_cacheReaderUnpinned?_pinWipeMinHeight(inner,_cachePrewipeH):null;
+      let _cacheGuardCleanupArmed=!!_cacheGuardToken;
+      try{
       inner.innerHTML=cached.html;
       _messageVirtualWindowKey=renderWindowKey;
       _sessionHtmlCacheSid=sid;
@@ -15219,7 +15235,9 @@ function renderMessages(options){
       if(_cacheGuardToken){
         const _innerRel=inner;
         const _releaseCacheGuard=()=>{
-          _releaseWipeMinHeight(_innerRel,_cacheGuardToken);
+          // A superseding render owns the height now; do not apply this stale
+          // snapshot/bottom restore when the release no longer owns the token.
+          if(!_releaseWipeMinHeight(_innerRel,_cacheGuardToken)) return;
           void $('messages').scrollHeight;
           if((preserveScroll||_messageUserUnpinned)&&scrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
             _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
@@ -15227,14 +15245,23 @@ function renderMessages(options){
             scrollToBottom();
           }
         };
-        if(typeof requestAnimationFrame==='function') requestAnimationFrame(()=>requestAnimationFrame(_releaseCacheGuard));
-        else _releaseCacheGuard();
+        if(typeof requestAnimationFrame==='function'){
+          requestAnimationFrame(()=>requestAnimationFrame(_releaseCacheGuard));
+          _cacheGuardCleanupArmed=false;
+        }else{
+          _releaseCacheGuard();
+          _cacheGuardCleanupArmed=false;
+        }
       }
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
+      }finally{
+        // Any cache rehydrate/render exception must release the token immediately.
+        if(_cacheGuardCleanupArmed&&_cacheGuardToken) _releaseWipeMinHeight(inner,_cacheGuardToken);
+      }
     }
   }
   // Mid-stream flicker fix (#3877): when a renderMessages() rebuild is reached
@@ -15350,6 +15377,8 @@ function renderMessages(options){
   const _prewipeScrollHeight=(inner&&Number.isFinite(inner.scrollHeight))?inner.scrollHeight:0;
   const _readerUnpinnedForGuard=!!(scrollSnapshot&&(scrollSnapshot.userUnpinned===true||scrollSnapshot.pinned===false))||_messageUserUnpinned;
   _mainWipeGuardToken=_readerUnpinnedForGuard?_pinWipeMinHeight(inner,_prewipeScrollHeight):null;
+  let _mainGuardCompleted=false;
+  try{
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
@@ -16775,6 +16804,12 @@ function renderMessages(options){
   }
   _recycleStash.clear();
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll(160);
+  _mainGuardCompleted=true;
+  }finally{
+    // A synchronous render failure anywhere after the pin must never freeze the
+    // transcript. This immediate owner-checked release also invalidates any stale rAF.
+    if(!_mainGuardCompleted&&_mainWipeGuardToken) _releaseWipeMinHeight(inner,_mainWipeGuardToken);
+  }
 }
 
 function _toolDisplayName(tc){

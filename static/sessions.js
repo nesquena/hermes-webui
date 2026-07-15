@@ -3638,7 +3638,10 @@ async function _loadOlderMessages() {
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
     renderMessages({ preserveScroll: true });
-    if (container) {
+    // renderMessages({preserveScroll:true}) already owns restoration of the
+    // load-older sentinel, including its height delta when the button disappears
+    // on the final page. Do not apply that same delta a second time here.
+    if (container && !(viewportAnchor && viewportAnchor.special === 'load-older')) {
       // Prepending older messages must not teleport the reader. Anchor to the
       // first visible rendered row and restore that row's top offset after the
       // prepend so synthetic virtual spacer heights cannot skew the delta.

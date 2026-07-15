@@ -2,6 +2,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 UI = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+SESSIONS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+
+def _function_body(src: str, marker: str) -> str:
+    start = src.index(marker)
+    brace = src.index("{", start)
+    depth = 0
+    for pos in range(brace, len(src)):
+        if src[pos] == "{":
+            depth += 1
+        elif src[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : pos + 1]
+    raise AssertionError(f"unterminated function: {marker}")
 
 
 def test_load_older_button_is_a_first_class_viewport_anchor():
@@ -65,3 +80,12 @@ def test_remount_refuses_load_older_sentinel():
 
 def test_loading_button_sentinel_is_distinct_from_content_derived_message_keys():
     assert "__load_older_indicator__" not in UI[UI.index("function _messageViewportAnchorKeyForMessage"):UI.index("function _messageVisibleIndexForAnchorKey")]
+
+
+def test_load_older_sentinel_has_exactly_one_height_delta_owner():
+    body = _function_body(SESSIONS, "async function _loadOlderMessages")
+    render_idx = body.index("renderMessages({ preserveScroll: true });")
+    dedupe_idx = body.index("viewportAnchor.special === 'load-older'", render_idx)
+    explicit_restore_idx = body.index("_restoreMessageViewportAnchor(viewportAnchor", render_idx)
+    assert render_idx < dedupe_idx < explicit_restore_idx
+    assert "if (container && !(viewportAnchor && viewportAnchor.special === 'load-older'))" in body

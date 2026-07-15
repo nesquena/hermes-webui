@@ -1195,6 +1195,7 @@ global._createAssistantTurn=()=>{{ const el=new FakeElement('div'); el.classList
 global._assistantTurnBlocks=(turn)=>turn;
 global._captureMessageScrollSnapshot=()=>({{scrollHeight:1000}});
 global._prepareLiveAnchorScrollRebuildGuard=()=>({{readerAwayFromBottom:false, release:null}});
+global._scheduleLiveAnchorScrollRebuildGuardRelease=()=>false;
 global._restoreMessageScrollSnapshotSameFrame=()=>{{}};
 global.scrollIfPinned=()=>{{}};
 global._moveLiveRunStatusToTurnEnd=()=>{{}};
