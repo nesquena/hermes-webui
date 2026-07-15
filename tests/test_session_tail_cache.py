@@ -1,8 +1,10 @@
+import gc
 import json
 import os
 import stat
 import threading
 import time
+import weakref
 from pathlib import Path
 
 import pytest
@@ -263,6 +265,177 @@ def test_same_id_concurrent_saves_bind_cache_to_authoritative_writer(
     assert snapshot["source_signature"] == models._tail_cache_signature_dict(
         models._sidecar_stat_signature(writer_b.path)
     )
+
+
+def test_tail_cache_uses_exact_nested_snapshot_serialized_to_authoritative_source(
+    isolated_session_store,
+    monkeypatch,
+):
+    session = Session(
+        session_id="nested_snapshot_binding",
+        messages=[
+            {"role": "user", "content": {"value": "SOURCE_BYTES"}, "timestamp": 1.0},
+            {"role": "assistant", "content": "answer", "timestamp": 2.0},
+        ],
+    )
+    source_replaced = threading.Event()
+    mutation_done = threading.Event()
+    original_replace = models._safe_replace
+
+    def observed_replace(src, dst):
+        original_replace(src, dst)
+        if dst == session.path:
+            source_replaced.set()
+            assert mutation_done.wait(timeout=5)
+
+    monkeypatch.setattr(models, "_safe_replace", observed_replace)
+
+    def mutate_nested_message_after_source_publish():
+        assert source_replaced.wait(timeout=5)
+        session.messages[0]["content"]["value"] = "MUTATED_AFTER_SOURCE"
+        mutation_done.set()
+
+    mutator = threading.Thread(target=mutate_nested_message_after_source_publish)
+    mutator.start()
+    session.save(touch_updated_at=False, skip_index=True)
+    mutator.join(timeout=5)
+    assert not mutator.is_alive()
+
+    authoritative = json.loads(session.path.read_bytes())
+    snapshot = models.read_session_tail_cache(session.session_id)
+    assert snapshot is not None
+    assert snapshot["messages"] == authoritative["messages"], (
+        "accepted cache was derived from nested objects mutated after authoritative "
+        "serialization instead of the exact frozen source snapshot"
+    )
+
+
+def test_tail_cache_detaches_nested_message_lists_and_tool_calls_before_replace(
+    isolated_session_store,
+    monkeypatch,
+):
+    session = Session(
+        session_id="nested_tool_snapshot_binding",
+        messages=[
+            {
+                "role": "user",
+                "content": {"parts": ["SOURCE", {"nested": "SOURCE"}]},
+                "timestamp": 1.0,
+            },
+            {"role": "assistant", "content": "answer", "timestamp": 2.0},
+        ],
+        tool_calls=[
+            {
+                "name": "source-tool",
+                "assistant_msg_idx": 1,
+                "custom": {"parts": ["SOURCE", {"nested": "SOURCE"}]},
+            }
+        ],
+    )
+    original_replace = models._safe_replace
+
+    def mutate_after_serialization_before_replace(src, dst):
+        if dst == session.path:
+            session.messages[0]["content"]["parts"][1]["nested"] = "MUTATED"
+            session.tool_calls[0]["custom"]["parts"][1]["nested"] = "MUTATED"
+        original_replace(src, dst)
+
+    monkeypatch.setattr(models, "_safe_replace", mutate_after_serialization_before_replace)
+
+    session.save(touch_updated_at=False, skip_index=True)
+
+    authoritative = json.loads(session.path.read_bytes())
+    snapshot = models.read_session_tail_cache(session.session_id)
+    assert snapshot is not None
+    assert snapshot["messages"] == authoritative["messages"]
+    assert snapshot["tool_calls"] == authoritative["tool_calls"]
+
+
+def test_same_canonical_sidecar_aliases_share_publication_lock(tmp_path, monkeypatch):
+    real = tmp_path / "real"
+    real.mkdir()
+    nested = real / "nested"
+    nested.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows privilege/filesystem dependent
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    absolute = real / "same.json"
+    aliases = [
+        alias / "same.json",
+        Path(os.fspath(real) + "/./nested/../same.json"),
+    ]
+    monkeypatch.chdir(tmp_path)
+    aliases.append(Path("real/same.json"))
+
+    assert not absolute.exists()
+    expected_lock = models._get_session_save_publication_lock(absolute)
+    for spelling in aliases:
+        assert spelling.resolve() == absolute.resolve()
+        assert models._get_session_save_publication_lock(spelling) is expected_lock
+    assert not absolute.exists(), "lock lookup must not create the sidecar"
+
+
+def test_session_dir_rewiring_to_same_store_reuses_publication_lock(tmp_path, monkeypatch):
+    real = tmp_path / "profiles" / "default" / "sessions"
+    real.mkdir(parents=True)
+    alias = tmp_path / "active-profile-sessions"
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows privilege/filesystem dependent
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    monkeypatch.setattr(models, "SESSION_DIR", real)
+    first = Session(session_id="profile_rewire", messages=_messages(2))
+    first_lock = models._get_session_save_publication_lock(first.path)
+
+    monkeypatch.setattr(models, "SESSION_DIR", alias)
+    second = Session(session_id="profile_rewire", messages=_messages(2))
+    second_lock = models._get_session_save_publication_lock(second.path)
+
+    assert first.path.resolve() == second.path.resolve()
+    assert second_lock is first_lock
+    assert not first.path.exists(), "lock lookup must work before the sidecar exists"
+
+
+def test_publication_lock_does_not_follow_final_symlink_and_is_name_scoped(tmp_path):
+    store = tmp_path / "sessions"
+    store.mkdir()
+    sidecar = store / "same.json"
+    target = store / "attacker-target.json"
+    target.write_text("target", encoding="utf-8")
+
+    by_name_lock = models._get_session_save_publication_lock(sidecar)
+    try:
+        sidecar.symlink_to(target)
+    except OSError as exc:  # pragma: no cover - Windows privilege/filesystem dependent
+        pytest.skip(f"file symlinks unavailable: {exc}")
+
+    assert sidecar.resolve() == target.resolve()
+    assert models._get_session_save_publication_lock(sidecar) is by_name_lock
+    assert models._get_session_save_publication_lock(target) is not by_name_lock
+
+
+def test_session_retained_publication_lock_releases_after_gc(
+    isolated_session_store,
+):
+    with models._SESSION_SAVE_PUBLICATION_LOCKS_GUARD:
+        models._SESSION_SAVE_PUBLICATION_LOCKS.clear()
+    session = Session(session_id="weak_lifetime", messages=[])
+
+    session.save(touch_updated_at=False, skip_index=True)
+
+    lock_ref = weakref.ref(session._save_publication_lock)
+    assert len(models._SESSION_SAVE_PUBLICATION_LOCKS) == 1
+    assert lock_ref() is not None
+
+    del session
+    gc.collect()
+
+    assert lock_ref() is None
+    assert len(models._SESSION_SAVE_PUBLICATION_LOCKS) == 0
 
 
 def test_session_save_lock_is_per_id_not_global(isolated_session_store, monkeypatch):
