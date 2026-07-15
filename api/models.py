@@ -164,7 +164,7 @@ def _open_windows_directory_handle(path: Path):  # pragma: no cover - Windows on
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = getattr(ctypes, 'WinDLL')('kernel32', use_last_error=True)
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)  # type: ignore[attr-defined]
     create_file = kernel32.CreateFileW
     create_file.argtypes = (
         wintypes.LPCWSTR,
@@ -187,7 +187,7 @@ def _open_windows_directory_handle(path: Path):  # pragma: no cover - Windows on
     )
     invalid = wintypes.HANDLE(-1).value
     if handle == invalid:
-        raise getattr(ctypes, 'WinError')(getattr(ctypes, 'get_last_error')())
+        raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
     return handle
 
 
@@ -196,9 +196,9 @@ def _close_windows_handle(handle) -> None:  # pragma: no cover - Windows only.
         return
     import ctypes
 
-    kernel32 = getattr(ctypes, 'WinDLL')('kernel32', use_last_error=True)
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)  # type: ignore[attr-defined]
     if not kernel32.CloseHandle(handle):
-        raise getattr(ctypes, 'WinError')(getattr(ctypes, 'get_last_error')())
+        raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
 
 
 class _BoundSessionSidecarTarget:
