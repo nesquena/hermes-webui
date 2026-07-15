@@ -241,7 +241,15 @@ def test_ephemeral_tail_cleanup_failure_is_nonfatal_and_still_removes_source(
     original_unlink = models.os.unlink
 
     def fail_cache_unlink(path, *args, **kwargs):
-        if Path(path) == cache_path:
+        target = models._active_session_sidecar_target()
+        is_bound_cache = (
+            target is not None
+            and kwargs.get("dir_fd") is not None
+            and kwargs["dir_fd"] == target._cache_fd
+        )
+        if Path(path).name == cache_path.name and (
+            Path(path) == cache_path or is_bound_cache
+        ):
             raise OSError("simulated ephemeral tail-cache cleanup failure")
         return original_unlink(path, *args, **kwargs)
 

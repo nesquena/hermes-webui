@@ -295,10 +295,13 @@ class TestIssue765FollowupHardening:
         replace_sources = []
         errors = []
 
-        def _record_replace(src, dst):
-            if Path(dst) == s.path:
+        def _record_replace(src, dst, *args, **kwargs):
+            destination_is_sidecar = Path(dst) == s.path
+            if kwargs.get("dst_dir_fd") is not None:
+                destination_is_sidecar = Path(dst).name == s.path.name
+            if destination_is_sidecar:
                 replace_sources.append(str(src))
-            return original_replace(src, dst)
+            return original_replace(src, dst, *args, **kwargs)
 
         monkeypatch.setattr(models.os, "replace", _record_replace)
 
