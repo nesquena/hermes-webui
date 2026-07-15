@@ -1842,20 +1842,26 @@ function extractFunc(name){
   }
   return src.slice(start, i);
 }
+const htmlRegistry = new Map();
 class FakeElement {
   constructor(tag='div'){
     this.tagName = String(tag).toUpperCase();
     this.children = [];
     this.parentNode = null;
     this.attributes = Object.create(null);
-    this.style = { color:'' };
-    this.title = '';
+    this._styleColor = '';
+    this.style = {};
+    const self = this;
+    Object.defineProperty(this.style, 'color', {
+      get(){ return self._styleColor; },
+      set(value){ self._recordWrite('style'); self._styleColor=String(value ?? ''); },
+    });
+    this._title = '';
     this.onclick = null;
     this.onkeydown = null;
     this._innerHTML = '';
     this._textContent = '';
     this._classes = new Set();
-    const self = this;
     this.classList = {
       add(...names){ names.forEach(name=>self._classes.add(name)); },
       remove(...names){ names.forEach(name=>self._classes.delete(name)); },
@@ -1869,18 +1875,54 @@ class FakeElement {
     };
   }
   get parentElement(){ return this.parentNode; }
+  get isConnected(){
+    let node = this;
+    while(node){
+      if(global.document&&node===global.document.body) return true;
+      node = node.parentNode;
+    }
+    return false;
+  }
+  get title(){ return this._title; }
+  set title(value){ this._recordWrite('title'); this._title=String(value ?? ''); }
   get className(){ return Array.from(this._classes).join(' '); }
   set className(value){ this._classes = new Set(String(value).split(/\s+/).filter(Boolean)); }
   get innerHTML(){ return this._innerHTML; }
-  set innerHTML(value){ this._innerHTML = String(value ?? ''); this._textContent = this._innerHTML; this.children = []; }
+  set innerHTML(value){
+    this._recordWrite('innerHTML');
+    this.children.forEach(child=>{ child.parentNode=null; });
+    this._innerHTML = String(value ?? '');
+    this._textContent = this._innerHTML;
+    this.children = [];
+    const factory = htmlRegistry.get(this._innerHTML);
+    if(factory){
+      this._textContent = '';
+      factory().forEach(child=>this.appendChild(child));
+    }
+  }
   get textContent(){ return this.children.length ? this.children.map(child=>child.textContent).join('') : this._textContent; }
-  set textContent(value){ this._textContent = String(value ?? ''); this._innerHTML = this._textContent; this.children = []; }
+  set textContent(value){
+    this._recordWrite('textContent');
+    this.children.forEach(child=>{ child.parentNode=null; });
+    this._textContent = String(value ?? '');
+    this._innerHTML = this._textContent;
+    this.children = [];
+  }
+  _recordWrite(kind){
+    if(this._trackDetachedWrites&& !this.isConnected) this._trackDetachedWrites.push(kind);
+  }
   setAttribute(name, value){
+    this._recordWrite(name === 'aria-label' ? 'aria-label' : `attribute:${name}`);
     this.attributes[String(name)] = String(value);
     if(name === 'title') this.title = String(value);
   }
   getAttribute(name){ return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
-  removeAttribute(name){ delete this.attributes[name]; if(name === 'title') this.title = ''; }
+  getAttributeNames(){ return Object.keys(this.attributes); }
+  removeAttribute(name){
+    this._recordWrite(name === 'aria-label' ? 'aria-label' : `attribute:${name}`);
+    delete this.attributes[name];
+    if(name === 'title') this.title = '';
+  }
   appendChild(child){ if(child.parentNode) child.remove(); child.parentNode = this; this.children.push(child); return child; }
   insertBefore(child, ref){
     if(child.parentNode) child.remove();
@@ -1951,6 +1993,38 @@ function toolRow(){
   row.appendChild(card);
   return { row, card, header, copy };
 }
+let reconcileTemplateId = 0;
+function reconcileToolRow(version, original){
+  const token = `__reconcile_tool_${version}_${++reconcileTemplateId}__`;
+  htmlRegistry.set(token, ()=>{
+    const card = element('div', 'tool-card');
+    const header = element('div', 'tool-card-header');
+    const copy = element('span', 'transparent-event-copy');
+    copy.innerHTML = original.html;
+    copy.style.color = original.color;
+    copy.setAttribute('title', original.title);
+    copy.setAttribute('aria-label', original.aria);
+    const toggle = element('span', 'tool-card-toggle');
+    header.appendChild(copy);
+    header.appendChild(toggle);
+    card.appendChild(header);
+    return [card];
+  });
+  const row = element('div', 'transparent-event-row');
+  row.setAttribute('data-event-type', 'tool');
+  row.setAttribute('data-anchor-row-id', 'copy-race');
+  row.setAttribute('data-anchor-row-role', 'tool');
+  row.setAttribute('data-anchor-source-event-type', 'process_tool');
+  row.setAttribute('data-expanded', '0');
+  row._tcData = { name:'shell', args:{ command:`echo ${version}` }, snippet:`${version} output` };
+  row.innerHTML = token;
+  return {
+    row,
+    card:row.querySelector('.tool-card'),
+    header:row.querySelector('.tool-card-header'),
+    copy:row.querySelector('.transparent-event-copy'),
+  };
+}
 function thinkingRow(text){
   const row = element('div', 'transparent-event-row transparent-thinking-event');
   row.setAttribute('data-event-type', 'thinking');
@@ -2008,7 +2082,11 @@ global._setTransparentCardOpen = (card, open)=>card.classList.toggle('open', !!o
 eval(extractFunc('_showTransparentCopiedFeedback'));
 eval(extractFunc('_copyEventToClipboard'));
 eval(extractFunc('_attachCopyButton'));
+eval(extractFunc('_transparentLiveRowAttributePairs'));
+eval(extractFunc('_transparentLiveRowInteractiveState'));
 eval(extractFunc('_rehydrateTransparentLiveRow'));
+eval(extractFunc('_refreshTransparentThinkingLiveRow'));
+eval(extractFunc('_refreshTransparentLiveRow'));
 
 function eventProbe(){
   return {
@@ -2035,6 +2113,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
 
 (async()=>{
   const tool = toolRow();
+  document.body.appendChild(tool.row);
   _attachCopyButton(tool.header);
   tool.copy.innerHTML = '<svg data-original="tool-copy"></svg>';
   tool.copy.style.color = 'rgb(1, 2, 3)';
@@ -2078,6 +2157,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
   };
 
   const thinking = thinkingRow('transparent reasoning');
+  document.body.appendChild(thinking.row);
   const candidate = thinkingRow('candidate reasoning');
   _rehydrateTransparentLiveRow(thinking.row, candidate.row, { expanded:false });
   const thinkingControls = thinking.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn');
@@ -2112,29 +2192,47 @@ function replaceCopyControl(header, oldCopy, classes, original){
   };
 
   const empty = thinkingRow('');
+  document.body.appendChild(empty.row);
   _attachCopyButton(empty.header);
   const writesBeforeEmpty = writes.length;
   empty.copy.onclick(eventProbe());
   await settle();
   const emptyCopySkipped = writes.length === writesBeforeEmpty && !empty.row._transparentCopiedFeedback;
 
-  // Copy success can settle after a live-row refresh has replaced the activated
-  // control. The row remains the owner, so the visible replacement receives the
-  // check and later restores its own normal presentation.
+  // Copy success can settle after the real live-row reconciler has replaced the
+  // activated control. The stable row owns the feedback lifetime, so the current
+  // visible replacement receives the check.
   clipboardMode = 'deferred';
-  const race = toolRow();
+  const race = reconcileToolRow('existing', {
+    html:'<svg data-original="existing"></svg>',
+    color:'rgb(3, 4, 5)',
+    title:'Existing title',
+    aria:'Existing aria',
+  });
+  document.body.appendChild(race.row);
   _attachCopyButton(race.header);
   let headerToggleCount = 0;
   race.header.onclick = ()=>{ headerToggleCount += 1; };
   const beforeSuccess = eventProbe();
+  const activatedCopy = race.copy;
   race.copy.onclick(beforeSuccess);
-  const replacementBeforeSuccess = replaceCopyControl(race.header, race.copy, 'transparent-event-copy', {
+  const candidateBeforeSuccess = reconcileToolRow('replacement-before-success', {
     html:'<svg data-original="replacement-before-success"></svg>',
     color:'rgb(7, 8, 9)',
     title:'Replacement before success title',
     aria:'Replacement before success aria',
   });
-  race.copy = replacementBeforeSuccess;
+  _refreshTransparentLiveRow(race.row, candidateBeforeSuccess.row);
+  race.card = race.row.querySelector('.tool-card');
+  race.header = race.row.querySelector('.tool-card-header');
+  race.copy = race.row.querySelector('.transparent-event-copy');
+  // Binding supplies the normal Copy label. Set distinct presentation after
+  // reconciliation so the feedback snapshot proves which control is current.
+  race.copy.innerHTML = '<svg data-original="replacement-before-success"></svg>';
+  race.copy.style.color = 'rgb(7, 8, 9)';
+  race.copy.setAttribute('title', 'Replacement before success title');
+  race.copy.setAttribute('aria-label', 'Replacement before success aria');
+  const activatedControlDetached = !activatedCopy.isConnected;
   const beforeResolutionCheck = race.copy.innerHTML.includes('data-icon="check"');
   deferredClipboardResolve();
   await settle();
@@ -2145,13 +2243,16 @@ function replaceCopyControl(header, oldCopy, classes, original){
     title:race.copy.title,
     aria:race.copy.getAttribute('aria-label'),
   };
-  const replacementDuringFeedback = {
+  const candidateDuringFeedback = reconcileToolRow('replacement-during-feedback', {
     html:'<svg data-original="replacement-during-feedback"></svg>',
     color:'rgb(11, 12, 13)',
     title:'Replacement during feedback title',
     aria:'Replacement during feedback aria',
-  };
-  race.copy = replaceCopyControl(race.header, race.copy, 'transparent-event-copy', replacementDuringFeedback);
+  });
+  _refreshTransparentLiveRow(race.row, candidateDuringFeedback.row);
+  race.card = race.row.querySelector('.tool-card');
+  race.header = race.row.querySelector('.tool-card-header');
+  race.copy = race.row.querySelector('.transparent-event-copy');
   const inheritedDuringFeedback = {
     check:race.copy.innerHTML.includes('data-icon="check"'),
     title:race.copy.title,
@@ -2164,8 +2265,18 @@ function replaceCopyControl(header, oldCopy, classes, original){
   const latestRaceTimerDuration = timers.get(latestRaceTimerId).ms;
   staleRaceTimer();
   const staleTimerDidNotClearLatest = race.copy.innerHTML.includes('data-icon="check"');
-  runTimer(latestRaceTimerId);
-  const replacementRestored = {
+  race.row.remove();
+  const detachedWrites = [];
+  race.row._trackDetachedWrites = detachedWrites;
+  race.copy._trackDetachedWrites = detachedWrites;
+  let expiryThrew = false;
+  try{ runTimer(latestRaceTimerId); }catch(_){ expiryThrew = true; }
+  const detachedExpiry = {
+    rowConnected:race.row.isConnected,
+    controlConnected:race.copy.isConnected,
+    feedbackState:!!race.row._transparentCopiedFeedback,
+    writes:detachedWrites,
+    threw:expiryThrew,
     html:race.copy.innerHTML,
     color:race.copy.style.color,
     title:race.copy.title,
@@ -2174,6 +2285,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
 
   clipboardMode = 'deferred';
   const thinkingRace = thinkingRow('rebound transparent reasoning');
+  document.body.appendChild(thinkingRace.row);
   _attachCopyButton(thinkingRace.header);
   thinkingRace.copy.onclick(eventProbe());
   thinkingRace.copy = replaceCopyControl(thinkingRace.header, thinkingRace.copy, 'thinking-copy-btn', {
@@ -2203,12 +2315,13 @@ function replaceCopyControl(header, oldCopy, classes, original){
     failure,
     emptyCopySkipped,
     replacementRace:{
+      activatedControlDetached,
       beforeResolutionCheck,
       replacementAfterSuccess,
       inheritedDuringFeedback,
       latestRaceTimerDuration,
       staleTimerDidNotClearLatest,
-      replacementRestored,
+      detachedExpiry,
       oneFunctionalControl:race.header.querySelectorAll('.transparent-event-copy,.thinking-copy-btn').length === 1 && typeof race.copy.onclick === 'function',
       activationDidNotToggle:beforeSuccess.stopped && beforeSuccess.prevented && headerToggleCount === 0,
     },
@@ -2248,6 +2361,7 @@ function replaceCopyControl(header, oldCopy, classes, original){
     }
     assert data["emptyCopySkipped"] is True
     assert data["replacementRace"] == {
+        "activatedControlDetached": True,
         "beforeResolutionCheck": False,
         "replacementAfterSuccess": {
             "check": True,
@@ -2261,11 +2375,16 @@ function replaceCopyControl(header, oldCopy, classes, original){
         },
         "latestRaceTimerDuration": 1500,
         "staleTimerDidNotClearLatest": True,
-        "replacementRestored": {
-            "html": '<svg data-original="replacement-during-feedback"></svg>',
-            "color": "rgb(11, 12, 13)",
-            "title": "Replacement during feedback title",
-            "aria": "Replacement during feedback aria",
+        "detachedExpiry": {
+            "rowConnected": False,
+            "controlConnected": False,
+            "feedbackState": False,
+            "writes": [],
+            "threw": False,
+            "html": '<svg data-icon="check" data-size="11"></svg>',
+            "color": "var(--accent)",
+            "title": "Copied",
+            "aria": "Copied",
         },
         "oneFunctionalControl": True,
         "activationDidNotToggle": True,

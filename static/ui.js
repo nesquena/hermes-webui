@@ -10757,6 +10757,19 @@ function _showTransparentCopiedFeedback(control,row,opts){
     }
     return control||null;
   };
+  const connectedControl=()=>{
+    const target=currentControl();
+    if(!target||target.isConnected!==true) return null;
+    if(feedbackRow&&feedbackRow.isConnected!==true) return null;
+    return target;
+  };
+  const clearFeedbackState=(state)=>{
+    if(state&&state.timer){
+      clearTimeout(state.timer);
+      state.timer=null;
+    }
+    if(owner._transparentCopiedFeedback===state) delete owner._transparentCopiedFeedback;
+  };
   const restoreControl=(target)=>{
     if(!target) return;
     const normal=target._transparentCopiedFeedbackNormal;
@@ -10800,13 +10813,24 @@ function _showTransparentCopiedFeedback(control,row,opts){
   let state=owner._transparentCopiedFeedback;
   if(opts.rehydrate){
     if(!state) return;
+    const target=connectedControl();
+    if(!target){
+      clearFeedbackState(state);
+      return;
+    }
     if(!state.expiresAt||state.expiresAt<=now){
       if(state.timer) clearTimeout(state.timer);
-      restoreControl(currentControl());
+      state.timer=null;
+      restoreControl(target);
       if(owner._transparentCopiedFeedback===state) delete owner._transparentCopiedFeedback;
       return;
     }
-    renderCopiedControl(currentControl());
+    renderCopiedControl(target);
+    return;
+  }
+  const target=connectedControl();
+  if(!target){
+    if(state) clearFeedbackState(state);
     return;
   }
   if(!state){
@@ -10818,11 +10842,17 @@ function _showTransparentCopiedFeedback(control,row,opts){
   state.generation+=1;
   const generation=state.generation;
   state.expiresAt=now+1500;
-  renderCopiedControl(currentControl());
+  renderCopiedControl(target);
   state.timer=setTimeout(()=>{
     if(owner._transparentCopiedFeedback!==state||state.generation!==generation) return;
+    const expiryTarget=connectedControl();
+    if(!expiryTarget){
+      state.timer=null;
+      delete owner._transparentCopiedFeedback;
+      return;
+    }
     state.timer=null;
-    restoreControl(currentControl());
+    restoreControl(expiryTarget);
     delete owner._transparentCopiedFeedback;
   },1500);
 }
