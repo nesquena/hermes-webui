@@ -2,6 +2,7 @@
 import collections
 import copy
 import datetime
+import errno
 import hashlib
 import inspect
 import json
@@ -203,15 +204,46 @@ def _close_windows_handle(handle) -> None:  # pragma: no cover - Windows only.
 class _BoundSessionSidecarTarget:
     """One parent identity used for lock lookup and every save/cache I/O."""
 
-    def __init__(self, requested_path: Path):
+    def __init__(self, requested_path: Path, cached_parent_binding=None):
         requested = Path(requested_path).expanduser()
         self.requested_parent = requested.parent
         self.name = requested.name
-        self.parent = self.requested_parent.resolve(strict=True)
-        self.path = self.parent / self.name
-        self.cache_dir = self.parent / '_tail_cache' / 'v1'
-        self.cache_path = self.cache_dir / self.name
-        self.lock_key = _session_save_publication_lock_key(self.path)
+        requested_key = os.path.normcase(
+            os.path.normpath(os.path.abspath(self.requested_parent))
+        )
+        requested_stat = os.stat(self.requested_parent)
+        requested_identity = _filesystem_object_identity(requested_stat)
+        self._requested_identity = requested_identity
+        if (
+            isinstance(cached_parent_binding, tuple)
+            and len(cached_parent_binding) == 8
+            and cached_parent_binding[0] == requested_key
+            and cached_parent_binding[1] == requested_identity
+            and cached_parent_binding[2] == self.name
+        ):
+            (
+                self.parent,
+                self.path,
+                self.cache_dir,
+                self.cache_path,
+                self.lock_key,
+            ) = cached_parent_binding[3:]
+        else:
+            self.parent = self.requested_parent.resolve(strict=True)
+            self.path = self.parent / self.name
+            self.cache_dir = self.parent / '_tail_cache' / 'v1'
+            self.cache_path = self.cache_dir / self.name
+            self.lock_key = os.path.normcase(os.path.normpath(os.fspath(self.path)))
+        self.parent_binding = (
+            requested_key,
+            requested_identity,
+            self.name,
+            self.parent,
+            self.path,
+            self.cache_dir,
+            self.cache_path,
+            self.lock_key,
+        )
         self._parent_fd = None
         self._cache_fd = None
         self._windows_parent_handle = None
@@ -236,7 +268,8 @@ class _BoundSessionSidecarTarget:
             if self._parent_fd is not None
             else os.stat(self.parent, follow_symlinks=False)
         )
-        self.validate_binding()
+        if _filesystem_object_identity(self._parent_stat) != self._requested_identity:
+            raise OSError('session sidecar parent changed during target binding')
         return self
 
     def __exit__(self, _exc_type, _exc, _tb):
@@ -255,7 +288,11 @@ class _BoundSessionSidecarTarget:
 
     def validate_binding(self) -> None:
         try:
-            current_parent = self.requested_parent.resolve(strict=True)
+            requested_absolute = Path(os.path.abspath(self.requested_parent))
+            if requested_absolute == self.parent:
+                current_parent = self.parent
+            else:
+                current_parent = self.requested_parent.resolve(strict=True)
             current_stat = os.stat(self.parent, follow_symlinks=False)
         except OSError as exc:
             raise OSError('session sidecar parent changed after target binding') from exc
@@ -272,7 +309,7 @@ class _BoundSessionSidecarTarget:
                 raise OSError('session sidecar parent changed after target binding')
 
     def owns(self, path: Path) -> bool:
-        candidate = Path(path)
+        candidate = path if isinstance(path, Path) else Path(path)
         return candidate.parent == self.parent or candidate.parent == self.cache_dir
 
     def _open_child_directory(self, parent_fd: int, name: str) -> int:
@@ -318,7 +355,7 @@ class _BoundSessionSidecarTarget:
             self._windows_cache_handles.append(_open_windows_directory_handle(directory))
 
     def _location(self, path: Path, *, create_cache=False):
-        candidate = Path(path)
+        candidate = path if isinstance(path, Path) else Path(path)
         if candidate.parent == self.parent:
             return self._parent_fd, candidate.name, candidate
         if candidate.parent == self.cache_dir:
@@ -344,13 +381,26 @@ class _BoundSessionSidecarTarget:
         raise OSError(f'path escaped bound session target: {candidate}')
 
     def open(self, path: Path, mode: str, *, encoding=None):
-        self.validate_binding()
         create_cache = any(flag in mode for flag in ('w', 'a', 'x', '+'))
         dir_fd, name, absolute = self._location(path, create_cache=create_cache)
         if os.name == 'nt':  # pragma: no cover - Windows only.
             if absolute.is_symlink():
                 raise OSError('refusing to follow final symlink for session sidecar I/O')
             return open(absolute, mode, encoding=encoding)
+
+        if mode in ('rb', 'xb'):
+            flags = os.O_RDONLY if mode == 'rb' else os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, 'O_CLOEXEC', 0)
+            flags |= getattr(os, 'O_NOFOLLOW', 0)
+            try:
+                fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise OSError(
+                        'refusing to follow final symlink for session sidecar I/O'
+                    ) from exc
+                raise
+            return os.fdopen(fd, mode, encoding=encoding)
 
         def opener(_path, flags):
             flags |= getattr(os, 'O_CLOEXEC', 0)
@@ -365,14 +415,12 @@ class _BoundSessionSidecarTarget:
             raise
 
     def stat(self, path: Path):
-        self.validate_binding()
         dir_fd, name, absolute = self._location(path)
         if dir_fd is None:  # pragma: no cover - Windows only.
             return os.stat(absolute, follow_symlinks=False)
         return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
 
     def unlink(self, path: Path, *, missing_ok=False) -> None:
-        self.validate_binding()
         try:
             dir_fd, name, absolute = self._location(path)
             if dir_fd is None:  # pragma: no cover - Windows only.
@@ -384,7 +432,6 @@ class _BoundSessionSidecarTarget:
                 raise
 
     def replace(self, src: Path, dst: Path) -> None:
-        self.validate_binding()
         src_fd, src_name, src_absolute = self._location(src)
         dst_fd, dst_name, dst_absolute = self._location(dst)
         if src_fd is not None and dst_fd is not None:
@@ -403,9 +450,9 @@ def _active_session_sidecar_target():
 
 
 @contextmanager
-def _bound_session_sidecar_target(path: Path):
+def _bound_session_sidecar_target(path: Path, *, cached_parent_binding=None):
     previous = _active_session_sidecar_target()
-    with _BoundSessionSidecarTarget(path) as target:
+    with _BoundSessionSidecarTarget(path, cached_parent_binding) as target:
         _SESSION_SIDECAR_TARGET_LOCAL.value = target
         try:
             yield target
@@ -418,6 +465,15 @@ def _bound_open(path: Path, mode: str, *, encoding=None):
     if target is not None and target.owns(path):
         return target.open(path, mode, encoding=encoding)
     return open(path, mode, encoding=encoding)
+
+
+def _bound_open_exclusive(path: Path):
+    """Create a temp file without a common-path pre-unlink syscall."""
+    try:
+        return _bound_open(path, 'xb')
+    except FileExistsError:
+        _bound_unlink(path, missing_ok=True)
+        return _bound_open(path, 'xb')
 
 
 def _bound_stat(path: Path):
@@ -1665,7 +1721,11 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
-        with _bound_session_sidecar_target(self.path) as target:
+        with _bound_session_sidecar_target(
+            self.path,
+            cached_parent_binding=getattr(self, '_save_parent_binding', None),
+        ) as target:
+            self._save_parent_binding = target.parent_binding
             publication_path_key = target.lock_key
             publication_lock = getattr(self, '_save_publication_lock', None)
             if (
@@ -1677,7 +1737,14 @@ class Session:
                 # save path without leaking locks after all same-ID objects expire.
                 self._save_publication_lock = publication_lock
                 self._save_publication_path_key = publication_path_key
+                lock_was_resolved_now = True
+            else:
+                lock_was_resolved_now = False
             with publication_lock:
+                if lock_was_resolved_now:
+                    # Lock lookup is an extension point used by the target-swap
+                    # adversarial controls; revalidate any first-lookup gap.
+                    target.validate_binding()
                 saved = self._save_authoritative_sidecar_and_tail_cache(
                     touch_updated_at=touch_updated_at,
                     sidecar_path=target.path,
@@ -1876,8 +1943,7 @@ class Session:
                 try:
                     # Retain the exact proven source bytes; text-mode newline
                     # translation would weaken this recovery contract on Windows.
-                    _bound_unlink(bak_tmp, missing_ok=True)
-                    with _bound_open(bak_tmp, 'xb') as bf:
+                    with _bound_open_exclusive(bak_tmp) as bf:
                         bf.write(existing_bytes)
                         bf.flush()
                         os.fsync(bf.fileno())
@@ -1891,15 +1957,10 @@ class Session:
 
         tmp = sidecar_path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
-            _bound_unlink(tmp, missing_ok=True)
-            with _bound_open(tmp, 'xb') as f:
+            with _bound_open_exclusive(tmp) as f:
                 f.write(payload_bytes)
                 f.flush()
                 os.fsync(f.fileno())
-            current_source = _sidecar_content_proof(sidecar_path)
-            current_proof = current_source[0] if current_source is not None else None
-            if current_proof != existing_proof:
-                raise OSError('authoritative session source changed before publication')
             _safe_replace(tmp, sidecar_path)
             _invalidate_persisted_session_ids_snapshot()
         except Exception:
@@ -1926,8 +1987,15 @@ class Session:
             # derived bytes. An eligible source is republished below; an ineligible
             # source stays cache-free. Cache cleanup/population remains non-fatal;
             # the reader rejects retained bytes without an exact source proof.
-            delete_session_tail_cache(self.session_id)
-            if _session_tail_cache_signature_is_large_enough(source_signature):
+            source_is_large = _session_tail_cache_signature_is_large_enough(source_signature)
+            cleanup_needed = (
+                source_is_large
+                or _session_tail_cache_signature_is_large_enough(existing_signature)
+                or getattr(self, '_tail_cache_cleanup_pending', False)
+            )
+            if cleanup_needed:
+                self._tail_cache_cleanup_pending = not delete_session_tail_cache(self.session_id)
+            if source_is_large:
                 _write_session_tail_cache(
                     frozen_snapshot,
                     expected_proof=source_proof,
@@ -4233,8 +4301,13 @@ def _sidecar_content_proof(path: Path):
         or int(current.st_size) != len(source_bytes)
     ):
         raise OSError('session sidecar changed while authoritative bytes were read')
-    signature = _sidecar_stat_signature(path)
-    if signature is None or signature[2] != len(source_bytes):
+    signature = (
+        str(path),
+        int(getattr(current, 'st_mtime_ns', int(current.st_mtime * 1_000_000_000))),
+        int(current.st_size),
+        int(getattr(current, 'st_ctime_ns', int(current.st_ctime * 1_000_000_000))),
+    )
+    if signature[2] != len(source_bytes):
         raise OSError('session sidecar stat/content proof is uncertain')
     proof = (signature, hashlib.sha256(source_bytes).hexdigest())
     return proof, source_bytes
@@ -4519,8 +4592,7 @@ def _write_session_tail_cache_payload(payload: dict, *, expected_signature) -> b
             target.ensure_cache_dir()
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-        _bound_unlink(tmp, missing_ok=True)
-        with _bound_open(tmp, 'xb') as handle:
+        with _bound_open_exclusive(tmp) as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
@@ -4529,12 +4601,10 @@ def _write_session_tail_cache_payload(payload: dict, *, expected_signature) -> b
             except (AttributeError, OSError):
                 pass
         sidecar = target.path if target is not None and target.sid == sid else SESSION_DIR / f'{sid}.json'
-        current_source = _sidecar_content_proof(sidecar)
         expected_digest = _tail_cache_content_digest(payload.get('source_sha256'))
         if (
-            current_source is None
-            or expected_digest is None
-            or current_source[0] != (expected_signature, expected_digest)
+            expected_digest is None
+            or _sidecar_stat_signature(sidecar) != expected_signature
         ):
             return False
         _safe_replace(tmp, path)

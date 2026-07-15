@@ -97,15 +97,17 @@ def _replace_bytes(path: Path, replacement: bytes, mode: str) -> None:
     os.replace(temp, path)
 
 
-def _force_signature_collision(monkeypatch, path: Path, signature) -> None:
-    original_signature = models._sidecar_stat_signature
+def _force_signature_collision(monkeypatch, path, signature):
+    original = models._sidecar_content_proof
 
-    def colliding_signature(candidate):
-        if Path(candidate) == path:
-            return signature
-        return original_signature(candidate)
+    def colliding(candidate):
+        source = original(candidate)
+        if source is not None and Path(candidate) == path:
+            proof, source_bytes = source
+            return (signature, proof[1]), source_bytes
+        return source
 
-    monkeypatch.setattr(models, "_sidecar_stat_signature", colliding_signature)
+    monkeypatch.setattr(models, "_sidecar_content_proof", colliding)
 
 
 def test_save_writes_atomic_v1_raw_tail_schema_and_permissions(isolated_session_store):
