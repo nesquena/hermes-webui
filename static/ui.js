@@ -12084,6 +12084,7 @@ function _anchorSceneNodeForRow(row, opts){
   if(!node) return null;
   node.setAttribute('data-anchor-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+  if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
   return node;
@@ -12153,6 +12154,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
   if(settled) node.setAttribute('data-anchor-settled-scene-row','1');
   if(live) node.setAttribute('data-anchor-live-scene-row','1');
   node.setAttribute('data-anchor-row-id',String(row.row_id||row.local_id||''));
+  if(row.local_id) node.setAttribute('data-anchor-local-id',String(row.local_id));
   node.setAttribute('data-anchor-row-role',String(row.role||'activity'));
   node.setAttribute('data-anchor-source-event-type',String(row.source_event_type||''));
   if(opts&&opts.streamId) node.setAttribute('data-anchor-stream-id',String(opts.streamId));
@@ -12344,6 +12346,81 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
     },
   };
 }
+function _resetMismatchedLiveAssistantTurnForSession(turn, sessionId){
+  const sid=String(sessionId||'');
+  if(!turn||!sid||!turn.dataset) return false;
+  const existingSid=String(turn.dataset.sessionId||'');
+  if(!existingSid||existingSid===sid) return false;
+  const blocks=typeof _assistantTurnBlocks==='function' ? _assistantTurnBlocks(turn) : turn;
+  if(blocks){
+    try{
+      blocks.innerHTML='';
+    }catch(_){
+      while(blocks.firstChild) blocks.removeChild(blocks.firstChild);
+    }
+  }
+  turn.dataset.sessionId=sid;
+  return true;
+}
+function _liveAnchorReasoningRowForFallback(turn, opts){
+  opts=opts||{};
+  const blocks=typeof _assistantTurnBlocks==='function' ? _assistantTurnBlocks(turn) : turn;
+  if(!turn||!blocks||!blocks.querySelectorAll) return null;
+  const streamId=String(opts.streamId||S.activeStreamId||'');
+  const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
+  const localId=String(opts.anchorReasoningLocalId||opts.localId||'').trim();
+  if(!localId) return null;
+  const rows=blocks.querySelectorAll(
+    '[data-anchor-scene-row="1"][data-anchor-local-id]'
+  );
+  for(const row of Array.from(rows)){
+    const anchorLocalId=String(row.getAttribute&&row.getAttribute('data-anchor-local-id')||'');
+    if(anchorLocalId!==localId) continue;
+    const rowRole=String(row.getAttribute&&row.getAttribute('data-anchor-row-role')||'');
+    const rowSource=String(row.getAttribute&&row.getAttribute('data-anchor-source-event-type')||'');
+    if(rowRole!=='thinking'&&rowSource!=='reasoning') continue;
+    const rowStreamId=String(row.getAttribute&&row.getAttribute('data-anchor-stream-id')||'');
+    if(rowStreamId&&streamId&&rowStreamId!==streamId) continue;
+    const rowSessionId=String(row.getAttribute&&row.getAttribute('data-session-id')||'');
+    if(rowSessionId&&sessionId&&rowSessionId!==sessionId) continue;
+    return row;
+  }
+  return null;
+}
+function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(!clean||window._showThinking===false) return false;
+  const row=_liveAnchorReasoningRowForFallback(turn, opts);
+  if(!row) return false;
+  if(row.classList&&row.classList.contains('wl-reason')){
+    if(typeof _renderWorklogReasonInto==='function') _renderWorklogReasonInto(row, clean);
+    else row.textContent=clean;
+    const group=row.closest&&row.closest('.tool-worklog-group,.tool-call-group,.live-worklog');
+    if(group&&typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
+  }else if(row.classList&&row.classList.contains('transparent-event-row')){
+    _renderThinkingInto(row, clean);
+    const eventAt=row.getAttribute&&row.getAttribute('data-event-at');
+    const nextTs=typeof _firstValidTimestampSeconds==='function'
+      ? _firstValidTimestampSeconds(opts&&opts.ts, opts&&opts.timestamp, opts&&opts.created_at, eventAt)
+      : null;
+    if(typeof _decorateTransparentEventRow==='function'){
+      _decorateTransparentEventRow(row,{
+        type:'thinking',
+        text:clean,
+        preview:clean,
+        ts:nextTs||undefined,
+        live:true,
+        segmentSeq:opts&&opts.segmentSeq,
+        burstId:opts&&opts.burstId,
+      });
+    }
+  }else{
+    _renderThinkingInto(row, clean);
+  }
+  if(turn&&typeof _syncTransparentEventControls==='function') _syncTransparentEventControls(turn);
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  return true;
+}
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -12360,6 +12437,12 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   const knownMode=(m)=>m==='compact_worklog'||m==='transparent_stream'||m==='hide_all_activity';
   const sceneMode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
   if(sceneMode==='hide_all_activity') return false;
+  const existingTurn=$('liveAssistantTurn');
+  const requestedSessionId=String(opts.sessionId||'');
+  const existingTurnSessionId=String(existingTurn&&existingTurn.dataset&&existingTurn.dataset.sessionId||'');
+  if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
+    if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
+  }
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
@@ -18435,9 +18518,19 @@ function appendThinking(text='', options){
   // without this check they would pollute the new session's DOM.
   options=options||{};
   const allowPendingPlaceholder=!!(options&&options.pending===true);
+  const anchorRenderFallback=!!(options&&options.anchorRenderFallback===true);
   if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
-  if(!allowPendingPlaceholder&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
+  if(options.sessionId&&String(options.sessionId)!==String(S.session.session_id||'')) return;
+  if(options.streamId&&String(options.streamId)!==String(S.activeStreamId||'')) return;
+  const existingLiveTurn=$('liveAssistantTurn');
+  if(anchorRenderFallback&&existingLiveTurn&&existingLiveTurn.dataset&&
+      existingLiveTurn.dataset.sessionId&&
+      String(existingLiveTurn.dataset.sessionId)!==String(S.session.session_id||'')){
+    if(!_resetMismatchedLiveAssistantTurnForSession(existingLiveTurn, S.session.session_id)) return;
+  }
+  if(anchorRenderFallback&&existingLiveTurn&&_updateLiveAnchorReasoningRowForFallback(existingLiveTurn,text,options)) return;
+  if(!allowPendingPlaceholder&&!anchorRenderFallback&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
   }

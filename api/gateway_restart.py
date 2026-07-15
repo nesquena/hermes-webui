@@ -10,7 +10,13 @@ import sys
 import threading
 from pathlib import Path
 
-from api.profiles import get_active_hermes_home
+from api.profiles import (
+    _PROFILE_ID_RE,
+    _is_root_profile,
+    get_active_hermes_home,
+    get_active_profile_name,
+    get_hermes_home_for_profile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +52,31 @@ def _release_lock() -> None:
         pass
 
 
+def _gateway_restart_profile_context(profile: str | None = None) -> tuple[Path, str | None]:
+    """Return the HERMES_HOME and CLI profile arg for a gateway restart."""
+    if profile is None:
+        raw_profile = str(get_active_profile_name() or "default").strip()
+        active_home = Path(get_active_hermes_home())
+    else:
+        raw_profile = str(profile or "")
+        if not raw_profile or not _PROFILE_ID_RE.fullmatch(raw_profile):
+            raise ValueError(f"Invalid profile for gateway restart: {profile!r}")
+        active_home = Path(get_hermes_home_for_profile(raw_profile))
+
+    if (
+        raw_profile == "default"
+        and active_home.name == "default"
+        and active_home.parent.name == "profiles"
+    ):
+        return active_home, None
+    if not raw_profile or not _PROFILE_ID_RE.fullmatch(raw_profile) or _is_root_profile(raw_profile):
+        return active_home, "default"
+    return active_home, raw_profile
+
+
 def restart_active_profile_gateway(
     *,
+    profile: str | None = None,
     quick_timeout_seconds: float = 2.0,
     background_wait_seconds: float = 240.0,
 ) -> dict:
@@ -66,18 +95,30 @@ def restart_active_profile_gateway(
         }
 
     try:
-        active_home = get_active_hermes_home()
+        active_home, cli_profile = _gateway_restart_profile_context(profile)
         env = os.environ.copy()
         env["HERMES_HOME"] = str(active_home)
         hermes_cmd = _resolve_hermes_command()
+        cmd = [hermes_cmd]
+        if cli_profile is not None:
+            cmd.extend(["--profile", cli_profile])
+        cmd.extend(["gateway", "restart"])
 
-        logger.info(
-            "Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)",
-            hermes_cmd,
-            active_home,
-        )
+        if cli_profile is None:
+            logger.info(
+                "Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)",
+                hermes_cmd,
+                active_home,
+            )
+        else:
+            logger.info(
+                "Restarting gateway service via CLI command: %s --profile %s gateway restart (HERMES_HOME=%s)",
+                hermes_cmd,
+                cli_profile,
+                active_home,
+            )
         proc = subprocess.Popen(
-            [hermes_cmd, "gateway", "restart"],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

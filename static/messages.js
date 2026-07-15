@@ -2380,8 +2380,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       burstId:_currentActivityBurstId,
     };
   }
-  function _updateLiveThinkingCard(text){
-    const opts=_liveThinkingPlacement();
+  function _updateLiveThinkingCard(text, options){
+    const opts={
+      ..._liveThinkingPlacement(),
+      ...((options&&typeof options==='object')?options:{}),
+    };
     if(typeof updateThinking==='function') updateThinking(text, opts);
     else appendThinking(text, opts);
   }
@@ -2625,7 +2628,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // in-closure SSE handlers). Explicit terminal-path calls above just expire it
   // sooner; this guarantees window._liveAnchorRegistries can't grow unbounded.
   _scheduleAnchorRegistryCleanup(600000);
-  function _applyToAnchor(sourceEventType, rawEventData, sseEvent){
+  // Applying an event and painting it are separate outcomes. Reasoning uses the
+  // optional holder to decide whether a temporary visible fallback is needed.
+  function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome){
+    if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=false;
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
     const raw=(rawEventData&&typeof rawEventData==='object')?rawEventData:{};
     const eventId=(sseEvent&&sseEvent.lastEventId)||raw.event_id||raw.lastEventId||raw.last_event_id||'';
@@ -2649,7 +2655,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         sourceEvent,
         {session_id:activeSid,stream_id:streamId}
       );
-      _renderAnchorLiveScene();
+      const rendered=_renderAnchorLiveScene();
+      if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=rendered;
       return result;
     }catch(err){
       if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
@@ -3785,19 +3792,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _upsertAnchorReasoning(text, options={}){
     const clean=String(text||'').trim();
-    if(!clean||!_anchorRegistry||window._showThinking===false) return null;
     const placement=_liveThinkingPlacement();
     const segmentSeq=Number(options.segmentSeq||placement.segmentSeq||_anchorSegmentSeq());
     const localId=String(options.localId||`live-reasoning:${streamId}:${segmentSeq}`);
+    if(options&&typeof options==='object'){
+      options.anchorReasoningLocalId=localId;
+      options.segmentSeq=segmentSeq;
+      if(options.burstId===undefined) options.burstId=_currentActivityBurstId;
+    }
+    if(!clean||!_anchorRegistry||window._showThinking===false) return null;
     const existing=_findAnchorActivityEventByLocalId(localId,'reasoning');
     if(existing){
       const replaced=_replaceAnchorActivityEventByLocalId(localId,'reasoning',{
         status:options.sealed?'completed':'running',
         payload:{text:clean,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
       });
-      _renderAnchorLiveScene();
-      return replaced;
+      return _renderAnchorLiveScene()?replaced:null;
     }
+    const renderOutcome={rendered:false};
     _applyToAnchor('reasoning',{
       text:clean,
       local_id:localId,
@@ -3805,8 +3817,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       status:options.sealed?'completed':'running',
       activitySegmentSeq:segmentSeq,
       activityBurstId:_currentActivityBurstId,
-    },null);
-    return _findAnchorActivityEventByLocalId(localId,'reasoning');
+    },null,renderOutcome);
+    return renderOutcome.rendered?_findAnchorActivityEventByLocalId(localId,'reasoning'):null;
   }
   function _compactVisibleEchoText(value){
     return String(value||'').replace(/\s+/g,'');
@@ -5340,16 +5352,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('reasoning',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(!_ownsActiveStreamOrBackground()) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
       reasoningText += text;
       liveReasoningText += text;
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
-      if(text&&S.session&&S.session.session_id===activeSid){
+      if(text&&S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId){
         const liveThinkingText=_liveThinkingText();
-        if(!_upsertAnchorReasoning(liveThinkingText)){
-          _updateLiveThinkingCard(liveThinkingText);
+        const anchorReasoningFallback={};
+        if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){
+          _updateLiveThinkingCard(liveThinkingText,{
+            ...anchorReasoningFallback,
+            anchorRenderFallback:true,
+            sessionId:activeSid,
+            streamId,
+          });
         }
       }
     });
