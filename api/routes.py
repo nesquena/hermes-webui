@@ -34,6 +34,7 @@ from contextlib import closing
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
+from api.agent_runtime import ensure_agent_runtime_current, require_ai_agent_class
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
@@ -16052,6 +16053,7 @@ def handle_post(handler, parsed) -> bool:
                     "api_key": _main_api_key,
                 }
 
+                ensure_agent_runtime_current()
                 try:
                     from agent.auxiliary_client import get_text_auxiliary_client
 
@@ -16072,7 +16074,7 @@ def handle_post(handler, parsed) -> bool:
                 except Exception as _e:
                     logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
 
-                from run_agent import AIAgent
+                AIAgent = require_ai_agent_class()
 
                 agent = AIAgent(
                     model=_main_model,
@@ -21991,7 +21993,7 @@ def _handle_chat_sync(handler, body):
         os.environ["HERMES_EXEC_ASK"] = "1"
         os.environ["HERMES_SESSION_KEY"] = s.session_id
     try:
-        from run_agent import AIAgent
+        AIAgent = require_ai_agent_class()
 
         with CHAT_LOCK:
             from api.config import (
@@ -22622,6 +22624,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
             "base_url": _main_base_url,
             "api_key": _main_api_key,
         }
+        ensure_agent_runtime_current()
         try:
             from agent.auxiliary_client import get_text_auxiliary_client
 
@@ -22638,7 +22641,7 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
         except Exception as _e:
             logger.debug("git commit message auxiliary model failed; falling back to main model: %s", _e)
 
-        from run_agent import AIAgent
+        AIAgent = require_ai_agent_class()
 
         agent = AIAgent(
             model=_main_model,
@@ -24035,10 +24038,11 @@ def _handle_session_compress(handler, body):
                     focus_topic,
                 )
 
+        ensure_agent_runtime_current()
         import api.config as _cfg
         from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
         import hermes_cli.runtime_provider as _runtime_provider
-        import run_agent as _run_agent
+        AIAgent = require_ai_agent_class()
 
         resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(
             _cfg.model_with_provider_context(s.model, getattr(s, "model_provider", None))
@@ -24081,7 +24085,7 @@ def _handle_session_compress(handler, body):
         )
         approx_tokens = _estimate_messages_tokens_rough(original_messages)
 
-        agent = _run_agent.AIAgent(
+        agent = AIAgent(
             model=resolved_model,
             provider=resolved_provider,
             base_url=resolved_base_url,
@@ -24685,10 +24689,11 @@ def _handle_handoff_summary(handler, body):
 
         # Call LLM for summary.
     try:
+        ensure_agent_runtime_current()
         import api.config as _cfg
         from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
         import hermes_cli.runtime_provider as _runtime_provider
-        import run_agent as _run_agent
+        AIAgent = require_ai_agent_class()
 
         # Try to resolve model from an existing session, fall back to default.
         resolved_model = None
@@ -24744,7 +24749,7 @@ def _handle_handoff_summary(handler, body):
                 "fallback": True,
             })
 
-        agent = _run_agent.AIAgent(
+        agent = AIAgent(
             model=resolved_model,
             provider=resolved_provider,
             base_url=resolved_base_url,
