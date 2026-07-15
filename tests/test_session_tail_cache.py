@@ -1,4 +1,5 @@
 import gc
+import hashlib
 import json
 import os
 import stat
@@ -147,6 +148,7 @@ def test_save_writes_atomic_v1_raw_tail_schema_and_permissions(isolated_session_
     ]
     assert payload["anchor_scene_index"] == {}
     assert isinstance(payload["created_at"], float)
+    assert payload["source_sha256"] == hashlib.sha256(session.path.read_bytes()).hexdigest()
     signature = payload["source_signature"]
     assert Path(signature["path"]).is_absolute()
     assert signature == models._tail_cache_signature_dict(
@@ -625,8 +627,10 @@ def test_cache_cleanup_failure_is_nonfatal_after_authoritative_save(
     original_unlink = models.os.unlink
 
     def fail_cache_unlink(path, *args, **kwargs):
-        if Path(path) == cache_path:
-            attempted.append(Path(path))
+        if Path(path).name == cache_path.name and (
+            Path(path) == cache_path or kwargs.get("dir_fd") is not None
+        ):
+            attempted.append(cache_path)
             raise OSError("simulated tail-cache unlink failure")
         return original_unlink(path, *args, **kwargs)
 
@@ -706,17 +710,32 @@ def test_reader_rejects_stale_and_oversize_cache(isolated_session_store):
 def test_reader_restats_sidecar_and_rejects_toctou(isolated_session_store, monkeypatch):
     session = Session(session_id="tail_toctou_read", messages=_messages(4))
     session.save(skip_index=True)
-    original = models._sidecar_stat_signature(session.path)
-    assert original is not None
-    changed = (original[0], original[1] + 1, original[2], original[3] + 1)
-    calls = 0
+    cache_path = models.session_tail_cache_path(session.session_id)
+    original_open = models._bound_open
 
-    def changing_signature(_path):
-        nonlocal calls
-        calls += 1
-        return original if calls == 1 else changed
+    class ChangeSourceAfterCacheRead:
+        def __init__(self, handle):
+            self.handle = handle
 
-    monkeypatch.setattr(models, "_sidecar_stat_signature", changing_signature)
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def read(self):
+            payload = self.handle.read()
+            session.path.write_bytes(session.path.read_bytes() + b"\n")
+            return payload
+
+    def changing_open(path, mode, *, encoding=None):
+        handle = original_open(path, mode, encoding=encoding)
+        if Path(path) == cache_path and mode == "rb":
+            return ChangeSourceAfterCacheRead(handle)
+        return handle
+
+    monkeypatch.setattr(models, "_bound_open", changing_open)
 
     assert models.read_session_tail_cache(session.session_id) is None
 

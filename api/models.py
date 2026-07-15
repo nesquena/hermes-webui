@@ -10,6 +10,7 @@ import math
 import mmap
 import os
 import re
+import stat as _stat
 import threading
 import time
 import uuid
@@ -111,8 +112,9 @@ _SIDECAR_METADATA_CACHE_MAX = 2000
 # its message_count or scene fingerprint. Without this, an unchanged legacy
 # large-scene session would full-parse on every poll (recreating the #4633
 # churn for legacy files) and could not be LRU-evicted. Populated once per file
-# from a full Session.load(); keyed by the sidecar's stat signature so any edit
-# invalidates it. Bounded. Value: {"message_count": int, "scene_index": dict}.
+# from a full Session.load(); keyed by the sidecar's complete content proof so
+# same-metadata edits invalidate it. Bounded. Value: {"message_count": int,
+# "scene_index": dict}.
 _LEGACY_SIDECAR_FACTS_LOCK = threading.Lock()
 _LEGACY_SIDECAR_FACTS: "collections.OrderedDict[tuple, dict]" = collections.OrderedDict()
 _LEGACY_SIDECAR_FACTS_MAX = 2000
@@ -146,6 +148,291 @@ _SESSION_TAIL_CACHE_MIN_SOURCE_BYTES = 1 * 1024 * 1024
 # the registry bounded while all concurrent users of one sidecar share one lock.
 _SESSION_SAVE_PUBLICATION_LOCKS_GUARD = threading.Lock()
 _SESSION_SAVE_PUBLICATION_LOCKS = weakref.WeakValueDictionary()
+_SESSION_SIDECAR_TARGET_LOCAL = threading.local()
+
+
+def _filesystem_object_identity(value) -> tuple:
+    return (
+        int(getattr(value, 'st_dev', 0)),
+        int(getattr(value, 'st_ino', 0)),
+    )
+
+
+def _open_windows_directory_handle(path: Path):  # pragma: no cover - Windows only.
+    """Pin a Windows directory against rename/replacement for path-based I/O."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = getattr(ctypes, 'WinDLL')('kernel32', use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        os.fspath(path),
+        0,
+        0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE; no delete sharing.
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000 | 0x00200000,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+        None,
+    )
+    invalid = wintypes.HANDLE(-1).value
+    if handle == invalid:
+        raise getattr(ctypes, 'WinError')(getattr(ctypes, 'get_last_error')())
+    return handle
+
+
+def _close_windows_handle(handle) -> None:  # pragma: no cover - Windows only.
+    if handle is None:
+        return
+    import ctypes
+
+    kernel32 = getattr(ctypes, 'WinDLL')('kernel32', use_last_error=True)
+    if not kernel32.CloseHandle(handle):
+        raise getattr(ctypes, 'WinError')(getattr(ctypes, 'get_last_error')())
+
+
+class _BoundSessionSidecarTarget:
+    """One parent identity used for lock lookup and every save/cache I/O."""
+
+    def __init__(self, requested_path: Path):
+        requested = Path(requested_path).expanduser()
+        self.requested_parent = requested.parent
+        self.name = requested.name
+        self.parent = self.requested_parent.resolve(strict=True)
+        self.path = self.parent / self.name
+        self.cache_dir = self.parent / '_tail_cache' / 'v1'
+        self.cache_path = self.cache_dir / self.name
+        self.lock_key = _session_save_publication_lock_key(self.path)
+        self._parent_fd = None
+        self._cache_fd = None
+        self._windows_parent_handle = None
+        self._windows_cache_handles = []
+        self._parent_stat = None
+
+    @property
+    def sid(self) -> str:
+        return self.name[:-5] if self.name.endswith('.json') else ''
+
+    def __enter__(self):
+        if os.name == 'nt':  # pragma: no cover - exercised by the native-Windows gate.
+            self._windows_parent_handle = _open_windows_directory_handle(self.parent)
+        else:
+            flags = os.O_RDONLY
+            flags |= getattr(os, 'O_DIRECTORY', 0)
+            flags |= getattr(os, 'O_CLOEXEC', 0)
+            flags |= getattr(os, 'O_NOFOLLOW', 0)
+            self._parent_fd = os.open(self.parent, flags)
+        self._parent_stat = (
+            os.fstat(self._parent_fd)
+            if self._parent_fd is not None
+            else os.stat(self.parent, follow_symlinks=False)
+        )
+        self.validate_binding()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        if self._cache_fd is not None:
+            os.close(self._cache_fd)
+            self._cache_fd = None
+        if self._parent_fd is not None:
+            os.close(self._parent_fd)
+            self._parent_fd = None
+        for handle in reversed(self._windows_cache_handles):
+            _close_windows_handle(handle)
+        self._windows_cache_handles.clear()
+        if self._windows_parent_handle is not None:
+            _close_windows_handle(self._windows_parent_handle)
+            self._windows_parent_handle = None
+
+    def validate_binding(self) -> None:
+        try:
+            current_parent = self.requested_parent.resolve(strict=True)
+            current_stat = os.stat(self.parent, follow_symlinks=False)
+        except OSError as exc:
+            raise OSError('session sidecar parent changed after target binding') from exc
+        if (
+            os.path.normcase(os.path.normpath(os.fspath(current_parent)))
+            != os.path.normcase(os.path.normpath(os.fspath(self.parent)))
+            or _filesystem_object_identity(current_stat)
+            != _filesystem_object_identity(self._parent_stat)
+        ):
+            raise OSError('session sidecar parent changed after target binding')
+        if self._parent_fd is not None:
+            opened_stat = os.fstat(self._parent_fd)
+            if _filesystem_object_identity(opened_stat) != _filesystem_object_identity(self._parent_stat):
+                raise OSError('session sidecar parent changed after target binding')
+
+    def owns(self, path: Path) -> bool:
+        candidate = Path(path)
+        return candidate.parent == self.parent or candidate.parent == self.cache_dir
+
+    def _open_child_directory(self, parent_fd: int, name: str) -> int:
+        flags = os.O_RDONLY
+        flags |= getattr(os, 'O_DIRECTORY', 0)
+        flags |= getattr(os, 'O_CLOEXEC', 0)
+        flags |= getattr(os, 'O_NOFOLLOW', 0)
+        try:
+            return os.open(name, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+            return os.open(name, flags, dir_fd=parent_fd)
+
+    def ensure_cache_dir(self) -> None:
+        if self._cache_fd is not None or self._windows_cache_handles:
+            return
+        self.validate_binding()
+        if self._parent_fd is not None:
+            tail_fd = self._open_child_directory(self._parent_fd, '_tail_cache')
+            try:
+                self._cache_fd = self._open_child_directory(tail_fd, 'v1')
+            finally:
+                os.close(tail_fd)
+            return
+        tail_dir = self.parent / '_tail_cache'
+        cache_dir = tail_dir / 'v1'
+        for directory in (tail_dir, cache_dir):  # pragma: no cover - Windows only.
+            try:
+                directory.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            if directory.is_symlink():
+                raise OSError('refusing symlinked session tail-cache directory')
+            self._windows_cache_handles.append(_open_windows_directory_handle(directory))
+
+    def _open_existing_windows_cache_dir(self) -> None:  # pragma: no cover - Windows only.
+        if self._windows_cache_handles:
+            return
+        self.validate_binding()
+        for directory in (self.parent / '_tail_cache', self.cache_dir):
+            if directory.is_symlink():
+                raise OSError('refusing symlinked session tail-cache directory')
+            self._windows_cache_handles.append(_open_windows_directory_handle(directory))
+
+    def _location(self, path: Path, *, create_cache=False):
+        candidate = Path(path)
+        if candidate.parent == self.parent:
+            return self._parent_fd, candidate.name, candidate
+        if candidate.parent == self.cache_dir:
+            if create_cache:
+                self.ensure_cache_dir()
+            elif self._parent_fd is not None and self._cache_fd is None:
+                tail_fd = os.open(
+                    '_tail_cache',
+                    os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0),
+                    dir_fd=self._parent_fd,
+                )
+                try:
+                    self._cache_fd = os.open(
+                        'v1',
+                        os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0),
+                        dir_fd=tail_fd,
+                    )
+                finally:
+                    os.close(tail_fd)
+            elif self._parent_fd is None and not self._windows_cache_handles:
+                self._open_existing_windows_cache_dir()
+            return self._cache_fd, candidate.name, candidate
+        raise OSError(f'path escaped bound session target: {candidate}')
+
+    def open(self, path: Path, mode: str, *, encoding=None):
+        self.validate_binding()
+        create_cache = any(flag in mode for flag in ('w', 'a', 'x', '+'))
+        dir_fd, name, absolute = self._location(path, create_cache=create_cache)
+        if os.name == 'nt':  # pragma: no cover - Windows only.
+            if absolute.is_symlink():
+                raise OSError('refusing to follow final symlink for session sidecar I/O')
+            return open(absolute, mode, encoding=encoding)
+
+        def opener(_path, flags):
+            flags |= getattr(os, 'O_CLOEXEC', 0)
+            flags |= getattr(os, 'O_NOFOLLOW', 0)
+            return os.open(name, flags, dir_fd=dir_fd)
+
+        try:
+            return open(name, mode, encoding=encoding, opener=opener)
+        except OSError as exc:
+            if getattr(exc, 'errno', None) == 40:  # ELOOP
+                raise OSError('refusing to follow final symlink for session sidecar I/O') from exc
+            raise
+
+    def stat(self, path: Path):
+        self.validate_binding()
+        dir_fd, name, absolute = self._location(path)
+        if dir_fd is None:  # pragma: no cover - Windows only.
+            return os.stat(absolute, follow_symlinks=False)
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+
+    def unlink(self, path: Path, *, missing_ok=False) -> None:
+        self.validate_binding()
+        try:
+            dir_fd, name, absolute = self._location(path)
+            if dir_fd is None:  # pragma: no cover - Windows only.
+                os.unlink(absolute)
+            else:
+                os.unlink(name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
+
+    def replace(self, src: Path, dst: Path) -> None:
+        self.validate_binding()
+        src_fd, src_name, src_absolute = self._location(src)
+        dst_fd, dst_name, dst_absolute = self._location(dst)
+        if src_fd is not None and dst_fd is not None:
+            os.replace(
+                src_name,
+                dst_name,
+                src_dir_fd=src_fd,
+                dst_dir_fd=dst_fd,
+            )
+        else:  # pragma: no cover - Windows only.
+            os.replace(src_absolute, dst_absolute)
+
+
+def _active_session_sidecar_target():
+    return getattr(_SESSION_SIDECAR_TARGET_LOCAL, 'value', None)
+
+
+@contextmanager
+def _bound_session_sidecar_target(path: Path):
+    previous = _active_session_sidecar_target()
+    with _BoundSessionSidecarTarget(path) as target:
+        _SESSION_SIDECAR_TARGET_LOCAL.value = target
+        try:
+            yield target
+        finally:
+            _SESSION_SIDECAR_TARGET_LOCAL.value = previous
+
+
+def _bound_open(path: Path, mode: str, *, encoding=None):
+    target = _active_session_sidecar_target()
+    if target is not None and target.owns(path):
+        return target.open(path, mode, encoding=encoding)
+    return open(path, mode, encoding=encoding)
+
+
+def _bound_stat(path: Path):
+    target = _active_session_sidecar_target()
+    if target is not None and target.owns(path):
+        return target.stat(path)
+    return os.stat(path, follow_symlinks=False)
+
+
+def _bound_unlink(path: Path, *, missing_ok=False) -> None:
+    target = _active_session_sidecar_target()
+    if target is not None and target.owns(path):
+        target.unlink(path, missing_ok=missing_ok)
+        return
+    Path(path).unlink(missing_ok=missing_ok)
 
 
 def _session_save_publication_lock_key(path: Path) -> str:
@@ -217,14 +504,21 @@ _WINDOWS_REPLACE_INITIAL_DELAY = 0.05  # 50 ms
 
 def _safe_replace(src: Path, dst: Path) -> None:
     """Atomic replace with retries on Windows file-locking errors."""
+    target = _active_session_sidecar_target()
     if os.name != 'nt':
-        os.replace(src, dst)
+        if target is not None and target.owns(src) and target.owns(dst):
+            target.replace(src, dst)
+        else:
+            os.replace(src, dst)
         return
 
     delay = _WINDOWS_REPLACE_INITIAL_DELAY
     for attempt in range(_WINDOWS_REPLACE_MAX_RETRIES):
         try:
-            os.replace(src, dst)
+            if target is not None and target.owns(src) and target.owns(dst):
+                target.replace(src, dst)
+            else:
+                os.replace(src, dst)
             return
         except PermissionError:
             if attempt == _WINDOWS_REPLACE_MAX_RETRIES - 1:
@@ -1371,25 +1665,23 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
-        sidecar_path = self.path
-        publication_path_key = os.fspath(sidecar_path)
-        publication_lock = getattr(self, '_save_publication_lock', None)
-        if (
-            publication_lock is None
-            or getattr(self, '_save_publication_path_key', None) != publication_path_key
-        ):
-            publication_lock = _get_session_save_publication_lock(sidecar_path)
-            # Keep the weak-registry value alive for this Session object's hot
-            # save path without leaking locks after all same-ID objects expire.
-            # The raw spelling is only a fast-path invalidation hint; registry
-            # ownership itself is keyed by the canonical parent + final name.
-            self._save_publication_lock = publication_lock
-            self._save_publication_path_key = publication_path_key
-        with publication_lock:
-            saved = self._save_authoritative_sidecar_and_tail_cache(
-                touch_updated_at=touch_updated_at,
-                sidecar_path=sidecar_path,
-            )
+        with _bound_session_sidecar_target(self.path) as target:
+            publication_path_key = target.lock_key
+            publication_lock = getattr(self, '_save_publication_lock', None)
+            if (
+                publication_lock is None
+                or getattr(self, '_save_publication_path_key', None) != publication_path_key
+            ):
+                publication_lock = _get_session_save_publication_lock(target.path)
+                # Keep the weak-registry value alive for this Session object's hot
+                # save path without leaking locks after all same-ID objects expire.
+                self._save_publication_lock = publication_lock
+                self._save_publication_path_key = publication_path_key
+            with publication_lock:
+                saved = self._save_authoritative_sidecar_and_tail_cache(
+                    touch_updated_at=touch_updated_at,
+                    sidecar_path=target.path,
+                )
         if not saved:
             return
         if not skip_index:
@@ -1499,11 +1791,14 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        existing_signature = _sidecar_stat_signature(sidecar_path)
-        previous_signature = getattr(self, '_last_saved_source_signature', None)
+        existing_source = _sidecar_content_proof(sidecar_path)
+        existing_proof = existing_source[0] if existing_source is not None else None
+        existing_bytes = existing_source[1] if existing_source is not None else None
+        existing_signature = existing_proof[0] if existing_proof is not None else None
+        previous_proof = getattr(self, '_last_saved_source_proof', None)
         fast_small_snapshot = (
-            existing_signature is not None
-            and existing_signature == previous_signature
+            existing_proof is not None
+            and existing_proof == previous_proof
             and not _session_tail_cache_signature_is_large_enough(existing_signature)
         )
         if fast_small_snapshot:
@@ -1539,94 +1834,77 @@ class Session:
         # The recovery path is api/session_recovery.py — at server startup and
         # via /api/session/recover, sessions whose JSON has fewer messages than
         # their .bak get restored automatically.
+        payload_bytes = payload.encode('utf-8')
         incoming_msg_count = len(frozen_snapshot.get('messages') or [])
-        try:
-            if existing_signature is not None:
-                existing_text = None
-                existing_msg_count = -1
-                if (
-                    existing_signature == getattr(self, '_last_saved_source_signature', None)
-                    and isinstance(getattr(self, '_last_saved_message_count', None), int)
-                ):
-                    # The same Session object still owns the exact bytes it last
-                    # published. Avoid re-reading and full-parsing them on every
-                    # checkpoint; any external/in-process replacement changes the
-                    # stat signature and falls through to the authoritative read.
-                    existing_msg_count = self._last_saved_message_count
-                else:
-                    existing_text = sidecar_path.read_text(encoding='utf-8')
+        if existing_proof is not None:
+            if (
+                existing_proof == getattr(self, '_last_saved_source_proof', None)
+                and isinstance(getattr(self, '_last_saved_message_count', None), int)
+            ):
+                # A full-source digest, not metadata, proves these are the exact
+                # bytes whose count this process cached.
+                existing_msg_count = self._last_saved_message_count
+            else:
+                try:
+                    if existing_bytes is None:
+                        raise ValueError('missing authoritative source bytes')
+                    existing = json.loads(existing_bytes)
+                    existing_msg_count = len(existing.get('messages') or [])
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError) as exc:
+                    raise OSError(
+                        'cannot prove previous authoritative session message count'
+                    ) from exc
+            if (
+                existing_msg_count > 0
+                and incoming_msg_count == 0
+                and (self.active_stream_id or self.pending_user_message)
+            ):
+                logger.warning(
+                    "refusing to overwrite session %s messages with empty active/pending snapshot "
+                    "(existing=%s, incoming=%s, stream=%s)",
+                    self.session_id,
+                    existing_msg_count,
+                    incoming_msg_count,
+                    self.active_stream_id,
+                )
+                return False
+            if existing_msg_count > incoming_msg_count:
+                bak_path = sidecar_path.with_suffix('.json.bak')
+                bak_tmp = bak_path.with_suffix(
+                    f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                )
+                try:
+                    # Retain the exact proven source bytes; text-mode newline
+                    # translation would weaken this recovery contract on Windows.
+                    _bound_unlink(bak_tmp, missing_ok=True)
+                    with _bound_open(bak_tmp, 'xb') as bf:
+                        bf.write(existing_bytes)
+                        bf.flush()
+                        os.fsync(bf.fileno())
+                    _safe_replace(bak_tmp, bak_path)
+                except Exception:
                     try:
-                        existing = json.loads(existing_text)
-                        existing_msg_count = len(existing.get('messages') or [])
-                    except (json.JSONDecodeError, ValueError):
-                        existing_msg_count = -1
-                if (
-                    existing_msg_count > 0
-                    and incoming_msg_count == 0
-                    and (self.active_stream_id or self.pending_user_message)
-                ):
-                    logger.warning(
-                        "refusing to overwrite session %s messages with empty active/pending snapshot "
-                        "(existing=%s, incoming=%s, stream=%s)",
-                        self.session_id,
-                        existing_msg_count,
-                        incoming_msg_count,
-                        self.active_stream_id,
-                    )
-                    return False
-                if existing_msg_count > incoming_msg_count:
-                    if existing_text is None:
-                        # A shrink needs the actual previous bytes for the backup.
-                        # Re-parse after the read so a replacement between the fast
-                        # stat and this slow path cannot back up an unrelated count.
-                        existing_text = sidecar_path.read_text(encoding='utf-8')
-                        try:
-                            existing = json.loads(existing_text)
-                            existing_msg_count = len(existing.get('messages') or [])
-                        except (json.JSONDecodeError, ValueError):
-                            existing_msg_count = -1
-                    if existing_msg_count <= incoming_msg_count:
-                        existing_text = None
-                    bak_path = sidecar_path.with_suffix('.json.bak')
-                    # SHOULD-FIX #2 (Opus): atomic write via tmp+replace,
-                    # mirroring the main save() pattern below. Prevents a
-                    # torn .bak from a crash mid-write or a concurrent
-                    # backup-producing save. Recovery defends against a
-                    # torn .bak (JSONDecodeError → no_action), so the
-                    # failure mode pre-fix was "backup is lost"; with
-                    # this fix the backup either lands cleanly or doesn't
-                    # land at all.
-                    try:
-                        if existing_text is None:
-                            raise OSError("authoritative source changed before backup")
-                        bak_tmp = bak_path.with_suffix(
-                            f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
-                        )
-                        with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(existing_text)
-                            bf.flush()
-                            os.fsync(bf.fileno())
-                        _safe_replace(bak_tmp, bak_path)
-                    except OSError:
-                        # Backup is best-effort; main save proceeds regardless.
-                        try:
-                            bak_tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-        except OSError:
-            pass
+                        _bound_unlink(bak_tmp, missing_ok=True)
+                    except Exception:
+                        pass
+                    raise
 
         tmp = sidecar_path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
-            with open(tmp, 'w', encoding='utf-8') as f:
-                f.write(payload)
+            _bound_unlink(tmp, missing_ok=True)
+            with _bound_open(tmp, 'xb') as f:
+                f.write(payload_bytes)
                 f.flush()
                 os.fsync(f.fileno())
+            current_source = _sidecar_content_proof(sidecar_path)
+            current_proof = current_source[0] if current_source is not None else None
+            if current_proof != existing_proof:
+                raise OSError('authoritative session source changed before publication')
             _safe_replace(tmp, sidecar_path)
             _invalidate_persisted_session_ids_snapshot()
         except Exception:
             try:
-                tmp.unlink(missing_ok=True)
+                _bound_unlink(tmp, missing_ok=True)
             except Exception:
                 pass
             raise
@@ -1636,19 +1914,23 @@ class Session:
         # Small sidecars stay on the authoritative path; publishing a second
         # fsync'd file on every streaming checkpoint would cost more than the
         # bounded read can save.
+        source_signature = _sidecar_stat_signature(sidecar_path)
+        if source_signature is None:
+            raise OSError('authoritative source stat failed after publication')
+        source_proof = (source_signature, hashlib.sha256(payload_bytes).hexdigest())
+        self._last_saved_source_signature = source_signature
+        self._last_saved_source_proof = source_proof
+        self._last_saved_message_count = incoming_msg_count
         try:
             # Every successful authoritative publication invalidates its previous
             # derived bytes. An eligible source is republished below; an ineligible
-            # source stays cache-free. Failure is non-fatal and the reader still
-            # rejects any retained stale entry by its old source signature.
-            source_signature = _sidecar_stat_signature(sidecar_path)
-            self._last_saved_source_signature = source_signature
-            self._last_saved_message_count = incoming_msg_count
+            # source stays cache-free. Cache cleanup/population remains non-fatal;
+            # the reader rejects retained bytes without an exact source proof.
             delete_session_tail_cache(self.session_id)
             if _session_tail_cache_signature_is_large_enough(source_signature):
                 _write_session_tail_cache(
                     frozen_snapshot,
-                    expected_signature=source_signature,
+                    expected_proof=source_proof,
                     snapshot_is_immutable=snapshot_is_immutable,
                 )
         except Exception:
@@ -1667,13 +1949,15 @@ class Session:
         if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
-        if not p.exists():
+        # One complete source proof owns both the parse and any opportunistic
+        # derived-cache publication. Metadata alone cannot establish stability.
+        with _bound_session_sidecar_target(p) as target:
+            _pre_read_source = _sidecar_content_proof(target.path)
+        if _pre_read_source is None:
             return None
-        # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
-        # cache write is only committed if the file didn't change under us
-        # during the parse (TOCTOU guard against an atomic replace mid-read).
-        _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        _pre_read_proof, _pre_read_bytes = _pre_read_source
+        _pre_read_sig = _pre_read_proof[0]
+        data = json.loads(_pre_read_bytes)
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
         if _collapsed_partials:
@@ -1690,9 +1974,8 @@ class Session:
             # scenes serialize before them, so cache the authoritative facts we
             # just parsed. This keeps the metadata-only path and the eviction
             # check from full-parsing this unchanged file again on every poll.
-            # Keyed by stat signature, so any edit invalidates it; the next
-            # save() rewrites the modern layout and the fallback stops firing.
-            # expected_sig guards against an atomic replace during the read.
+            # Keyed by complete content proof, so any edit invalidates it; the
+            # next save() rewrites the modern layout and the fallback stops firing.
             # (When _collapsed_partials fired, save() above already rewrote the
             # modern layout, so no legacy caching is needed.)
             if 'anchor_scene_index' not in data:
@@ -1701,7 +1984,7 @@ class Session:
                         sid,
                         len(getattr(session, 'messages', None) or []),
                         _anchor_scene_index_from_records(getattr(session, 'anchor_activity_scenes', None)),
-                        expected_sig=_pre_read_sig,
+                        expected_proof=_pre_read_proof,
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
@@ -1710,19 +1993,20 @@ class Session:
             # metadata-only probes and pre-authorization foreign-profile reads
             # must not leave plaintext cache copies behind.
             try:
-                _post_read_sig = _sidecar_stat_signature(p)
-                if (
-                    _populate_tail_cache
-                    and _pre_read_sig is not None
-                    and _pre_read_sig == _post_read_sig
-                    and _session_tail_cache_signature_is_large_enough(_pre_read_sig)
-                    and _session_tail_cache_profile_is_active(session)
-                    and not _session_tail_cache_has_signature(sid, _pre_read_sig)
-                ):
-                    _write_session_tail_cache(
-                        session,
-                        expected_signature=_pre_read_sig,
-                    )
+                with _bound_session_sidecar_target(p) as target:
+                    _post_read_source = _sidecar_content_proof(target.path)
+                    if (
+                        _populate_tail_cache
+                        and _post_read_source is not None
+                        and _pre_read_proof == _post_read_source[0]
+                        and _session_tail_cache_signature_is_large_enough(_pre_read_sig)
+                        and _session_tail_cache_profile_is_active(session)
+                        and not _session_tail_cache_has_signature(sid, _pre_read_proof)
+                    ):
+                        _write_session_tail_cache(
+                            session,
+                            expected_proof=_pre_read_proof,
+                        )
             except Exception:
                 logger.debug(
                     "session tail-cache opportunistic populate failed for %s",
@@ -3903,23 +4187,75 @@ def _disk_scene_fingerprint(disk_meta_prefix: dict):
 
 
 def _sidecar_stat_signature(path):
-    """Stat signature for a sidecar path, or None if it can't be stat'd.
-
-    Any edit (atomic-rename or in-place) changes at least one component, so a
-    cached entry keyed by this signature is auto-invalidated on the next write.
-    """
+    """Return cheap source metadata, never treating it as a content proof."""
     try:
-        st = path.stat()
+        st = _bound_stat(Path(path))
     except OSError:
+        return None
+    if not _stat.S_ISREG(st.st_mode):
         return None
     return (str(path), int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
             int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
+
+
+def _sidecar_content_proof(path: Path):
+    """Read stable authoritative bytes and return ``((stat, sha256), bytes)``.
+
+    The digest covers the complete JSON source, so every cache semantic input
+    (prefix facts, lineage/todo facts, message tail, and tool calls) participates.
+    Stat metadata remains an optimization/diagnostic field only. A final-symlink
+    or parent-identity uncertainty raises instead of silently following a target.
+    """
+    path = Path(path)
+    target = _active_session_sidecar_target()
+    if target is None:
+        with _bound_session_sidecar_target(path) as bound:
+            return _sidecar_content_proof(bound.path)
+    try:
+        with _bound_open(path, 'rb') as handle:
+            before = os.fstat(handle.fileno())
+            if not _stat.S_ISREG(before.st_mode):
+                raise OSError('refusing non-regular session sidecar source')
+            source_bytes = handle.read()
+            after = os.fstat(handle.fileno())
+    except FileNotFoundError:
+        return None
+    if (
+        _filesystem_object_identity(before) != _filesystem_object_identity(after)
+        or int(before.st_size) != int(after.st_size)
+        or len(source_bytes) != int(after.st_size)
+    ):
+        raise OSError('session sidecar changed while authoritative bytes were read')
+    current = _bound_stat(path)
+    if (
+        not _stat.S_ISREG(current.st_mode)
+        or _filesystem_object_identity(current) != _filesystem_object_identity(after)
+        or int(current.st_size) != len(source_bytes)
+    ):
+        raise OSError('session sidecar changed while authoritative bytes were read')
+    signature = _sidecar_stat_signature(path)
+    if signature is None or signature[2] != len(source_bytes):
+        raise OSError('session sidecar stat/content proof is uncertain')
+    proof = (signature, hashlib.sha256(source_bytes).hexdigest())
+    return proof, source_bytes
+
+
+def _tail_cache_content_digest(value) -> str | None:
+    if not isinstance(value, str) or len(value) != 64:
+        return None
+    lowered = value.lower()
+    if any(character not in '0123456789abcdef' for character in lowered):
+        return None
+    return lowered
 
 
 def session_tail_cache_path(sid: str) -> Path:
     """Return the v1 derived-cache path for a path-safe session id."""
     if not is_safe_session_id(sid):
         raise ValueError(f"Unsafe session_id {sid!r}")
+    target = _active_session_sidecar_target()
+    if target is not None and target.sid == sid:
+        return target.cache_path
     return SESSION_DIR / '_tail_cache' / 'v1' / f'{sid}.json'
 
 
@@ -3953,7 +4289,7 @@ def delete_session_tail_cache(sid: str) -> bool:
     if not is_safe_session_id(sid):
         return False
     try:
-        os.unlink(session_tail_cache_path(sid))
+        _bound_unlink(session_tail_cache_path(sid))
         return True
     except FileNotFoundError:
         return True
@@ -3967,16 +4303,21 @@ def delete_session_sidecar_and_tail_cache(sid: str) -> bool:
     if not is_safe_session_id(sid):
         return False
     sidecar = SESSION_DIR / f'{sid}.json'
-    with _get_session_save_publication_lock(sidecar):
-        try:
-            sidecar.unlink(missing_ok=True)
-            sidecar_deleted = True
-        except OSError:
-            logger.debug("Failed to remove session sidecar for %s", sid, exc_info=True)
-            sidecar_deleted = False
-        # Keep separate failure handling: a sidecar failure must not retain the
-        # derived copy, and a cache failure must not resurrect/fail the source.
-        cache_deleted = delete_session_tail_cache(sid)
+    try:
+        with _bound_session_sidecar_target(sidecar) as target:
+            with _get_session_save_publication_lock(target.path):
+                try:
+                    _bound_unlink(target.path, missing_ok=True)
+                    sidecar_deleted = True
+                except OSError:
+                    logger.debug("Failed to remove session sidecar for %s", sid, exc_info=True)
+                    sidecar_deleted = False
+                # Keep separate failure handling: a sidecar failure must not retain the
+                # derived copy, and a cache failure must not resurrect/fail the source.
+                cache_deleted = delete_session_tail_cache(sid)
+    except OSError:
+        logger.debug("Failed to bind session sidecar target for %s", sid, exc_info=True)
+        return False
     return sidecar_deleted and cache_deleted
 
 
@@ -4049,7 +4390,7 @@ def _session_tail_cache_snapshot_value(snapshot, key, default=None):
 
 def _session_tail_cache_payload(
     session,
-    source_signature,
+    source_proof,
     *,
     snapshot_is_immutable: bool = False,
 ) -> dict | None:
@@ -4059,8 +4400,11 @@ def _session_tail_cache_payload(
     sid = _session_tail_cache_snapshot_value(session, 'session_id')
     if not is_safe_session_id(sid):
         return None
-    signature = _tail_cache_signature_dict(source_signature)
-    if signature is None:
+    if not isinstance(source_proof, tuple) or len(source_proof) != 2:
+        return None
+    signature = _tail_cache_signature_dict(source_proof[0])
+    source_digest = _tail_cache_content_digest(source_proof[1])
+    if signature is None or source_digest is None:
         return None
     messages = _session_tail_cache_snapshot_value(session, 'messages')
     if not isinstance(messages, list):
@@ -4126,6 +4470,7 @@ def _session_tail_cache_payload(
         'version': _SESSION_TAIL_CACHE_VERSION,
         'session_id': sid,
         'source_signature': signature,
+        'source_sha256': source_digest,
         'tail_limit': _SESSION_TAIL_CACHE_LIMIT,
         'message_offset': offset,
         'messages': raw_tail,
@@ -4151,10 +4496,16 @@ def _session_tail_cache_payload(
 
 
 def _write_session_tail_cache_payload(payload: dict, *, expected_signature) -> bool:
-    """Atomically publish one already-built cache payload after a final restat."""
+    """Atomically publish one payload after a full-source proof check."""
     sid = payload.get('session_id') if isinstance(payload, dict) else None
     if not is_safe_session_id(sid) or expected_signature is None:
         return False
+    if _active_session_sidecar_target() is None:
+        with _bound_session_sidecar_target(SESSION_DIR / f'{sid}.json'):
+            return _write_session_tail_cache_payload(
+                payload,
+                expected_signature=expected_signature,
+            )
     encoded = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     if len(encoded) > _SESSION_TAIL_CACHE_MAX_BYTES:
         return False
@@ -4163,27 +4514,34 @@ def _write_session_tail_cache_payload(payload: dict, *, expected_signature) -> b
         f'{path.name}.tmp.{os.getpid()}.{threading.current_thread().ident}'
     )
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, 'wb') as handle:
+        target = _active_session_sidecar_target()
+        if target is not None and target.owns(path):
+            target.ensure_cache_dir()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        _bound_unlink(tmp, missing_ok=True)
+        with _bound_open(tmp, 'xb') as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
-        sidecar = SESSION_DIR / f'{sid}.json'
-        if _sidecar_stat_signature(sidecar) != expected_signature:
+            try:
+                os.fchmod(handle.fileno(), 0o600)
+            except (AttributeError, OSError):
+                pass
+        sidecar = target.path if target is not None and target.sid == sid else SESSION_DIR / f'{sid}.json'
+        current_source = _sidecar_content_proof(sidecar)
+        expected_digest = _tail_cache_content_digest(payload.get('source_sha256'))
+        if (
+            current_source is None
+            or expected_digest is None
+            or current_source[0] != (expected_signature, expected_digest)
+        ):
             return False
         _safe_replace(tmp, path)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
         return True
     finally:
         try:
-            tmp.unlink(missing_ok=True)
+            _bound_unlink(tmp, missing_ok=True)
         except OSError:
             pass
 
@@ -4191,42 +4549,65 @@ def _write_session_tail_cache_payload(payload: dict, *, expected_signature) -> b
 def _write_session_tail_cache(
     session,
     *,
-    expected_signature,
+    expected_proof=None,
+    expected_signature=None,
     snapshot_is_immutable: bool = False,
 ) -> bool:
+    sid = _session_tail_cache_snapshot_value(session, 'session_id')
+    if not is_safe_session_id(sid):
+        return False
+    if _active_session_sidecar_target() is None:
+        with _bound_session_sidecar_target(SESSION_DIR / f'{sid}.json'):
+            return _write_session_tail_cache(
+                session,
+                expected_proof=expected_proof,
+                expected_signature=expected_signature,
+                snapshot_is_immutable=snapshot_is_immutable,
+            )
+    if expected_proof is None:
+        sidecar = SESSION_DIR / f'{sid}.json'
+        current_source = _sidecar_content_proof(sidecar)
+        if current_source is None or current_source[0][0] != expected_signature:
+            return False
+        expected_proof = current_source[0]
     payload = _session_tail_cache_payload(
         session,
-        expected_signature,
+        expected_proof,
         snapshot_is_immutable=snapshot_is_immutable,
     )
     if payload is None:
         return False
     return _write_session_tail_cache_payload(
         payload,
-        expected_signature=expected_signature,
+        expected_signature=expected_proof[0],
     )
 
 
-def _session_tail_cache_has_signature(sid: str, signature) -> bool:
-    """Cheaply decide whether an existing bounded cache describes this source."""
+def _session_tail_cache_has_signature(sid: str, source_proof) -> bool:
+    """Decide whether an existing bounded cache has this full-source proof."""
+    if not isinstance(source_proof, tuple) or len(source_proof) != 2:
+        return False
     try:
         path = session_tail_cache_path(sid)
-        if path.stat().st_size > _SESSION_TAIL_CACHE_MAX_BYTES:
+        if _bound_stat(path).st_size > _SESSION_TAIL_CACHE_MAX_BYTES:
             return False
-        value = json.loads(path.read_bytes())
+        with _bound_open(path, 'rb') as handle:
+            value = json.loads(handle.read())
         return (
             isinstance(value, dict)
             and value.get('format') == _SESSION_TAIL_CACHE_FORMAT
             and value.get('version') == _SESSION_TAIL_CACHE_VERSION
             and value.get('session_id') == sid
             and _tail_cache_signature_tuple(value.get('source_signature'))
-            == _tail_cache_signature_tuple(_tail_cache_signature_dict(signature))
+            == _tail_cache_signature_tuple(_tail_cache_signature_dict(source_proof[0]))
+            and _tail_cache_content_digest(value.get('source_sha256'))
+            == _tail_cache_content_digest(source_proof[1])
         )
     except Exception:
         return False
 
 
-def _validate_session_tail_cache_payload(payload, sid: str, source_signature) -> dict | None:
+def _validate_session_tail_cache_payload(payload, sid: str, source_proof) -> dict | None:
     """Strictly validate v1 shape and bounded-read eligibility."""
     if not isinstance(payload, dict):
         return None
@@ -4234,9 +4615,18 @@ def _validate_session_tail_cache_payload(payload, sid: str, source_signature) ->
         return None
     if payload.get('version') != _SESSION_TAIL_CACHE_VERSION or payload.get('session_id') != sid:
         return None
+    if not isinstance(source_proof, tuple) or len(source_proof) != 2:
+        return None
     embedded_signature = _tail_cache_signature_tuple(payload.get('source_signature'))
-    current_signature = _tail_cache_signature_tuple(_tail_cache_signature_dict(source_signature))
-    if embedded_signature is None or embedded_signature != current_signature:
+    current_signature = _tail_cache_signature_tuple(_tail_cache_signature_dict(source_proof[0]))
+    embedded_digest = _tail_cache_content_digest(payload.get('source_sha256'))
+    current_digest = _tail_cache_content_digest(source_proof[1])
+    if (
+        embedded_signature is None
+        or embedded_signature != current_signature
+        or embedded_digest is None
+        or embedded_digest != current_digest
+    ):
         return None
     if payload.get('tail_limit') != _SESSION_TAIL_CACHE_LIMIT:
         return None
@@ -4298,22 +4688,23 @@ def _validate_session_tail_cache_payload(payload, sid: str, source_signature) ->
 def _read_session_tail_cache_file(sid: str) -> dict | None:
     if not is_safe_session_id(sid):
         return None
-    sidecar = SESSION_DIR / f'{sid}.json'
-    before = _sidecar_stat_signature(sidecar)
-    if before is None:
-        return None
     try:
-        path = session_tail_cache_path(sid)
-        size = path.stat().st_size
-        if size <= 0 or size > _SESSION_TAIL_CACHE_MAX_BYTES:
-            return None
-        payload = json.loads(path.read_bytes())
+        with _bound_session_sidecar_target(SESSION_DIR / f'{sid}.json') as target:
+            path = target.cache_path
+            size = _bound_stat(path).st_size
+            if size <= 0 or size > _SESSION_TAIL_CACHE_MAX_BYTES:
+                return None
+            with _bound_open(path, 'rb') as handle:
+                payload = json.loads(handle.read())
+            # Read the complete authoritative source after the derived bytes.
+            # Returning a cache requires an exact digest match, so same-stat
+            # in-place and atomic replacements fail closed without JSON parsing.
+            source = _sidecar_content_proof(target.path)
+            if source is None:
+                return None
+            return _validate_session_tail_cache_payload(payload, sid, source[0])
     except (OSError, ValueError, TypeError):
         return None
-    after = _sidecar_stat_signature(sidecar)
-    if after is None or before != after:
-        return None
-    return _validate_session_tail_cache_payload(payload, sid, before)
 
 
 def read_session_tail_cache(sid: str) -> dict | None:
@@ -4563,7 +4954,7 @@ def _legacy_tail_positionable_tool_calls(suffix: dict, messages: list, offset: i
 
 
 def build_session_tail_cache_from_legacy_sidecar(sid: str) -> dict | None:
-    """Build a v1 snapshot from stable prefix/tail/suffix slices, never a full parse."""
+    """Build a v1 snapshot from one content-proven authoritative source read."""
     if not is_safe_session_id(sid):
         return None
     with LOCK:
@@ -4571,112 +4962,95 @@ def build_session_tail_cache_from_legacy_sidecar(sid: str) -> dict | None:
         if cached is not None and not getattr(cached, '_loaded_metadata_only', False):
             return None
     path = SESSION_DIR / f'{sid}.json'
-    before = _sidecar_stat_signature(path)
-    if not _session_tail_cache_signature_is_large_enough(before):
-        return None
     try:
-        prefix = _read_metadata_json_prefix(path)
-        metadata = json.loads(prefix) if prefix else None
+        with _bound_session_sidecar_target(path) as target:
+            source = _sidecar_content_proof(target.path)
+            if source is None or not _session_tail_cache_signature_is_large_enough(source[0][0]):
+                return None
+            snapshot = json.loads(source[1])
+            if (
+                not isinstance(snapshot, dict)
+                or snapshot.get('session_id') != sid
+                or not _legacy_tail_metadata_is_eligible(snapshot)
+            ):
+                return None
+            index_row = _legacy_tail_cache_index_row(sid, source[0][0], snapshot)
+            messages = snapshot.get('messages')
+            if index_row is None or not isinstance(messages, list):
+                return None
+            uncached_prefix = messages[:-_SESSION_TAIL_CACHE_LIMIT]
+            if any(
+                isinstance(message, dict)
+                and isinstance(message.get('content'), str)
+                and (
+                    '"todos"' in message['content']
+                    or '\\"todos\\"' in message['content']
+                )
+                for message in uncached_prefix
+            ):
+                return None
+            payload = _session_tail_cache_payload(snapshot, source[0])
+            if payload is None:
+                return None
+            if not _write_session_tail_cache_payload(
+                payload,
+                expected_signature=source[0][0],
+            ):
+                return None
+            validated = _read_session_tail_cache_file(sid)
+            if validated is None:
+                delete_session_tail_cache(sid)
+            return validated
     except (OSError, ValueError, TypeError):
         return None
-    if not isinstance(metadata, dict):
-        return None
-    if not _legacy_tail_metadata_is_eligible(metadata) or metadata.get('session_id') != sid:
-        return None
-    index_row = _legacy_tail_cache_index_row(sid, before, metadata)
-    if index_row is None:
-        return None
-    source_count = int(index_row['message_count'])
-    wanted = min(_SESSION_TAIL_CACHE_LIMIT, source_count)
-    parts = _read_legacy_tail_parts(path, wanted)
-    if parts is None:
-        return None
-    messages, suffix = parts
-    offset = source_count - wanted
-    cached_tool_calls = _legacy_tail_positionable_tool_calls(
-        suffix,
-        messages,
-        offset,
-        source_count,
-    )
-    if cached_tool_calls is None:
-        return None
-    try:
-        from api.todo_state import derive_todo_state
-
-        todo_state = derive_todo_state(messages)
-    except Exception:
-        return None
-    payload = {
-        'format': _SESSION_TAIL_CACHE_FORMAT,
-        'version': _SESSION_TAIL_CACHE_VERSION,
-        'session_id': sid,
-        'source_signature': _tail_cache_signature_dict(before),
-        'tail_limit': _SESSION_TAIL_CACHE_LIMIT,
-        'message_offset': offset,
-        'messages': messages,
-        'source_message_count': source_count,
-        'source_user_message_count': int(index_row['user_message_count']),
-        'source_last_message_at': index_row.get('last_message_at'),
-        'tool_calls': cached_tool_calls,
-        'all_tool_calls_positionable': True,
-        'todo_state': todo_state,
-        'anchor_scene_index': {},
-        'all_cached_timestamps_valid': True,
-        'created_at': float(time.time()),
-    }
-    if _sidecar_stat_signature(path) != before:
-        return None
-    if not _write_session_tail_cache_payload(payload, expected_signature=before):
-        return None
-    return _read_session_tail_cache_file(sid)
 
 
 def _legacy_sidecar_facts_get(sid):
     """Return cached authoritative facts for a LEGACY sidecar, or None (#5854).
 
-    Only returns a hit when the file's current stat signature matches the cached
-    one, so a stale entry can never be served after an edit.
+    Only returns a hit when the file's complete content proof matches the cached
+    one, so same-metadata edits cannot serve stale facts.
     """
     if not is_safe_session_id(sid):
         return None
-    sig = _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
-    if sig is None:
+    try:
+        source = _sidecar_content_proof(SESSION_DIR / f'{sid}.json')
+    except OSError:
         return None
+    if source is None:
+        return None
+    proof = source[0]
     with _LEGACY_SIDECAR_FACTS_LOCK:
-        hit = _LEGACY_SIDECAR_FACTS.get(sig)
+        hit = _LEGACY_SIDECAR_FACTS.get(proof)
         if hit is not None:
-            _LEGACY_SIDECAR_FACTS.move_to_end(sig)
+            _LEGACY_SIDECAR_FACTS.move_to_end(proof)
             return dict(hit)
     return None
 
 
-def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_sig):
-    """Cache authoritative facts for a legacy sidecar keyed by its stat signature.
+def _legacy_sidecar_facts_put(sid, message_count, scene_index, *, expected_proof):
+    """Cache authoritative facts for a legacy sidecar keyed by content proof.
 
-    #5854 TOCTOU guard: ``expected_sig`` (MANDATORY) is the signature captured
-    BEFORE the caller parsed the file. The facts were derived from that snapshot,
-    so we only cache when the file's CURRENT signature still equals it —
-    otherwise the file was atomically replaced during the parse and these facts
-    describe the old content; caching them under the new signature would serve
-    stale data. Pass ``None`` explicitly only if the caller genuinely has no
-    snapshot (then this is a no-op, refusing to cache unverified facts).
+    The expected proof was captured with the exact bytes parsed by the caller.
+    Re-read and compare before insertion so replacements and in-place edits both
+    fail closed.
     """
     if not is_safe_session_id(sid):
         return
-    if expected_sig is None:
+    if expected_proof is None:
         return
-    sig = _sidecar_stat_signature(SESSION_DIR / f'{sid}.json')
-    if sig is None:
+    try:
+        source = _sidecar_content_proof(SESSION_DIR / f'{sid}.json')
+    except OSError:
         return
-    if sig != expected_sig:
+    if source is None or source[0] != expected_proof:
         # File changed under us during the parse — do not cache stale facts.
         return
     entry = {"message_count": message_count,
              "scene_index": dict(scene_index) if isinstance(scene_index, dict) else {}}
     with _LEGACY_SIDECAR_FACTS_LOCK:
-        _LEGACY_SIDECAR_FACTS[sig] = entry
-        _LEGACY_SIDECAR_FACTS.move_to_end(sig)
+        _LEGACY_SIDECAR_FACTS[expected_proof] = entry
+        _LEGACY_SIDECAR_FACTS.move_to_end(expected_proof)
         while len(_LEGACY_SIDECAR_FACTS) > _LEGACY_SIDECAR_FACTS_MAX:
             _LEGACY_SIDECAR_FACTS.popitem(last=False)
 
@@ -4942,22 +5316,25 @@ def _persisted_message_count(sid) -> int | None:
                 # as "do not evict"), which can let new_session() evict its own
                 # unsaved session and 404 the first send. Full-parse to get the
                 # authoritative count (Session.load re-caches the facts for
-                # legacy files under a TOCTOU-guarded signature). Re-verify the
-                # stat signature is stable across the parse so we never return a
-                # count from a file that was atomically replaced mid-read; retry
+                # legacy files under a TOCTOU-guarded content proof). Re-read that
+                # proof through the facts lookup so same-stat in-place and atomic
+                # replacements cannot return a count from old bytes. Retry
                 # boundedly on mismatch, then fall through to None. Bounded
                 # overall: the next save() rewrites the modern layout.
                 for _attempt in range(3):
-                    sig_before = _sidecar_stat_signature(p)
                     try:
                         _full = Session.load(sid)
                     except Exception:
                         _full = None
-                    sig_after = _sidecar_stat_signature(p)
                     if _full is None:
                         return None
-                    if sig_before is not None and sig_before == sig_after:
-                        return len(getattr(_full, 'messages', None) or [])
+                    _verified_facts = _legacy_sidecar_facts_get(sid)
+                    if _verified_facts is not None:
+                        verified_count = _parse_nonnegative_int(
+                            _verified_facts.get('message_count')
+                        )
+                        if verified_count is not None:
+                            return verified_count
                     # File changed during the parse — the count is uncertain;
                     # retry with a fresh snapshot.
                 return None
