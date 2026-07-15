@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -53,7 +54,6 @@ logger = logging.getLogger(__name__)
 _WATCHER_THREAD: threading.Thread | None = None
 _STOP_EVENT = threading.Event()
 _LIFECYCLE_LOCK = threading.Lock()
-_WATCHER_STARTED_AT: float | None = None
 
 # ── Tunables (RFC §Required implementation §9 + §10 + §3) ───────────────
 # 1 second default; the wait goes through _STOP_EVENT.wait() so a stop
@@ -192,18 +192,130 @@ def _kb():
 def _open_conn(board: str | None = None):
     """Open a short-lived Kanban connection, always closed on exit.
 
-    Returns a context manager. Mirrors api/kanban_bridge._conn so a sqlite
-    FDs don't pin stale -wal/-shm snapshots across the long-lived watcher.
+    RFC §5 forbids the WebUI watcher from creating, migrating, or
+    replacing the Agent-owned ``kanban_notify_subs`` schema, and the
+    actual ``kb.connect`` / ``kb.connect_closing`` helpers auto-run
+    ``init_db`` on a freshly opened path: a legacy four-column
+    ``kanban_notify_subs`` would be silently migrated to add
+    ``notifier_profile``, and an empty existing Kanban DB would gain
+    the full Agent table set on first open. Neither behaviour is
+    acceptable here — the bridge must introspect the live schema, not
+    mutate it. We therefore cannot reuse ``kb.connect`` /
+    ``kb.connect_closing`` (or the private ``_sqlite_connect``):
+
+    * Resolve the path via ``kb.kanban_db_path(board=board)``.
+    * Open the existing file directly with stdlib ``sqlite3`` using a
+      file URI with ``mode=rw`` and ``uri=True``. The URI form is safe
+      for paths containing spaces; ``mode=rw`` (no ``mode=rwc``) means
+      a missing file raises instead of being created.
+    * A missing path must raise and MUST NOT create the file or any
+      parent directory — fail-closed introspection (RFC §5).
+    * ``isolation_level=None`` so cursor UPDATEs are immediately
+      durable without an explicit ``commit()``.
+    * ``row_factory=sqlite3.Row`` so the production reader / writer
+      can index columns by name.
+    * Honor ``HERMES_KANBAN_BUSY_TIMEOUT_MS`` exactly like the Agent:
+      prefer ``kb._resolve_busy_timeout_ms`` if callable; otherwise
+      parse the env (reject invalid / non-positive exactly like the
+      Agent does), then fall back to ``kb.DEFAULT_BUSY_TIMEOUT_MS`` if
+      positive, then to a documented local default of 120_000 ms that
+      matches the current Agent default.
+    * ``timeout`` (seconds) on ``sqlite3.connect`` AND an explicit
+      ``PRAGMA busy_timeout`` so the value is observable.
+    * Return a context manager that ALWAYS closes the FD; if any
+      setup step after ``sqlite3.connect`` fails, close the already
+      opened connection before re-raising.
+    * Do not set ``journal_mode``, ``synchronous``, ``secure_delete``,
+      or any other schema-affecting PRAGMA — the watcher does not own
+      the DB and must not change its durability / safety properties.
     """
     kb = _kb()
+    # Resolve the on-disk path; ``kanban_db_path`` honours the same
+    # env / board / default-resolution rules the Agent uses, so the
+    # watcher sees the exact file the dispatcher / messaging adapters
+    # are writing to.
+    path = kb.kanban_db_path(board=board)
+    # Fail-closed introspection: a missing path MUST raise; we must
+    # NOT create a file or a parent directory. ``resolve()`` here is
+    # purely for URI formatting (it does not require the file to exist
+    # on POSIX, and even where it does we want the URIs to share a
+    # canonical form so the busy-timeout pragma value is consistent).
+    path_uri = Path(path).resolve().as_uri() + "?mode=rw"
+    # Busy-timeout resolution, mirroring ``_resolve_busy_timeout_ms``
+    # in ``hermes_cli.kanban_db``: the Agent rejects non-positive and
+    # unparseable env values silently and falls back to its default.
+    resolver = getattr(kb, "_resolve_busy_timeout_ms", None)
+    busy_timeout_ms: int
+    if callable(resolver):
+        busy_timeout_ms = int(resolver())
+    else:
+        raw = os.environ.get("HERMES_KANBAN_BUSY_TIMEOUT_MS", "").strip()
+        parsed: int | None = None
+        if raw:
+            try:
+                parsed = int(raw)
+            except ValueError:
+                parsed = None
+        if parsed is not None and parsed > 0:
+            busy_timeout_ms = parsed
+        else:
+            agent_default = getattr(kb, "DEFAULT_BUSY_TIMEOUT_MS", None)
+            if isinstance(agent_default, int) and agent_default > 0:
+                busy_timeout_ms = int(agent_default)
+            else:
+                # Matches the Agent's current published default
+                # (``DEFAULT_BUSY_TIMEOUT_MS = 120_000``). Documented
+                # local fallback so a slimmed-down kanban_db fixture
+                # without ``DEFAULT_BUSY_TIMEOUT_MS`` still resolves
+                # to a sane value.
+                busy_timeout_ms = 120_000
+    conn = sqlite3.connect(
+        path_uri,
+        uri=True,
+        isolation_level=None,
+        timeout=busy_timeout_ms / 1000.0,
+    )
     try:
-        kb.init_db(board=board)
+        conn.row_factory = sqlite3.Row
+        # Set the PRAGMA explicitly so it is observable (the URI
+        # helper hides ``PRAGMA busy_timeout`` introspection paths
+        # otherwise) and survives future wrapper changes.
+        conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
     except Exception:
-        logger.debug("init_db failed for board=%s", board, exc_info=True)
-    closing = getattr(kb, "connect_closing", None)
-    if closing is not None:
-        return closing(board=board)
-    return kb.connect(board=board)
+        # Close before re-raising so a misconfigured env / row_factory
+        # does not leak an open FD. The watcher's hot path runs every
+        # second per board — a leaked FD per setup failure would
+        # eventually hit the kernel FD limit.
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+    return _ClosingConn(conn)
+
+
+class _ClosingConn:
+    """Minimal context-manager wrapper that guarantees ``conn.close()``
+    on exit. SQLite's own ``__exit__`` only scopes the transaction —
+    it never closes the FD — so the watcher (per RFC §2 / §6 / §11)
+    must use a wrapper that does. Mirrors the closing helper used by
+    ``kb.connect_closing`` without leaning on the Agent's schema-
+    mutating connect path."""
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def __enter__(self) -> sqlite3.Connection:
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        return False
 
 
 # ── Marker (RFC §6) ─────────────────────────────────────────────────────
@@ -723,6 +835,42 @@ def _initialize_baseline_state(boards: Iterable[str]) -> dict:
     }
 
 
+def _initial_init_failed_state(boards: list[str], exc: BaseException) -> dict:
+    """Build the fail-closed state shape the watcher already understands.
+
+    Used when the *initial* ``_initialize_baseline_state`` call inside
+    ``_watcher_loop`` raises an unexpected exception (anything the helper
+    itself does not anticipate and downgrade). The shape mirrors the
+    fail-closed marker/schema branches returned by
+    ``_initialize_baseline_state`` so the bounded reinitialization path
+    picks it up and retries on its normal cadence.
+    """
+    try:
+        boards_list = sorted(
+            {_normalize_board_slug(b) for b in boards if _normalize_board_slug(b)}
+        )
+    except Exception:
+        boards_list = []
+    try:
+        schema_by_board = {b: _inspect_subs_columns(b) for b in boards_list}
+    except Exception:
+        schema_by_board = {}
+    schema = (
+        schema_by_board.get(boards_list[0], _inspect_subs_columns(None))
+        if boards_list
+        else _inspect_subs_columns(None)
+    )
+    return {
+        "boards": boards_list,
+        "baseline": {b: 0 for b in boards_list},
+        "schema_ok": False,
+        "schema": schema,
+        "schema_by_board": schema_by_board,
+        "marker_loaded": False,
+        "initial_init_error": repr(exc),
+    }
+
+
 # ── Candidates (RFC §7) ────────────────────────────────────────────────
 
 
@@ -1023,81 +1171,6 @@ def _get_session_for_target(sid: str) -> Any:
         globals()["get_session"] = _real_get_session
         fn = _real_get_session
     return fn(sid)
-
-
-def _validate_target(
-    chat_id: str,
-    sub_profile: str | None,
-) -> tuple[str, str | None]:
-    """Return ``(status, resolved_profile)``.
-
-    ``status`` is one of:
-      * ``"ok"`` — session exists; ``resolved_profile`` is the persisted
-        session profile (which the prompt may use for display).
-      * ``"missing"`` — chat_id has no session record (KeyError from
-        ``get_session``); quarantine the candidate, log a warning WITHOUT
-        prompt content, advance cursor.
-      * ``"mismatch"`` — positive subscription/profile disagreement; fail
-        closed, log error WITHOUT prompt content, advance cursor.
-      * ``"transient"`` — ``get_session`` raised a non-KeyError exception
-        (H4). The candidate is NOT consumed: cursors stay untouched so the
-        next iteration can re-read the events, and a bounded per-chat
-        backoff is applied so a persistent I/O error doesn't burn CPU.
-
-    Note (B): the ``profile_column`` parameter is intentionally absent.
-    The session's persisted profile is the canonical answer to "does this
-    chat match this subscription?". The subscription row's profile COLUMN
-    name (``notifier_profile`` vs legacy ``profile``) is already chosen
-    per-candidate in the candidate-rows scan and applied independently
-    during the cursor UPDATE; we never need to feed it back into session
-    validation.
-    """
-    try:
-        session = _get_session_for_target(chat_id)
-    except KeyError:
-        logger.warning(
-            "kanban notification target session %r is missing; "
-            "quarantining terminal event without waking any session",
-            chat_id,
-        )
-        return "missing", None
-    except Exception:
-        # H4: a transient get_session exception (SESSIONS table I/O error,
-        # full disk, locked DB, in-progress migration, etc.) is NOT the
-        # same as a genuinely absent session. We log WARNING so the
-        # operator sees it, but do NOT consume/quarantine — the events
-        # stay readable for the next iteration after the backoff expires.
-        logger.warning(
-            "kanban notification get_session transient failure for %r; "
-            "deferring until backoff expires",
-            chat_id,
-            exc_info=True,
-        )
-        return "transient", None
-    try:
-        resolved_profile = getattr(session, "profile", None)
-    except Exception:
-        resolved_profile = None
-
-    if sub_profile is None or str(sub_profile).strip() == "":
-        # Legacy row — no profile discriminator. Trust the resolved session's
-        # persisted profile (RFC §8 step 5).
-        return "ok", resolved_profile
-
-    # Positive check: subscription profile must match the session's profile,
-    # using the alias-aware matcher (RFC §8 step 3: 'default' and root alias
-    # must compare identically to the rest of WebUI).
-    if not _profiles_match(sub_profile, resolved_profile):
-        logger.error(
-            "kanban notification profile mismatch for chat_id=%r "
-            "(subscription_profile=%r session_profile=%r); "
-            "quarantining terminal event without waking any session",
-            chat_id,
-            sub_profile,
-            resolved_profile,
-        )
-        return "mismatch", resolved_profile
-    return "ok", resolved_profile
 
 
 def _profiles_match(row_profile: Any, active_profile: Any) -> bool:
@@ -1618,7 +1691,6 @@ def _run_one_iteration(state: dict) -> list[str]:
                 dispatched_chats,
                 _get_board_conn,
                 _close_board_conns,
-                _validate_target,
                 _classify_terminal,
                 _build_prompt,
                 _dispatch,
@@ -1642,7 +1714,6 @@ def _process_chat(
     dispatched_chats: list[str],
     _get_board_conn,
     _close_board_conns,
-    _validate_target,
     _classify_terminal,
     _build_prompt,
     _dispatch,
@@ -1681,7 +1752,7 @@ def _process_chat(
     #     subscription identity only (do NOT consume matching subs).
     #   * session lookup transient → defer ALL candidates for this
     #     chat (no cursor advance).
-    target_status, resolved_profile = _validate_chat_target(chat_id, group)
+    target_status, resolved_profile = _validate_chat_target(chat_id)
     if target_status == "transient":
         _bump_backoff(chat_backoff_state, chat_id, transient=True)
         logger.warning(
@@ -1930,14 +2001,13 @@ def _process_chat(
 
 def _validate_chat_target(
     chat_id: str,
-    group: list[dict],
 ) -> tuple[str, str | None]:
     """Resolve the session for ``chat_id`` once, returning one of
     ``("ok", profile)``, ``("missing", None)``, or ``("transient", None)``.
 
-    ``group`` is unused here; it is included so callers can pass the
-    chat group context. Per-candidate profile validation is performed
-    separately by ``_classify_candidate_target``.
+    Per-candidate profile validation is performed separately by
+    ``_classify_candidate_target`` so this helper only needs the chat
+    identity — the candidate group is irrelevant to session resolution.
     """
     try:
         session = _get_session_for_target(chat_id)
@@ -1998,6 +2068,37 @@ def _classify_candidate_target(
     return "mismatch"
 
 
+def _refresh_board_discovery(state: dict | None) -> float:
+    """Re-discover boards, merge any newly-observed boards into ``state``
+    with baseline=0 (RFC §6 consequence: late boards don't replay
+    historical events because their recorded baseline is 0), and prime
+    their per-board schema cache.
+
+    Returns the ``time.time()`` stamp the caller should record as
+    ``last_board_refresh`` (separating the cadence concern from the
+    refresh logic keeps the watcher loop testable in isolation).
+
+    Errors discovering boards are swallowed and logged at DEBUG so a
+    transient Agent hiccup never kills the watcher.
+    """
+    now = time.time()
+    try:
+        boards = _discover_boards()
+    except Exception:
+        logger.debug("board refresh failed", exc_info=True)
+        return now
+    if state is None:
+        return now
+    state["boards"] = boards
+    baseline_map = state.setdefault("baseline", {})
+    schema_by_board = state.setdefault("schema_by_board", {})
+    for board in boards:
+        if board not in baseline_map:
+            baseline_map[board] = 0
+        schema_by_board.setdefault(board, _inspect_subs_columns(board))
+    return now
+
+
 def _is_dispatch_accepted(resp: dict) -> tuple[bool, str]:
     """A3 / Fix 2: a dispatch response is accepted iff BOTH:
 
@@ -2044,8 +2145,6 @@ def _find_profile_column_for_board(state: dict, board: str | None) -> str | None
 
 
 def _watcher_loop() -> None:
-    global _WATCHER_STARTED_AT
-    _WATCHER_STARTED_AT = time.time()
     backoff = _BACKOFF_INITIAL_SECONDS
     state: dict | None = None
     last_board_refresh = 0.0
@@ -2068,7 +2167,30 @@ def _watcher_loop() -> None:
         except Exception:
             logger.debug("initial board discovery failed", exc_info=True)
             boards = []
-        state = _initialize_baseline_state(boards)
+        # The initial _initialize_baseline_state call lives OUTSIDE the
+        # while-loop's ``except Exception`` handler. If it raises (a
+        # corrupt but-not-empty marker that the helper itself somehow
+        # can't tolerate, a programmer error in a downstream helper,
+        # etc.) the thread would die before entering the recovery loop.
+        # Catch unexpected exceptions here, downgrade to the same
+        # fail-closed shape ``_initialize_baseline_state`` already
+        # returns for marker/schema failures, and let the bounded
+        # reinitialization cadence retry. KeyboardInterrupt and
+        # SystemExit MUST propagate so a stop signal still kills the
+        # thread promptly.
+        try:
+            state = _initialize_baseline_state(boards)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 — preserve stop signals above
+            logger.warning(
+                "kanban notification watcher: initial baseline init "
+                "raised %r; entering fail-closed mode and retrying at "
+                "bounded cadence",
+                exc,
+                exc_info=True,
+            )
+            state = _initial_init_failed_state(boards, exc)
         if state.get("marker_loaded") is False:
             logger.warning(
                 "kanban notification watcher: baseline marker failed to "
@@ -2115,22 +2237,7 @@ def _watcher_loop() -> None:
                 # after WebUI starts become observable.
                 now = time.time()
                 if (now - last_board_refresh) >= _BOARD_DISCOVERY_REFRESH_SECONDS:
-                    try:
-                        boards = _discover_boards()
-                    except Exception:
-                        logger.debug("board refresh failed", exc_info=True)
-                    else:
-                        if state is not None:
-                            state["boards"] = boards
-                            baseline_map = state.setdefault("baseline", {})
-                            schema_by_board = state.setdefault("schema_by_board", {})
-                            for board in boards:
-                                if board not in baseline_map:
-                                    baseline_map[board] = 0
-                                schema_by_board.setdefault(
-                                    board, _inspect_subs_columns(board)
-                                )
-                    last_board_refresh = now
+                    last_board_refresh = _refresh_board_discovery(state)
                 if state is not None:
                     _run_one_iteration(state)
                 backoff = _BACKOFF_INITIAL_SECONDS  # reset after a clean pass
