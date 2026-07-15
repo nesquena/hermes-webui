@@ -92,6 +92,57 @@ console.log(JSON.stringify(notifications));
     return json.loads(completed.stdout)
 
 
+def _run_notification_delivery_probe(*, service_worker_succeeds: bool, direct_succeeds: bool, permission: str = "granted") -> dict:
+    """Execute the real notification delivery path and report durable delivery effects."""
+    if NODE is None:  # pragma: no cover - node is installed in CI
+        pytest.skip("node not on PATH")
+    functions = "\n".join(
+        (
+            _function_source(MESSAGES_JS, "_notificationOptions"),
+            _function_source(MESSAGES_JS, "_showPwaNotification"),
+            _function_source(MESSAGES_JS, "sendBrowserNotification"),
+        )
+    )
+    script = f"""
+global.window = global;
+global.document = {{hidden: true}};
+global.location = {{origin: 'https://example.test', href: 'https://example.test/', pathname: '/'}};
+global.S = {{session: {{session_id: 'target'}}}};
+global._notificationsEnabled = true;
+global._isBackgroundedForBrowserNotification = () => true;
+global._sessionUrlForSid = sid => `/?session=${{sid}}`;
+global.assistantDisplayName = () => 'Hermes';
+global.requestNotificationPermission = () => Promise.resolve('granted');
+let delivered = 0;
+let direct = 0;
+function Notification() {{
+  direct += 1;
+  if(!{str(direct_succeeds).lower()}) throw new Error('direct failed');
+}}
+Notification.permission = {json.dumps(permission)};
+global.Notification = Notification;
+Object.defineProperty(global, 'navigator', {{value: {{serviceWorker: {{
+  getRegistration: () => Promise.resolve({{
+    active: true,
+    showNotification: () => {"Promise.resolve()" if service_worker_succeeds else "Promise.reject(new Error('sw failed'))"}
+  }})
+}}}}, configurable: true}});
+{functions}
+sendBrowserNotification('Approval required','Tool approval needed',{{
+  sid:'target', onDelivered:()=>{{delivered += 1;}}
+}});
+setTimeout(()=>console.log(JSON.stringify({{delivered,direct}})),25);
+"""
+    completed = subprocess.run(
+        [NODE, "-e", script],
+        cwd=REPO,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return json.loads(completed.stdout)
+
+
 def test_sidebar_attention_state_plays_distinct_sound_on_new_attention_only():
     sync_body = _function_body(SESSIONS_JS, "_syncSessionAttentionSoundState")
     apply_body = _function_body(SESSIONS_JS, "_applySessionListPayload")
@@ -166,6 +217,25 @@ _syncSessionAttentionSoundState([{{session_id:'target',title:'Build',attention:{
     )
 
     assert [item["title"] for item in notifications] == ["Waiting for permission decision"]
+
+
+@pytest.mark.parametrize(
+    ("service_worker_succeeds", "direct_succeeds", "permission", "expected"),
+    [
+        (True, True, "granted", {"delivered": 1, "direct": 0}),
+        (False, True, "granted", {"delivered": 1, "direct": 1}),
+        (False, False, "granted", {"delivered": 0, "direct": 1}),
+        (True, True, "default", {"delivered": 1, "direct": 0}),
+    ],
+)
+def test_attention_key_is_marked_only_after_successful_notification_delivery(
+    service_worker_succeeds, direct_succeeds, permission, expected
+):
+    assert _run_notification_delivery_probe(
+        service_worker_succeeds=service_worker_succeeds,
+        direct_succeeds=direct_succeeds,
+        permission=permission,
+    ) == expected
 
 
 def test_attention_sound_is_softer_short_reverse_of_completion_sound():

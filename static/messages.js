@@ -5621,11 +5621,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      if(!_hasAttentionNotificationKey(activeSid,'approval',1)
-        &&sendBrowserNotification('Approval required',d.description||'Tool approval needed',{
+      if(!_hasAttentionNotificationKey(activeSid,'approval',1)){
+        sendBrowserNotification('Approval required',d.description||'Tool approval needed',{
           sid:activeSid,onDelivered:()=>_markAttentionNotificationKey(activeSid,'approval',1)
-        })){
-        _markAttentionNotificationKey(activeSid,'approval',1);
+        });
       }
     });
 
@@ -5634,11 +5633,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      if(!_hasAttentionNotificationKey(activeSid,'clarify',1)
-        &&sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{
+      if(!_hasAttentionNotificationKey(activeSid,'clarify',1)){
+        sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{
           sid:activeSid,onDelivered:()=>_markAttentionNotificationKey(activeSid,'clarify',1)
-        })){
-        _markAttentionNotificationKey(activeSid,'clarify',1);
+        });
       }
     });
 
@@ -8643,9 +8641,9 @@ function _showPwaNotification(title,body,options={}){
     ]);
     return reg$.then(reg=>(reg&&reg.active&&reg.showNotification)
       ? reg.showNotification(title||botName,opts)
-      : direct());
+      : direct()).catch(()=>direct());
   }
-  return Promise.resolve(direct());
+  return Promise.resolve().then(direct);
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){
@@ -8681,9 +8679,11 @@ function sendBrowserNotification(title,body,options={}){
   if(!force&&!window._notificationsEnabled) return false;
   if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return false;
   if(!('Notification' in window)) return false;
+  const deliver=()=>_showPwaNotification(title,body,options)
+    .then(()=>{if(typeof options.onDelivered==='function') options.onDelivered();return true;})
+    .catch(()=>false);
   if(Notification.permission==='granted'){
-    if(typeof options.onDelivered==='function') options.onDelivered();
-    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+    deliver();
     return true;
   }else if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
@@ -8691,8 +8691,7 @@ function sendBrowserNotification(title,body,options={}){
     return false;
   }else{
     requestNotificationPermission().then(p=>{if(p==='granted'){
-      if(typeof options.onDelivered==='function') options.onDelivered();
-      _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+      deliver();
     }});
     return false;
   }

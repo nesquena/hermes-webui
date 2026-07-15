@@ -59,7 +59,7 @@ def test_notification_payload_uses_completion_session_when_provided():
         assert f"sendBrowserNotification('{title}',{body},{{" in handler
         assert "sid:activeSid" in handler
         assert f"onDelivered:()=>_markAttentionNotificationKey(activeSid,'{kind}',1)" in handler
-        assert f"_markAttentionNotificationKey(activeSid,'{kind}',1);" in handler
+        assert handler.count(f"_markAttentionNotificationKey(activeSid,'{kind}',1)") == 1
 
 
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():

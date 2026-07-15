@@ -5304,11 +5304,9 @@ function _syncSessionAttentionSoundState(sessions){
           const _title=kind==='approval'?'Waiting for permission decision'
             :(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
           const _body=(s&&s.title)?String(s.title):'A background session needs you';
-          if(sendBrowserNotification(_title,_body,{
+          sendBrowserNotification(_title,_body,{
             sid:s.session_id,onDelivered:()=>_markAttentionNotificationKey(s.session_id,kind,count)
-          })){
-            _markAttentionNotificationKey(s.session_id,kind,count);
-          }
+          });
         }
       }catch(_e){}
     }
