@@ -378,15 +378,15 @@ def test_cache_cleanup_failure_is_nonfatal_after_authoritative_save(
     session.save(touch_updated_at=False, skip_index=True)
     assert cache_path.exists()
     attempted = []
-    original_unlink = Path.unlink
+    original_unlink = models.os.unlink
 
     def fail_cache_unlink(path, *args, **kwargs):
-        if path == cache_path:
-            attempted.append(path)
+        if Path(path) == cache_path:
+            attempted.append(Path(path))
             raise OSError("simulated tail-cache unlink failure")
         return original_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", fail_cache_unlink)
+    monkeypatch.setattr(models.os, "unlink", fail_cache_unlink)
     new_messages = _messages(2)
     session.messages = new_messages
     caplog.set_level("DEBUG", logger="api.models")

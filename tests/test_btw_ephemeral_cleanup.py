@@ -238,14 +238,14 @@ def test_ephemeral_tail_cleanup_failure_is_nonfatal_and_still_removes_source(
     monkeypatch,
 ):
     session, stream_id, event_queue, cache_path = _prepare_ephemeral(tmp_path, "FAILURE")
-    original_unlink = Path.unlink
+    original_unlink = models.os.unlink
 
     def fail_cache_unlink(path, *args, **kwargs):
-        if path == cache_path:
+        if Path(path) == cache_path:
             raise OSError("simulated ephemeral tail-cache cleanup failure")
         return original_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", fail_cache_unlink)
+    monkeypatch.setattr(models.os, "unlink", fail_cache_unlink)
     _run_ephemeral_worker(monkeypatch, session, stream_id)
 
     events = _events(event_queue)

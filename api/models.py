@@ -149,7 +149,10 @@ _SESSION_SAVE_PUBLICATION_LOCKS = weakref.WeakValueDictionary()
 
 
 def _get_session_save_publication_lock(path: Path):
-    key = str(path.expanduser().resolve())
+    # ``SESSION_DIR`` is already process-owned canonical storage. Avoid
+    # ``Path.resolve()`` here: it stats every path component on each save and
+    # materially penalizes the small-session hot path.
+    key = os.fspath(path)
     with _SESSION_SAVE_PUBLICATION_LOCKS_GUARD:
         lock = _SESSION_SAVE_PUBLICATION_LOCKS.get(key)
         if lock is None:
@@ -1330,7 +1333,18 @@ class Session:
                 f"See #1558."
             )
         sidecar_path = self.path
-        with _get_session_save_publication_lock(sidecar_path):
+        publication_key = os.fspath(sidecar_path)
+        publication_lock = getattr(self, '_save_publication_lock', None)
+        if (
+            publication_lock is None
+            or getattr(self, '_save_publication_lock_key', None) != publication_key
+        ):
+            publication_lock = _get_session_save_publication_lock(sidecar_path)
+            # Keep the weak-registry value alive for this Session object's hot
+            # save path without leaking locks after all same-ID objects expire.
+            self._save_publication_lock = publication_lock
+            self._save_publication_lock_key = publication_key
+        with publication_lock:
             saved = self._save_authoritative_sidecar_and_tail_cache(
                 touch_updated_at=touch_updated_at,
             )
@@ -1438,7 +1452,13 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        frozen_snapshot = copy.deepcopy({**meta, **extra})
+        # Freeze list membership while the per-sidecar publication lock is held.
+        # Concurrent writers use independent Session objects; copying this list
+        # binds later cache derivation to the exact writer snapshot without a
+        # full transcript deepcopy on every small save. The bounded tail itself
+        # is deep-copied when its derived payload is built below.
+        frozen_snapshot = {**meta, **extra}
+        frozen_snapshot['messages'] = list(frozen_snapshot.get('messages') or [])
         payload = json.dumps(frozen_snapshot, ensure_ascii=False, indent=2)
 
         # ── #1558 backup safeguard ──────────────────────────────────────
@@ -3838,7 +3858,9 @@ def delete_session_tail_cache(sid: str) -> bool:
     if not is_safe_session_id(sid):
         return False
     try:
-        session_tail_cache_path(sid).unlink(missing_ok=True)
+        os.unlink(session_tail_cache_path(sid))
+        return True
+    except FileNotFoundError:
         return True
     except OSError:
         logger.debug("Failed to remove tail cache for %s", sid, exc_info=True)
@@ -3945,7 +3967,7 @@ def _session_tail_cache_payload(session, source_signature) -> dict | None:
         return None
     source_count = len(messages)
     offset = max(0, source_count - _SESSION_TAIL_CACHE_LIMIT)
-    raw_tail = messages[offset:]
+    raw_tail = copy.deepcopy(messages[offset:])
     all_timestamps_valid = all(
         isinstance(message, dict)
         and _tail_cache_finite_number(message.get('timestamp'))
@@ -3977,7 +3999,7 @@ def _session_tail_cache_payload(session, source_signature) -> dict | None:
             all_tool_calls_positionable = False
             continue
         if assistant_idx >= offset:
-            cached_tool_calls.append(tool_call)
+            cached_tool_calls.append(copy.deepcopy(tool_call))
 
     try:
         from api.todo_state import derive_todo_state
@@ -4011,7 +4033,12 @@ def _session_tail_cache_payload(session, source_signature) -> dict | None:
         'tool_calls': cached_tool_calls,
         'all_tool_calls_positionable': all_tool_calls_positionable,
         'todo_state': todo_state,
-        'anchor_scene_index': _anchor_scene_index_from_records(
+        'anchor_scene_index': copy.deepcopy(
+            _session_tail_cache_snapshot_value(session, 'anchor_scene_index')
+        ) if isinstance(
+            _session_tail_cache_snapshot_value(session, 'anchor_scene_index'),
+            dict,
+        ) else _anchor_scene_index_from_records(
             _session_tail_cache_snapshot_value(session, 'anchor_activity_scenes')
         ),
         'all_cached_timestamps_valid': all_timestamps_valid,
