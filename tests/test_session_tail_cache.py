@@ -64,6 +64,49 @@ def _writer_messages(label, count):
     return messages
 
 
+def _message(index):
+    return {
+        "role": "user" if index % 2 == 0 else "assistant",
+        "content": f"message-{index}",
+        "timestamp": float(index + 1),
+    }
+
+
+def _same_size_replacement_with_extra_message(path: Path) -> bytes:
+    source = json.loads(path.read_bytes())
+    original_size = len(path.read_bytes())
+    original_title = source["title"]
+    source["messages"].append(_message(len(source["messages"])))
+    expanded = json.dumps(source, ensure_ascii=False, indent=2).encode("utf-8")
+    delta = len(expanded) - original_size
+    assert delta > 0
+    assert len(original_title) > delta
+    source["title"] = original_title[:-delta]
+    replacement = json.dumps(source, ensure_ascii=False, indent=2).encode("utf-8")
+    assert len(replacement) == original_size
+    return replacement
+
+
+def _replace_bytes(path: Path, replacement: bytes, mode: str) -> None:
+    if mode == "in_place":
+        path.write_bytes(replacement)
+        return
+    temp = path.with_name(f"{path.name}.external")
+    temp.write_bytes(replacement)
+    os.replace(temp, path)
+
+
+def _force_signature_collision(monkeypatch, path: Path, signature) -> None:
+    original_signature = models._sidecar_stat_signature
+
+    def colliding_signature(candidate):
+        if Path(candidate) == path:
+            return signature
+        return original_signature(candidate)
+
+    monkeypatch.setattr(models, "_sidecar_stat_signature", colliding_signature)
+
+
 def test_save_writes_atomic_v1_raw_tail_schema_and_permissions(isolated_session_store):
     messages = _messages(305)
     messages[1] = {
@@ -776,3 +819,203 @@ def test_stale_cache_tmp_cleanup_and_nested_cache_discovery_isolation(isolated_s
     assert [path.name for path in isolated_session_store.glob("*.json")] == [
         "tail_discovery.json"
     ]
+
+
+@pytest.mark.parametrize("replacement_mode", ["in_place", "atomic_replace"])
+def test_same_stat_tuple_shrink_backs_up_exact_authoritative_bytes(
+    isolated_session_store,
+    monkeypatch,
+    replacement_mode,
+):
+    session = Session(
+        session_id=f"content_proof_shrink_{replacement_mode}",
+        title="P" * 5000,
+        messages=[_message(0), _message(1), _message(2)],
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+    path = session.path
+    signature = models._sidecar_stat_signature(path)
+    replacement = _same_size_replacement_with_extra_message(path)
+    _replace_bytes(path, replacement, replacement_mode)
+    _force_signature_collision(monkeypatch, path, signature)
+
+    session.save(touch_updated_at=False, skip_index=True)
+
+    backup = path.with_suffix(".json.bak")
+    assert backup.read_bytes() == replacement
+    assert len(json.loads(path.read_bytes())["messages"]) == 3
+
+
+@pytest.mark.parametrize("replacement_mode", ["in_place", "atomic_replace"])
+def test_same_stat_tuple_reader_rejects_same_count_content_replacement(
+    isolated_session_store,
+    monkeypatch,
+    replacement_mode,
+):
+    session = Session(
+        session_id=f"content_proof_reader_{replacement_mode}",
+        messages=[_message(0), _message(1)],
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+    path = session.path
+    signature = models._sidecar_stat_signature(path)
+    source = json.loads(path.read_bytes())
+    source["messages"][0]["content"] = "changed-0"
+    replacement = json.dumps(source, ensure_ascii=False, indent=2).encode("utf-8")
+    assert len(replacement) == path.stat().st_size
+    _replace_bytes(path, replacement, replacement_mode)
+    _force_signature_collision(monkeypatch, path, signature)
+
+    assert models.read_session_tail_cache(session.session_id) is None
+
+
+def test_process_local_source_proof_is_invalidated_by_second_session_writer(
+    isolated_session_store,
+    monkeypatch,
+):
+    original = Session(
+        session_id="content_proof_second_writer",
+        title="P" * 5000,
+        messages=[_message(0), _message(1), _message(2)],
+    )
+    original.save(touch_updated_at=False, skip_index=True)
+    original_signature = models._sidecar_stat_signature(original.path)
+    replacement = _same_size_replacement_with_extra_message(original.path)
+    second = Session(**json.loads(replacement))
+
+    second.save(touch_updated_at=False, skip_index=True)
+    second_writer_bytes = original.path.read_bytes()
+    assert len(second_writer_bytes) == len(replacement)
+    assert len(json.loads(second_writer_bytes)["messages"]) == 4
+    _force_signature_collision(monkeypatch, original.path, original_signature)
+
+    original.save(touch_updated_at=False, skip_index=True)
+
+    assert original.path.with_suffix(".json.bak").read_bytes() == second_writer_bytes
+
+
+def test_parent_symlink_rewire_after_binding_fails_closed(tmp_path, monkeypatch):
+    real_a = tmp_path / "real-a"
+    real_b = tmp_path / "real-b"
+    real_a.mkdir()
+    real_b.mkdir()
+    alias = tmp_path / "active-sessions"
+    try:
+        alias.symlink_to(real_a, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - platform/filesystem dependent
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    monkeypatch.setattr(models, "SESSION_DIR", alias)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", alias / "_index.json")
+    original_get = models._get_session_save_publication_lock
+    swapped = False
+
+    def get_lock_then_rewire(path):
+        nonlocal swapped
+        lock = original_get(path)
+        if not swapped:
+            swapped = True
+            alias.unlink()
+            alias.symlink_to(real_b, target_is_directory=True)
+        return lock
+
+    monkeypatch.setattr(models, "_get_session_save_publication_lock", get_lock_then_rewire)
+    session = Session(session_id="parent_symlink_rewire", messages=_messages(2))
+
+    with pytest.raises(OSError, match="session sidecar parent changed"):
+        session.save(touch_updated_at=False, skip_index=True)
+
+    assert not (real_a / "parent_symlink_rewire.json").exists()
+    assert not (real_b / "parent_symlink_rewire.json").exists()
+
+
+def test_parent_rename_and_replacement_after_binding_fails_closed(tmp_path, monkeypatch):
+    store = tmp_path / "sessions"
+    moved_store = tmp_path / "sessions-moved"
+    store.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", store)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", store / "_index.json")
+    original_get = models._get_session_save_publication_lock
+    swapped = False
+
+    def get_lock_then_replace_parent(path):
+        nonlocal swapped
+        lock = original_get(path)
+        if not swapped:
+            swapped = True
+            store.rename(moved_store)
+            store.mkdir()
+        return lock
+
+    monkeypatch.setattr(models, "_get_session_save_publication_lock", get_lock_then_replace_parent)
+    session = Session(session_id="parent_replaced", messages=_messages(2))
+
+    with pytest.raises(OSError, match="session sidecar parent changed"):
+        session.save(touch_updated_at=False, skip_index=True)
+
+    assert not (moved_store / "parent_replaced.json").exists()
+    assert not (store / "parent_replaced.json").exists()
+
+
+def test_final_symlink_swap_after_binding_fails_closed(tmp_path, monkeypatch):
+    store = tmp_path / "sessions"
+    store.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", store)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", store / "_index.json")
+    attacker_target = tmp_path / "attacker.json"
+    attacker_bytes = json.dumps({"messages": _messages(4)}, indent=2).encode("utf-8")
+    attacker_target.write_bytes(attacker_bytes)
+    sidecar = store / "final_symlink_swap.json"
+    original_get = models._get_session_save_publication_lock
+    swapped = False
+
+    def get_lock_then_swap_final(path):
+        nonlocal swapped
+        lock = original_get(path)
+        if not swapped:
+            swapped = True
+            try:
+                sidecar.symlink_to(attacker_target)
+            except OSError as exc:  # pragma: no cover - platform/filesystem dependent
+                pytest.skip(f"file symlinks unavailable: {exc}")
+        return lock
+
+    monkeypatch.setattr(models, "_get_session_save_publication_lock", get_lock_then_swap_final)
+    session = Session(session_id="final_symlink_swap", messages=_messages(2))
+
+    with pytest.raises(OSError, match="refusing to follow final symlink"):
+        session.save(touch_updated_at=False, skip_index=True)
+
+    assert sidecar.is_symlink()
+    assert attacker_target.read_bytes() == attacker_bytes
+    assert not sidecar.with_suffix(".json.bak").exists()
+
+
+def test_session_dir_rewire_cannot_split_source_and_cache_targets(tmp_path, monkeypatch):
+    store_a = tmp_path / "store-a"
+    store_b = tmp_path / "store-b"
+    store_a.mkdir()
+    store_b.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", store_a)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", store_a / "_index.json")
+    monkeypatch.setattr(models, "_SESSION_TAIL_CACHE_MIN_SOURCE_BYTES", 0)
+    original_get = models._get_session_save_publication_lock
+    rewired = False
+
+    def get_lock_then_rewire_profile(path):
+        nonlocal rewired
+        lock = original_get(path)
+        if not rewired:
+            rewired = True
+            monkeypatch.setattr(models, "SESSION_DIR", store_b)
+            monkeypatch.setattr(models, "SESSION_INDEX_FILE", store_b / "_index.json")
+        return lock
+
+    monkeypatch.setattr(models, "_get_session_save_publication_lock", get_lock_then_rewire_profile)
+    session = Session(session_id="profile_target_binding", messages=_messages(2))
+
+    session.save(touch_updated_at=False, skip_index=True)
+
+    assert (store_a / "profile_target_binding.json").exists()
+    assert (store_a / "_tail_cache" / "v1" / "profile_target_binding.json").exists()
+    assert not (store_b / "profile_target_binding.json").exists()
+    assert not (store_b / "_tail_cache" / "v1" / "profile_target_binding.json").exists()
