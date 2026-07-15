@@ -858,29 +858,30 @@ def build_agent_health_payload() -> dict[str, Any]:
     # (e.g. ``startup_failed``) that is older than the threshold must never cause
     # the server to exit. Treat it as UNKNOWN and log a warning so operators can
     # investigate while the server continues running.
-    if isinstance(runtime_status, dict):
-        raw_updated_at = runtime_status.get("updated_at")
+    if _runtime_status_is_stale(runtime_status, now=checked_at):
+        # Recalculate age for the warning log (helper only returns bool).
+        raw_updated_at = runtime_status.get("updated_at", "") if isinstance(runtime_status, dict) else ""
+        age_s = 0.0
         if isinstance(raw_updated_at, str) and raw_updated_at:
             try:
                 updated_at = datetime.fromisoformat(raw_updated_at)
                 if updated_at.tzinfo is not None:
-                    age_s = (datetime.now(timezone.utc) - updated_at).total_seconds()
-                    if age_s > STALE_GATEWAY_STATE_THRESHOLD_S:
-                        _logger.warning(
-                            "gateway_state.json is stale (%.0f seconds old) — ignoring",
-                            age_s,
-                        )
-                        return {
-                            "alive": None,
-                            "checked_at": checked_at,
-                            "details": {
-                                "state": "unknown",
-                                "reason": "gateway_stale_state",
-                                **safe_details,
-                            },
-                        }
+                    age_s = (checked_at - updated_at).total_seconds()
             except (TypeError, ValueError):
                 pass
+        _logger.warning(
+            "gateway_state.json is stale (%.0f seconds old) — ignoring",
+            age_s,
+        )
+        return {
+            "alive": None,
+            "checked_at": checked_at,
+            "details": {
+                "state": "unknown",
+                "reason": "gateway_stale_state",
+                **safe_details,
+            },
+        }
 
     if isinstance(runtime_status, dict):
         return {
