@@ -62,7 +62,7 @@ class TestAuxReasoningExtraRouteContract:
             ('local', '', '', 'deepseek', 'deepseek-reasoner', '',
              ('deepseek', 'deepseek-reasoner', None), {'reasoning': {'enabled': False}}),
             ('deepseek', '', '', 'deepseek', 'deepseek-reasoner', '',
-             ('deepseek', 'deepseek-reasoner', None), {'reasoning': {'enabled': False}}),
+             ('deepseek', 'deepseek-v4-flash', None), {'reasoning': {'enabled': False}}),
             ('auto', '', '', 'openai', 'gpt-5', '',
              ('openai', 'gpt-5', None), None),
             ('local', '', '', 'custom', 'title-model', 'https://relay.example/v1',
@@ -74,6 +74,16 @@ class TestAuxReasoningExtraRouteContract:
             ('auto', '', '', 'minimax', 'MiniMax-M2.5', 'https://api.minimaxi.com/v1',
              ('minimax', 'MiniMax-M2.5', 'https://api.minimaxi.com/v1'),
              {'reasoning': {'enabled': False}, 'reasoning_split': True}),
+            # Explicit routes must not inherit a differing main route's model
+            # or endpoint, including namespaced OpenRouter identifiers.
+            ('deepseek', 'deepseek-reasoner', 'https://api.deepseek.com/v1', 'openai', 'gpt-5.5', 'https://api.openai.com/v1',
+             ('deepseek', 'deepseek-reasoner', 'https://api.deepseek.com/v1'),
+             {'reasoning': {'enabled': False}}),
+            ('openrouter', 'deepseek/deepseek-r1:free', 'https://openrouter.ai/api/v1', 'openai', 'gpt-5.5', 'https://api.openai.com/v1',
+             ('openrouter', 'deepseek/deepseek-r1:free', 'https://openrouter.ai/api/v1'),
+             {'reasoning': {'enabled': False}}),
+            ('openrouter', 'anthropic/claude-sonnet-4.6:thinking', 'https://openrouter.ai/api/v1', 'openai', 'gpt-5.5', 'https://api.openai.com/v1',
+             ('openrouter', 'anthropic/claude-sonnet-4.6:thinking', 'https://openrouter.ai/api/v1'), None),
         )
         for (
             provider, model, base_url, default_provider, default_model, default_url,
@@ -98,6 +108,47 @@ class TestAuxReasoningExtraRouteContract:
             request = captured[-1]
             assert (request['provider'], request['model'], request['base_url']) == expected_route
             assert request['extra_body'] == expected_extra
+
+    def test_explicit_blank_model_uses_its_own_default_not_the_main_route(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'deepseek', 'model': '', 'base_url': '',
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'openai', 'default': 'gpt-5.5', 'base_url': 'https://api.openai.com/v1'},
+            'providers': {'deepseek': {'models': ['deepseek-chat']}},
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert request['provider'] == 'deepseek'
+        assert request['model'] == 'deepseek-chat'
+        assert request['base_url'] is None
+        assert request['extra_body'] == {'reasoning': {'enabled': False}}
+
+    def test_explicit_blank_model_without_a_provider_default_fails_closed(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'custom:unconfigured', 'model': '', 'base_url': 'https://relay.example/v1',
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'openai', 'default': 'gpt-5.5', 'base_url': 'https://api.openai.com/v1'},
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'custom:unconfigured', None, 'https://relay.example/v1',
+        )
+        assert request['extra_body'] is None
 
     @pytest.mark.parametrize('model', (
         '@openai:gpt-5.5',

@@ -3375,13 +3375,72 @@ def _log_aux_title_failure(message: str, base_url: str, provider: str, model: st
     logger.error('%s', _redact_urls_for_log(rendered))
 
 
-def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tuple[str, str, str]:
-    """Resolve the one auxiliary title route used for requests and compatibility."""
+def _aux_default_model_for_provider(provider: str) -> str:
+    """Return an explicitly selected provider's own configured/catalog default."""
     provider_lower = str(provider or '').strip().lower()
-    effective_model = str(model or '').strip()
-    # resolve_model_provider deliberately leaves an empty model empty. For
-    # implicit, auto, and legacy local auxiliary routes, resolve the configured
-    # default model through that existing effective-route resolver instead.
+    provider_canonical = str(_resolve_provider_alias(provider_lower) or provider_lower).strip().lower()
+    try:
+        providers = get_config().get('providers', {})
+        if isinstance(providers, dict):
+            for name, definition in providers.items():
+                name_canonical = str(_resolve_provider_alias(str(name).lower()) or name).strip().lower()
+                if name_canonical != provider_canonical or not isinstance(definition, dict):
+                    continue
+                configured_default = str(definition.get('default') or definition.get('model') or '').strip()
+                if configured_default:
+                    return configured_default
+                models = definition.get('models')
+                if isinstance(models, list) and models:
+                    first = models[0]
+                    return str(first.get('id') if isinstance(first, dict) else first or '').strip()
+                if isinstance(models, dict):
+                    return next((str(item).strip() for item in models if str(item).strip()), '')
+    except Exception:
+        pass
+    catalog = _PROVIDER_MODELS.get(provider_canonical) or _PROVIDER_MODELS.get(provider_lower) or []
+    if catalog:
+        first = catalog[0]
+        return str(first.get('id') if isinstance(first, dict) else first or '').strip()
+    return ''
+
+
+def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tuple[str, str, str]:
+    """Resolve the one auxiliary title route used for requests and compatibility.
+
+    Only implicit, auto/local, and picker routes inherit resolver output.  A
+    configured explicit route is itself the request contract: it must never be
+    filled with the main route's model or endpoint.
+    """
+    supplied_provider = str(provider or '').strip()
+    supplied_model = str(model or '').strip()
+    supplied_base_url = str(base_url or '').strip()
+    provider_lower = supplied_provider.lower()
+    implicit_route = provider_lower in {'', 'auto', 'local'}
+    picker_route = supplied_model.startswith('@')
+
+    if not implicit_route and not picker_route:
+        if supplied_model:
+            # Preserve explicit model IDs (including :free/:thinking suffixes)
+            # and the supplied endpoint exactly as configured.
+            return supplied_provider, supplied_model, supplied_base_url
+        own_default = _aux_default_model_for_provider(supplied_provider)
+        if not own_default:
+            # An unresolved explicit route must fail closed rather than borrow
+            # a model from the main chat route.
+            return supplied_provider, '', supplied_base_url
+        try:
+            resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+                f'@{supplied_provider}:{own_default}'
+            )
+            return (
+                str(resolved_provider or supplied_provider),
+                str(resolved_model or own_default),
+                supplied_base_url or str(resolved_base_url or ''),
+            )
+        except Exception:
+            return supplied_provider, own_default, supplied_base_url
+
+    effective_model = supplied_model
     if not effective_model:
         try:
             model_cfg = get_config().get('model', {})
@@ -3391,27 +3450,14 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str) -> tupl
             pass
     try:
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(effective_model)
-        # Explicit routes keep their configured provider, except picker values
-        # (``@provider:model``), whose provider/model pair is canonicalized by
-        # resolve_model_provider.  An explicit provider with no auxiliary
-        # model still uses the configured default model: do not return the
-        # pre-resolution blank model or request/gate routing would diverge.
-        # That resolver preserves model suffixes such as ``:free`` and
-        # ``:thinking``.
-        if provider_lower not in {'', 'auto', 'local'} and not effective_model.startswith('@'):
-            return (
-                provider,
-                str(resolved_model or effective_model or model or ''),
-                str(base_url or resolved_base_url or ''),
-            )
         return (
-            str(resolved_provider or provider or ''),
-            str(resolved_model or effective_model or model or ''),
-            str(base_url or resolved_base_url or ''),
+            str(resolved_provider or supplied_provider),
+            str(resolved_model or effective_model),
+            supplied_base_url or str(resolved_base_url or ''),
         )
     except Exception:
         # A failed resolution is deliberately treated as unknown by the gate.
-        return provider, model, base_url
+        return supplied_provider, supplied_model, supplied_base_url
 
 
 def _get_aux_title_config() -> dict:
