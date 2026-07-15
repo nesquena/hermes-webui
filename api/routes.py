@@ -9568,6 +9568,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "archived",
     "project_id",
     "profile",
+    "profile_scope",
     "input_tokens",
     "output_tokens",
     "estimated_cost",
@@ -9631,6 +9632,7 @@ def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None
         for key, value in dict(session).items()
         if key in _SIDEBAR_SESSION_RESPONSE_FIELDS
     }
+    item["profile_scope"] = _session_list_cache_profile_scope(item.get("profile"))
     if isinstance(item.get("title"), str):
         item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
     _redact_sidebar_title_fields(item, redact_enabled)

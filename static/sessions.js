@@ -648,6 +648,34 @@ function _cronMarkerProfileMatchesActive(origin, activeProfile) {
   return false;
 }
 
+function _sessionProfileScope(session){
+  if(!session||typeof session!=='object') return 'default';
+  if(typeof session.profile_scope==='string'&&session.profile_scope.trim()) return session.profile_scope.trim();
+  const name=(typeof session.profile==='string'&&session.profile.trim())?session.profile.trim():'default';
+  if(name==='default') return 'default';
+  const activeName=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+    ? S.activeProfile.trim()
+    : '';
+  if(activeName&&typeof S!=='undefined'&&S&&S.activeProfileIsDefault&&activeName===name) return 'default';
+  return name;
+}
+
+function _sidebarLineageScopeKey(session, fallbackIsCli){
+  if(!session) return null;
+  const isCli=typeof _isCliSession==='function'
+    ? !!_isCliSession(session)
+    : (typeof fallbackIsCli==='boolean' ? !!fallbackIsCli : !!session.is_cli_session);
+  const project=session.project_id||'';
+  return `${isCli?'cli':'webui'}\u0000${project}\u0000${_sessionProfileScope(session)}`;
+}
+
+function _sidebarScopedIdentityKey(session, identity, fallbackIsCli){
+  const scopeKey=_sidebarLineageScopeKey(session, fallbackIsCli);
+  const raw=String(identity||'');
+  if(!scopeKey||!raw) return null;
+  return `${scopeKey}\u0000${raw}`;
+}
+
 // Drop persisted cron unread dots that belong to inactive profiles. Ordinary
 // (non-cron) completion markers stay put — sticky all-profile sidebars still
 // need those. Called from the shared profile-switch reset in panels.js.
@@ -6758,18 +6786,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   const sessionIdsInList=durableLineageIds instanceof Set
     ? durableLineageIds
     : new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
-  const normalizedProfileForScope=(profile)=>{
-    const name=(typeof profile==='string'&&profile.trim())?profile.trim():'default';
-    if(name==='default') return 'default';
-    if(typeof _cronProfileNameIsRootAlias==='function'&&_cronProfileNameIsRootAlias(name)) return 'default';
-    return name;
-  };
-  const scopeKeyForSession=(session)=>{
-    if(!session) return null;
-    const isCli=typeof _isCliSession==='function'&&_isCliSession(session);
-    const project=session.project_id||'';
-    return `${isCli?'cli':'webui'}\u0000${project}\u0000${normalizedProfileForScope(session.profile)}`;
-  };
+  const scopeKeyForSession=(session)=>_sidebarLineageScopeKey(session);
+  const scopedIdentityKey=(session, identity)=>_sidebarScopedIdentityKey(session, identity);
   const sessionIdsFor=(session)=>{
     if(durableLineageIds instanceof Map){
       const key=scopeKeyForSession(session);
@@ -6778,7 +6796,11 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     }
     return sessionIdsInList;
   };
-  const rawSessionsById=new Map(referenceSessions.filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
+  const rawSessionsById=new Map();
+  for(const session of referenceSessions){
+    const key=session&&session.session_id&&scopedIdentityKey(session, session.session_id);
+    if(key&&!rawSessionsById.has(key)) rawSessionsById.set(key, session);
+  }
   const cleanSidebarRow=(s)=>{
     const row={...s};
     // Child-session decoration is render-derived.  Drop stale copies so an
@@ -6830,23 +6852,27 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   const attachDepthCache=new Map();
   const attachDepthFor=(session, seen=new Set())=>{
     if(!session||!session.session_id) return 0;
-    if(attachDepthCache.has(session.session_id)) return attachDepthCache.get(session.session_id);
-    if(seen.has(session.session_id)) return 0;
-    seen.add(session.session_id);
-    const parent=session.parent_session_id&&rawSessionsById.get(session.parent_session_id);
+    const sessionKey=scopedIdentityKey(session, session.session_id)||session.session_id;
+    if(attachDepthCache.has(sessionKey)) return attachDepthCache.get(sessionKey);
+    if(seen.has(sessionKey)) return 0;
+    seen.add(sessionKey);
+    const parent=session.parent_session_id&&rawSessionsById.get(scopedIdentityKey(session, session.parent_session_id));
     let depth=0;
     if(parent&&(_isChildSession(session)||(_isForkWithResolvableParent(session, sessionIdsFor(session))&&!(session&&session.pinned)))){
       depth=1+attachDepthFor(parent, seen);
     }
-    attachDepthCache.set(session.session_id, depth);
+    attachDepthCache.set(sessionKey, depth);
     return depth;
   };
   for(const row of rows){
-    if(row&&row.session_id) visibleBySid.set(row.session_id,row);
+    const rowSidKey=row&&row.session_id&&scopedIdentityKey(row, row.session_id);
+    if(rowSidKey) visibleBySid.set(rowSidKey,row);
     const lineageKey=_sidebarLineageKeyForRow(row);
-    if(lineageKey&&!visibleByLineageKey.has(lineageKey)) visibleByLineageKey.set(lineageKey,row);
+    const scopedLineageKey=lineageKey&&scopedIdentityKey(row, lineageKey);
+    if(scopedLineageKey&&!visibleByLineageKey.has(scopedLineageKey)) visibleByLineageKey.set(scopedLineageKey,row);
     for(const seg of (Array.isArray(row._lineage_segments)?row._lineage_segments:[])){
-      if(seg&&seg.session_id) visibleBySegmentSid.set(seg.session_id,{row,seg});
+      const segKey=seg&&seg.session_id&&scopedIdentityKey(row, seg.session_id);
+      if(segKey) visibleBySegmentSid.set(segKey,{row,seg});
     }
   }
   const hiddenArchivedChildTree=new Set();
@@ -6854,48 +6880,57 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   const hasHiddenArchivedAncestor=(session)=>{
     if(!session||!session.session_id||archivedRowsVisible) return false;
     const seen=new Set();
+    let current=session;
     let parentSid=session.parent_session_id;
     while(parentSid){
       if(hiddenArchivedChildTree.has(parentSid)) return true;
       if(seen.has(parentSid)) break;
       seen.add(parentSid);
-      const rawParent=rawSessionsById.get(parentSid);
+      const rawParent=rawSessionsById.get(scopedIdentityKey(current, parentSid));
       if(!rawParent) break;
       if(rawParent.archived) return true;
+      current=rawParent;
       parentSid=rawParent.parent_session_id;
     }
     return false;
   };
   const orphans=[];
-  const renderableChildIds=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
+  const renderableChildIds=new Set(
+    (rawSessions||[])
+      .map(s=>s&&s.session_id&&scopedIdentityKey(s, s.session_id))
+      .filter(Boolean)
+  );
   const attachQueueById=new Map();
   for(const candidate of [...(rawSessions||[]),...(referenceSessions||[])]){
-    if(candidate&&candidate.session_id&&!attachQueueById.has(candidate.session_id)) attachQueueById.set(candidate.session_id,candidate);
+    const candidateKey=candidate&&candidate.session_id&&(scopedIdentityKey(candidate, candidate.session_id)||candidate.session_id);
+    if(candidateKey&&!attachQueueById.has(candidateKey)) attachQueueById.set(candidateKey,candidate);
   }
   const attachQueue=[...attachQueueById.values()].sort((a,b)=>attachDepthFor(a)-attachDepthFor(b));
   for(const child of attachQueue){
-    const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
-    if(child&&child.session_id&&visibleBySid.has(child.session_id)) continue;
+    const childSidKey=child&&child.session_id&&scopedIdentityKey(child, child.session_id);
+    const childRenderable=!!(childSidKey&&renderableChildIds.has(childSidKey));
+    if(childSidKey&&visibleBySid.has(childSidKey)) continue;
     const isForkChild=_isForkWithResolvableParent(child, sessionIdsFor(child))&&!(child&&child.pinned);
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
     const parentSid=child.parent_session_id;
-    let parentRow=visibleBySid.get(parentSid);
+    let parentRow=parentSid&&visibleBySid.get(scopedIdentityKey(child, parentSid));
     let parentSegment=null;
-    if(!parentRow&&visibleBySegmentSid.has(parentSid)){
-      const resolved=visibleBySegmentSid.get(parentSid);
+    const parentSegmentKey=parentSid&&scopedIdentityKey(child, parentSid);
+    if(!parentRow&&parentSegmentKey&&visibleBySegmentSid.has(parentSegmentKey)){
+      const resolved=visibleBySegmentSid.get(parentSegmentKey);
       parentRow=resolved.row;
       parentSegment=resolved.seg;
     }
     if(!parentRow&&child._parent_lineage_tip_id){
-      parentRow=visibleBySid.get(child._parent_lineage_tip_id)||null;
+      parentRow=visibleBySid.get(scopedIdentityKey(child, child._parent_lineage_tip_id))||null;
     }
     if(!parentRow&&child._parent_lineage_root_id){
-      parentRow=visibleByLineageKey.get(child._parent_lineage_root_id)||null;
+      parentRow=visibleByLineageKey.get(scopedIdentityKey(child, child._parent_lineage_root_id))||null;
     }
     if(!parentRow){
-      parentRow=visibleByLineageKey.get(childLineageKey||parentSid)||null;
+      parentRow=visibleByLineageKey.get(scopedIdentityKey(child, childLineageKey||parentSid))||null;
     }
     if(!parentRow&&hasHiddenArchivedAncestor(child)){
       hiddenArchivedChildTree.add(child.session_id);
@@ -6932,7 +6967,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
         parentRow._child_session_count=parentRow._child_sessions.length;
       }
       bubbleSidebarState(parentRow, childCopy);
-      visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
+      const childCopyKey=childCopy&&childCopy.session_id&&scopedIdentityKey(childCopy, childCopy.session_id);
+      if(childCopyKey) visibleBySegmentSid.set(childCopyKey,{row: parentRow, seg: childCopy});
     } else if(childRenderable) {
       // #5305: a delegated subagent child whose WebUI parent is NOT a visible
       // row in this render (filtered out by the active project / profile / source
@@ -7050,6 +7086,7 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
     last_message_at:nowSec,
     updated_at:nowSec,
     profile:S.session.profile||S.activeProfile||'default',
+    profile_scope:_sessionProfileScope(S.session||{profile:S.activeProfile||'default'}),
     is_streaming:true,
   };
   if(existingIdx>=0) _allSessions[existingIdx]={..._allSessions[existingIdx],...row};
@@ -7072,6 +7109,7 @@ function _sessionRowsWithActiveEphemeralSession(rows){
     last_message_at:S.session.last_message_at||S.session.updated_at||nowSec,
     updated_at:S.session.updated_at||S.session.last_message_at||nowSec,
     profile:S.session.profile||S.activeProfile||'default',
+    profile_scope:_sessionProfileScope(S.session||{profile:S.activeProfile||'default'}),
     is_streaming:false,
   };
   return [activeRow,...rows];
@@ -7360,20 +7398,10 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, li
   const durableRows=[];
   if(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions)) durableRows.push(..._allSessions);
   durableRows.push(...referenceRows);
-  const normalizedProfileForScope=(profile)=>{
-    const name=(typeof profile==='string'&&profile.trim())?profile.trim():'default';
-    if(name==='default') return 'default';
-    if(typeof _cronProfileNameIsRootAlias==='function'&&_cronProfileNameIsRootAlias(name)) return 'default';
-    return name;
-  };
-  const scopeKeyForSession=(session)=>{
-    if(!session) return null;
-    const isCli=typeof _isCliSession==='function'
-      ? !!_isCliSession(session)
-      : !!(lineageScope&&lineageScope.isCli);
-    const project=session.project_id||'';
-    return `${isCli?'cli':'webui'}\u0000${project}\u0000${normalizedProfileForScope(session.profile)}`;
-  };
+  const scopeKeyForSession=(session)=>_sidebarLineageScopeKey(
+    session,
+    lineageScope&&typeof lineageScope.isCli==='boolean' ? lineageScope.isCli : undefined
+  );
   const durableLineageIdsByScope=new Map();
   for(const session of durableRows){
     if(!session) continue;
