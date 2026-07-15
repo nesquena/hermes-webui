@@ -82,8 +82,13 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
     assert "cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true)]," in render_body
     assert "{...lineageScope, isCli:true}).length" in render_body
     assert "function _countRenderedSidebarRowsFromRawSessions" not in SESSIONS_JS
+    assert "function _sessionProfileScope(session){" in SESSIONS_JS
+    assert "function _sidebarLineageScopeKey(session, fallbackIsCli){" in SESSIONS_JS
+    assert "function _sidebarScopedIdentityKey(session, identity, fallbackIsCli){" in SESSIONS_JS
     assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, lineageScope){" in SESSIONS_JS
     assert "const durableLineageIdsByScope=new Map();" in SESSIONS_JS
+    assert 'item["profile_scope"] = _session_list_cache_profile_scope(item.get("profile"))' in (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+    assert "session.profile_scope" in SESSIONS_JS
     assert "lineageScope&&lineageScope.profile&&session.profile&&session.profile!==lineageScope.profile" not in SESSIONS_JS
     assert "_attachChildSessionsToSidebarRows(" in SESSIONS_JS
     assert "_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, durableLineageIdsByScope)" in SESSIONS_JS

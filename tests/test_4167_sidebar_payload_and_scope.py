@@ -13,6 +13,7 @@ def test_sidebar_allowlist_preserves_read_only_and_gateway_routing():
     import api.routes as routes
 
     allow = routes._SIDEBAR_SESSION_RESPONSE_FIELDS
+    assert "profile_scope" in allow, "profile_scope dropped -> sidebar cold-path scope falls back to lazy roster"
     assert "read_only" in allow, "read_only dropped -> read-only sessions render writable"
     assert "is_read_only" in allow, "is_read_only dropped -> read-only detection misses"
     assert "gateway_routing" in allow, "gateway_routing dropped -> sidebar model label degrades"
@@ -29,11 +30,13 @@ def test_sidebar_response_item_preserves_read_only_flag():
     row = fn({
         "session_id": "s1",
         "title": "t",
+        "profile": "Renamed root",
         "read_only": True,
         "gateway_routing": {"provider": "anthropic", "model": "claude"},
         "not_allowed_field": "x",
     })
     assert row.get("read_only") is True
+    assert row.get("profile_scope") == routes._session_list_cache_profile_scope("Renamed root")
     assert row.get("gateway_routing") == {"provider": "anthropic", "model": "claude"}
     assert "not_allowed_field" not in row
 
