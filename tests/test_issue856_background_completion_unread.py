@@ -508,10 +508,11 @@ def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker()
 
     assert "if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;" in return_block
     assert "_markSessionViewed(S.session.session_id" in return_block
-    assert "_clearSessionCompletionUnread(S.session.session_id)" in return_block, (
-        "returning to a visible/focused tab must clear the explicit unread marker "
-        "for the active session the user is now viewing"
-    )
+    assert "_markSessionViewed(S.session.session_id" in return_block
+    assert "_clearSessionCompletionUnread(S.session.session_id)" not in return_block
+    # Returning to a visible/focused tab now clears via _markSessionViewed(...)
+    # (which routes through _setSessionViewedCount and respects manual-unread guard
+    # semantics).
     assert "renderSessionListFromCache()" in return_block
     assert "document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);" in MESSAGES_JS
     assert "window.addEventListener('focus', _markActiveSessionViewedOnReturn);" in MESSAGES_JS
