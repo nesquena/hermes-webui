@@ -184,7 +184,7 @@ class TestMcpSave:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_add_new_stdio_server(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {}
         h = _make_handler()
@@ -199,7 +199,7 @@ class TestMcpSave:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_add_new_http_server(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {}
         h = _make_handler()
@@ -212,7 +212,7 @@ class TestMcpSave:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_update_existing(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {'mcp_servers': {'existing': {'command': 'old'}}}
         h = _make_handler()
@@ -225,7 +225,7 @@ class TestMcpSave:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_preserves_other_servers(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {'mcp_servers': {'keep': {'command': 'stay'}}}
         h = _make_handler()
@@ -259,7 +259,7 @@ class TestMcpDelete:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_delete_existing(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {'mcp_servers': {'target': {'command': 'rm'}}}
         h = _make_handler()
@@ -269,7 +269,7 @@ class TestMcpDelete:
         saved = mock_save.call_args[0][1]
         assert 'target' not in saved.get('mcp_servers', {})
 
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_delete_nonexistent(self, mock_cfg):
         mock_cfg.return_value = {'mcp_servers': {}}
         h = _make_handler()
@@ -281,7 +281,7 @@ class TestMcpDelete:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_preserves_others(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {'mcp_servers': {'a': {'c': '1'}, 'b': {'c': '2'}}}
         h = _make_handler()
@@ -370,7 +370,7 @@ class TestMcpToggle:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_disable_server(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {'mcp_servers': {'myserver': {'command': 'run'}}}
         h = _make_handler()
@@ -384,7 +384,7 @@ class TestMcpToggle:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_enable_server(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {'mcp_servers': {'myserver': {'command': 'run', 'enabled': False}}}
         h = _make_handler()
@@ -393,7 +393,7 @@ class TestMcpToggle:
         saved = mock_save.call_args[0][1]
         assert saved['mcp_servers']['myserver']['enabled'] is True
 
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_nonexistent_server_returns_404(self, mock_cfg):
         mock_cfg.return_value = {'mcp_servers': {}}
         h = _make_handler()
@@ -419,7 +419,7 @@ class TestMcpToggle:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_response_payload(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {'mcp_servers': {'srv': {'url': 'http://localhost'}}}
         h = _make_handler()
@@ -432,7 +432,7 @@ class TestMcpToggle:
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
-    @patch('api.routes.get_config')
+    @patch('api.routes._load_yaml_config_file')
     def test_url_encoded_name(self, mock_cfg, mock_path, mock_save, mock_reload):
         """Names with special characters must be URL-decoded."""
         mock_cfg.return_value = {'mcp_servers': {'my server': {'command': 'x'}}}

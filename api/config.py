@@ -485,7 +485,17 @@ def get_config() -> dict:
 
 
 def get_config_snapshot() -> dict:
-    """Return a request-owned config snapshot captured under the cache lock."""
+    """Return a detached snapshot of the active profile config.
+
+    ``get_config()`` intentionally exposes the historical process-global dict
+    because a few legacy callers still install in-memory overrides through it.
+    Request handlers must not retain that live object: a concurrent request for
+    another profile can reload the cache in place and change the first
+    request's data after it has already been returned.  Resolve staleness and
+    copy while holding the same lock used by reloads so the snapshot represents
+    one complete profile config.
+    """
+    global cfg
     with _cfg_lock:
         config_path = _get_config_path()
         try:
@@ -494,13 +504,17 @@ def get_config_snapshot() -> dict:
             current_mtime = 0.0
         path_changed = _cfg_path != config_path
         mtime_stale = current_mtime != _cfg_mtime
-        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+        if not _cfg_cache or path_changed or (
+            mtime_stale and not _cfg_has_in_memory_overrides()
+        ):
             _refresh_config_cache(config_path)
+            if path_changed:
+                cfg = _cfg_cache
         try:
-            active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
+            source = cfg if cfg is not _cfg_cache else _cfg_cache
         except NameError:
-            active_cfg = _cfg_cache
-        return copy.deepcopy(active_cfg)
+            source = _cfg_cache
+        return copy.deepcopy(source)
 
 
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
@@ -711,33 +725,34 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     This helper reads the config for a *known* profile home directly off disk,
     bypassing the thread-local resolver entirely. When ``profile_home`` matches
     the path the ambient resolver would pick (the common single-profile case),
-    we return the cached ``get_config()`` to preserve in-memory overrides used
-    by tests and runtime callers. Only when the session's profile home diverges
-    from the ambient path do we read the session profile's file directly — a
-    pure read with no global cache mutation, so it is race-free across
-    concurrent sessions on different profiles.
+    we return a detached snapshot of the ambient config to preserve in-memory
+    overrides used by tests and runtime callers without exposing the mutable
+    process-global cache. Only when the session's profile home diverges from
+    the ambient path do we read the session profile's file directly — a pure
+    read with no global cache mutation.
     """
     if not profile_home:
-        return get_config()
+        return get_config_snapshot()
     try:
         target = Path(profile_home).expanduser()
     except Exception:
-        return get_config()
+        return get_config_snapshot()
     try:
         from api.profiles import get_active_hermes_home
 
         if Path(get_active_hermes_home()).expanduser() == target:
-            return get_config()
+            return get_config_snapshot()
     except Exception:
         pass
     # If the ambient resolver already points at this profile home, defer to
-    # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
-    # MUST run before the nonexistent-home guard below: a matching ambient home
+    # the ambient snapshot so in-memory overrides (monkeypatched cfg) are
+    # honored. This short-circuit MUST run before the nonexistent-home guard
+    # below: a matching ambient home
     # whose directory doesn't physically exist yet (fresh install, monkeypatched
     # cfg) must still resolve through get_config(), not return {} (#4516 gate).
     try:
         if _get_config_path().parent == target:
-            return get_config()
+            return get_config_snapshot()
     except Exception:
         pass
     if not target.exists():
@@ -1102,7 +1117,7 @@ def _resolve_cli_toolsets(cfg=None):
     """Resolve CLI toolsets using the agent's _get_platform_tools() so that
     MCP server toolsets are automatically included, matching CLI behaviour."""
     if cfg is None:
-        cfg = get_config()
+        cfg = get_config_snapshot()
     try:
         from hermes_cli.tools_config import _get_platform_tools
         return _normalize_cli_toolsets(_get_platform_tools(cfg, "cli"))
@@ -2576,7 +2591,7 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     return bare_model, provider_hint
 
 
-def _get_provider_base_url(provider_id):
+def _get_provider_base_url(provider_id, *, config_data: dict | None = None):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
     Checks two locations, in order:
@@ -2589,11 +2604,12 @@ def _get_provider_base_url(provider_id):
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    prov_cfg = _get_provider_cfg(provider_id, config_data=active_cfg)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    model_cfg = cfg.get("model", {}) or {}
+    model_cfg = active_cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
@@ -2603,13 +2619,14 @@ def _get_provider_base_url(provider_id):
     return None
 
 
-def _get_providers_cfg() -> dict:
-    providers_cfg = cfg.get("providers")
+def _get_providers_cfg(*, config_data: dict | None = None) -> dict:
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    providers_cfg = active_cfg.get("providers")
     return providers_cfg if isinstance(providers_cfg, dict) else {}
 
 
-def _get_provider_cfg(provider_id) -> dict:
-    provider_cfg = _get_providers_cfg().get(provider_id, {})
+def _get_provider_cfg(provider_id, *, config_data: dict | None = None) -> dict:
+    provider_cfg = _get_providers_cfg(config_data=config_data).get(provider_id, {})
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
@@ -5152,19 +5169,22 @@ def _configured_model_badges_from_static_catalog(
     return badges
 
 
-def _minimal_static_models_catalog() -> dict:
+def _minimal_static_models_catalog(config_data: dict | None = None) -> dict:
     """Return the emergency one-model fallback for /api/models."""
     try:
+        active_cfg = (
+            config_data if isinstance(config_data, dict) else get_config_snapshot()
+        )
         active_provider = None
         cfg_base_url = ""
-        model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+        model_cfg = active_cfg.get("model", {}) if isinstance(active_cfg, dict) else {}
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
-                    active_provider, cfg, base_url=cfg_base_url
+                    active_provider, active_cfg, base_url=cfg_base_url
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -5175,13 +5195,13 @@ def _minimal_static_models_catalog() -> dict:
                     _store = json.loads(_ap.read_text(encoding="utf-8"))
                     active_provider = (
                         _resolve_configured_provider_id(
-                            _store.get("active_provider"), cfg, base_url=cfg_base_url
+                            _store.get("active_provider"), active_cfg, base_url=cfg_base_url
                         )
                         or None
                     )
             except Exception:
                 pass
-        default_model = get_effective_default_model(cfg)
+        default_model = get_effective_default_model(active_cfg)
         groups: list[dict] = []
         if default_model:
             try:
@@ -5213,8 +5233,11 @@ def _minimal_static_models_catalog() -> dict:
         }
 
 
-def _static_models_catalog_without_live_probes() -> dict:
+def _static_models_catalog_without_live_probes(
+    config_data: dict | None = None,
+) -> dict:
     """Return a network-free /api/models catalog from local config/auth only."""
+    cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
     try:
         from api.providers import _provider_has_key
 
@@ -5257,7 +5280,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         named_custom_groups: dict[str, dict[str, object]] = {}
         custom_group_models: list[dict] = []
         canonical_to_raw_provider_key: dict[str, str] = {}
-        providers_cfg = _get_providers_cfg()
+        providers_cfg = _get_providers_cfg(config_data=cfg)
 
         def _append_model_id(provider_id: str | None, model_id: object) -> None:
             pid = _canonicalise_provider_id(provider_id)
@@ -5319,7 +5342,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         for provider_id in set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY):
             canonical = _canonicalise_provider_id(provider_id)
-            if canonical and _provider_has_key(canonical):
+            if canonical and _provider_has_key(canonical, cfg):
                 detected_providers.add(canonical)
 
         # Plugin-only providers (e.g. 9router) are not in the static
@@ -5331,7 +5354,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         # group when the live-rebuild cache is cold.
         try:
             for _plugin_pid in list(_plugin_model_provider_profiles().keys()):
-                if not _plugin_pid or not _provider_has_key(_plugin_pid):
+                if not _plugin_pid or not _provider_has_key(_plugin_pid, cfg):
                     continue
                 _canonical = _canonicalise_provider_id(_plugin_pid) or _plugin_pid
                 if _canonical:
@@ -5558,7 +5581,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             pass
 
         if not groups and default_model:
-            return copy.deepcopy(_minimal_static_models_catalog())
+            return copy.deepcopy(_minimal_static_models_catalog(config_data=cfg))
 
         return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
@@ -5573,7 +5596,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         })
     except Exception:
         logger.debug("static models catalog build failed", exc_info=True)
-        return copy.deepcopy(_minimal_static_models_catalog())
+        return copy.deepcopy(_minimal_static_models_catalog(config_data=cfg))
 
 # Cache for credential pool results -- calling load_pool() per-provider per-server
 # session is expensive (~10s for zai due to endpoint probing).  The credential pool
@@ -6530,6 +6553,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     mtime_stale = _current_mtime != _cfg_mtime
     if path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
         reload_config_if_stale()
+    # The builder performs a long sequence of config reads and may continue on
+    # a detached worker. Keep one immutable profile snapshot for the complete
+    # catalog so another profile reload cannot change it mid-build (#5619).
+    cfg = get_config_snapshot()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
@@ -7715,8 +7742,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         # `cfg["providers"]["lmstudio"]["base_url"]` or
                         # `cfg["model"]["base_url"]` (via _get_provider_base_url),
                         # so the historical model-block config shape still works.
-                        lm_cfg = _get_provider_cfg("lmstudio")
-                        lm_base_url = _get_provider_base_url("lmstudio") or ""
+                        lm_cfg = _get_provider_cfg("lmstudio", config_data=cfg)
+                        lm_base_url = (
+                            _get_provider_base_url("lmstudio", config_data=cfg) or ""
+                        )
                         lm_api_key = str(lm_cfg.get("api_key") or "").strip()
                         if lm_base_url:
                             headers = {"User-Agent": "OpenAI/Python 1.0"}
@@ -7750,7 +7779,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # (#2245).  Fall back to the canonical pid for providers
                     # that appear in _PROVIDER_MODELS but not in cfg.
                     _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
-                    provider_cfg = _get_provider_cfg(_raw_key)
+                    provider_cfg = _get_provider_cfg(_raw_key, config_data=cfg)
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
@@ -8038,7 +8067,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if force_refresh and _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
                 if stale_disk_groups is not None:
                     return copy.deepcopy(stale_disk_groups)
-                return copy.deepcopy(_static_models_catalog_without_live_probes())
+                return copy.deepcopy(
+                    _static_models_catalog_without_live_probes(config_data=cfg)
+                )
 
         # Reload config if changed
         if _cfg_changed:
@@ -8091,7 +8122,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if _cache_build_in_progress and _LIVE_REBUILD_BUDGET_SECONDS > 0:
                 if stale_disk_groups is not None:
                     return copy.deepcopy(stale_disk_groups)
-                return copy.deepcopy(_static_models_catalog_without_live_probes())
+                return copy.deepcopy(
+                    _static_models_catalog_without_live_probes(config_data=cfg)
+                )
 
         # Cold path: disk cache hit — use it (fast, no lock contention)
         if disk_groups is not None and not force_refresh:
@@ -8121,7 +8154,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # prematurely release that rebuild's serialization, waking waiters
             # to an empty cache and triggering a second live rebuild. Just
             # serve the network-free minimal catalog and leave the flag alone.
-            return copy.deepcopy(_minimal_static_models_catalog())
+            return copy.deepcopy(_minimal_static_models_catalog(config_data=cfg))
 
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
@@ -8325,7 +8358,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # does not extend the lock hold while the worker is ready to publish.
         if stale_disk_groups is not None:
             return copy.deepcopy(stale_disk_groups)
-        return copy.deepcopy(_static_models_catalog_without_live_probes())
+        return copy.deepcopy(
+            _static_models_catalog_without_live_probes(config_data=cfg)
+        )
 
 
 def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
@@ -9464,9 +9499,10 @@ def load_settings() -> dict:
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
-    settings["default_model"] = get_effective_default_model()
+    config_snapshot = get_config_snapshot()
+    settings["default_model"] = get_effective_default_model(config_snapshot)
     try:
-        model_cfg = get_config().get("model", {})
+        model_cfg = config_snapshot.get("model", {})
         if isinstance(model_cfg, dict) and model_cfg.get("provider"):
             settings["default_model_provider"] = str(model_cfg.get("provider"))
     except Exception:

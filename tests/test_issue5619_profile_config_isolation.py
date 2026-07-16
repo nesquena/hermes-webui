@@ -1,0 +1,279 @@
+"""Regression coverage for issue #5619 profile config cross-contamination."""
+
+from __future__ import annotations
+
+import copy
+import json
+import os
+import threading
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+import yaml
+
+
+def _write_config(home, *, provider: str, mcp_server: str) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    home.joinpath("config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {"provider": provider, "default": f"{provider}-model"},
+                "providers": {provider: {"api_key": f"{provider}-key"}},
+                "mcp_servers": {mcp_server: {"command": f"run-{mcp_server}"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _handler():
+    handler = MagicMock()
+    handler.path = "/api/mcp/servers"
+    handler.command = "GET"
+    return handler
+
+
+def _payload(handler) -> dict:
+    body = handler.wfile.write.call_args[0][0]
+    return json.loads(body.decode("utf-8"))
+
+
+@pytest.fixture
+def profile_config_harness(tmp_path, monkeypatch):
+    from api import config, routes
+
+    default_home = tmp_path / "default"
+    work_home = tmp_path / "profiles" / "work"
+    _write_config(default_home, provider="default-provider", mcp_server="default-mcp")
+    _write_config(work_home, provider="work-provider", mcp_server="work-mcp")
+    shared_mtime = 1_700_000_000
+    os.utime(default_home / "config.yaml", (shared_mtime, shared_mtime))
+    os.utime(work_home / "config.yaml", (shared_mtime, shared_mtime))
+
+    request_scope = threading.local()
+
+    def active_home():
+        return work_home if getattr(request_scope, "profile", "default") == "work" else default_home
+
+    def active_config_path():
+        return active_home() / "config.yaml"
+
+    original_cache = copy.deepcopy(config._cfg_cache)
+    original_mtime = config._cfg_mtime
+    original_path = config._cfg_path
+    original_fingerprint = config._cfg_fingerprint
+    original_cfg_rebound = config.cfg is not config._cfg_cache
+    original_cfg = copy.deepcopy(config.cfg)
+
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.setattr(config, "_get_config_path", active_config_path)
+    monkeypatch.setattr(routes, "_get_config_path", active_config_path)
+    monkeypatch.setattr(routes, "get_active_hermes_home", active_home)
+    request_scope.profile = "default"
+    config.reload_config()
+
+    yield SimpleNamespace(
+        config=config,
+        routes=routes,
+        request_scope=request_scope,
+        default_home=default_home,
+        work_home=work_home,
+    )
+
+    with config._cfg_lock:
+        config._cfg_cache.clear()
+        config._cfg_cache.update(original_cache)
+        config._cfg_mtime = original_mtime
+        config._cfg_path = original_path
+        config._cfg_fingerprint = original_fingerprint
+        config.cfg = copy.deepcopy(original_cfg) if original_cfg_rebound else config._cfg_cache
+
+
+def _reload_default_in_other_thread(harness) -> None:
+    errors = []
+
+    def reload_default():
+        try:
+            harness.request_scope.profile = "default"
+            harness.config.reload_config()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    thread = threading.Thread(target=reload_default)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not errors
+
+
+def test_mcp_list_keeps_work_profile_snapshot_during_default_reload(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    routes = harness.routes
+    harness.request_scope.profile = "work"
+    original_get = routes.get_config_for_profile_home
+
+    def get_then_reload(profile_home):
+        config_data = original_get(profile_home)
+        _reload_default_in_other_thread(harness)
+        return config_data
+
+    monkeypatch.setattr(routes, "get_config_for_profile_home", get_then_reload)
+    monkeypatch.setattr(routes, "_mcp_runtime_status_by_name", lambda: {})
+
+    handler = _handler()
+    routes._handle_mcp_servers_list(handler)
+
+    assert [row["name"] for row in _payload(handler)["servers"]] == ["work-mcp"]
+
+
+def test_provider_catalog_keeps_work_profile_snapshot_during_default_reload(
+    profile_config_harness, monkeypatch
+):
+    from api import providers
+
+    harness = profile_config_harness
+    harness.request_scope.profile = "work"
+    original_get = providers.get_config
+
+    def get_then_reload():
+        config_data = original_get()
+        _reload_default_in_other_thread(harness)
+        return config_data
+
+    monkeypatch.setattr(providers, "get_config", get_then_reload)
+
+    result = providers.get_providers()
+    provider_ids = {row["id"] for row in result["providers"]}
+
+    assert result["active_provider"] == "work-provider"
+    assert "work-provider" in provider_ids
+    assert "default-provider" not in provider_ids
+
+
+def test_model_picker_keeps_work_profile_snapshot_during_default_reload(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    config = harness.config
+    harness.request_scope.profile = "work"
+    original_get = config.get_config_snapshot
+
+    def get_then_reload():
+        config_data = original_get()
+        _reload_default_in_other_thread(harness)
+        return config_data
+
+    monkeypatch.setattr(config, "get_config_snapshot", get_then_reload)
+    monkeypatch.setattr(config, "_available_models_cache", None)
+    monkeypatch.setattr(config, "_available_models_cache_ts", 0.0)
+    monkeypatch.setattr(config, "_available_models_cache_source_fingerprint", None)
+    monkeypatch.setattr(config, "_models_cache_provenance", None)
+    monkeypatch.setattr(config, "_cache_build_in_progress", False)
+    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(config, "_load_stale_models_cache_from_disk", lambda: None)
+    for env_name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(env_name, raising=False)
+
+    result = config.get_available_models(prefer_cache=True)
+
+    assert result["active_provider"] == "work-provider"
+    assert result["default_model"] == "work-provider-model"
+
+
+def test_settings_default_model_uses_one_profile_snapshot(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    config = harness.config
+    harness.request_scope.profile = "work"
+    original_get = config.get_config_snapshot
+
+    def get_then_reload():
+        config_data = original_get()
+        _reload_default_in_other_thread(harness)
+        return config_data
+
+    monkeypatch.setattr(config, "get_config_snapshot", get_then_reload)
+    monkeypatch.setattr(config, "_read_raw_settings_file", lambda: {})
+    for env_name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        monkeypatch.delenv(env_name, raising=False)
+
+    settings = config.load_settings()
+
+    assert settings["default_model"] == "work-provider-model"
+    assert settings["default_model_provider"] == "work-provider"
+
+
+def test_mcp_write_holds_profile_config_lock_through_save(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    routes = harness.routes
+    entered_save = threading.Event()
+    release_save = threading.Event()
+    reload_attempted = threading.Event()
+    reload_finished = threading.Event()
+    errors = []
+    original_save = routes._save_yaml_config_file
+
+    def paused_save(path, config_data):
+        if path == harness.work_home / "config.yaml":
+            entered_save.set()
+            assert release_save.wait(timeout=5)
+        return original_save(path, config_data)
+
+    monkeypatch.setattr(routes, "_save_yaml_config_file", paused_save)
+
+    def update_work():
+        try:
+            harness.request_scope.profile = "work"
+            handler = _handler()
+            handler.command = "PUT"
+            routes._handle_mcp_server_update(
+                handler,
+                "new-work-mcp",
+                {"command": "run-new-work-mcp"},
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    def reload_default():
+        try:
+            assert entered_save.wait(timeout=5)
+            harness.request_scope.profile = "default"
+            reload_attempted.set()
+            harness.config.reload_config()
+            reload_finished.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    update_thread = threading.Thread(target=update_work)
+    reload_thread = threading.Thread(target=reload_default)
+    update_thread.start()
+    reload_thread.start()
+
+    assert entered_save.wait(timeout=5)
+    assert reload_attempted.wait(timeout=5)
+    assert not reload_finished.wait(timeout=0.1)
+    release_save.set()
+    update_thread.join(timeout=5)
+    reload_thread.join(timeout=5)
+
+    assert not update_thread.is_alive()
+    assert not reload_thread.is_alive()
+    assert not errors
+
+    work_config = yaml.safe_load(
+        harness.work_home.joinpath("config.yaml").read_text(encoding="utf-8")
+    )
+    default_config = yaml.safe_load(
+        harness.default_home.joinpath("config.yaml").read_text(encoding="utf-8")
+    )
+    assert work_config["model"]["provider"] == "work-provider"
+    assert "new-work-mcp" in work_config["mcp_servers"]
+    assert default_config["model"]["provider"] == "default-provider"
+    assert "new-work-mcp" not in default_config["mcp_servers"]

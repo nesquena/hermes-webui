@@ -44,7 +44,7 @@ from api.config import (
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
     _thread_local_env_value,
-    get_config,
+    get_config_snapshot as get_config,
     invalidate_models_cache,
     reload_config,
 )
@@ -55,6 +55,8 @@ from api.plugin_providers import (
     plugin_model_provider_ids,
 )
 
+# Provider surfaces are read-only. Keep the established local ``get_config``
+# seam for focused tests while binding it to a detached per-request snapshot.
 logger = logging.getLogger(__name__)
 
 
@@ -1097,7 +1099,10 @@ def _provider_value_counts_as_api_key(provider_id: str, value: object) -> bool:
     return True
 
 
-def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
+def _provider_has_shadowed_codex_oauth_value(
+    provider_id: str,
+    config_data: dict | None = None,
+) -> bool:
     """True when the bare OpenAI credential slot contains only a Codex OAuth JWT.
 
     Users who authenticate Codex can end up with a ChatGPT/Codex JWT in a
@@ -1118,7 +1123,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
             values.append(env_values.get(alias))
             values.append(_thread_local_env_value(alias))
 
-    cfg = get_config()
+    cfg = config_data if isinstance(config_data, dict) else get_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         active_provider = str(model_cfg.get("provider") or "").strip().lower()
@@ -1239,7 +1244,7 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             pass
 
 
-def _provider_has_key(provider_id: str) -> bool:
+def _provider_has_key(provider_id: str, config_data: dict | None = None) -> bool:
     """Check whether a provider has a configured API key.
 
     Checks (in order):
@@ -1281,7 +1286,7 @@ def _provider_has_key(provider_id: str) -> bool:
     except ImportError:
         pass
 
-    cfg = get_config()
+    cfg = config_data if isinstance(config_data, dict) else get_config()
     # Check model.api_key — only match if this provider is the active one.
     # Previously this checked globally, causing all providers to show
     # "configured" when the active provider had a top-level api_key.
@@ -2553,7 +2558,7 @@ def get_providers() -> dict[str, Any]:
     for pid in sorted(known_ids):
         display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
         is_oauth = _provider_is_oauth(pid)
-        has_key = _provider_has_key(pid)
+        has_key = _provider_has_key(pid, cfg)
         plugin_auth_status: dict[str, Any] | None = None
         if not has_key and is_plugin_model_provider(pid):
             try:
@@ -2660,7 +2665,11 @@ def get_providers() -> dict[str, Any]:
                 except Exception:
                     pass
 
-        if pid == "openai" and not has_key and _provider_has_shadowed_codex_oauth_value(pid):
+        if (
+            pid == "openai"
+            and not has_key
+            and _provider_has_shadowed_codex_oauth_value(pid, cfg)
+        ):
             continue
 
         models = list(_PROVIDER_MODELS.get(pid, []))
@@ -2769,7 +2778,11 @@ def get_providers() -> dict[str, Any]:
         is_self_hosted = pid in _SELF_HOSTED_PROVIDER_IDS
         try:
             from api.config import _get_provider_base_url
-            provider_base_url = _get_provider_base_url(pid) if is_self_hosted else None
+            provider_base_url = (
+                _get_provider_base_url(pid, config_data=cfg)
+                if is_self_hosted
+                else None
+            )
         except Exception:
             provider_base_url = None
         _is_plugin = is_plugin_model_provider(pid)
