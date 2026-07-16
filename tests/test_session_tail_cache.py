@@ -1,6 +1,7 @@
 import gc
 import hashlib
 import json
+import logging
 import os
 import stat
 import threading
@@ -201,6 +202,171 @@ def test_save_is_fail_open_when_tail_cache_write_fails(isolated_session_store, m
     session.save(skip_index=True)
 
     assert json.loads(session.path.read_bytes())["messages"] == session.messages
+
+
+def _backup_shrink_remaining_files(root):
+    return sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+        if path.is_file()
+    )
+
+
+def _backup_warning_records(caplog, session_id):
+    return [
+        record
+        for record in caplog.records
+        if record.name == "api.models"
+        and record.levelno >= logging.WARNING
+        and "backup" in record.getMessage().lower()
+        and session_id in record.getMessage()
+    ]
+
+
+def test_shrink_save_survives_backup_publication_oserror(
+    isolated_session_store, monkeypatch, caplog
+):
+    session = Session(
+        session_id="shrink_backup_besteffort",
+        messages=[_message(index) for index in range(4)],
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+    authoritative_before = session.path.read_bytes()
+    assert len(json.loads(authoritative_before)["messages"]) == 4
+    session.messages = session.messages[:2]
+
+    original_safe_replace = models._safe_replace
+
+    def fail_backup_replace(src, dst):
+        if Path(dst).name.endswith(".json.bak"):
+            raise OSError("injected backup publication failure")
+        return original_safe_replace(src, dst)
+
+    monkeypatch.setattr(models, "_safe_replace", fail_backup_replace)
+    caplog.set_level(logging.DEBUG, logger="api.models")
+
+    # A backup-publication OSError is best-effort: the authoritative shrink
+    # save must still land the requested two messages without raising.
+    session.save(touch_updated_at=False, skip_index=True)
+
+    authoritative_after = json.loads(session.path.read_bytes())
+    assert authoritative_after["messages"] == session.messages
+    assert len(authoritative_after["messages"]) == 2
+    assert session.path.read_bytes() != authoritative_before
+
+    remaining = _backup_shrink_remaining_files(isolated_session_store)
+    assert not any(".bak.tmp." in name for name in remaining), remaining
+    assert not any(
+        ".tmp." in name and ".bak.tmp." not in name for name in remaining
+    ), remaining
+    assert not session.path.with_suffix(".json.bak").exists()
+
+    backup_warnings = _backup_warning_records(caplog, session.session_id)
+    assert backup_warnings, [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "api.models"
+    ]
+    assert any(record.exc_info for record in backup_warnings)
+
+
+def test_shrink_save_survives_backup_temp_cleanup_error(
+    isolated_session_store, monkeypatch, caplog
+):
+    session = Session(
+        session_id="shrink_backup_cleanup_besteffort",
+        messages=[_message(index) for index in range(4)],
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+    session.messages = session.messages[:2]
+
+    original_safe_replace = models._safe_replace
+    original_bound_unlink = models._bound_unlink
+
+    def fail_backup_replace(src, dst):
+        if Path(dst).name.endswith(".json.bak"):
+            raise OSError("injected backup publication failure")
+        return original_safe_replace(src, dst)
+
+    def fail_backup_temp_unlink(path, *, missing_ok=False):
+        if ".bak.tmp." in Path(path).name:
+            raise OSError("injected backup temp cleanup failure")
+        return original_bound_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(models, "_safe_replace", fail_backup_replace)
+    monkeypatch.setattr(models, "_bound_unlink", fail_backup_temp_unlink)
+    caplog.set_level(logging.DEBUG, logger="api.models")
+
+    # Even when best-effort backup-temp cleanup itself fails, the authoritative
+    # two-message save must complete and the original backup error must survive.
+    session.save(touch_updated_at=False, skip_index=True)
+
+    authoritative_after = json.loads(session.path.read_bytes())
+    assert authoritative_after["messages"] == session.messages
+    assert len(authoritative_after["messages"]) == 2
+
+    backup_error_records = [
+        record
+        for record in _backup_warning_records(caplog, session.session_id)
+        if record.exc_info
+    ]
+    assert backup_error_records, [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "api.models"
+    ]
+    # The cleanup failure may add a debug record but must not erase the
+    # authoritative backup-failure warning that came first.
+    assert "injected backup publication failure" in "".join(
+        record.getMessage()
+        + ("".join(map(str, record.exc_info)) if record.exc_info else "")
+        for record in backup_error_records
+    ) or any(
+        record.exc_info and record.exc_info[1] is not None
+        for record in backup_error_records
+    )
+
+
+def test_authoritative_publication_oserror_remains_fatal_after_backup_failure(
+    isolated_session_store, monkeypatch, caplog
+):
+    session = Session(
+        session_id="authoritative_still_fatal",
+        messages=[_message(index) for index in range(4)],
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+    authoritative_before = session.path.read_bytes()
+    assert len(json.loads(authoritative_before)["messages"]) == 4
+    session.messages = session.messages[:2]
+
+    original_safe_replace = models._safe_replace
+
+    def fail_both_replacements(src, dst):
+        name = Path(dst).name
+        if name.endswith(".json.bak"):
+            raise OSError("injected backup publication failure")
+        if name.endswith(".json"):
+            raise OSError("injected authoritative publication failure")
+        return original_safe_replace(src, dst)
+
+    monkeypatch.setattr(models, "_safe_replace", fail_both_replacements)
+    caplog.set_level(logging.DEBUG, logger="api.models")
+
+    # The best-effort backup must never swallow an authoritative publication
+    # error: the second, authoritative OSError has to propagate.
+    with pytest.raises(OSError, match="injected authoritative publication failure"):
+        session.save(touch_updated_at=False, skip_index=True)
+
+    assert session.path.read_bytes() == authoritative_before
+    assert len(json.loads(session.path.read_bytes())["messages"]) == 4
+
+    remaining = _backup_shrink_remaining_files(isolated_session_store)
+    assert not any(".bak.tmp." in name for name in remaining), remaining
+    assert not any(
+        ".tmp." in name and ".bak.tmp." not in name for name in remaining
+    ), remaining
+
+    assert _backup_warning_records(caplog, session.session_id)
 
 
 def test_save_publishes_cache_only_after_source_reaches_threshold(

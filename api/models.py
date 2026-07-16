@@ -1948,12 +1948,31 @@ class Session:
                         bf.flush()
                         os.fsync(bf.fileno())
                     _safe_replace(bak_tmp, bak_path)
-                except Exception:
+                except OSError:
+                    # The pre-shrink backup is a best-effort recovery aid, not
+                    # part of the authoritative save transaction. A backup-side
+                    # disk failure (OSError) must never abort the authoritative
+                    # shrink write below, so log it with the exception and fall
+                    # through to the authoritative block. Only OSError is
+                    # normalized here: a programming/type error is not a disk
+                    # failure and must still surface.
+                    logger.warning(
+                        "session %s pre-shrink backup publication failed; "
+                        "continuing best-effort with authoritative save",
+                        self.session_id,
+                        exc_info=True,
+                    )
+                    # Clean up the temp so a partial backup can't masquerade as a
+                    # recoverable source. Cleanup is itself best-effort and must
+                    # not replace or erase the original backup-failure warning.
                     try:
                         _bound_unlink(bak_tmp, missing_ok=True)
                     except Exception:
-                        pass
-                    raise
+                        logger.debug(
+                            "session %s pre-shrink backup temp cleanup failed",
+                            self.session_id,
+                            exc_info=True,
+                        )
 
         tmp = sidecar_path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
