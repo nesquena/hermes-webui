@@ -16202,7 +16202,7 @@ def handle_post(handler, parsed) -> bool:
         )
         if not proj:
             return bad(handler, "Project not found", 404)
-        if not _profiles_match(proj.get("profile"), requested_profile):
+        if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
         proj["name"] = body["name"].strip()[:128]
         if "color" in body:
@@ -16233,7 +16233,7 @@ def handle_post(handler, parsed) -> bool:
         )
         if not proj:
             return bad(handler, "Project not found", 404)
-        if not _profiles_match(proj.get("profile"), requested_profile):
+        if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
         projects = [
             p for p in projects
