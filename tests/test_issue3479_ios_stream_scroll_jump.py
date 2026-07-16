@@ -186,7 +186,10 @@ console.log(JSON.stringify({{threw,minHeight:inner.style.minHeight,token:inner.d
 
 def test_delayed_settle_restore_yields_to_fresh_user_scroll():
     # Maintainer gate: if the reader keeps scrolling during the two-frame settle
-    # window, the delayed release must NOT snap them back to the pre-render anchor.
+    # window, the delayed release must NOT snap them back to the pre-render anchor —
+    # and it must not be fooled by _programmaticScroll (which the sync compensation
+    # sets true for the whole window). The render below is a REAL one that measures a
+    # shifted row and latches _programmaticScroll=true, exercising the true window.
     helpers = "\n".join(
         _function_body(UI_JS, name)
         for name in (
@@ -195,12 +198,18 @@ def test_delayed_settle_restore_yields_to_fresh_user_scroll():
             "_compensateScrollForMeasurementDelta",
         )
     )
-    # rafQueue lets the test interleave a user scroll between the two rAF frames.
-    source = f"""
+    # scenario: "before" moves scrollTop BEFORE frame one; "between" moves it between
+    # the two frames; "still" never moves. rafQueue lets us interleave the user scroll.
+    def _run(scenario):
+        return f"""
 const rafQueue=[];
 function requestAnimationFrame(cb){{ rafQueue.push(cb); return rafQueue.length; }}
-function _deferClearProgrammaticScroll(){{}}
+let _programmaticScrollResetTimer=0;
+function clearTimeout(){{}}
+function setTimeout(cb){{ if(typeof cb==='function') cb(); return 1; }}
+function _deferClearProgrammaticScroll(){{ _programmaticScroll=false; }}
 let _programmaticScroll=false;
+let _programmaticScrollSetAt=0;
 let _lastScrollTop=0;
 let _messageUserUnpinned=true;
 let _wipeGuardSeq=0;
@@ -209,39 +218,39 @@ function _restoreMessageViewportAnchor(a){{ restoredAnchor=a; container.scrollTo
 const container={{
   scrollTop:200,scrollHeight:5000,clientHeight:800,
   classList:{{add(){{}},remove(){{}}}},
-  querySelector:()=>null,
   getBoundingClientRect:()=>({{top:0}}),
+  querySelector:(sel)=>rowEl,
 }};
+// A measured row whose top matches the captured anchor offset, so the sync
+// compensation runs its real branch (sets _programmaticScroll=true) with delta 0
+// — i.e. it does NOT itself move scrollTop, isolating user movement.
+const rowEl={{ getBoundingClientRect:()=>({{top:0}}), style:{{height:'0'}} }};
 const inner={{scrollHeight:5000,style:{{minHeight:'17px'}},dataset:{{}}}};
 function $(id){{return id==='messages'?container:inner;}}
 function _captureMessageViewportAnchor(){{return {{rawIdx:5,sessionIdx:5,topOffset:0,topPadBefore:0}};}}
 {helpers}
-// Run the compensation. renderFn does nothing (no measured shift) so the
-// synchronous compensation leaves scrollTop where it started (200).
-_compensateScrollForMeasurementDelta(()=>{{}});
-// Frame 1: fires the outer rAF, which snapshots expectedTop (200) and queues frame 2.
-rafQueue.shift()();
-// USER SCROLLS during the window: 200 -> 260.
-container.scrollTop=260;
-// Frame 2: the settle release runs. It must see the divergence and NOT restore.
-rafQueue.shift()();
-const movedResult={{scrollTop:container.scrollTop, restoredAnchor:restoredAnchor!==null}};
-
-// Control: same flow but the reader does NOT move — the anchor restore must run.
-restoredAnchor=null;
-inner.style.minHeight='17px'; delete inner.dataset.wipeGuardToken; delete inner.dataset.wipeGuardPrevMinHeight;
-container.scrollTop=200;
-_compensateScrollForMeasurementDelta(()=>{{}});
-rafQueue.shift()();
-rafQueue.shift()();
-const stillResult={{scrollTop:container.scrollTop, restoredAnchor:restoredAnchor!==null}};
-console.log(JSON.stringify({{moved:movedResult, still:stillResult}}));
+// A real render that latches _programmaticScroll for the whole window.
+function realRender(){{ _programmaticScroll=true; _programmaticScrollSetAt=1; }}
+_compensateScrollForMeasurementDelta(realRender);
+// "before" = user scrolls AFTER sync compensation settles but BEFORE frame one
+// (the window the old baseline-inside-frame-one capture missed).
+{'container.scrollTop=260;' if scenario=='before' else ''}
+rafQueue.shift()();   // frame 1
+{'container.scrollTop=260;' if scenario=='between' else ''}
+rafQueue.shift()();   // frame 2 -> release
+console.log(JSON.stringify({{scrollTop:container.scrollTop, restored:restoredAnchor!==null, prog:_programmaticScroll}}));
 """
-    result = _run_node(source)
-    # Reader moved: restore must be skipped, fresh position (260) preserved.
-    assert result["moved"] == {"scrollTop": 260, "restoredAnchor": False}
-    # Reader stayed put: the semantic anchor restore runs normally.
-    assert result["still"]["restoredAnchor"] is True
+    before = _run_node(_run("before"))
+    between = _run_node(_run("between"))
+    still = _run_node(_run("still"))
+    # _programmaticScroll must be TRUE at release time (proves the latch is armed and
+    # that the yield decision ignores it rather than being masked by a no-op render).
+    assert before["prog"] is True and between["prog"] is True
+    # Movement before frame one OR between frames must cancel the restore.
+    assert before == {"scrollTop": 260, "restored": False, "prog": True}
+    assert between == {"scrollTop": 260, "restored": False, "prog": True}
+    # No movement: the semantic anchor restore still runs.
+    assert still["restored"] is True
 
 
 def test_all_guarded_render_paths_have_exception_cleanup_and_owned_restore():

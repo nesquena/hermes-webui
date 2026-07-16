@@ -1324,91 +1324,96 @@ function _compensateScrollForMeasurementDelta(renderFn){
   // Delayed-restore movement guard (maintainer gate): the settle release runs two
   // frames later. If the reader keeps scrolling during that window, restoring the
   // pre-render `anchorBefore` would snap them back to the stale position (repro:
-  // scrollTop 200 -> 260 during the window, then forced back to 200). Capture the
-  // scrollTop the synchronous compensation below leaves (in the FIRST frame, after
-  // that compensation has run), then in the SECOND frame only restore the anchor if
-  // the reader has NOT moved since — otherwise yield to the fresh user position.
+  // scrollTop 200 -> 260 during the window, then forced back to 200). The baseline
+  // is the scrollTop the SYNCHRONOUS compensation below settles on (captured right
+  // after it runs, so movement BEFORE the first frame is caught too). At release we
+  // decide movement PURELY on position delta — never on _programmaticScroll, which
+  // this same compensation sets true for the whole two-frame window — and we make
+  // that decision BEFORE releasing minHeight, since the release itself reflows
+  // scrollHeight and can clamp scrollTop into a false "moved" reading.
   const _releaseSettledGuard=(expectedTop)=>{
     if(!_settleToken) return;
+    const _moved=Number.isFinite(expectedTop)&&Math.abs(container.scrollTop-expectedTop)>3;
     // A newer render may supersede this delayed guard. Never apply the old
     // semantic anchor unless this callback still owned and released the token.
     if(!_releaseWipeMinHeight(_inner,_settleToken)) return;
     void container.scrollHeight;
     if(!anchorBefore) return;
-    // If the reader scrolled during the two-frame window (current scrollTop diverged
-    // from the value compensation left, and we didn't cause it programmatically),
-    // do NOT restore the stale anchor — respect where the reader is now.
-    if(Number.isFinite(expectedTop)
-       && Math.abs(container.scrollTop-expectedTop)>3
-       && !(typeof _programmaticScroll!=='undefined'&&_programmaticScroll)){
+    // The reader scrolled during the window — respect the fresh position, do NOT
+    // restore the stale anchor.
+    if(_moved){
       _lastScrollTop=container.scrollTop;
       return;
     }
     _restoreMessageViewportAnchor(anchorBefore);
   };
-  if(typeof requestAnimationFrame==='function'){
-    requestAnimationFrame(()=>{
-      // First frame: the synchronous compensation below has landed. Snapshot the
-      // scrollTop it settled on as the movement baseline for the second frame.
-      const _expectedTop=container.scrollTop;
-      requestAnimationFrame(()=>_releaseSettledGuard(_expectedTop));
-    });
-  }else{
-    _releaseSettledGuard(container.scrollTop);
-  }
-  if(!anchorBefore){
-    return;
-  }
-  if(scrollTopBefore<1){
-    const spacer=container.querySelector('[data-virtual-spacer="before"]');
-    if(!spacer||parseFloat(spacer.style.height||'0')<=0) return;
-  }
-  // Re-find the anchor row after the measurement-driven re-render. The primary
-  // lookup is by rawIdx (the DOM index), but on a big virtualized session a large
-  // scroll delta can RECYCLE the old anchor row out of the render window entirely
-  // (verified via real-device telemetry: DOM collapsed to 1 row, scrollHeight
-  // lurched by tens of thousands of px). The old code did `if(!row) return` here,
-  // abandoning compensation → the full estimated↔measured height lurch hit
-  // scrollTop uncompensated and threw the viewport to the top (the recurring
-  // mobile scroll jump-back). Fall back to the stable sessionIdx anchor (captured in
-  // _captureMessageViewportAnchor) before giving up, mirroring the "recover via
-  // sessionIdx when the primary anchor key is gone" approach used elsewhere but for
-  // the virtualization-measurement compensation path.
-  let row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
-  if(!row&&Number.isFinite(Number(anchorBefore.sessionIdx))){
-    row=container.querySelector(`[data-session-msg-idx="${anchorBefore.sessionIdx}"]`);
-  }
-  if(!row){
-    // Anchor row is no longer rendered (recycled out of the virtual window). We
-    // cannot measure its live offset, but we CAN keep the viewport visually
-    // stable by compensating for the top-spacer (topPad) height change: the
-    // whole reason scrollHeight lurched is that the estimated topPad was replaced
-    // by a measured one. Shift scrollTop by that same delta so content under the
-    // viewport does not appear to jump. Without this the browser lands at an
-    // uncompensated absolute scrollTop against a wildly different scrollHeight.
-    const spacerAfter=container.querySelector('[data-virtual-spacer="before"]');
-    const topPadAfter=spacerAfter?parseFloat(spacerAfter.style.height||'0')||0:0;
-    const topPadBefore=Number(anchorBefore.topPadBefore);
-    if(Number.isFinite(topPadBefore)){
-      const padDelta=topPadAfter-topPadBefore;
-      if(Math.abs(padDelta)>=2){
-        _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-        container.scrollTop=Math.max(0,scrollTopBefore+padDelta);
-        _lastScrollTop=container.scrollTop;
-        _deferClearProgrammaticScroll();
-      }
+  // Synchronous compensation for the measurement-driven re-render. Runs INLINE (a
+  // nested fn so its early returns don't skip the release scheduling below), then we
+  // capture the settled scrollTop as the delayed-restore movement baseline.
+  const _applySyncCompensation=()=>{
+    if(!anchorBefore){
+      return;
     }
-    return;
+    if(scrollTopBefore<1){
+      const spacer=container.querySelector('[data-virtual-spacer="before"]');
+      if(!spacer||parseFloat(spacer.style.height||'0')<=0) return;
+    }
+    // Re-find the anchor row after the measurement-driven re-render. The primary
+    // lookup is by rawIdx (the DOM index), but on a big virtualized session a large
+    // scroll delta can RECYCLE the old anchor row out of the render window entirely
+    // (verified via real-device telemetry: DOM collapsed to 1 row, scrollHeight
+    // lurched by tens of thousands of px). The old code did `if(!row) return` here,
+    // abandoning compensation → the full estimated↔measured height lurch hit
+    // scrollTop uncompensated and threw the viewport to the top (the recurring
+    // mobile scroll jump-back). Fall back to the stable sessionIdx anchor (captured in
+    // _captureMessageViewportAnchor) before giving up, mirroring the "recover via
+    // sessionIdx when the primary anchor key is gone" approach used elsewhere but for
+    // the virtualization-measurement compensation path.
+    let row=container.querySelector(`[data-msg-idx="${anchorBefore.rawIdx}"]`);
+    if(!row&&Number.isFinite(Number(anchorBefore.sessionIdx))){
+      row=container.querySelector(`[data-session-msg-idx="${anchorBefore.sessionIdx}"]`);
+    }
+    if(!row){
+      // Anchor row is no longer rendered (recycled out of the virtual window). We
+      // cannot measure its live offset, but we CAN keep the viewport visually
+      // stable by compensating for the top-spacer (topPad) height change: the
+      // whole reason scrollHeight lurched is that the estimated topPad was replaced
+      // by a measured one. Shift scrollTop by that same delta so content under the
+      // viewport does not appear to jump. Without this the browser lands at an
+      // uncompensated absolute scrollTop against a wildly different scrollHeight.
+      const spacerAfter=container.querySelector('[data-virtual-spacer="before"]');
+      const topPadAfter=spacerAfter?parseFloat(spacerAfter.style.height||'0')||0:0;
+      const topPadBefore=Number(anchorBefore.topPadBefore);
+      if(Number.isFinite(topPadBefore)){
+        const padDelta=topPadAfter-topPadBefore;
+        if(Math.abs(padDelta)>=2){
+          _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+          container.scrollTop=Math.max(0,scrollTopBefore+padDelta);
+          _lastScrollTop=container.scrollTop;
+          _deferClearProgrammaticScroll();
+        }
+      }
+      return;
+    }
+    const containerRect=container.getBoundingClientRect();
+    const rowRect=row.getBoundingClientRect();
+    const actualOffset=rowRect.top-containerRect.top;
+    const delta=actualOffset-anchorBefore.topOffset;
+    if(Math.abs(delta)<2) return;
+    _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+    container.scrollTop=scrollTopBefore+delta;
+    _lastScrollTop=container.scrollTop;
+    _deferClearProgrammaticScroll();
+  };
+  _applySyncCompensation();
+  // Baseline = the scrollTop compensation just settled on. Any later user scroll
+  // (before frame one or between frames) diverges from it and cancels the restore.
+  const _settledTop=container.scrollTop;
+  if(typeof requestAnimationFrame==='function'){
+    requestAnimationFrame(()=>requestAnimationFrame(()=>_releaseSettledGuard(_settledTop)));
+  }else{
+    _releaseSettledGuard(_settledTop);
   }
-  const containerRect=container.getBoundingClientRect();
-  const rowRect=row.getBoundingClientRect();
-  const actualOffset=rowRect.top-containerRect.top;
-  const delta=actualOffset-anchorBefore.topOffset;
-  if(Math.abs(delta)<2) return;
-  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-  container.scrollTop=scrollTopBefore+delta;
-  _lastScrollTop=container.scrollTop;
-  _deferClearProgrammaticScroll();
 }
 function _messageViewportIntersectsRenderedRow(){
   const container=$('messages');
