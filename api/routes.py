@@ -260,6 +260,15 @@ _MANUAL_COMPRESSION_JOBS_LOCK = threading.Lock()
 _MANUAL_COMPRESSION_JOB_TTL_SECONDS = 10 * 60
 _CRON_OUTPUT_CONTENT_LIMIT = 8000
 _CRON_OUTPUT_HEADER_CONTEXT = 200
+# Cap on reading whole operator-authored files (cron run outputs, skill linked
+# files) into memory. These handlers used to read_text() the whole file then
+# often slice it down — a multi-MB cron output was fully loaded (and, for the
+# run-detail endpoint, fully serialized into the JSON response) before any
+# truncation. Mirror the git-diff DIFF_SIZE_LIMIT (api/workspace_git.py) bound:
+# files at or under the cap are returned verbatim; larger files are read only up
+# to the cap and flagged truncated so a client can fetch the full file another
+# way. The cap is on BYTES read, not chars.
+_FILE_READ_MAX_BYTES = 512 * 1024
 _MESSAGING_RAW_SOURCES = {str(s).strip().lower() for s in MESSAGING_SOURCES}
 _MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
     "path": None,
@@ -1378,6 +1387,70 @@ def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIM
     return text[-limit:]
 
 
+def _read_text_bounded(
+    path, *, max_bytes: int = _FILE_READ_MAX_BYTES, tail: bool = False
+) -> tuple[str, bool]:
+    """Read up to ``max_bytes`` of a text file, returning ``(text, truncated)``.
+
+    Guards against loading a huge operator-authored file (cron run output, skill
+    linked file) wholesale into memory. Files at or under the cap are read in
+    full; larger files are read only up to the cap (decoding on a byte boundary
+    with errors="replace" so a truncated multibyte sequence is safe) and the
+    ``truncated`` flag is set so the caller can surface it to the client. The
+    cap mirrors the git-diff DIFF_SIZE_LIMIT bound. St_size is checked BEFORE the
+    read so an over-cap file is never fully materialized.
+
+    ``tail=True`` reads the TRAILING ``max_bytes`` (seek-to-end) instead of the
+    leading bytes — used by cron output reads where the ``## Response`` section
+    the UI most wants lives at the END of the file, so a pure head cap would
+    drop exactly that section when the preceding prompt/front-matter is large.
+    A line split at the seek boundary is discarded.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        # Fall back to a direct read; the caller's own error handling covers
+        # missing/unreadable files. This branch is reached only if stat fails.
+        try:
+            return path.read_text(encoding="utf-8", errors="replace"), False
+        except OSError:
+            return "", False
+    if size <= max_bytes:
+        return path.read_text(encoding="utf-8", errors="replace"), False
+    # Over cap: read only max_bytes. Head or tail per ``tail``.
+    with open(path, "rb") as fh:
+        if tail:
+            fh.seek(size - max_bytes)
+        raw = fh.read(max_bytes)
+    text = raw.decode("utf-8", errors="replace")
+    if tail:
+        # Drop the partial first line at the seek boundary (it's a fragment).
+        nl = text.find("\n")
+        if nl >= 0:
+            text = text[nl + 1:]
+    return text, True
+
+
+def _read_cron_output_bounded(path, *, max_bytes: int = _FILE_READ_MAX_BYTES) -> tuple[str, bool]:
+    """Read a cron output .md file with a head-then-tail bias.
+
+    Cron output layout is front-matter, ``## Prompt`` (potentially huge), then
+    ``## Response`` (the reply the UI most wants) as the LAST section. A pure
+    head cap drops ``## Response`` when the prompt is large, leaving the snippet/
+    window helpers to serve prompt bytes instead of the reply. So: read the head
+    first; if it contains the ``## Response`` marker, use it. Otherwise fall back
+    to a bounded TAIL read so the response survives. Returns ``(text, truncated)``.
+    """
+    text, truncated = _read_text_bounded(path, max_bytes=max_bytes)
+    if not truncated:
+        return text, False
+    # Over cap. If the response marker is in the head, the head is sufficient.
+    if _cron_response_marker_index(text) >= 0:
+        return text, True
+    # Marker not in head → the response lives past the cap. Read the tail so the
+    # response section survives (the front-matter/prompt head is sacrificed).
+    tail_text, _tail_trunc = _read_text_bounded(path, max_bytes=max_bytes, tail=True)
+    return tail_text, True
 
 
 def _cron_job_for_api(job: dict) -> dict:
@@ -13629,9 +13702,13 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "Invalid file path", 400)
             if not target.exists() or not target.is_file():
                 return bad(handler, "File not found", 404)
+            # Bound the read so a huge linked file isn't loaded whole / serialized
+            # wholesale into the response. Over-cap files return the head and a
+            # truncated flag.
+            content, truncated = _read_text_bounded(target)
             return j(
                 handler,
-                {"content": target.read_text(encoding="utf-8"), "path": file_path},
+                {"content": content, "path": file_path, "truncated": truncated},
             )
         data = _skill_view_from_active_dir(name)
         if not isinstance(data.get("linked_files"), dict):
@@ -20177,12 +20254,18 @@ def _handle_cron_run_detail(handler, parsed):
     if not fpath.exists():
         return j(handler, {"error": "run not found"}, status=404)
     try:
-        content = fpath.read_text(encoding="utf-8", errors="replace")
+        # Bound the read so a multi-MB cron output isn't loaded whole and
+        # serialized into the response. Cron output puts ## Response at the END,
+        # so _read_cron_output_bounded reads head-first and falls back to a tail
+        # read when the response marker isn't in the head — otherwise a large
+        # prompt section would push the reply past the cap and the snippet would
+        # serve prompt bytes instead of the response.
+        content, truncated = _read_cron_output_bounded(fpath)
         snippet = _cron_output_snippet(content)
         usage = _cron_output_usage_metadata(content)
         return j(handler, {"job_id": job_id, "filename": filename,
                            "content": content, "snippet": snippet,
-                           "usage": usage})
+                           "usage": usage, "truncated": truncated})
     except Exception as e:
         return j(handler, {"error": str(e)}, status=500)
 
@@ -20289,15 +20372,41 @@ def _handle_cron_output(handler, parsed):
         limit = 5
     out_dir = CRON_OUT / job_id
     outputs = []
+    truncated_files = False
     if out_dir.exists():
         files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
+        # Cumulative byte budget across the batch so many large files don't each
+        # force a full read (each file is independently bounded by
+        # _read_text_bounded; this caps the whole batch). Once the budget is
+        # spent, stop reading more files and flag the batch truncated.
+        total_budget = _FILE_READ_MAX_BYTES * 4
+        spent = 0
         for f in files:
             try:
-                txt = f.read_text(encoding="utf-8", errors="replace")
-                outputs.append({"filename": f.name, "content": _cron_output_content_window(txt)})
+                st = f.stat()
+            except OSError:
+                continue
+            if spent + st.st_size > total_budget:
+                truncated_files = True
+                break
+            spent += st.st_size
+            try:
+                # Per-file bound with head-then-tail bias: a large prompt
+                # section pushes ## Response past a pure head cap, so use the
+                # same _read_cron_output_bounded as the detail endpoint and
+                # surface per-file truncation on the output entry so a client
+                # can tell that file's content was clipped.
+                txt, file_truncated = _read_cron_output_bounded(f)
+                entry = {"filename": f.name, "content": _cron_output_content_window(txt)}
+                if file_truncated:
+                    entry["truncated"] = True
+                outputs.append(entry)
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
-    return j(handler, {"job_id": job_id, "outputs": outputs})
+    result = {"job_id": job_id, "outputs": outputs}
+    if truncated_files:
+        result["truncated"] = True
+    return j(handler, result)
 
 
 def _handle_cron_status(handler, parsed):
