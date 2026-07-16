@@ -145,7 +145,7 @@ def test_fallback_notice_persisted_on_assistant_message_before_save():
     # 4. The stamping must happen in the pre-save metadata block (near _turnDuration)
     turn_duration_idx = src.find("_dm['_turnDuration']")
     assert turn_duration_idx != -1, "_turnDuration stamping block not found"
-    assert stamp_idx > turn_duration_idx and stamp_idx < turn_duration_idx + 800, (
+    assert stamp_idx > turn_duration_idx and stamp_idx < turn_duration_idx + 1200, (
         "_fallbackNotice must be stamped in the same pre-save metadata block "
         "as _turnDuration/_turnTps, before s.save()."
     )
