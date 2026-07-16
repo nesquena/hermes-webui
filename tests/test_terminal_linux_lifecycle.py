@@ -13,13 +13,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.skip(
-    reason="Test is timing-flaky in non-tty CI: depends on bash prompt rendering "
-    "+ printf execution echoing back through the PTY within a fixed deadline. "
-    "The actual supervisor invariants (concurrent spawn, timeout-race reap, "
-    "Popen-failure recovery, supervisor singleton) are covered by the other 7 "
-    "tests in this file which all pass deterministically."
-)
 def test_terminal_survives_short_lived_request_thread(tmp_path):
     # Mirrors ThreadingHTTPServer: the request worker exits after spawning the
     # shell, so terminal lifetime must not be tied to that worker thread.
@@ -56,7 +49,7 @@ def test_terminal_survives_short_lived_request_thread(tmp_path):
         seen = ""
         while time.monotonic() < deadline:
             try:
-                event, payload = out.get(timeout=0.1)
+                _seq, event, payload = out.get(timeout=0.1)
             except queue.Empty:
                 continue
             if event == "output":

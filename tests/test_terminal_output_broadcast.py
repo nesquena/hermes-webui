@@ -15,6 +15,7 @@ can't starve another.
 import io
 import os
 import queue
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -69,9 +70,9 @@ def test_terminal_closed_reaches_all_subscribers():
 
     term.put_output("terminal_closed", {"exit_code": 0})
 
-    assert any(e == "terminal_closed" for _seq, e, _p in _drain(a))
-    assert any(e == "terminal_closed" for _seq, e, _p in _drain(b)), (
-        "second tab never received terminal_closed"
+    assert [e for _seq, e, _p in _drain(a)] == ["terminal_closed"]
+    assert [e for _seq, e, _p in _drain(b)] == ["terminal_closed"], (
+        "second tab did not receive terminal_closed exactly once"
     )
 
 
@@ -100,9 +101,19 @@ def test_reconnecting_subscriber_replays_only_events_after_cursor():
     term.unsubscribe(first)
 
     term.put_output("output", {"text": "B"})
+    term.put_output("output", {"text": "C"})
     reconnect = term.subscribe(after_seq=cursor)
 
-    assert [payload["text"] for _seq, _event, payload in _drain(reconnect)] == ["B"]
+    replayed = _drain(reconnect)
+    assert [seq for seq, _event, _payload in replayed] == [cursor + 1, cursor + 2]
+    assert [payload["text"] for _seq, _event, payload in replayed] == ["B", "C"]
+
+    new_viewer = term.subscribe()
+    assert [payload["text"] for _seq, _event, payload in _drain(new_viewer)] == [
+        "A",
+        "B",
+        "C",
+    ]
 
 
 def test_sse_reconnect_honors_last_event_id_and_emits_ids(monkeypatch):
@@ -143,6 +154,46 @@ def test_sse_reconnect_honors_last_event_id_and_emits_ids(monkeypatch):
     assert '"text": "B"' in body
     assert "id: 2\n" in body
     assert "id: 3\n" in body
+    assert term._subscribers == []
+
+
+def test_sse_heartbeat_is_a_valid_comment_and_cleans_up(monkeypatch):
+    term = _make_term("sse-heartbeat")
+    term.closed.set()
+
+    class _Handler:
+        headers = {}
+
+        def __init__(self):
+            self.wfile = io.BytesIO()
+            self.status = None
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, _name, _value):
+            pass
+
+        def end_headers(self):
+            pass
+
+    monkeypatch.setattr(routes, "_embedded_terminal_gate_allows", lambda _handler: True)
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
+    monkeypatch.setattr(routes, "_SSE_HEARTBEAT_INTERVAL_SECONDS", 0)
+    monkeypatch.setitem(terminal._TERMINALS, term.session_id, term)
+    handler = _Handler()
+
+    routes._handle_terminal_output(
+        handler,
+        SimpleNamespace(query=f"session_id={term.session_id}"),
+    )
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert handler.status == 200
+    assert body.startswith(": terminal heartbeat\n\n")
+    assert "event: terminal_closed\n" in body
+    assert "id: None" not in body
+    assert term._subscribers == []
 
 
 def test_unsubscribe_stops_delivery_and_shrinks_list():
@@ -164,23 +215,68 @@ def test_slow_subscriber_drops_oldest_without_starving_others():
     slow = term.subscribe()
     fast = term.subscribe()
 
-    # Overflow the slow subscriber's queue (maxsize 2000) while draining fast.
-    total = 2000 + 50
+    # Overflow the slow subscriber's queue while draining fast.
+    total = terminal._OUTPUT_BUFFER_MAXLEN + 50
+    fast_items = []
     for i in range(total):
         term.put_output("output", {"text": f"c{i}"})
         # Keep 'fast' drained so it never overflows.
-        try:
-            fast.get_nowait()
-        except queue.Empty:
-            pass
+        fast_items.append(fast.get_nowait())
 
     # Slow subscriber is capped and kept the newest chunks (drop-oldest).
     slow_items = _drain(slow)
-    assert len(slow_items) <= 2000
+    assert len(slow_items) == terminal._OUTPUT_BUFFER_MAXLEN
     assert slow_items[-1][2]["text"] == f"c{total - 1}", "slow queue didn't keep newest"
+    assert [seq for seq, _event, _payload in fast_items] == list(range(1, total + 1))
+    assert [payload["text"] for _seq, _event, payload in fast_items] == [
+        f"c{i}" for i in range(total)
+    ]
 
 
 def test_unsubscribe_unknown_queue_is_safe():
     term = _make_term()
+    known = term.subscribe()
+    term.unsubscribe(known)
+    term.unsubscribe(known)  # double-unsubscribe must be idempotent
     stray: queue.Queue = queue.Queue()
     term.unsubscribe(stray)  # must not raise
+    assert term._subscribers == []
+
+
+def test_concurrent_producers_keep_monotonic_sequences_through_backlog_rollover():
+    term = _make_term()
+    producer_count = 4
+    events_per_producer = 600
+    barrier = threading.Barrier(producer_count)
+
+    def produce(producer_id):
+        barrier.wait(timeout=1.0)
+        for index in range(events_per_producer):
+            term.put_output(
+                "output",
+                {"text": f"producer-{producer_id}-{index}"},
+            )
+
+    threads = [
+        threading.Thread(target=produce, args=(producer_id,))
+        for producer_id in range(producer_count)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3.0)
+        assert not thread.is_alive()
+
+    total = producer_count * events_per_producer
+    backlog = list(term._backlog)
+    assert len(backlog) == terminal._OUTPUT_BUFFER_MAXLEN
+    assert [seq for seq, _event, _payload in backlog] == list(
+        range(total - terminal._OUTPUT_BUFFER_MAXLEN + 1, total + 1)
+    )
+    assert term._next_output_seq == total + 1
+
+    cursor = backlog[0][0]
+    replay = _drain(term.subscribe(after_seq=cursor))
+    assert [seq for seq, _event, _payload in replay] == list(
+        range(cursor + 1, total + 1)
+    )
