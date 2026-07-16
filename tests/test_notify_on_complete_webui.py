@@ -4,10 +4,13 @@ from pathlib import Path
 def test_webui_drains_only_matching_background_completion_events():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 
-    assert "def _drain_webui_process_notifications(session_id: str)" in src
+    assert "def _drain_webui_process_notifications(" in src
+    assert "pending_async_acceptances: list | None = None" in src
     assert "from tools.process_registry import process_registry" in src
     assert "proc = process_registry.get(evt_sid)" in src
-    assert "getattr(proc, 'session_key', None) != session_id" in src
+    assert "def _completion_event_targets_webui_session(evt_session_key: str, session_id: str)" in src
+    assert "PROCESS_SESSION_INDEX.get(evt_session_key) == session_id" in src
+    assert "not _completion_event_targets_webui_session(evt_session_key, session_id)" in src
     assert "skipped_events.append(evt)" in src
     assert "completion_queue.put(evt)" in src
 
@@ -15,7 +18,11 @@ def test_webui_drains_only_matching_background_completion_events():
 def test_webui_injects_process_notifications_without_persisting_them_as_user_text():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 
-    assert "_process_notifications = _drain_webui_process_notifications(session_id)" in src
+    assert "_process_notifications = _drain_webui_process_notifications(" in src
+    assert "pending_async_acceptances=_pending_async_acceptances" in src
+    assert src.index("complete_async_delegation_delivery(_evt, _claim)") < src.index(
+        "result = agent.run_conversation(**_run_conversation_kwargs)"
+    )
     assert "[*_process_notifications, msg_text]" in src
     assert "_build_native_multimodal_message(workspace_ctx, _agent_msg_text" in src
     assert "persist_user_message=msg_text" in src
@@ -40,8 +47,11 @@ def test_webui_age_gates_stale_background_completion_events():
     assert "HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS" in src
     # The drain reads completed_at and drops over-age events without requeueing.
     assert "completed_at = evt.get('completed_at')" in src
-    assert "age = time.time() - completed_at" in src
-    assert "if age > stale_completion_max_age:" in src
-    # Over-age events are consumed (marked), not requeued, so they vanish.
+    assert "stale_age = time.time() - completed_at" in src
+    assert "is_stale = stale_age > stale_completion_max_age" in src
+    assert "if is_stale:" in src
+    # Over-age process events use the registry marker; async delegations finish
+    # their durable delivery claim. Neither path is added to skipped_events.
     assert "_mark_process_completion_consumed(process_registry, evt_sid)" in src
+    assert "complete_async_delegation_delivery(evt, claim)" in src
 
