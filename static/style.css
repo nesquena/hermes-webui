@@ -1477,7 +1477,11 @@
   body,header,footer,aside,nav,main,div,button,input,textarea,select{transition-property:background-color,border-color,color;transition-duration:.15s;transition-timing-function:ease;}
   /* Live assistant content is updated token-by-token. The global div color/background
      transition above makes each streamed markdown rewrite briefly fade/flash on light
-     themes. Keep theme transitions elsewhere, but make the live turn paint instantly. */
+     themes. Settled assistant prose must also keep one paint state: async/background
+     results are inserted after settlement, and the residual div transition can re-shade
+     their text when hover chrome repaints the turn (#6072). Keep theme transitions
+     elsewhere, but make assistant prose paint instantly. */
+  .assistant-turn:not(#liveAssistantTurn) .assistant-segment > .msg-body,
   #liveAssistantTurn,
   #liveAssistantTurn *,
   #thinkingRow,
