@@ -1410,8 +1410,15 @@ async function newSession(flash, options={}){
     if(options&&Object.prototype.hasOwnProperty.call(options,'worktree')) reqBody.worktree=!!options.worktree;
     if(Object.prototype.hasOwnProperty.call(options,'project_id')){
       reqBody.project_id=options.project_id;
+      reqBody.profile=options.profile||(
+        _activeProject&&_activeProject!==NO_PROJECT_FILTER&&
+        String(_activeProject.project_id)===String(options.project_id)
+          ? _activeProject.profile
+          : S.activeProfile||'default'
+      );
     } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
       reqBody.project_id=_activeProject.project_id;
+      reqBody.profile=_activeProject.profile||'default';
     }
     // Forward a pre-session toolset override only from the empty composer (#4490).
     if(!S.session && Array.isArray(S._pendingSessionToolsets)) reqBody.enabled_toolsets=S._pendingSessionToolsets;
@@ -7545,7 +7552,7 @@ function _attachProjectQuickCreateButton(chip, project){
     if(_newSessionInFlight){
       // The initiating tap already owns the filter change and rollback path.
       try{
-        await newSession(false,{project_id:project.project_id});
+        await newSession(false,{project_id:project.project_id,profile:project.profile});
       }catch(_){
         // The initiating tap already owns the visible failure path.
       }
@@ -7554,7 +7561,7 @@ function _attachProjectQuickCreateButton(chip, project){
     const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
     _setActiveProjectFilter(project);
     try{
-      await newSession(false,{project_id:project.project_id});
+      await newSession(false,{project_id:project.project_id,profile:project.profile});
       // newSession() does not repaint the sidebar (callers own that — see the
       // newSession contract). Repaint from the post-create state so the new
       // project-assigned session appears deterministically.
@@ -9294,7 +9301,7 @@ function _startProjectRename(proj, chip){
     _finishDone=true;
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       try {
-        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,profile:proj.profile,name:inp.value.trim()})});
         await renderSessionList();
         showToast('Project renamed');
       } catch(e) {
@@ -9352,7 +9359,7 @@ function _showProjectContextMenu(e, proj, chip){
     dot.onclick=async()=>{
       menu.remove();
       try {
-        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:proj.name,color:hex})});
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,profile:proj.profile,name:proj.name,color:hex})});
         await renderSessionList();
         showToast('Color updated');
       } catch(e) {
@@ -9388,7 +9395,7 @@ async function _confirmDeleteProject(proj){
   });
   if(!ok){return;}
   try {
-    await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
+    await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id,profile:proj.profile})});
     if(_projectFilterMatches(_activeProject,proj)) _activeProject=null;
     await renderSessionList();
     showToast('Project deleted');
