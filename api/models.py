@@ -1592,6 +1592,221 @@ class Session:
             return cls.load(sid)
 
     @staticmethod
+    def _scan_to_messages_array(buf: str, start: int = 0):
+        """Return the index in ``buf`` just past the ``[`` opening the top-level
+        ``messages`` array, or ``None`` if not found within ``buf``.
+
+        Mirrors the depth-tracking approach of ``_find_top_level_json_key`` but
+        returns the position of the array body (after ``[``) so a caller can
+        peel off individual elements without re-parsing the whole prefix.
+        """
+        depth = 0
+        i = start
+        n = len(buf)
+        while i < n:
+            ch = buf[i]
+            if ch == '"':
+                # Skip a string literal (handles escapes).
+                i += 1
+                escaped = False
+                while i < n:
+                    c = buf[i]
+                    if escaped:
+                        escaped = False
+                    elif c == '\\':
+                        escaped = True
+                    elif c == '"':
+                        break
+                    i += 1
+                if i >= n:
+                    return None
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            elif depth == 1 and ch == '[':
+                # We are at the top level (depth would be 1 inside the session
+                # object). The token immediately before '[' must be the key
+                # "messages". Look back for the most recent string token.
+                # Simpler: verify by scanning the preceding non-space chars for
+                # the closing quote of a key and that the key text is messages.
+                # To stay robust we rely on _read_metadata_json_prefix already
+                # having validated layout; here we accept the first depth==1 '['
+                # whose preceding key is "messages" — detect by walking back.
+                j = i - 1
+                while j >= 0 and buf[j] in ' \t\r\n':
+                    j -= 1
+                # Expect ':' then the key string before it.
+                if j >= 0 and buf[j] == ':':
+                    j -= 1
+                    while j >= 0 and buf[j] in ' \t\r\n':
+                        j -= 1
+                    if j >= 0 and buf[j] == '"':
+                        k = j - 1
+                        key_chars = []
+                        while k >= 0:
+                            ck = buf[k]
+                            if ck == '\\':
+                                break  # not a clean key boundary
+                            if ck == '"':
+                                break
+                            key_chars.append(ck)
+                            k -= 1
+                        key = ''.join(reversed(key_chars))
+                        if key == 'messages':
+                            return i + 1
+            i += 1
+        return None
+
+    @classmethod
+    def load_messages_head(cls, sid, limit: int, *, max_bytes: int | None = None):
+        """Load at most the first ``limit`` messages WITHOUT parsing the rest.
+
+        Content search (``GET /api/sessions/search``) scans only the first
+        ``depth`` messages (default 5) per session, but used to call
+        ``get_session()`` which materializes the ENTIRE transcript (often
+        hundreds of KB to multiple MB) just to read 5. This streams the on-disk
+        JSON, peels off at most ``limit`` elements of the top-level ``messages``
+        array via ``json.raw_decode`` (one element at a time), and stops — the
+        message tail and the large ``anchor_activity_scenes`` bodies are never
+        parsed.
+
+        Returns ``(messages, total_message_count)`` where the count comes from
+        the metadata prefix's ``message_count`` (the true on-disk total), so a
+        caller can tell whether the head was truncated (``None`` = unknown).
+
+        ``max_bytes`` caps how many bytes of the messages array are scanned, a
+        defense against a pathological first-N-messages payload; default 1 MiB.
+        On any layout anomaly it falls back to a bounded slice of a full
+        ``cls.load(sid)`` so callers always get a usable result.
+        """
+        # Same path-safety contract as load()/load_metadata_only().
+        if not is_safe_session_id(sid):
+            return [], None
+        p = SESSION_DIR / f'{sid}.json'
+        if not p.exists():
+            return [], None
+        if limit is None or limit <= 0:
+            limit = 0
+        if max_bytes is None:
+            max_bytes = 1024 * 1024
+        if max_bytes <= 0:
+            max_bytes = 1
+        try:
+            # 1) Cheap metadata prefix → true message_count (does not parse the
+            #    messages array).
+            total_count: int | None = None
+            prefix = _read_metadata_json_prefix(p)
+            if prefix:
+                try:
+                    parsed_meta = json.loads(prefix)
+                    if isinstance(parsed_meta, dict):
+                        mc = parsed_meta.get('message_count')
+                        if isinstance(mc, int):
+                            total_count = mc
+                except Exception:
+                    pass
+            # 2) Stream the file body to locate the "messages": [ opener and
+            #    peel off the first `limit` array elements one at a time.
+            decoder = json.JSONDecoder()
+            messages: list = []
+            READ_CHUNK = 16384
+            buf = ''
+            array_opened = False
+            scanned_bytes = 0  # bytes consumed inside the messages-array region
+            # Cap on how far we scan the metadata prefix looking for the
+            # "messages" array opener, before giving up and falling back to a
+            # full load. The metadata prefix is written compactly (title, model,
+            # token counters, anchor_scene_index) and is normally a few KB; a
+            # pathological large anchor_activity_scenes serialized BEFORE
+            # messages could push it higher, but the on-disk layout puts scenes
+            # AFTER messages, so this is a generous safety ceiling only.
+            _METADATA_SCAN_MAX_BYTES = 4 * 1024 * 1024
+            metadata_scanned = 0
+            with open(p, 'r', encoding='utf-8') as f:
+                while True:
+                    if limit and len(messages) >= limit:
+                        break
+                    # Skip inter-element whitespace/commas (and, before the
+                    # array opens, the metadata we don't care about).
+                    s = 0
+                    while s < len(buf) and buf[s] in ' \t\r\n,':
+                        s += 1
+                    if s >= len(buf):
+                        # Need more input.
+                        chunk = f.read(READ_CHUNK)
+                        if not chunk:
+                            break
+                        buf = buf[s:] + chunk
+                        continue
+                    ch = buf[s]
+                    if not array_opened:
+                        # We are inside the metadata region, hunting for the
+                        # "messages": [ opener. _scan_to_messages_array tracks
+                        # brace depth from the START of buf, so it must see the
+                        # root '{' to reach depth 1. Therefore we do NOT trim
+                        # the prefix here across chunks (a previous version kept
+                        # only a 64-byte tail, which discarded the depth context
+                        # and caused the array to be missed once the metadata
+                        # exceeded one read chunk — silently returning []).
+                        # Instead, keep accumulating until the opener is in view,
+                        # bounded by _METADATA_SCAN_MAX_BYTES.
+                        pos = cls._scan_to_messages_array(buf)
+                        if pos is None:
+                            if len(buf) >= _METADATA_SCAN_MAX_BYTES:
+                                # Pathological metadata prefix; give up the
+                                # streaming scan and fall back to a full load.
+                                break
+                            chunk = f.read(READ_CHUNK)
+                            if not chunk:
+                                break
+                            buf += chunk
+                            continue
+                        # Found: trim buf to start at the array body (past '['),
+                        # re-skipping leading whitespace on the next iteration.
+                        buf = buf[pos:]
+                        array_opened = True
+                        continue
+                    # array_opened: end of array?
+                    if ch == ']':
+                        break
+                    # Peel one element via raw_decode.
+                    try:
+                        value, end = decoder.raw_decode(buf, s)
+                    except json.JSONDecodeError:
+                        # Element spans beyond current buf; read more.
+                        chunk = f.read(READ_CHUNK)
+                        if not chunk:
+                            break  # malformed/truncated; stop gracefully
+                        buf = buf[s:] + chunk
+                        continue
+                    if isinstance(value, dict):
+                        messages.append(value)
+                    scanned_bytes += end
+                    buf = buf[end:]
+                    if scanned_bytes > max_bytes:
+                        # Pathological first-N payload; bound memory/time.
+                        break
+            if not array_opened:
+                # Never located the array — fall back to a full load. This is
+                # layout-anomaly-driven (NOT gated on total_count, which modern
+                # sessions always supply from message_count): returning ([],
+                # total_count) here would silently drop content-search matches.
+                full = cls.load(sid)
+                msgs = full.messages or []
+                return (list(msgs[:limit]) if limit else list(msgs)), (
+                    total_count if total_count is not None else len(msgs)
+                )
+            return messages, total_count
+        except Exception:
+            logger.debug(
+                "load_messages_head fell back to full load for %s", sid, exc_info=True
+            )
+            full = cls.load(sid)
+            msgs = full.messages or []
+            return (list(msgs[:limit]) if limit else list(msgs)), len(msgs)
+
+    @staticmethod
     def _compute_user_message_count(messages) -> int:
         """perf(session-load-latency) Priority 1: bounded in-memory count.
 

@@ -26,23 +26,34 @@ def _run_search(query):
     import api.routes as routes
 
     sessions_meta = [{"session_id": "s1", "title": "Untitled", "profile": "default"}]
-    session = SimpleNamespace(
-        session_id="s1",
-        messages=[
-            {"role": "user", "content": "first message"},
-            {"role": "assistant", "content": "second message"},
-            {"role": "user", "content": "NEEDLE in the latest message"},
-        ],
-    )
+    all_msgs = [
+        {"role": "user", "content": "first message"},
+        {"role": "assistant", "content": "second message"},
+        {"role": "user", "content": "NEEDLE in the latest message"},
+    ]
+    session = SimpleNamespace(session_id="s1", messages=all_msgs)
     captured = {}
 
     def fake_j(handler, payload, status=200, extra_headers=None):
         captured["status"] = status
         captured["payload"] = payload
 
+    # The depth-bounded search path now streams the first `depth` messages via
+    # Session.load_messages_head (instead of get_session() + slice) so the
+    # transcript tail is never parsed. Mock it to mirror that head-truncation
+    # against the synthetic messages, so the depth-validation contract (what
+    # `depth` scans) is still what's under test here. depth==0 ("whole
+    # transcript") still routes through get_session, so keep both mocks.
+    def fake_load_head(_sid, limit, **_kw):
+        return (all_msgs[:limit] if limit else list(all_msgs)), len(all_msgs)
+
     with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
         "api.routes.get_session", return_value=session
-    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+    ), patch(
+        "api.routes.Session.load_messages_head", side_effect=fake_load_head
+    ), patch(
+        "api.profiles.get_active_profile_name", return_value="default"
+    ), patch(
         "api.routes.j", side_effect=fake_j
     ):
         routes._handle_sessions_search(SimpleNamespace(), urlparse(query))

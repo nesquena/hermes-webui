@@ -16621,8 +16621,20 @@ def _handle_sessions_search(handler, parsed):
             continue
         if content_search:
             try:
-                sess = get_session(s["session_id"])
-                msgs = sess.messages[:depth] if depth else sess.messages
+                # Scan only the first `depth` messages WITHOUT materializing the
+                # whole transcript. get_session() parses the entire session JSON
+                # (often hundreds of KB to multiple MB) just to read ~5
+                # messages; load_messages_head streams the file and peels off
+                # only the first `depth` elements via json.raw_decode, so the
+                # message tail and anchor_activity_scenes bodies are never
+                # parsed. Per-session memory stays bounded to `depth` messages.
+                if depth:
+                    msgs, _total = Session.load_messages_head(s["session_id"], depth)
+                else:
+                    # depth == 0 keeps its existing "search the whole transcript"
+                    # meaning — opt-in, rare; full load is acceptable here.
+                    sess = get_session(s["session_id"])
+                    msgs = sess.messages
                 for m in msgs:
                     c = _session_search_message_text(m)
                     if q in str(c).lower():
