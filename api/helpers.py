@@ -1077,6 +1077,10 @@ _LEGACY_PROFILE_COOKIE_ENV = 'WEBUI_PROFILE_COOKIE_NAME'
 _legacy_profile_cookie_warned = False
 
 
+class InvalidProfileCookie(ValueError):
+    """Raised when a present profile cookie cannot map to a valid profile."""
+
+
 def get_profile_cookie_name() -> str:
     """Return the cookie name used to persist the active WebUI profile.
 
@@ -1104,7 +1108,7 @@ def get_profile_cookie_name() -> str:
     return PROFILE_COOKIE_NAME
 
 
-def get_profile_cookie(handler) -> str | None:
+def get_profile_cookie(handler, *, reject_invalid: bool = False) -> str | None:
     """Extract and authenticate the active-profile cookie value.
 
     When WebUI auth is enabled, the profile cookie is treated as an
@@ -1129,22 +1133,46 @@ def get_profile_cookie(handler) -> str | None:
 
     from api.profiles import _PROFILE_ID_RE
 
+    def _invalid(reason: str) -> None:
+        if reject_invalid:
+            raise InvalidProfileCookie(reason)
+        return None
+
     def _valid_profile_name(val: str) -> bool:
         return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
+
+    def _known_profile_name(val: str) -> bool:
+        if not _valid_profile_name(val):
+            return False
+        try:
+            from api.profiles import _is_root_profile, get_hermes_home_for_profile
+
+            if _is_root_profile(val):
+                return True
+            return get_hermes_home_for_profile(val).is_dir()
+        except Exception:
+            logger.debug("Failed to validate active profile cookie target", exc_info=True)
+            return False
 
     raw_val = morsel.value
     try:
         from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
         if is_auth_enabled():
             val = verify_profile_cookie_value(raw_val, parse_cookie(handler))
-            return val if val and _valid_profile_name(val) else None
+            if val and _known_profile_name(val):
+                return val
+            return _invalid("Invalid or unknown active profile cookie")
+    except InvalidProfileCookie:
+        raise
     except Exception:
         logger.warning("Failed to verify active profile cookie", exc_info=True)
-        return None
+        return _invalid("Invalid active profile cookie")
 
     # No-auth mode: the cookie is a per-browser UI preference, not an authz
     # boundary, so retain the legacy plain profile-name format.
-    return raw_val if _valid_profile_name(raw_val) else None
+    if _known_profile_name(raw_val):
+        return raw_val
+    return _invalid("Invalid or unknown active profile cookie")
 
 
 def build_profile_cookie(name: str, handler=None, *, session_cookie_value: str | None = None) -> str:

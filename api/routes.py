@@ -2830,6 +2830,7 @@ from api.config import (
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
+    _load_yaml_config_file_raw,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -26251,12 +26252,20 @@ def _mcp_tool_summary(name, tool, server_summary):
     }
 
 
+def _active_profile_mcp_config_path() -> Path:
+    """Return the active profile config path for profile-scoped MCP writes."""
+    return Path(get_active_hermes_home()).expanduser() / "config.yaml"
+
+
 def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
     """Read detailed MCP tool payloads from runtime status when available."""
     tools = []
     if not isinstance(runtime_by_name, dict):
         return tools
     for server_name, runtime in runtime_by_name.items():
+        server_name = str(server_name)
+        if server_name not in server_summaries:
+            continue
         if not isinstance(runtime, dict):
             continue
         raw_tools = runtime.get("tools")
@@ -26264,7 +26273,7 @@ def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
             raw_tools = runtime.get("tool_schemas")
         if not isinstance(raw_tools, list):
             continue
-        server_summary = server_summaries.get(str(server_name), {"name": str(server_name)})
+        server_summary = server_summaries[server_name]
         for index, tool in enumerate(raw_tools):
             fallback_name = f"{server_name}:{index}"
             summary = _mcp_tool_summary(fallback_name, tool, server_summary)
@@ -26292,13 +26301,10 @@ def _mcp_tools_from_registry(server_summaries):
         if not isinstance(toolset, str) or not toolset.startswith("mcp-"):
             continue
         server_name = toolset[len("mcp-"):]
+        if server_name not in server_summaries:
+            continue
         schema = registry.get_schema(tool_name) or {}
-        server_summary = server_summaries.get(server_name, {
-            "name": server_name,
-            "enabled": True,
-            "active": False,
-            "status": "configured",
-        })
+        server_summary = server_summaries[server_name]
         tools.append(_mcp_tool_summary(tool_name, schema, server_summary))
     return tools
 
@@ -26843,8 +26849,8 @@ def _handle_mcp_server_delete(handler, name):
         return bad(handler, "name is required")
     missing = False
     with _cfg_lock:
-        config_path = _get_config_path()
-        cfg = _load_yaml_config_file(config_path)
+        config_path = _active_profile_mcp_config_path()
+        cfg = _load_yaml_config_file_raw(config_path)
         servers = cfg.get("mcp_servers", {})
         if not isinstance(servers, dict):
             servers = {}
@@ -26871,8 +26877,8 @@ def _handle_mcp_server_toggle(handler, name, body):
     enabled = bool(body["enabled"])
     error = None
     with _cfg_lock:
-        config_path = _get_config_path()
-        cfg = _load_yaml_config_file(config_path)
+        config_path = _active_profile_mcp_config_path()
+        cfg = _load_yaml_config_file_raw(config_path)
         servers = cfg.get("mcp_servers", {})
         if not isinstance(servers, dict):
             servers = {}
@@ -26920,8 +26926,8 @@ def _handle_mcp_server_update(handler, name, body):
     if not body.get("url") and not body.get("command"):
         return bad(handler, "url or command is required")
     with _cfg_lock:
-        config_path = _get_config_path()
-        cfg = _load_yaml_config_file(config_path)
+        config_path = _active_profile_mcp_config_path()
+        cfg = _load_yaml_config_file_raw(config_path)
         servers = cfg.get("mcp_servers", {})
         if not isinstance(servers, dict):
             servers = {}

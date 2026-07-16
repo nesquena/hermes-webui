@@ -40,6 +40,7 @@ from api.config import (
     resolve_model_provider,
     resolve_custom_provider_connection,
     model_with_provider_context,
+    get_config_snapshot,
     warm_models_catalog_provenance_if_cold,
     load_settings,
     parse_reasoning_effort,
@@ -441,6 +442,8 @@ def _resolve_custom_provider_runtime_overrides(
     resolved_provider: str | None,
     resolved_api_key: str | None,
     resolved_base_url: str | None,
+    *,
+    config_data: dict | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Return provider/key/base_url overrides for ``custom:*`` endpoints.
 
@@ -453,7 +456,10 @@ def _resolve_custom_provider_runtime_overrides(
     if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
         return resolved_provider, resolved_api_key, resolved_base_url
 
-    _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+    _cp_key, _cp_base = resolve_custom_provider_connection(
+        resolved_provider,
+        config_data=config_data,
+    )
     if not resolved_api_key and _cp_key:
         resolved_api_key = _cp_key
     if not resolved_base_url and _cp_base:
@@ -8440,9 +8446,15 @@ def _run_agent_streaming(
                 _resolved_profile_name, "model resolution", logger_override=logger
             ):
                 warm_models_catalog_provenance_if_cold()
+                _model_resolution_cfg = get_config_snapshot()
                 resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-                    model_with_provider_context(model, provider_context),
+                    model_with_provider_context(
+                        model,
+                        provider_context,
+                        config_data=_model_resolution_cfg,
+                    ),
                     explicitly_picked=_explicitly_picked,
+                    config_data=_model_resolution_cfg,
                 )
             configured_base_url = resolved_base_url
 
@@ -8470,7 +8482,10 @@ def _run_agent_streaming(
             # hermes_cli.runtime_provider directly. Fall back to config.yaml
             # custom_providers[] so WebUI can pass explicit creds/base_url.
             resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                resolved_provider, resolved_api_key, resolved_base_url
+                resolved_provider,
+                resolved_api_key,
+                resolved_base_url,
+                config_data=_model_resolution_cfg,
             )
 
             # Read per-profile config at call time (not module-level snapshot).

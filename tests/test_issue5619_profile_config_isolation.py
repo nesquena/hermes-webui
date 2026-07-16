@@ -5,7 +5,9 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 import threading
+import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -181,8 +183,8 @@ def test_model_picker_keeps_work_profile_snapshot_during_default_reload(
     monkeypatch.setattr(config, "_available_models_cache_source_fingerprint", None)
     monkeypatch.setattr(config, "_models_cache_provenance", None)
     monkeypatch.setattr(config, "_cache_build_in_progress", False)
-    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
-    monkeypatch.setattr(config, "_load_stale_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda *, config_data=None: None)
+    monkeypatch.setattr(config, "_load_stale_models_cache_from_disk", lambda *, config_data=None: None)
     for env_name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
         monkeypatch.delenv(env_name, raising=False)
 
@@ -319,3 +321,201 @@ def test_mcp_write_holds_profile_config_lock_through_save(
     assert "new-work-mcp" in work_config["mcp_servers"]
     assert default_config["model"]["provider"] == "default-provider"
     assert "new-work-mcp" not in default_config["mcp_servers"]
+
+
+def test_profile_snapshot_expands_env_from_request_profile_raw_yaml(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    config = harness.config
+    harness.work_home.joinpath("config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {"provider": "work-provider", "default": "work-model"},
+                "providers": {"work-provider": {"api_key": "${PROFILE_TOKEN}"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROFILE_TOKEN", "process-secret")
+    harness.request_scope.profile = "work"
+    previous_env = getattr(config._thread_ctx, "env", None)
+    previous_block = getattr(config._thread_ctx, "block_process_env_fallback", False)
+    try:
+        config._thread_ctx.env = {"PROFILE_TOKEN": "work-secret"}
+        config._thread_ctx.block_process_env_fallback = True
+        snapshot = config.get_config_snapshot()
+    finally:
+        config._thread_ctx.block_process_env_fallback = previous_block
+        if previous_env is None:
+            try:
+                del config._thread_ctx.env
+            except AttributeError:
+                pass
+        else:
+            config._thread_ctx.env = previous_env
+
+    assert snapshot["providers"]["work-provider"]["api_key"] == "work-secret"
+
+
+def test_model_resolution_uses_one_profile_snapshot_after_other_profile_reload(
+    profile_config_harness,
+):
+    harness = profile_config_harness
+    config = harness.config
+    harness.default_home.joinpath("config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "provider": "lmstudio",
+                    "default": "local-model",
+                    "base_url": "http://default-lmstudio.test/v1",
+                },
+                "providers": {
+                    "lmstudio": {"base_url": "http://default-lmstudio.test/v1"}
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    harness.work_home.joinpath("config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "provider": "lmstudio",
+                    "default": "local-model",
+                    "base_url": "http://work-lmstudio.test/v1",
+                },
+                "providers": {
+                    "lmstudio": {"base_url": "http://work-lmstudio.test/v1"}
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    harness.request_scope.profile = "work"
+    snapshot = config.get_config_snapshot()
+
+    _reload_default_in_other_thread(harness)
+    model_for_resolution = config.model_with_provider_context(
+        "local-model",
+        "lmstudio",
+        config_data=snapshot,
+    )
+    _, provider, base_url = config.resolve_model_provider(
+        model_for_resolution,
+        config_data=snapshot,
+    )
+
+    assert provider == "lmstudio"
+    assert base_url == "http://work-lmstudio.test/v1"
+
+
+def test_mcp_write_ignores_hermes_config_path_and_preserves_raw_placeholders(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    routes = harness.routes
+    harness.work_home.joinpath("config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {"provider": "work-provider", "default": "work-model"},
+                "providers": {"work-provider": {"api_key": "${PROFILE_TOKEN}"}},
+                "mcp_servers": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(harness.default_home / "config.yaml"))
+    monkeypatch.setenv("PROFILE_TOKEN", "process-secret")
+    harness.request_scope.profile = "work"
+
+    handler = _handler()
+    handler.command = "PUT"
+    routes._handle_mcp_server_update(
+        handler,
+        "raw-work-mcp",
+        {"command": "run-raw-work-mcp"},
+    )
+
+    work_config = yaml.safe_load(
+        harness.work_home.joinpath("config.yaml").read_text(encoding="utf-8")
+    )
+    default_config = yaml.safe_load(
+        harness.default_home.joinpath("config.yaml").read_text(encoding="utf-8")
+    )
+    assert work_config["providers"]["work-provider"]["api_key"] == "${PROFILE_TOKEN}"
+    assert "raw-work-mcp" in work_config["mcp_servers"]
+    assert "raw-work-mcp" not in default_config["mcp_servers"]
+
+
+def test_mcp_tools_inventory_filters_runtime_and_registry_to_active_profile(
+    profile_config_harness, monkeypatch
+):
+    harness = profile_config_harness
+    routes = harness.routes
+    harness.request_scope.profile = "work"
+    monkeypatch.setattr(
+        routes,
+        "_mcp_runtime_status_by_name",
+        lambda: {
+            "work-mcp": {"tools": [{"name": "work_tool"}]},
+            "default-mcp": {"tools": [{"name": "default_tool"}]},
+        },
+    )
+
+    handler = _handler()
+    routes._handle_mcp_tools_list(handler)
+    tools = _payload(handler)["tools"]
+
+    assert [tool["name"] for tool in tools] == ["work_tool"]
+
+    fake_registry_mod = types.ModuleType("tools.registry")
+
+    class _Registry:
+        def get_all_tool_names(self):
+            return ["work_registry_tool", "default_registry_tool"]
+
+        def get_toolset_for_tool(self, name):
+            return {
+                "work_registry_tool": "mcp-work-mcp",
+                "default_registry_tool": "mcp-default-mcp",
+            }[name]
+
+        def get_schema(self, name):
+            return {"name": name}
+
+    fake_registry_mod.registry = _Registry()
+    monkeypatch.setitem(sys.modules, "tools.registry", fake_registry_mod)
+    monkeypatch.setattr(routes, "_mcp_runtime_status_by_name", lambda: {})
+
+    handler = _handler()
+    routes._handle_mcp_tools_list(handler)
+    tools = _payload(handler)["tools"]
+
+    assert [tool["name"] for tool in tools] == ["work_registry_tool"]
+
+
+def test_strict_profile_cookie_rejects_invalid_and_unknown_profiles(
+    monkeypatch, tmp_path
+):
+    from api import profiles
+    from api.helpers import InvalidProfileCookie, get_profile_cookie
+
+    invalid_handler = SimpleNamespace(headers={"Cookie": "hermes_profile=../../etc"})
+    with pytest.raises(InvalidProfileCookie):
+        get_profile_cookie(invalid_handler, reject_invalid=True)
+
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: tmp_path / "profiles" / name,
+    )
+    unknown_handler = SimpleNamespace(headers={"Cookie": "hermes_profile=ghost"})
+    with pytest.raises(InvalidProfileCookie):
+        get_profile_cookie(unknown_handler, reject_invalid=True)

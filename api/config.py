@@ -523,10 +523,74 @@ def get_config_snapshot() -> dict:
             if path_changed:
                 cfg = _cfg_cache
         try:
-            source = cfg if cfg is not _cfg_cache else _cfg_cache
+            if cfg is not _cfg_cache or _cfg_has_in_memory_overrides():
+                return copy.deepcopy(cfg)
         except NameError:
-            source = _cfg_cache
-        return copy.deepcopy(source)
+            pass
+        return _expanded_config_snapshot_from_path(config_path)
+
+
+def _expanded_config_snapshot_from_path(config_path: Path) -> dict:
+    raw = _load_yaml_config_file_raw(config_path, _copy=False)
+    snapshot = _expand_env_vars(raw) if isinstance(raw, dict) else {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    _apply_config_defaults(snapshot)
+    return snapshot
+
+
+def _config_yaml_fingerprint_stable(config_path: Path) -> tuple[dict, dict]:
+    """Return one expanded config snapshot plus a matching stat fingerprint."""
+    for _ in range(2):
+        before = _models_cache_file_fingerprint(config_path)
+        snapshot = _expanded_config_snapshot_from_path(config_path)
+        after = _models_cache_file_fingerprint(config_path)
+        if before == after:
+            return snapshot, after
+    snapshot = _expanded_config_snapshot_from_path(config_path)
+    return snapshot, _models_cache_file_fingerprint(config_path)
+
+
+def get_config_snapshot_with_source_fingerprint() -> tuple[dict, dict]:
+    """Return an expanded profile snapshot and matching /api/models fingerprint."""
+    global cfg
+    with _cfg_lock:
+        config_path = _get_config_path()
+        try:
+            current_mtime = config_path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+        path_changed = _cfg_path != config_path
+        if _cfg_cache_needs_refresh(config_path, current_mtime):
+            _refresh_config_cache(config_path)
+            if path_changed:
+                cfg = _cfg_cache
+        try:
+            if cfg is not _cfg_cache or _cfg_has_in_memory_overrides():
+                return copy.deepcopy(cfg), _models_cache_source_fingerprint()
+        except NameError:
+            pass
+        snapshot, config_fingerprint = _config_yaml_fingerprint_stable(config_path)
+        return snapshot, _models_cache_source_fingerprint_for_snapshot(
+            config_path=config_path,
+            config_yaml_fingerprint=config_fingerprint,
+        )
+
+
+def _models_cache_source_fingerprint_for_snapshot(
+    *,
+    config_path: Path,
+    config_yaml_fingerprint: dict,
+) -> dict:
+    try:
+        return _models_cache_source_fingerprint(
+            config_path=config_path,
+            config_yaml_fingerprint=config_yaml_fingerprint,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return _models_cache_source_fingerprint()
 
 
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
@@ -539,7 +603,7 @@ def get_webui_session_save_mode(config_data: dict | None = None) -> str:
     values fail closed to ``deferred`` so a typo never reintroduces eager disk
     writes unexpectedly.
     """
-    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    active_cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
     webui_cfg = active_cfg.get("webui", {}) if isinstance(active_cfg, dict) else {}
     if not isinstance(webui_cfg, dict):
         return _DEFAULT_WEBUI_SESSION_SAVE_MODE
@@ -557,7 +621,7 @@ def is_unified_session_db_enabled(config_data: dict | None = None) -> bool:
     The default is intentionally false so adding the JSON adapter cannot change
     runtime persistence until a later migration PR switches call sites.
     """
-    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    active_cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
     experimental = active_cfg.get("experimental", {}) if isinstance(active_cfg, dict) else {}
     if not isinstance(experimental, dict):
         return False
@@ -2445,7 +2509,12 @@ def _is_local_server_provider(provider_id: str) -> bool:
     return False
 
 
-def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> bool:
+def _model_id_declared_in_config(
+    model_id: str,
+    config_provider: str | None,
+    *,
+    config_data: dict | None = None,
+) -> bool:
     """True when the user's own config declares ``model_id`` verbatim (full form).
 
     This is the COLD-catalog provenance signal for #5979: when the live
@@ -2462,7 +2531,8 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     model = str(model_id or "").strip()
     if not model:
         return False
-    model_cfg = cfg.get("model", {})
+    active_cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
+    model_cfg = active_cfg.get("model", {})
     if isinstance(model_cfg, dict):
         if str(model_cfg.get("default") or "").strip() == model:
             return True
@@ -2473,7 +2543,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     prov = str(config_provider or "").strip().lower()
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
-        for entry in _custom_provider_entries():
+        for entry in _custom_provider_entries(active_cfg):
             slug = _custom_provider_slug_from_name(entry.get("name"))
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
@@ -2642,7 +2712,12 @@ def _get_provider_cfg(provider_id, *, config_data: dict | None = None) -> dict:
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
-def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
+def resolve_model_provider(
+    model_id: str,
+    *,
+    explicitly_picked: bool = False,
+    config_data: dict | None = None,
+) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -2673,14 +2748,15 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
     (endpoint-advertised ids) always takes precedence over this flag.
     """
+    active_cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
     config_provider = None
     config_base_url = None
-    model_cfg = cfg.get("model", {})
+    model_cfg = active_cfg.get("model", {})
     if isinstance(model_cfg, dict):
         config_base_url = model_cfg.get("base_url")
         config_provider = _resolve_configured_provider_id(
             model_cfg.get("provider"),
-            cfg,
+            active_cfg,
             base_url=config_base_url,
             resolve_alias=False,
         )
@@ -2737,7 +2813,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # own declared models and can't be hijacked by another providers.<slug>
     # entry that happens to list the same bare id earlier in config order (#5511).
     if _canon_config_provider:
-        _providers_cfg_own = cfg.get('providers', {})
+        _providers_cfg_own = active_cfg.get('providers', {})
         if isinstance(_providers_cfg_own, dict):
             for _slug, _pdef in _providers_cfg_own.items():
                 if not isinstance(_pdef, dict):
@@ -2756,7 +2832,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             or model_id in _provider_models_set
         )
     )
-    custom_providers = cfg.get('custom_providers', [])
+    custom_providers = active_cfg.get('custom_providers', [])
     if isinstance(custom_providers, list) and not _skip_custom_providers:
         for entry in custom_providers:
             if not isinstance(entry, dict):
@@ -2775,7 +2851,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # Check user-defined providers (config.yaml → providers:).
     # Mirrors the custom_providers scan above — exact match against each
     # entry's declared models list (case-sensitive to match custom_providers).
-    providers_cfg = cfg.get('providers', {})
+    providers_cfg = active_cfg.get('providers', {})
     if isinstance(providers_cfg, dict):
         target = model_id.strip()
         # Honor the same active/default ownership guard as the custom_providers
@@ -2836,7 +2912,10 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             and provider_hint.lower() in _custom_endpoint_slugs_for_base_url(config_base_url)
         ):
             return bare_model, config_provider, config_base_url
-        return bare_model, provider_hint, _get_provider_base_url(provider_hint)
+        return bare_model, provider_hint, _get_provider_base_url(
+            provider_hint,
+            config_data=active_cfg,
+        )
 
     if "/" in model_id:
         prefix, bare = model_id.split("/", 1)
@@ -2878,7 +2957,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # instead of falling back to the default config provider. MUST come BEFORE
         # the config_base_url branch because many providers have a base_url set.
         if prefix and config_provider and prefix != config_provider:
-            _custom_cfg = cfg.get("custom_providers", [])
+            _custom_cfg = active_cfg.get("custom_providers", [])
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
@@ -2945,7 +3024,11 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 # (1) Config declares the full id verbatim (model.default /
                 #     model.models / custom_providers[].models). Authoritative and
                 #     network-free, so #5979 survives a cold restart — preserve.
-                if _model_id_declared_in_config(model_id, config_provider):
+                if _model_id_declared_in_config(
+                    model_id,
+                    config_provider,
+                    config_data=active_cfg,
+                ):
                     return model_id, config_provider, config_base_url
                 # (2) The endpoint's live/cached catalog advertised it.
                 _advertised = _endpoint_advertised_model_ids(config_provider)
@@ -3022,7 +3105,11 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     return model_id, config_provider, config_base_url
 
 
-def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
+def resolve_custom_provider_connection(
+    provider_id: str,
+    *,
+    config_data: dict | None = None,
+) -> tuple[str | None, str | None]:
     """Return (api_key, base_url) for a named ``custom:*`` provider.
 
     Supports ``custom_providers[].api_key`` as either a literal key or
@@ -3045,7 +3132,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
 
     # Read the live config snapshot to avoid stale module-level cache edge
     # cases after profile switches or runtime config edits.
-    cfg_data = get_config()
+    cfg_data = config_data if isinstance(config_data, dict) else get_config_snapshot()
 
     def _resolve_key(raw_api_key, raw_key_env, provider_hint=None) -> str | None:
         api_key = None
@@ -3126,7 +3213,12 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
 _ACP_SUBPROCESS_PROVIDERS = frozenset({"cursor-acp", "copilot-acp"})
 
 
-def model_with_provider_context(model_id: str, model_provider: str | None = None) -> str:
+def model_with_provider_context(
+    model_id: str,
+    model_provider: str | None = None,
+    *,
+    config_data: dict | None = None,
+) -> str:
     """Return the model string to pass to ``resolve_model_provider()``.
 
     Session persistence keeps the user's selected provider in ``model_provider``
@@ -3140,7 +3232,8 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if not model or not provider or provider == "default" or model.startswith("@"):
         return model
 
-    model_cfg = cfg.get("model", {})
+    active_cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
+    model_cfg = active_cfg.get("model", {})
     config_provider = None
     if isinstance(model_cfg, dict):
         config_provider = str(model_cfg.get("provider") or "").strip().lower()
@@ -3175,7 +3268,7 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     # contains '/'. Otherwise a selected local model such as
     # 'unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL' inherits the default provider
     # (e.g. openai-codex) and is sent to the wrong backend.
-    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else {}
+    providers_cfg = active_cfg.get("providers") if isinstance(active_cfg, dict) else {}
     if isinstance(providers_cfg, dict) and provider in providers_cfg:
         return f"@{provider}:{model}"
 
@@ -4638,7 +4731,8 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         previous_provider = str(model_cfg.get("provider") or "").strip()
         requested_provider = str(provider or "").strip()
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-            selected_model
+            selected_model,
+            config_data=config_data,
         )
         # Persist the resolved bare/slash form, NOT the `@provider:` prefix. The
         # prefix is a WebUI-internal routing hint that the hermes-agent CLI does
@@ -5065,6 +5159,7 @@ def _configured_model_badges_from_static_catalog(
     *,
     active_provider: str | None,
     default_model: str,
+    config_data: dict | None = None,
 ) -> dict[str, dict[str, str]]:
     configured_entries: list[dict[str, str]] = []
     if active_provider and default_model:
@@ -5077,7 +5172,8 @@ def _configured_model_badges_from_static_catalog(
             }
         )
 
-    fallback_cfg = cfg.get("fallback_providers", []) if isinstance(cfg, dict) else []
+    active_cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
+    fallback_cfg = active_cfg.get("fallback_providers", []) if isinstance(active_cfg, dict) else []
     if isinstance(fallback_cfg, list):
         for idx, entry in enumerate(fallback_cfg, start=1):
             if not isinstance(entry, dict):
@@ -5602,6 +5698,7 @@ def _static_models_catalog_without_live_probes(
                 groups,
                 active_provider=active_provider,
                 default_model=default_model,
+                config_data=cfg,
             ),
             "groups": groups,
             "aliases": model_aliases,
@@ -5997,7 +6094,11 @@ def _auth_store_semantic_fingerprint(path: Path) -> dict:
     return fp
 
 
-def _models_cache_source_fingerprint() -> dict:
+def _models_cache_source_fingerprint(
+    *,
+    config_path: Path | None = None,
+    config_yaml_fingerprint: dict | None = None,
+) -> dict:
     """Return the current config/auth/catalog fingerprint for /api/models cache.
 
     The auth.json axis uses a *content* fingerprint that excludes pure
@@ -6009,7 +6110,11 @@ def _models_cache_source_fingerprint() -> dict:
     edits (which can change anything) and does not churn on a timer.
     """
     return {
-        "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
+        "config_yaml": (
+            config_yaml_fingerprint
+            if isinstance(config_yaml_fingerprint, dict)
+            else _models_cache_file_fingerprint(config_path or _get_config_path())
+        ),
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
         "catalog": _models_cache_catalog_fingerprint(),
     }
@@ -6097,7 +6202,7 @@ def _is_loadable_disk_cache(cache: object) -> bool:
     return True
 
 
-def _load_models_cache_from_disk() -> dict | None:
+def _load_models_cache_from_disk(config_data: dict | None = None) -> dict | None:
     """Load /api/models cache from disk if it exists and has current metadata.
 
     Adds the per-release version check from #1633: a cache stamped with a
@@ -6130,14 +6235,14 @@ def _load_models_cache_from_disk() -> dict | None:
             "aliases": (
                 cache["aliases"]
                 if isinstance(cache.get("aliases"), dict)
-                else _model_aliases_from_config()
+                else _model_aliases_from_config(config_data=config_data)
             ),
         })
     except Exception:
         return None
 
 
-def _model_aliases_from_config() -> dict[str, str]:
+def _model_aliases_from_config(config_data: dict | None = None) -> dict[str, str]:
     """Build the normalized model-alias map from current config.
 
     Mirrors the alias construction used by the live and static catalog paths so
@@ -6146,7 +6251,8 @@ def _model_aliases_from_config() -> dict[str, str]:
     disk cache that never persisted them).
     """
     try:
-        raw_aliases = cfg.get("model", {}).get("aliases", {})
+        active_cfg = config_data if isinstance(config_data, dict) else get_config_snapshot()
+        raw_aliases = active_cfg.get("model", {}).get("aliases", {})
         if isinstance(raw_aliases, dict):
             return {
                 str(k).strip(): str(v).strip()
@@ -6158,7 +6264,7 @@ def _model_aliases_from_config() -> dict[str, str]:
     return {}
 
 
-def _load_stale_models_cache_from_disk() -> dict | None:
+def _load_stale_models_cache_from_disk(config_data: dict | None = None) -> dict | None:
     """Load a shape-valid stale /api/models disk cache for timeout fallback only.
 
     The main cache loader enforces metadata stamps for a full cold-path cache hit.
@@ -6189,7 +6295,7 @@ def _load_stale_models_cache_from_disk() -> dict | None:
             # resolves slash aliases only from /api/models.aliases) for the
             # duration of the over-budget stale fallback. Reconstruct from
             # current config, mirroring the live/static catalog alias build.
-            aliases = _model_aliases_from_config()
+            aliases = _model_aliases_from_config(config_data=config_data)
         return _annotate_fast_tier_model_groups({
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
@@ -6201,7 +6307,11 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         return None
 
 
-def _save_models_cache_to_disk(cache: dict) -> None:
+def _save_models_cache_to_disk(
+    cache: dict,
+    *,
+    source_fingerprint: dict | None = None,
+) -> None:
     """Save cache to disk so it survives server restarts.
 
     Stamps the payload with `_webui_version` and `_schema_version` (#1633) so
@@ -6222,7 +6332,11 @@ def _save_models_cache_to_disk(cache: dict) -> None:
             return
         payload = {
             "_schema_version": _MODELS_CACHE_SCHEMA_VERSION,
-            "_source_fingerprint": _models_cache_source_fingerprint(),
+            "_source_fingerprint": (
+                copy.deepcopy(source_fingerprint)
+                if isinstance(source_fingerprint, dict)
+                else _models_cache_source_fingerprint()
+            ),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -6566,7 +6680,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # The builder performs a long sequence of config reads and may continue on
     # a detached worker. Keep one immutable profile snapshot for the complete
     # catalog so another profile reload cannot change it mid-build (#5619).
-    cfg = get_config_snapshot()
+    cfg, _catalog_source_fingerprint = get_config_snapshot_with_source_fingerprint()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
@@ -8035,11 +8149,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     disk_groups = None
     stale_disk_groups = None
     if _available_models_cache is None and not force_refresh:
-        disk_groups = _load_models_cache_from_disk()
+        disk_groups = _load_models_cache_from_disk(config_data=cfg)
         if disk_groups is None:
-            stale_disk_groups = _load_stale_models_cache_from_disk()
+            stale_disk_groups = _load_stale_models_cache_from_disk(config_data=cfg)
     elif force_refresh:
-        stale_disk_groups = _load_stale_models_cache_from_disk()
+        stale_disk_groups = _load_stale_models_cache_from_disk(config_data=cfg)
 
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
@@ -8217,10 +8331,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _available_models_cache = result
                 _available_models_cache_ts = published_at
                 _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                _available_models_cache_source_fingerprint = copy.deepcopy(
+                    _catalog_source_fingerprint
+                )
                 _sync_models_cache_provenance()
             try:
-                _save_models_cache_to_disk(result)
+                _save_models_cache_to_disk(
+                    result,
+                    source_fingerprint=_catalog_source_fingerprint,
+                )
             finally:
                 with _cache_build_cv:
                     _cache_build_in_progress = False
@@ -8265,12 +8384,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _available_models_cache = result
                 _available_models_cache_ts = published_at
                 _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = (
-                    _models_cache_source_fingerprint()
+                _available_models_cache_source_fingerprint = copy.deepcopy(
+                    _catalog_source_fingerprint
                 )
                 _sync_models_cache_provenance()
             try:
-                _save_models_cache_to_disk(result)
+                _save_models_cache_to_disk(
+                    result,
+                    source_fingerprint=_catalog_source_fingerprint,
+                )
             except Exception:
                 logger.debug("models cache disk save failed", exc_info=True)
             finally:

@@ -104,6 +104,7 @@ from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
     get_profile_cookie,
+    InvalidProfileCookie,
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
@@ -373,15 +374,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
-        cookie_profile = get_profile_cookie(self)
-        if cookie_profile:
-            set_request_profile(cookie_profile)
         try:
+            cookie_profile = get_profile_cookie(self, reject_invalid=True)
+            if cookie_profile:
+                set_request_profile(cookie_profile)
             parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
+        except InvalidProfileCookie as exc:
+            return j(self, {'error': str(exc)}, status=400)
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
@@ -398,10 +401,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
-        cookie_profile = get_profile_cookie(self)
-        if cookie_profile:
-            set_request_profile(cookie_profile)
         try:
+            cookie_profile = get_profile_cookie(self, reject_invalid=True)
+            if cookie_profile:
+                set_request_profile(cookie_profile)
             parsed = urlparse(self.path)
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
@@ -410,6 +413,8 @@ class Handler(BaseHTTPRequestHandler):
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
+        except InvalidProfileCookie as exc:
+            return j(self, {'error': str(exc)}, status=400)
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
