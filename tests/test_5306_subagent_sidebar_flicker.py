@@ -264,6 +264,42 @@ console.log(JSON.stringify({
     assert out["ambiguous"] is None
 
 
+def test_cyclic_project_lineage_fails_closed_but_diamonds_and_self_roots_resolve():
+    """A genuine lineage back-edge cannot donate project scope."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _preamble(js) + """
+global._activeProject = 'projA';
+global._showArchived = false;
+global._sessionSourceFilter = 'webui';
+const cyclicParent = { session_id:'cyclic_parent', profile_scope:'work', project_id:'projA', parent_session_id:'cyclic_child', session_source:'webui', message_count:3 };
+const cyclicChild = { session_id:'cyclic_child', profile_scope:'work', parent_session_id:'cyclic_parent', relationship_type:'child_session', session_source:'webui', message_count:2 };
+const diamondRoot = { session_id:'diamond_root', profile_scope:'work', project_id:'projA', session_source:'webui', message_count:3 };
+const diamondLeft = { session_id:'diamond_left', profile_scope:'work', parent_session_id:'diamond_root', session_source:'webui', message_count:2 };
+const diamondRight = { session_id:'diamond_right', profile_scope:'work', parent_session_id:'diamond_root', session_source:'webui', message_count:2 };
+const diamondTip = { session_id:'diamond_tip', profile_scope:'work', parent_session_id:'diamond_left', _parent_lineage_tip_id:'diamond_right', session_source:'webui', message_count:2 };
+const selfRoot = { session_id:'self_root', profile_scope:'work', project_id:'projA', _lineage_root_id:'self_root', session_source:'webui', message_count:3 };
+const selfRootChild = { session_id:'self_root_child', profile_scope:'work', parent_session_id:'self_root', session_source:'webui', message_count:2 };
+const raw = [cyclicParent, cyclicChild, diamondRoot, diamondLeft, diamondRight, diamondTip, selfRoot, selfRootChild];
+const effectiveProject = _buildSidebarLineageProjectResolver(raw, []);
+const part = _partitionSidebarSessionRows(raw, null, effectiveProject);
+const rows = _renderSidebarRowsFromRawSessions(part.sessionsRaw, [], {isCli:false, project:'projA'}, effectiveProject);
+const parent = rows.find(r=>r.session_id==='cyclic_parent') || {};
+console.log(JSON.stringify({
+  cyclicProject: effectiveProject(cyclicChild),
+  projARaw: part.sessionsRaw.map(s=>s.session_id),
+  cyclicChildren: (parent._child_sessions||[]).map(s=>s.session_id),
+  diamondProject: effectiveProject(diamondTip),
+  selfRootProject: effectiveProject(selfRootChild),
+}));
+"""
+    out = json.loads(_run_node(source))
+    assert out["cyclicProject"] is None
+    assert "cyclic_child" not in out["projARaw"]
+    assert out["cyclicChildren"] == []
+    assert out["diamondProject"] == "projA"
+    assert out["selfRootProject"] == "projA"
+
+
 def test_5305_missing_parent_delegate_child_is_suppressed_not_orphaned():
     """#5305 at the attach layer: a cross-surface delegate child whose parent is
     entirely absent from the render is suppressed, not orphaned."""
