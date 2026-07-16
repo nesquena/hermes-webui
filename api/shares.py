@@ -136,7 +136,11 @@ def _is_public_media_url(raw_ref: str) -> bool:
             return False
     except ValueError:
         pass
-    return not parsed.path.rstrip("/").lower().endswith("/api/media")
+    media_path = parsed.path.rstrip("/").lower()
+    return not (
+        media_path.endswith("/api/media")
+        or "/api/media/" in media_path
+    )
 
 
 def _omit_local_media_references(text: str) -> str:

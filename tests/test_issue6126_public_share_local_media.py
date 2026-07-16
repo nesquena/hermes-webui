@@ -31,6 +31,7 @@ def test_public_share_snapshot_omits_local_media_references():
                 "Loopback MEDIA:http://localhost:8787/api/media?path=/tmp/loopback.png\n"
                 "Private MEDIA:http://192.168.1.20/internal.png\n"
                 "Authenticated MEDIA:https://hermes.example.test/api/media?path=/tmp/private.png\n"
+                "Media subpath MEDIA:https://hermes.example.test/app/api/media/download?id=private\n"
                 "Public MEDIA:https://cdn.example.test/image.png"
             ),
         },
@@ -39,19 +40,22 @@ def test_public_share_snapshot_omits_local_media_references():
     snapshot = shares.build_share_snapshot(session)
     content = snapshot["messages"][1]["content"]
 
-    assert content.count(OMITTED_ATTACHMENT) == 10
+    assert content.count(OMITTED_ATTACHMENT) == 11
     assert "file://" not in content
     assert "MEDIA:/" not in content
     assert "MEDIA:C:" not in content
     assert "localhost:8787" not in content
     assert "192.168.1.20" not in content
     assert "hermes.example.test/api/media" not in content
+    assert "/api/media/download" not in content
     assert "/private/workspace" not in content
     assert "MEDIA:https://cdn.example.test/image.png" in content
 
 
 def test_authenticated_media_route_stays_private(monkeypatch):
     import api.auth as auth
+
+    assert "/api/media" not in auth.PUBLIC_PATHS
 
     class Handler:
         def __init__(self):
