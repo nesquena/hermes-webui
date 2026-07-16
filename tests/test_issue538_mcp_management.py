@@ -226,6 +226,25 @@ class TestMcpSave:
     @patch('api.routes._save_yaml_config_file')
     @patch('api.routes._active_profile_mcp_config_path', return_value='/tmp/test.yaml')
     @patch('api.routes._load_yaml_config_file_raw')
+    def test_update_existing_preserves_disabled_state(self, mock_cfg, mock_path, mock_save, mock_reload):
+        mock_cfg.return_value = {
+            'mcp_servers': {'existing': {'command': 'old', 'enabled': False}}
+        }
+        h = _make_handler()
+        h.command = 'PUT'
+        body = {"command": "new-cmd"}
+        _handle_mcp_server_update(h, 'existing', body)
+        saved = mock_save.call_args[0][1]
+        assert saved['mcp_servers']['existing']['command'] == 'new-cmd'
+        assert saved['mcp_servers']['existing']['enabled'] is False
+        payload = _json_payload(h)
+        assert payload['server']['enabled'] is False
+        assert payload['server']['status'] == 'disabled'
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes._save_yaml_config_file')
+    @patch('api.routes._active_profile_mcp_config_path', return_value='/tmp/test.yaml')
+    @patch('api.routes._load_yaml_config_file_raw')
     def test_preserves_other_servers(self, mock_cfg, mock_path, mock_save, mock_reload):
         mock_cfg.return_value = {'mcp_servers': {'keep': {'command': 'stay'}}}
         h = _make_handler()

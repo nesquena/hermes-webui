@@ -26936,6 +26936,10 @@ def _handle_mcp_server_update(handler, name, body):
         if not isinstance(existing_cfg, dict):
             existing_cfg = {}
         server_cfg = {}
+        if "enabled" in body:
+            server_cfg["enabled"] = bool(body["enabled"])
+        elif "enabled" in existing_cfg:
+            server_cfg["enabled"] = existing_cfg["enabled"]
         if body.get("url"):
             server_cfg["url"] = body["url"].strip()
             if body.get("headers"):
