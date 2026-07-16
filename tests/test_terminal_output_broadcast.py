@@ -326,3 +326,54 @@ def test_concurrent_producers_keep_live_subscriber_delivery_order():
     assert not second.is_alive()
     assert not second_delivered_before_release
     assert [seq for seq, _event, _payload in _drain(subscriber)] == [1, 2]
+
+
+def test_unsubscribe_waits_for_inflight_delivery_then_stops_future_output():
+    term = _make_term()
+    delivery_started = threading.Event()
+    release_delivery = threading.Event()
+    unsubscribe_started = threading.Event()
+    unsubscribe_completed = threading.Event()
+
+    class _PausingQueue(queue.Queue):
+        def put_nowait(self, item):
+            if item[0] == 1:
+                delivery_started.set()
+                assert release_delivery.wait(timeout=1.0)
+            return super().put_nowait(item)
+
+    subscriber = _PausingQueue(maxsize=terminal._OUTPUT_BUFFER_MAXLEN)
+    with term._sub_lock:
+        term._subscribers.append(subscriber)
+
+    publisher = threading.Thread(
+        target=term.put_output,
+        args=("output", {"text": "in-flight"}),
+    )
+
+    def unsubscribe():
+        unsubscribe_started.set()
+        term.unsubscribe(subscriber)
+        unsubscribe_completed.set()
+
+    remover = threading.Thread(target=unsubscribe)
+    publisher.start()
+    assert delivery_started.wait(timeout=1.0)
+    remover.start()
+    assert unsubscribe_started.wait(timeout=1.0)
+    assert not unsubscribe_completed.wait(timeout=0.1)
+
+    release_delivery.set()
+    publisher.join(timeout=1.0)
+    remover.join(timeout=1.0)
+
+    assert not publisher.is_alive()
+    assert not remover.is_alive()
+    assert unsubscribe_completed.is_set()
+    assert term._subscribers == []
+
+    term.put_output("output", {"text": "after-unsubscribe"})
+    assert [
+        (seq, payload["text"])
+        for seq, _event, payload in _drain(subscriber)
+    ] == [(1, "in-flight")]
