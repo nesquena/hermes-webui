@@ -143,6 +143,28 @@ _SESSION_TAIL_CACHE_VERSION = 1
 _SESSION_TAIL_CACHE_LIMIT = 300
 _SESSION_TAIL_CACHE_MAX_BYTES = 4 * 1024 * 1024
 _SESSION_TAIL_CACHE_MIN_SOURCE_BYTES = 1 * 1024 * 1024
+_SESSION_TAIL_CACHE_SEMANTIC_KEYS = (
+    'message_offset',
+    'messages',
+    'source_message_count',
+    'source_user_message_count',
+    'source_last_message_at',
+    'tool_calls',
+    'all_tool_calls_positionable',
+    'todo_state',
+    'anchor_scene_index',
+    'all_cached_timestamps_valid',
+)
+_SESSION_TAIL_CACHE_V1_KEYS = frozenset((
+    'format',
+    'version',
+    'session_id',
+    'source_signature',
+    'source_sha256',
+    'tail_limit',
+    *_SESSION_TAIL_CACHE_SEMANTIC_KEYS,
+    'created_at',
+))
 
 # Storage publication ownership is separate from the non-reentrant agent lock:
 # callers commonly hold the latter while calling Session.save(). Weak values keep
@@ -4433,6 +4455,47 @@ def _tail_cache_finite_number(value, *, positive=False) -> bool:
     return math.isfinite(number) and (not positive or number > 0)
 
 
+def _tail_cache_strict_json_object(pairs) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f'duplicate JSON object member: {key!r}')
+        value[key] = item
+    return value
+
+
+def _tail_cache_reject_json_constant(value):
+    raise ValueError(f'non-standard JSON constant: {value}')
+
+
+def _tail_cache_strict_json_decode(raw):
+    """Decode untrusted cache/source JSON without ambiguous object members."""
+    return json.loads(
+        raw,
+        object_pairs_hook=_tail_cache_strict_json_object,
+        parse_constant=_tail_cache_reject_json_constant,
+    )
+
+
+def _tail_cache_exact_json_equal(left, right) -> bool:
+    """Compare decoded JSON recursively without Python numeric coercion."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            _tail_cache_exact_json_equal(left[key], right[key])
+            for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _tail_cache_exact_json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if left is None or isinstance(left, (str, bool, int, float)):
+        return left == right
+    return False
+
+
 def _tail_cache_signature_dict(signature) -> dict | None:
     """Convert the internal stat tuple into the stable on-disk v1 shape."""
     if not isinstance(signature, tuple) or len(signature) != 4:
@@ -4480,6 +4543,96 @@ def _session_tail_cache_snapshot_value(snapshot, key, default=None):
     return getattr(snapshot, key, default)
 
 
+def _session_tail_cache_projection(
+    session,
+    *,
+    snapshot_is_immutable: bool = False,
+) -> dict | None:
+    """Build the deterministic source-derived portion of a v1 cache."""
+    if _session_tail_cache_snapshot_value(session, '_loaded_metadata_only', False):
+        return None
+    messages = _session_tail_cache_snapshot_value(session, 'messages')
+    if not isinstance(messages, list):
+        return None
+    try:
+        source_count = len(messages)
+        offset = max(0, source_count - _SESSION_TAIL_CACHE_LIMIT)
+        raw_tail = messages[offset:] if snapshot_is_immutable else copy.deepcopy(messages[offset:])
+        all_timestamps_valid = all(
+            isinstance(message, dict)
+            and _tail_cache_finite_number(message.get('timestamp'))
+            for message in raw_tail
+        )
+
+        all_tool_calls_positionable = True
+        cached_tool_calls = []
+        raw_tool_calls = _session_tail_cache_snapshot_value(session, 'tool_calls')
+        if not isinstance(raw_tool_calls, list):
+            raw_tool_calls = []
+            all_tool_calls_positionable = False
+        for tool_call in raw_tool_calls:
+            if not isinstance(tool_call, dict):
+                all_tool_calls_positionable = False
+                continue
+            assistant_idx = tool_call.get('assistant_msg_idx')
+            positionable = _tail_cache_strict_int(
+                assistant_idx,
+                minimum=0,
+                maximum=source_count - 1,
+            )
+            if positionable:
+                positionable = (
+                    isinstance(messages[assistant_idx], dict)
+                    and messages[assistant_idx].get('role') == 'assistant'
+                )
+            if not positionable:
+                all_tool_calls_positionable = False
+                continue
+            if assistant_idx >= offset:
+                cached_tool_calls.append(
+                    tool_call if snapshot_is_immutable else copy.deepcopy(tool_call)
+                )
+
+        from api.todo_state import derive_todo_state
+
+        todo_state = derive_todo_state(messages)
+
+        timestamps = [
+            float(message.get('timestamp'))
+            for message in messages
+            if isinstance(message, dict) and _tail_cache_finite_number(message.get('timestamp'))
+        ]
+        last_message_at = max(timestamps) if timestamps else _session_tail_cache_snapshot_value(
+            session,
+            'updated_at',
+        )
+        if last_message_at is not None and not _tail_cache_finite_number(last_message_at):
+            last_message_at = None
+        return {
+            'message_offset': offset,
+            'messages': raw_tail,
+            'source_message_count': source_count,
+            'source_user_message_count': Session._compute_user_message_count(messages),
+            'source_last_message_at': last_message_at,
+            'tool_calls': cached_tool_calls,
+            'all_tool_calls_positionable': all_tool_calls_positionable,
+            'todo_state': todo_state,
+            'anchor_scene_index': (
+                _session_tail_cache_snapshot_value(session, 'anchor_scene_index')
+                if snapshot_is_immutable
+                else copy.deepcopy(_session_tail_cache_snapshot_value(session, 'anchor_scene_index'))
+            ) if isinstance(
+                _session_tail_cache_snapshot_value(session, 'anchor_scene_index'),
+                dict,
+            ) else _anchor_scene_index_from_records(
+                _session_tail_cache_snapshot_value(session, 'anchor_activity_scenes')
+            ),
+            'all_cached_timestamps_valid': all_timestamps_valid,
+        }
+    except Exception:
+        return None
+
+
 def _session_tail_cache_payload(
     session,
     source_proof,
@@ -4487,8 +4640,6 @@ def _session_tail_cache_payload(
     snapshot_is_immutable: bool = False,
 ) -> dict | None:
     """Build a v1 cache payload from a Session or its frozen save snapshot."""
-    if _session_tail_cache_snapshot_value(session, '_loaded_metadata_only', False):
-        return None
     sid = _session_tail_cache_snapshot_value(session, 'session_id')
     if not is_safe_session_id(sid):
         return None
@@ -4498,65 +4649,12 @@ def _session_tail_cache_payload(
     source_digest = _tail_cache_content_digest(source_proof[1])
     if signature is None or source_digest is None:
         return None
-    messages = _session_tail_cache_snapshot_value(session, 'messages')
-    if not isinstance(messages, list):
-        return None
-    source_count = len(messages)
-    offset = max(0, source_count - _SESSION_TAIL_CACHE_LIMIT)
-    raw_tail = messages[offset:] if snapshot_is_immutable else copy.deepcopy(messages[offset:])
-    all_timestamps_valid = all(
-        isinstance(message, dict)
-        and _tail_cache_finite_number(message.get('timestamp'))
-        for message in raw_tail
-    )
-
-    all_tool_calls_positionable = True
-    cached_tool_calls = []
-    raw_tool_calls = _session_tail_cache_snapshot_value(session, 'tool_calls')
-    if not isinstance(raw_tool_calls, list):
-        raw_tool_calls = []
-        all_tool_calls_positionable = False
-    for tool_call in raw_tool_calls:
-        if not isinstance(tool_call, dict):
-            all_tool_calls_positionable = False
-            continue
-        assistant_idx = tool_call.get('assistant_msg_idx')
-        positionable = _tail_cache_strict_int(
-            assistant_idx,
-            minimum=0,
-            maximum=source_count - 1,
-        )
-        if positionable:
-            positionable = (
-                isinstance(messages[assistant_idx], dict)
-                and messages[assistant_idx].get('role') == 'assistant'
-            )
-        if not positionable:
-            all_tool_calls_positionable = False
-            continue
-        if assistant_idx >= offset:
-            cached_tool_calls.append(
-                tool_call if snapshot_is_immutable else copy.deepcopy(tool_call)
-            )
-
-    try:
-        from api.todo_state import derive_todo_state
-
-        todo_state = derive_todo_state(messages)
-    except Exception:
-        todo_state = None
-
-    timestamps = [
-        float(message.get('timestamp'))
-        for message in messages
-        if isinstance(message, dict) and _tail_cache_finite_number(message.get('timestamp'))
-    ]
-    last_message_at = max(timestamps) if timestamps else _session_tail_cache_snapshot_value(
+    projection = _session_tail_cache_projection(
         session,
-        'updated_at',
+        snapshot_is_immutable=snapshot_is_immutable,
     )
-    if last_message_at is not None and not _tail_cache_finite_number(last_message_at):
-        last_message_at = None
+    if projection is None:
+        return None
     return {
         'format': _SESSION_TAIL_CACHE_FORMAT,
         'version': _SESSION_TAIL_CACHE_VERSION,
@@ -4564,25 +4662,7 @@ def _session_tail_cache_payload(
         'source_signature': signature,
         'source_sha256': source_digest,
         'tail_limit': _SESSION_TAIL_CACHE_LIMIT,
-        'message_offset': offset,
-        'messages': raw_tail,
-        'source_message_count': source_count,
-        'source_user_message_count': Session._compute_user_message_count(messages),
-        'source_last_message_at': last_message_at,
-        'tool_calls': cached_tool_calls,
-        'all_tool_calls_positionable': all_tool_calls_positionable,
-        'todo_state': todo_state,
-        'anchor_scene_index': (
-            _session_tail_cache_snapshot_value(session, 'anchor_scene_index')
-            if snapshot_is_immutable
-            else copy.deepcopy(_session_tail_cache_snapshot_value(session, 'anchor_scene_index'))
-        ) if isinstance(
-            _session_tail_cache_snapshot_value(session, 'anchor_scene_index'),
-            dict,
-        ) else _anchor_scene_index_from_records(
-            _session_tail_cache_snapshot_value(session, 'anchor_activity_scenes')
-        ),
-        'all_cached_timestamps_valid': all_timestamps_valid,
+        **projection,
         'created_at': float(time.time()),
     }
 
@@ -4681,7 +4761,7 @@ def _session_tail_cache_has_signature(sid: str, source_proof) -> bool:
         if _bound_stat(path).st_size > _SESSION_TAIL_CACHE_MAX_BYTES:
             return False
         with _bound_open(path, 'rb') as handle:
-            value = json.loads(handle.read())
+            value = _tail_cache_strict_json_decode(handle.read())
         return (
             isinstance(value, dict)
             and value.get('format') == _SESSION_TAIL_CACHE_FORMAT
@@ -4696,14 +4776,19 @@ def _session_tail_cache_has_signature(sid: str, source_proof) -> bool:
         return False
 
 
-def _validate_session_tail_cache_payload(payload, sid: str, source_proof) -> dict | None:
+def _validate_session_tail_cache_payload(payload, sid: str, source) -> dict | None:
     """Strictly validate v1 shape and bounded-read eligibility."""
     if not isinstance(payload, dict):
+        return None
+    if set(payload) != _SESSION_TAIL_CACHE_V1_KEYS:
         return None
     if payload.get('format') != _SESSION_TAIL_CACHE_FORMAT:
         return None
     if payload.get('version') != _SESSION_TAIL_CACHE_VERSION or payload.get('session_id') != sid:
         return None
+    if not isinstance(source, tuple) or len(source) != 2:
+        return None
+    source_proof, source_bytes = source
     if not isinstance(source_proof, tuple) or len(source_proof) != 2:
         return None
     embedded_signature = _tail_cache_signature_tuple(payload.get('source_signature'))
@@ -4718,6 +4803,22 @@ def _validate_session_tail_cache_payload(payload, sid: str, source_proof) -> dic
     ):
         return None
     if payload.get('tail_limit') != _SESSION_TAIL_CACHE_LIMIT:
+        return None
+
+    try:
+        authoritative = _tail_cache_strict_json_decode(source_bytes)
+        if not isinstance(authoritative, dict) or authoritative.get('session_id') != sid:
+            return None
+        expected_projection = _session_tail_cache_projection(
+            authoritative,
+            snapshot_is_immutable=True,
+        )
+        if expected_projection is None or any(
+            not _tail_cache_exact_json_equal(payload[key], expected_projection[key])
+            for key in _SESSION_TAIL_CACHE_SEMANTIC_KEYS
+        ):
+            return None
+    except Exception:
         return None
 
     source_count = payload.get('source_message_count')
@@ -4784,14 +4885,14 @@ def _read_session_tail_cache_file(sid: str) -> dict | None:
             if size <= 0 or size > _SESSION_TAIL_CACHE_MAX_BYTES:
                 return None
             with _bound_open(path, 'rb') as handle:
-                payload = json.loads(handle.read())
+                payload = _tail_cache_strict_json_decode(handle.read())
             # Read the complete authoritative source after the derived bytes.
-            # Returning a cache requires an exact digest match, so same-stat
-            # in-place and atomic replacements fail closed without JSON parsing.
+            # Returning a cache requires both an exact proof match and an exact
+            # source-derived semantic projection from these already-proven bytes.
             source = _sidecar_content_proof(target.path)
             if source is None:
                 return None
-            return _validate_session_tail_cache_payload(payload, sid, source[0])
+            return _validate_session_tail_cache_payload(payload, sid, source)
     except (OSError, ValueError, TypeError):
         return None
 

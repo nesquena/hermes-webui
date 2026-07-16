@@ -178,6 +178,327 @@ def test_reader_returns_validated_snapshot_without_mutating_sidecar(isolated_ses
     assert session.path.read_bytes() == sidecar_before
 
 
+_TAIL_CACHE_PROOF_FIELDS = (
+    "format",
+    "version",
+    "session_id",
+    "source_signature",
+    "source_sha256",
+    "tail_limit",
+)
+
+
+def _semantic_tail_cache_fixture(session_id):
+    messages = [_message(index) for index in range(305)]
+    messages[1] = {
+        "role": "tool",
+        "content": json.dumps(
+            {"todos": [{"id": "todo-1", "content": "keep me", "status": "pending"}]}
+        ),
+        "timestamp": 2.0,
+    }
+    messages[303] = {
+        "role": "assistant",
+        "content": "assistant-with-tool-call",
+        "timestamp": 304.0,
+    }
+    tool_calls = [
+        {
+            "name": "inside-tail",
+            "assistant_msg_idx": 303,
+            "arguments": {"value": "authoritative"},
+        }
+    ]
+    session = Session(
+        session_id=session_id,
+        profile="default",
+        messages=messages,
+        tool_calls=tool_calls,
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+    models.SESSIONS.pop(session.session_id, None)
+    cache_path = models.session_tail_cache_path(session.session_id)
+    return session, cache_path, json.loads(cache_path.read_bytes())
+
+
+def _mutate_semantic_tail_cache(payload, case):
+    if case == "cached-message":
+        payload["messages"][-1]["content"] = "CORRUPTED_ASSISTANT_CONTENT"
+    elif case == "coordinated-total-count":
+        payload["source_message_count"] += 1
+        payload["message_offset"] += 1
+        for tool_call in payload["tool_calls"]:
+            tool_call["assistant_msg_idx"] += 1
+    elif case == "user-count":
+        payload["source_user_message_count"] = 0
+    elif case == "assistant-role-derived-count":
+        tool_indices = {call["assistant_msg_idx"] for call in payload["tool_calls"]}
+        for tail_index, message in enumerate(payload["messages"]):
+            source_index = payload["message_offset"] + tail_index
+            if message.get("role") == "assistant" and source_index not in tool_indices:
+                message["role"] = "user"
+                payload["source_user_message_count"] += 1
+                payload["source_assistant_message_count"] = -999
+                break
+        else:  # pragma: no cover - fixture contract
+            raise AssertionError("no non-tool assistant message found")
+    elif case == "tool-call-content":
+        payload["tool_calls"][0].update(
+            name="CORRUPTED_TOOL_CALL",
+            arguments={"value": "corrupted"},
+        )
+    elif case == "tool-call-count":
+        payload["tool_calls"] = []
+        payload["source_tool_call_count"] = 999
+    elif case == "todo-state":
+        payload["todo_state"] = {
+            "todos": [{"id": "evil", "content": "CORRUPTED_TODO", "status": "done"}]
+        }
+    else:  # pragma: no cover - parameter contract
+        raise AssertionError(f"unknown semantic corruption case: {case}")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "cached-message",
+        "coordinated-total-count",
+        "user-count",
+        "assistant-role-derived-count",
+        "tool-call-content",
+        "tool-call-count",
+        "todo-state",
+    ],
+)
+def test_reader_rejects_semantic_cache_corruption_with_valid_source_proof(
+    isolated_session_store,
+    case,
+):
+    session, cache_path, payload = _semantic_tail_cache_fixture(
+        f"semantic_corruption_{case.replace('-', '_')}"
+    )
+    proof_before = {key: payload[key] for key in _TAIL_CACHE_PROOF_FIELDS}
+    _mutate_semantic_tail_cache(payload, case)
+    proof_after = {key: payload[key] for key in _TAIL_CACHE_PROOF_FIELDS}
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert proof_after == proof_before
+    assert models.read_session_tail_cache(session.session_id) is None
+
+
+@pytest.mark.parametrize("case", ["unknown-key", "missing-todo-state"])
+def test_reader_requires_exact_v1_schema_keys(isolated_session_store, case):
+    session, cache_path, payload = _semantic_tail_cache_fixture(
+        f"exact_schema_{case.replace('-', '_')}"
+    )
+    if case == "unknown-key":
+        payload["unexpected_semantic_field"] = {"accepted": True}
+    else:
+        payload.pop("todo_state")
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert models.read_session_tail_cache(session.session_id) is None
+
+
+def _rewrite_tail_cache_proof_for_source(session, cache_path, payload):
+    source = models._sidecar_content_proof(session.path)
+    assert source is not None
+    source_proof, _source_bytes = source
+    payload["source_signature"] = models._tail_cache_signature_dict(source_proof[0])
+    payload["source_sha256"] = source_proof[1]
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _strict_json_semantics_fixture(session_id):
+    session = Session(
+        session_id=session_id,
+        profile="default",
+        messages=[
+            {
+                "role": "user",
+                "content": {"count": 1, "nested": ["stable", 1]},
+                "timestamp": 1.0,
+            },
+            {
+                "role": "assistant",
+                "content": "answer",
+                "timestamp": 2.0,
+            },
+        ],
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+    models.SESSIONS.pop(session.session_id, None)
+    cache_path = models.session_tail_cache_path(session.session_id)
+    return session, cache_path, json.loads(cache_path.read_bytes())
+
+
+@pytest.mark.parametrize(
+    ("replacement", "case_name"),
+    [(True, "bool"), (1.0, "float")],
+    ids=["nested-int-to-bool", "nested-int-to-float"],
+)
+def test_reader_rejects_exact_json_type_confusion_with_valid_source_proof(
+    isolated_session_store,
+    replacement,
+    case_name,
+):
+    session, cache_path, payload = _strict_json_semantics_fixture(
+        f"strict_json_type_{case_name}"
+    )
+    assert models.read_session_tail_cache(session.session_id) is not None
+    models.SESSIONS.pop(session.session_id, None)
+
+    proof_before = {key: payload[key] for key in _TAIL_CACHE_PROOF_FIELDS}
+    payload["messages"][0]["content"]["count"] = replacement
+    payload["messages"][0]["content"]["nested"][1] = replacement
+    proof_after = {key: payload[key] for key in _TAIL_CACHE_PROOF_FIELDS}
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+    source_before = session.path.read_bytes()
+    cache_before = cache_path.read_bytes()
+
+    assert proof_after == proof_before
+    assert models.read_session_tail_cache(session.session_id) is None
+    assert session.path.read_bytes() == source_before
+    assert cache_path.read_bytes() == cache_before
+
+
+def test_reader_rejects_duplicate_authoritative_object_members(
+    isolated_session_store,
+):
+    session, cache_path, payload = _strict_json_semantics_fixture(
+        "strict_json_duplicate_source"
+    )
+    assert models.read_session_tail_cache(session.session_id) is not None
+    models.SESSIONS.pop(session.session_id, None)
+
+    source_bytes = session.path.read_bytes()
+    assert source_bytes.count(b'"count"') == 1
+    ambiguous_source = source_bytes.replace(
+        b'"count": 1,\n',
+        b'"count": 1,\n          "count": 1,\n',
+        1,
+    )
+    assert ambiguous_source.count(b'"count"') == 2
+    session.path.write_bytes(ambiguous_source)
+    _rewrite_tail_cache_proof_for_source(session, cache_path, payload)
+    source_before = session.path.read_bytes()
+    cache_before = cache_path.read_bytes()
+
+    assert models.read_session_tail_cache(session.session_id) is None
+    assert session.path.read_bytes() == source_before
+    assert cache_path.read_bytes() == cache_before
+
+
+def test_reader_rejects_duplicate_cache_object_members(
+    isolated_session_store,
+):
+    session, cache_path, payload = _strict_json_semantics_fixture(
+        "strict_json_duplicate_cache"
+    )
+    assert models.read_session_tail_cache(session.session_id) is not None
+    models.SESSIONS.pop(session.session_id, None)
+
+    cache_text = json.dumps(payload)
+    assert cache_text.count('"count": 1') == 1
+    ambiguous_cache = cache_text.replace(
+        '"count": 1,',
+        '"count": 1, "count": 1,',
+        1,
+    )
+    assert ambiguous_cache.count('"count": 1') == 2
+    cache_path.write_text(ambiguous_cache, encoding="utf-8")
+    source_before = session.path.read_bytes()
+    cache_before = cache_path.read_bytes()
+
+    assert models.read_session_tail_cache(session.session_id) is None
+    assert session.path.read_bytes() == source_before
+    assert cache_path.read_bytes() == cache_before
+
+
+def test_reader_rejects_unparseable_authoritative_source_even_with_matching_proof(
+    isolated_session_store,
+):
+    session, cache_path, payload = _semantic_tail_cache_fixture("unparseable_source")
+    session.path.write_bytes(b'{"session_id":"unparseable_source",')
+    _rewrite_tail_cache_proof_for_source(session, cache_path, payload)
+    source_before = session.path.read_bytes()
+    cache_before = cache_path.read_bytes()
+
+    assert models.read_session_tail_cache(session.session_id) is None
+    assert session.path.read_bytes() == source_before
+    assert cache_path.read_bytes() == cache_before
+
+
+def test_reader_rejects_authoritative_source_identity_mismatch_even_with_matching_proof(
+    isolated_session_store,
+):
+    session, cache_path, payload = _semantic_tail_cache_fixture("source_identity_mismatch")
+    authoritative = json.loads(session.path.read_bytes())
+    authoritative["session_id"] = "different_source_identity"
+    session.path.write_text(json.dumps(authoritative), encoding="utf-8")
+    _rewrite_tail_cache_proof_for_source(session, cache_path, payload)
+    source_before = session.path.read_bytes()
+    cache_before = cache_path.read_bytes()
+
+    assert models.read_session_tail_cache(session.session_id) is None
+    assert session.path.read_bytes() == source_before
+    assert cache_path.read_bytes() == cache_before
+
+
+def test_reader_falls_back_when_authoritative_projection_is_ambiguous(
+    isolated_session_store,
+    monkeypatch,
+):
+    from api import todo_state
+
+    session, cache_path, _payload = _semantic_tail_cache_fixture("ambiguous_reader_projection")
+    source_before = session.path.read_bytes()
+    cache_before = cache_path.read_bytes()
+
+    def fail_todo_derivation(_messages):
+        raise RuntimeError("injected todo derivation ambiguity")
+
+    monkeypatch.setattr(todo_state, "derive_todo_state", fail_todo_derivation)
+
+    assert models.read_session_tail_cache(session.session_id) is None
+    assert session.path.read_bytes() == source_before
+    assert cache_path.read_bytes() == cache_before
+
+
+def test_save_is_fail_open_when_tail_cache_projection_is_ambiguous(
+    isolated_session_store,
+    monkeypatch,
+):
+    from api import todo_state
+
+    session = Session(session_id="ambiguous_writer_projection", messages=_messages(4))
+    cache_path = models.session_tail_cache_path(session.session_id)
+
+    def fail_todo_derivation(_messages):
+        raise RuntimeError("injected todo derivation ambiguity")
+
+    monkeypatch.setattr(todo_state, "derive_todo_state", fail_todo_derivation)
+
+    session.save(touch_updated_at=False, skip_index=True)
+
+    assert json.loads(session.path.read_bytes())["messages"] == session.messages
+    assert not cache_path.exists()
+    assert models.read_session_tail_cache(session.session_id) is None
+
+
+def test_reader_accepts_matching_semantics_with_valid_independent_created_at(
+    isolated_session_store,
+):
+    session, cache_path, payload = _semantic_tail_cache_fixture("independent_created_at")
+    payload["created_at"] = 123.456
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    snapshot = models.read_session_tail_cache(session.session_id)
+
+    assert snapshot is not None
+    assert snapshot["created_at"] == 123.456
+
+
 def test_reader_accepts_finite_zero_timestamp(isolated_session_store):
     session = Session(
         session_id="tail_zero_timestamp",
