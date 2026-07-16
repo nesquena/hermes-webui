@@ -21982,15 +21982,80 @@ def _handle_chat_sync(handler, body):
         s.model = model
         s.model_provider = model_provider
     from api.streaming import _ENV_LOCK
+    from api.terminal_backend_isolation import (
+        TerminalBackendIsolationError,
+        acquire_turn_lease_failclosed,
+    )
 
-    with _ENV_LOCK:
-        old_cwd = os.environ.get("TERMINAL_CWD")
-        os.environ["TERMINAL_CWD"] = str(workspace)
-        old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
-        old_session_key = os.environ.get("HERMES_SESSION_KEY")
-        os.environ["HERMES_EXEC_ASK"] = "1"
-        os.environ["HERMES_SESSION_KEY"] = s.session_id
+    # #5937/#5988 round 4: this fallback endpoint constructs a tool-capable
+    # AIAgent, so it must hold the same full-turn backend-identity lease as
+    # the streaming path — otherwise it can create/use the agent "default"
+    # env slot concurrently with (or across) a backend transition.
+    #
+    # #5988 P1 (greptile): the lease identity must come from THIS request's
+    # RESOLVED profile, not raw process-global os.environ. A concurrent
+    # streaming turn keeps its own profile's HERMES_HOME + terminal settings
+    # in os.environ for its whole run, so computing identity from the live
+    # process env would let a sync turn for a different profile calculate the
+    # streaming profile's identity, skip invalidation, and reuse its cached
+    # "default" backend. Resolve the session's profile and build the identity
+    # (and the applied turn env below) from the profile overlay, exactly like
+    # streaming — so identity reflects the backend this turn will actually use.
     try:
+        from api.profiles import (
+            filter_runtime_env_for_gateway_parity,
+            get_hermes_home_for_profile,
+            get_profile_runtime_env,
+        )
+        _chat_profile_home = str(get_hermes_home_for_profile(getattr(s, "profile", None)))
+        _chat_safe_profile_env = filter_runtime_env_for_gateway_parity(
+            get_profile_runtime_env(_chat_profile_home)
+        )
+    except ImportError:
+        _chat_profile_home = os.environ.get("HERMES_HOME", "")
+        _chat_safe_profile_env = {}
+
+    _effective_turn_env = dict(os.environ)
+    _effective_turn_env.update(_chat_safe_profile_env)
+    if _chat_profile_home:
+        _effective_turn_env["HERMES_HOME"] = _chat_profile_home
+    # Acquired BEFORE the _ENV_LOCK mutation (a differing-backend turn may
+    # block here waiting on in-flight turns; their env restore needs the lock).
+    # Released in the turn's finally; rejections fail closed as a retryable 503.
+    try:
+        _terminal_backend_lease, _ = acquire_turn_lease_failclosed(_effective_turn_env)
+    except TerminalBackendIsolationError as e:
+        return j(handler, {"error": str(e)}, status=503)
+
+    # #5988 round 5 (lease-leak): the env mutation, agent run, env restore, and
+    # lease release all live under ONE guaranteed teardown. The release is in
+    # the OUTER finally so it runs even if (a) the env MUTATION below raises
+    # before the run — previously it sat between the acquire and the protecting
+    # try, so a throw there leaked the lease with no backstop on this path — or
+    # (b) the env RESTORE raises during teardown. release() is idempotent, so
+    # this never double-frees another turn's count.
+    # Pre-bind so the restore in the finally can never NameError even if the
+    # mutation below raises before binding them.
+    old_cwd = old_exec_ask = old_session_key = old_hermes_home = None
+    _old_profile_env = {}
+    try:
+        with _ENV_LOCK:
+            # Capture ALL prior values before mutating any, so a set that
+            # raises still leaves an accurate restore snapshot.
+            _old_profile_env = {k: os.environ.get(k) for k in _chat_safe_profile_env}
+            old_cwd = os.environ.get("TERMINAL_CWD")
+            old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
+            old_session_key = os.environ.get("HERMES_SESSION_KEY")
+            old_hermes_home = os.environ.get("HERMES_HOME")
+            # Apply THIS request's resolved profile so the agent creates/uses
+            # the backend the lease identity names (#5988 P1) — not a
+            # concurrent streaming turn's leftover process env.
+            os.environ.update(_chat_safe_profile_env)
+            if _chat_profile_home:
+                os.environ["HERMES_HOME"] = _chat_profile_home
+            os.environ["TERMINAL_CWD"] = str(workspace)
+            os.environ["HERMES_EXEC_ASK"] = "1"
+            os.environ["HERMES_SESSION_KEY"] = s.session_id
         from run_agent import AIAgent
 
         with CHAT_LOCK:
@@ -22089,19 +22154,35 @@ def _handle_chat_sync(handler, body):
                 persist_user_message=msg,
             )
     finally:
-        with _ENV_LOCK:
-            if old_cwd is None:
-                os.environ.pop("TERMINAL_CWD", None)
-            else:
-                os.environ["TERMINAL_CWD"] = old_cwd
-            if old_exec_ask is None:
-                os.environ.pop("HERMES_EXEC_ASK", None)
-            else:
-                os.environ["HERMES_EXEC_ASK"] = old_exec_ask
-            if old_session_key is None:
-                os.environ.pop("HERMES_SESSION_KEY", None)
-            else:
-                os.environ["HERMES_SESSION_KEY"] = old_session_key
+        try:
+            with _ENV_LOCK:
+                for _pk, _pv in _old_profile_env.items():
+                    if _pv is None:
+                        os.environ.pop(_pk, None)
+                    else:
+                        os.environ[_pk] = _pv
+                if old_hermes_home is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = old_hermes_home
+                if old_cwd is None:
+                    os.environ.pop("TERMINAL_CWD", None)
+                else:
+                    os.environ["TERMINAL_CWD"] = old_cwd
+                if old_exec_ask is None:
+                    os.environ.pop("HERMES_EXEC_ASK", None)
+                else:
+                    os.environ["HERMES_EXEC_ASK"] = old_exec_ask
+                if old_session_key is None:
+                    os.environ.pop("HERMES_SESSION_KEY", None)
+                else:
+                    os.environ["HERMES_SESSION_KEY"] = old_session_key
+        finally:
+            # #5988 round 5 (lease-leak): NESTED in a finally so the release
+            # runs even if the env restore above raises. Ordered AFTER the
+            # restore so a waiter admitted by this release never observes this
+            # turn's TERMINAL_* mutations. release() is idempotent (#5937).
+            _terminal_backend_lease.release()
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(

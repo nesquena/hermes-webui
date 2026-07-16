@@ -6748,6 +6748,7 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    _terminal_backend_lease = None
 
     # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
     # (was here at v0.51.30) — the previous placement always read the default
@@ -7298,6 +7299,41 @@ def _run_agent_streaming(
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
+        # #5937: multi-profile WebUI can leave an incompatible terminal env in
+        # the agent process-global "default" cache slot after a backend
+        # identity switch. Acquire a full-turn backend-identity lease BEFORE
+        # _ENV_LOCK (a differing-backend turn may block here waiting for
+        # in-flight turns, and their env restore needs _ENV_LOCK). Identity is
+        # derived from the effective turn environment — process env overlaid
+        # with this profile's runtime env, i.e. what os.environ.update below
+        # produces — not the profile env alone, so env applied by other layers
+        # is reflected. The lease is released in the turn's finally block.
+        # Fail CLOSED on EVERY acquisition outcome that is not a verified
+        # lease (#5988 round 4): deliberate rejections (bounded wait timed
+        # out, previous backend env not verifiably removed) AND unexpected
+        # internal errors both abort the turn before AIAgent construction —
+        # `acquire_turn_lease_failclosed` converts the latter into the same
+        # typed `TerminalBackendIsolationError`, which surfaces through the
+        # standard stream error path below. Running the turn anyway would
+        # execute tools against a slot that may belong to a different
+        # profile's backend; for a cross-profile security boundary an
+        # isolation bug must brick the switching turn, not run it open.
+        from api.terminal_backend_isolation import acquire_turn_lease_failclosed
+
+        _effective_turn_env = dict(os.environ)
+        _effective_turn_env.update(_safe_profile_runtime_env)
+        # #5988 round 5: the identity must reflect THIS turn's profile, not
+        # whatever HERMES_HOME the shared process env currently carries (a
+        # prior turn's, applied to os.environ only later at the mutation
+        # below). Stamp the RESOLVED profile home so two profiles can never
+        # share a backend identity. The forwarded-secret VALUES are already
+        # present via _safe_profile_runtime_env (the profile's .env), which
+        # terminal_backend_identity() now fingerprints.
+        if _profile_home:
+            _effective_turn_env['HERMES_HOME'] = _profile_home
+        _terminal_backend_lease, _ = acquire_turn_lease_failclosed(
+            _effective_turn_env
+        )
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
@@ -7312,6 +7348,9 @@ def _run_agent_streaming(
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
             os.environ.update(_safe_profile_runtime_env)
+            # #5937: the backend-identity lease acquired above (before this
+            # lock) already invalidated the agent "default" terminal env slot
+            # if this turn's identity differs from the last committed one.
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
@@ -10142,24 +10181,41 @@ def _run_agent_streaming(
                     _unreg_clarify_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
-            with _ENV_LOCK:
-                for _key, _old_value in old_profile_env.items():
-                    if _old_value is None: os.environ.pop(_key, None)
-                    else: os.environ[_key] = _old_value
-                if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
-                else: os.environ['TERMINAL_CWD'] = old_cwd
-                if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
-                else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
-                if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
-                else: os.environ['HERMES_SESSION_KEY'] = old_session_key
-                if old_session_id is None: os.environ.pop('HERMES_SESSION_ID', None)
-                else: os.environ['HERMES_SESSION_ID'] = old_session_id
-                if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
-                else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
-                if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
-                else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
-                if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
-                else: os.environ['HERMES_HOME'] = old_hermes_home
+            try:
+                with _ENV_LOCK:
+                    for _key, _old_value in old_profile_env.items():
+                        if _old_value is None: os.environ.pop(_key, None)
+                        else: os.environ[_key] = _old_value
+                    if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
+                    else: os.environ['TERMINAL_CWD'] = old_cwd
+                    if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
+                    else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
+                    if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
+                    else: os.environ['HERMES_SESSION_KEY'] = old_session_key
+                    if old_session_id is None: os.environ.pop('HERMES_SESSION_ID', None)
+                    else: os.environ['HERMES_SESSION_ID'] = old_session_id
+                    if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
+                    else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
+                    if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
+                    else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
+                    if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
+                    else: os.environ['HERMES_HOME'] = old_hermes_home
+            finally:
+                # #5937: release this turn's backend-identity lease AFTER the env
+                # restore so a waiting differing-backend turn can't invalidate
+                # while this turn's environment is still nominally in effect.
+                # #5988 round 5 (lease-leak): NESTED in a finally so the ordered
+                # primary release runs even if the env restore above raises —
+                # the outer-finally backstop is then the second line of defense,
+                # not the only path that frees the lease.
+                if _terminal_backend_lease is not None:
+                    try:
+                        _terminal_backend_lease.release()
+                    except Exception:
+                        logger.debug(
+                            "terminal backend lease release failed (#5937)",
+                            exc_info=True,
+                        )
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
@@ -10478,6 +10534,23 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to end metering session for stream %s", stream_id, exc_info=True)
         _metering_stop.set()
+        # #5937/#5988: BACKSTOP release of the backend-identity lease. The
+        # primary release lives in the inner try's finally so it stays ordered
+        # after the env restore — but the lease is acquired ~180 lines before
+        # that inner try begins, and an exception in the window between them
+        # (env mutation, MCP discovery, callback setup) would otherwise leak
+        # the lease. Under fail-closed admission a leaked lease is a standing
+        # denial (every later differing-backend turn waits its bound, then
+        # aborts), not just a stall. release() is idempotent, so the normal
+        # path's double-release is a no-op.
+        if _terminal_backend_lease is not None:
+            try:
+                _terminal_backend_lease.release()
+            except Exception:
+                logger.debug(
+                    "terminal backend lease backstop release failed (#5937)",
+                    exc_info=True,
+                )
         # Stop the periodic checkpoint thread before the final recovery path.
         # The checkpoint thread also uses the per-session lock; joining it first
         # avoids contending with checkpoint writes during stale-pending repair.
