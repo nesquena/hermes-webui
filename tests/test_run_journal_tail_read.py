@@ -22,7 +22,7 @@ from api.run_journal import (
     latest_run_summary,
     read_run_events,
 )
-from api.run_journal import _SESSION_REPLAY_MAX_BYTES, _SESSION_REPLAY_MAX_ROWS
+from api.run_journal import _SESSION_REPLAY_MAX_ROWS
 
 
 def _write_n_events(session_dir, *, session_id, run_id, n, terminal_after=None):
